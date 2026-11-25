@@ -226,6 +226,9 @@ window.RadioView = (() => {
     meta.append(el("span", "t", fmtTime(t.start, true)), el("span", "ek note", "note"));
     for (const u of (t.rig || "").split(/,\s*/).filter(Boolean)) meta.append(el("span", "unit-tag", u));
     if (t.operator) meta.append(opSpan(t.operator));
+    const lc = t.label ? labelChip({ label: t.label, operator: t.operator, at: t.start }) : null;   // after close: not live
+    if (lc) meta.append(lc);
+    li.classList.toggle("ev-late", !!t.label);
     const acts = el("span", "feed-acts");
     for (const e of t.events || []) acts.append(evChip(e));
     meta.append(acts);

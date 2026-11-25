@@ -336,7 +336,7 @@
   .cm.cm-sys .txt { color: var(--text-2); }
   /* a line recorded after the close or by a quiet edit (events.label): muted, a dashed chip; never a live change */
   .chip.ev-label { color: var(--dim); background: transparent; border-color: var(--line-strong); border-style: dashed; cursor: help; }
-  :is(.ev, .cm).ev-late .txt { color: var(--dim); }
+  :is(.ev, .cm, .rt).ev-late .txt { color: var(--dim); }
   .ek.remarks { color: var(--text-2); }
   .cmts-new { position: absolute; inset-block-end: var(--s-2); inset-inline-end: var(--s-3); z-index: var(--z-raised); background: var(--raised); box-shadow: var(--elev-1); }
   .cmts-new[hidden] { display: none; }

@@ -1157,6 +1157,9 @@ class Cad:
         """Active events with no unit left on them back to pending (Store.settle_unstaffed; Sources' ticker calls this
         every TICK_S), unless 60 Control automation still has one (AutoDispatch.holds_active): under automation's lock,
         so its clear-then-assign never interleaves with the look. Each one a line in the hub log."""
+        if not self.store.one("SELECT 1 AS x FROM incidents i WHERE i.status = 'active' AND NOT EXISTS (SELECT 1 FROM "
+                              "assignments a WHERE a.incident_id = i.id AND a.cleared_at IS NULL) LIMIT 1"):
+            return []                                    # (most looks: nothing, and no lock taken)
         with self.auto._lock:
             done = self.store.settle_unstaffed(now, hold=self.auto.holds_active)
         for iid in done:

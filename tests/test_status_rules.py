@@ -143,6 +143,7 @@ def test_non_emergency_attached_then_detached_is_open_again_and_never_queued_or_
     clock.t += SETTLE_S
     done = cad.settle_unstaffed()
     assert done == [ne] and status(cad, ne) == "pending"
+    assert texts(cad, ne)[-1] == "Event status: open (no units)"                  # "Open" on the boards
     closed = dispatched(cad, clock, "E61")
     cad.close(closed, {"disposition": "COMPLETE", "operator": "JD"})
     clock.t += 600
@@ -227,6 +228,18 @@ def test_60_control_a_close_waiting_holds_it_active(rig):
     rig.at(1000)
     assert rig.cad.auto.holds_active(rig.iid()) is True
     assert rig.cad.settle_unstaffed() == [] and rig.inc()["status"] == "active"
+
+
+def test_60_control_a_call_the_county_stopped_listing_is_not_held(rig):
+    rig.created()
+    rig.at(300)
+    rig.radio("307-25-call_25-t0", T0 + 290, "Engine 60 back in service")
+    rig.radio("307-26-call_26-t0", T0 + 295, "Ladder 31 back in service")
+    rig.at(600)
+    assert rig.cad.auto.holds_active(rig.iid()) is True
+    with rig.cad.store.tx() as db:                                                 # the feed's snapshot dropped it
+        db.execute("UPDATE source_reports SET gone_at = ? WHERE incident_id = ?", (rig.clock.t, rig.iid()))
+    assert rig.cad.settle_unstaffed() == [rig.iid()] and rig.inc()["status"] == "pending"
 
 
 def test_pcfd_mode_settles_with_no_hold(rig):
@@ -345,16 +358,24 @@ def test_labels_in_the_activity_log_and_the_event_log(cad_clock):
     assert "Edited cross street: Test Pl (quiet edit)" in csv and "Edited cross street: Sample St (after close)" in csv
 
 
-def test_a_label_raises_no_push_and_no_dispatch(cad_clock):
+def test_a_late_edit_dispatches_nothing_and_puts_no_unit_back(cad_clock):
     cad, clock = cad_clock
-    sent = []
-    cad.pushes = type("P", (), {"__getattr__": lambda self, k: (lambda *a, **kw: sent.append(k))})()
     iid = dispatched(cad, clock, "E60")
-    n_disp = len(cad.store.full(iid)["dispatches"])
+    n_disp, voices = len(cad.store.full(iid)["dispatches"]), len(cad.store.pending_voices())
     cad.close(iid, {"disposition": "COMPLETE", "operator": "JD"})
     cad.update(iid, {"type": "STRU", "subtype": "", "quiet": True, "operator": "JD"})
-    assert sent == [] and len(cad.store.full(iid)["dispatches"]) == n_disp
-    assert by_name(cad, "E60")["incident_id"] is None                              # nobody put back on it
+    assert len(cad.store.full(iid)["dispatches"]) == n_disp and len(cad.store.pending_voices()) == voices
+    assert by_name(cad, "E60")["incident_id"] is None and status(cad, iid) == "closed"
+
+
+def test_a_note_after_close_is_marked_in_the_radio_view(cad_clock):
+    cad, clock = cad_clock
+    iid = dispatched(cad, clock, "E60")
+    cad.note(iid, {"text": "E60 on location", "units": ["E60"], "operator": "JD"})
+    cad.close(iid, {"disposition": "COMPLETE", "operator": "JD"})
+    cad.note(iid, {"text": "E60 left a card with the owner", "units": ["E60"], "operator": "JD"})
+    notes = {r["text"]: r["label"] for r in cad.comms._notes("E60", "", None, None, None, 50)}
+    assert notes == {"E60 on location": "", "E60 left a card with the owner": AFTER_CLOSE}
 
 
 def test_an_older_file_gets_the_label_column_its_lines_live(tmp_path):

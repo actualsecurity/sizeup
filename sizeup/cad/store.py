@@ -79,8 +79,9 @@ UNTIL_OPEN = "until_at IS NOT NULL AND status IN ('pending', 'active')"    # inc
 # An active event with no unit left on it goes back to pending (Store.settle_unstaffed, the incident sources' ticker):
 # SETTLE_S after its last unit cleared, so a unit cleared and put back at once (moved, a mistaken click, automation's
 # clear-then-assign) never flaps it. Its received time and elapsed clock stay (created_at is never touched).
-SETTLE_S = 5.0
+SETTLE_S = 30.0            # (a person taking the wrong unit off, then putting the right one on, takes this long)
 UNSTAFFED = "Event status: pending (no units)"
+UNSTAFFED_NE = "Event status: open (no units)"   # a non-emergency one: "Open" on the boards
 # A timeline line's label (events.label): recorded while the event was closed, or by a quiet edit (Edit with
 # quiet: true): the record put right, not a live change (muted on the timeline, never "New" in the comments box)
 AFTER_CLOSE, QUIET_EDIT = "after close", "quiet edit"
@@ -1400,7 +1401,7 @@ class Store:
         now = self.clock() if now is None else now
         if not self.may_write():
             return []
-        rows = self.q("SELECT i.id, (SELECT MAX(a.cleared_at) FROM assignments a WHERE a.incident_id = i.id) AS last "
+        rows = self.q("SELECT i.id, i.emergency, (SELECT MAX(a.cleared_at) FROM assignments a WHERE a.incident_id = i.id) AS last "
                       "FROM incidents i WHERE i.status = 'active' AND NOT EXISTS (SELECT 1 FROM assignments a "
                       "WHERE a.incident_id = i.id AND a.cleared_at IS NULL) ORDER BY i.id")
         out = []
@@ -1413,7 +1414,7 @@ class Store:
                 if db.execute("UPDATE incidents SET status = 'pending' WHERE id = ? AND status = 'active' AND NOT EXISTS "
                               "(SELECT 1 FROM assignments a WHERE a.incident_id = incidents.id AND a.cleared_at IS NULL)",
                               (r["id"],)).rowcount:
-                    self._event(db, r["id"], "status", UNSTAFFED, AUTO, at=now)   # (signed: _worked reads it as no person's)
+                    self._event(db, r["id"], "status", UNSTAFFED if r["emergency"] else UNSTAFFED_NE, AUTO, at=now)   # (signed: _worked reads it as no person's)
                     out.append(r["id"])
         return out
 

@@ -856,14 +856,20 @@ class AutoDispatch:
     def holds_active(self, iid: int) -> bool:
         """An active event with no unit left on it that automation still has (Store.settle_unstaffed leaves it active
         for now): 60 Control mode, a tracked incident, and either its close is waiting ("close?": the feed's in service
-        came, the close is automation's or one click), or the feed's report is still live and lists one of our units
+        came and automation closes it; never an "ask:" one, a person's), or the feed's report is still live (listed
+        by the county: no gone_at, not over) and lists one of our units
         that was on this call, no in-service time for it, and no person took it off (manual_edits): the county still
         has it there, and its in service (or the radio) settles the call. Never raises (False on a fault)."""
         try:
             if self.mode() != "60control" or not self.tracked(iid):
                 return False
-            if self.close_pending(iid) is not None:
-                return True
+            s = self.close_pending(iid)
+            if s is not None:                            # automation's close comes; an "ask:" one is a person's, any time
+                return not str(s["ref"]).startswith("ask:")
+            r = self.store.one("SELECT gone_at FROM source_reports WHERE incident_id = ? AND source != ? "
+                               "AND merged_into = '' ORDER BY rank, first_seen LIMIT 1", (iid, PAGING))
+            if r is not None and r["gone_at"] is not None:
+                return False                             # the county stopped listing it: nothing will settle it
             data, _ = self._feed(iid)
             if not data or self._over(data):
                 return False

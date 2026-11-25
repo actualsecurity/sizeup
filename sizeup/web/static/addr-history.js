@@ -189,6 +189,7 @@ window.AddrHistory = (() => {
         e.preventDefault();
         peek(r.id, b);
       });
+      b.addEventListener("keydown", (e) => { if (e.key === " ") { e.preventDefault(); peek(r.id, b); } });   // as a button
       li.append(b, el("span", "", typeLabel(r.type, r.subtype) || "—"),
         el("span", r.disposition ? "" : "dim", r.disposition ? nameOf("dispositions", r.disposition) : (r.status === "closed" ? "—" : "Open")),
         el("span", "dim", (r.units || []).join(", ")));
@@ -280,7 +281,7 @@ window.AddrHistory = (() => {
     pk.open = false;
     const seq = ++pk.seq;
     renderPeek({ loading: true, id });
-    if (ov.hidden) UI.dialog.open(ov, { opener: opener || document.activeElement, focus: $("#peek-close"), onClose: () => peekClosed(id) });
+    if (ov.hidden) UI.dialog.open(ov, { opener: opener || document.activeElement, focus: $("#peek-close"), onClose: () => peekClosed(pk.id) });
     let inc;
     try { inc = await api("GET", `/api/cad/incident/${id}`); } catch (e) { inc = { error: e.message, id }; }
     if (seq !== pk.seq) return;
