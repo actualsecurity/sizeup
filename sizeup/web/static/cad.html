@@ -516,7 +516,10 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
             <label class="field">Dangerous goods <input id="e-acft-cargo" type="text" maxlength="120" placeholder="none" spellcheck="false"></label>
           </fieldset>
           <label class="field span2">Comments <textarea id="e-remarks" rows="3" maxlength="4000"></textarea></label>
-          <div class="span2 row"><span id="e-error" class="error"></span><span class="spacer"></span>
+          <div class="span2 row">
+            <label id="e-quiet-w" class="check" title="Record fix: its timeline line marked “quiet edit”, not a live change"><input id="e-quiet" type="checkbox"> <span>Quiet edit</span></label>
+            <span id="e-closed" class="chip ev-label" hidden title="Edits the closed record without reopening it: status unchanged, its timeline line marked “after close”">Stays closed</span>
+            <span id="e-error" class="error"></span><span class="spacer"></span>
             <button id="edit-cancel" type="button">Cancel</button>
             <button id="edit-save" type="submit" class="primary">Save</button></div>
         </form>
@@ -754,6 +757,22 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 
 <!-- the style guide (styleguide.js, /cad#styleguide): every component in every state; Settings > System links it -->
 <main id="styleguide" class="styleguide" hidden></main>
+
+<!-- a past call from History here, read-only over the current view (addr-history.js peek; #peek/<id> deep link) -->
+<div id="peek-overlay" class="overlay" hidden>
+  <div class="dialog tall peek-panel" role="dialog" aria-modal="true" aria-labelledby="peek-title">
+    <div class="dialog-head">
+      <h2 id="peek-title" class="dialog-title"></h2>
+      <span id="peek-status" class="st-badge" hidden></span>
+      <span class="dim small" title="A past call, read-only: the call you were on stays as it was">View only</span>
+      <span class="spacer"></span>
+      <a id="peek-new" class="btn sm" target="_blank" rel="noopener" title="In a new tab">New tab</a>
+      <button id="peek-open" type="button" class="sm" title="Switch to this call">Open</button>
+      <button id="peek-close" class="icon quiet" title="Close (Esc)" aria-label="Close"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-x"/></svg></button>
+    </div>
+    <div id="peek-body" class="dialog-body peek-body"></div>
+  </div>
+</div>
 
 <div id="db-overlay" class="overlay" hidden>
   <div class="dialog tall db-panel" role="dialog" aria-modal="true" aria-labelledby="db-title">

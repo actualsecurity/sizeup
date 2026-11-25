@@ -30,7 +30,9 @@ def closed_with_units(cad, clock):
     return iid
 
 
-def test_closed_with_units_reopens_active_disposition_into_the_chronology(tmp_path):
+def test_closed_with_units_reopens_pending_disposition_into_the_chronology(tmp_path):
+    """No unit comes back by itself, so it reopens PENDING (the admin, 2026-11-25: "an active incident with no units
+    assigned should drop back to pending, even after being reopened"); a unit put on it makes it active again."""
     clock = Clock(local(2026, 10, 13, 16, 0))
     cad = make_cad(tmp_path, clock=clock)
     iid = closed_with_units(cad, clock)
@@ -38,15 +40,16 @@ def test_closed_with_units_reopens_active_disposition_into_the_chronology(tmp_pa
     assert (before["status"], before["disposition"]) == ("closed", "COMPLETE") and before["closed_at"] == clock.t
     clock.t += 600                                              # 16:41, closed at 16:31
     inc = cad.reopen(iid, {"operator": "Jordan <jordan@example.org>"})
-    assert (inc["status"], inc["disposition"], inc["closed_at"], inc["number"]) == ("active", "", None, before["number"])
+    assert (inc["status"], inc["disposition"], inc["closed_at"], inc["number"]) == ("pending", "", None, before["number"])
+    assert (inc["created_at"], inc["accepted_at"]) == (before["created_at"], before["accepted_at"])   # its clock stays
     full = cad.store.full(iid)
     assert full["events"][-1]["kind"] == "reopened" and full["events"][-1]["operator"] == "Jordan <jordan@example.org>"
     assert texts(cad, iid)[-1] == "Reopened by Jordan; was Complete at 16:31"
     # no unit comes back by itself: E60 stays cleared and available; the dispatcher adds units again
     assert all(a["cleared_at"] for a in full["assignments"]) and by_name(cad, "E60")["incident_id"] is None
-    assert [i["id"] for i in cad.store.incidents() if i["status"] == "active"] == [iid]
+    assert [i["id"] for i in cad.store.incidents() if i["status"] == "pending"] == [iid]
     cad.attach(iid, {"unit_ids": [uid(cad, "E60")], "status": "OL", "operator": "JD"})
-    assert by_name(cad, "E60")["incident_id"] == iid
+    assert by_name(cad, "E60")["incident_id"] == iid and cad.store.incident(iid)["status"] == "active"
     # and it closes again, with a new disposition
     cad.close(iid, {"disposition": "RESCUE", "operator": "JD"})
     assert cad.store.incident(iid)["disposition"] == "RESCUE"
