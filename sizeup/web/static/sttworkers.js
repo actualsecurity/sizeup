@@ -282,16 +282,16 @@ const SttWorkersCard = (() => {
   function catalogTable(m) {
     const t = el("table", "evtable");
     const hr = el("tr");
-    for (const h of ["Model", "Kind", "VRAM", "Default for", "Context"]) hr.append(el("th", "", h));
+    for (const h of ["Model", "Kind", "VRAM", "Recommended for", "Context"]) hr.append(el("th", "", h));
     t.append(el("thead"), el("tbody"));
     t.tHead.append(hr);
-    const defaults = m.defaults || {};
+    const rec = m.recommended || {};
     for (const c of m.catalog || []) {
       const tr = el("tr");
       const id = el("td", "mono", c.id);
       id.title = c.what || "";
-      const svc = Object.keys(defaults).filter((s) => defaults[s] === c.id);
-      if (m.fallback === c.id) svc.push("rest");
+      const svc = Object.keys(rec).filter((s) => rec[s] === c.id);
+      if (m.fallback === c.id) svc.push("default");
       const ctx = el("td", c.context_default ? "" : "dim", `${c.context} · ${c.context_default ? "on" : "off"}`);
       ctx.title = c.context === "list" ? "Context: a short list (names, call signs, aircraft, terms)" : "Context: whisper's prompt";
       tr.append(id, el("td", "", KIND[c.kind] || c.kind), el("td", "t", `${(c.vram_mb / 1024).toFixed(1)} GB`),

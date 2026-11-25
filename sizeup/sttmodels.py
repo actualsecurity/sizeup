@@ -6,8 +6,10 @@ the workers are asked to run, and the context each clip carries.
                 its context a short list), VRAM, services and context_default. The hub tells the workers which catalog
                 (word(): the commit it was built from and models.json's SHA-256) and which models it wants (want()).
     choices     hub.sqlite meta "stt_models" (JSON {channel key: {model?, context?, callsigns?}}): Settings > Radios >
-                <channel> > Speech model, admins, audited. Not set: DEFAULTS by the channel's service (fire, EMS and
-                police: Qwen3-ASR; airband: the ATC whisper), FALLBACK for any other. context "on" | "off" over the
+                <channel> > Speech model, admins, audited. Not set: FALLBACK, today's whisper, whatever the service: the
+                live path never changes model by itself (no slowdown, no untested model on fire traffic); an admin
+                switches a channel once the evidence is there (sizeup/sttscore.py). RECOMMENDED by service (fire, EMS
+                and police: Qwen3-ASR; airband: the ATC whisper) is what Settings suggests. context "on" | "off" over the
                 model's context_default (the ATC whisper's is off: a prompt raised its repetition loops). callsigns: the
                 channel's fixed call signs ("908", "Headquarters": a dispatch console's), said all the time, in every
                 clip's context whoever talks.
@@ -34,8 +36,9 @@ META = "stt_models"
 KINDS = ("whisper-ggml", "llama-asr")
 ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,47}")
 FALLBACK = "large-v3-turbo-q5_0"              # today's whisper (every worker's whisper_server)
-DEFAULTS = {"fire": "qwen3-asr-1.7b-q8_0", "ems": "qwen3-asr-1.7b-q8_0", "police": "qwen3-asr-1.7b-q8_0",
-            "air": "large-v3-turbo-us-atc-v3-f16"}
+RECOMMENDED = {"fire": "qwen3-asr-1.7b-q8_0", "ems": "qwen3-asr-1.7b-q8_0", "police": "qwen3-asr-1.7b-q8_0",
+               "air": "large-v3-turbo-us-atc-v3-f16"}    # (suggested in Settings, never applied by itself)
+DEFAULTS: dict = {}                                    # a service's own default model: none (FALLBACK for all)
 SERVICE_ORDER = ("fire", "ems", "police", "air", "transit", "other", "")   # whose model is loaded first (VRAM)
 CONTEXT_MAX = 12
 CALLSIGNS_MAX = 8
@@ -222,6 +225,7 @@ class Choices:
         channel's choices."""
         return {"catalog": [dict(e) for e in self.catalog.values()], "defaults": {s: self.default_for(s)
                                                                                 for s in DEFAULTS},
+                "recommended": {s: m for s, m in RECOMMENDED.items() if m in self.catalog},
                 "fallback": FALLBACK, "channels": self.settings()}
 
 
