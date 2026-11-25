@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/stt-worker-hello.schema.json",
   "title": "Worker hello",
-  "description": "The body of POST /api/station/stt/hello, as the GPU worker client sends it today (tools/stt_worker/worker.py hello; read by WorkerApi.handle, sizeup/cloud/sttworkers.py). JSON with a Content-Length, at most 1 MiB. The hub resolves the bearer token first: a GPU worker's own (sw1.<id>.<secret>), or a station's token for its whisper, which the hub knows as `station:<id>` and takes only while that station's whisper is in the pool. Sent once when the worker connects, and again after the hub was away.",
+  "description": "The body of POST /api/station/stt/hello, as the GPU worker client sends it today (deploy/stt-worker/worker.py hello; read by WorkerApi.handle, sizeup/cloud/sttworkers.py). JSON with a Content-Length, at most 1 MiB. The hub resolves the bearer token first: a GPU worker's own (sw1.<id>.<secret>), or a station's token for its whisper, which the hub knows as `station:<id>` and takes only while that station's whisper is in the pool. Sent once when the worker connects, and again after the hub was away.",
   "x-status": "as-built",
   "x-version": 1,
   "x-complete": true,
@@ -66,7 +66,7 @@
     },
     "self_update": {
       "title": "Self-update",
-      "description": "A GPU worker's self-update (tools/stt_worker/worker.py Updater): the worker.py it runs and what its updater is doing. Sending it is the capability: the hub answers `worker_update` only to a worker that sent it. A station's whisper never sends it.",
+      "description": "A GPU worker's self-update (deploy/stt-worker/worker.py Updater): the worker.py it runs and what its updater is doing. Sending it is the capability: the hub answers `worker_update` only to a worker that sent it. A station's whisper never sends it.",
       "x-complete": true,
       "type": "object",
       "additionalProperties": true,

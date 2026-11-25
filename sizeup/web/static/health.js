@@ -351,7 +351,7 @@ const StationHealth = (() => {
         ["Fallbacks", fbn ? Object.entries(fb).filter(([, n]) => n).map(([k, n]) => `${n} ${k.replace("_", " ")}`).join(" · ")
           + (sp.refused_late ? ` · ${sp.refused_late} late refused` : "") : "none", fbn ? "hl-warn" : ""],
       ]));
-      // a GPU worker's self-update (tools/stt_worker/worker.py): the worker.py it runs, against the one the hub wants
+      // a GPU worker's self-update (deploy/stt-worker/worker.py): the worker.py it runs, against the one the hub wants
       const ver = (w) => {
         const u = w.update;
         if (!u || !u.sha256) return "—";
@@ -360,7 +360,15 @@ const StationHealth = (() => {
           [u.commit ? `Commit ${u.commit.slice(0, 12)}` : "", u.state || "", w.update_wanted && !w.update_current
             ? `Hub: ${w.update_wanted.slice(0, 12)}` : "", u.auto === false ? "auto_update off" : ""].filter(Boolean).join("\n")];
       };
-      if ((sp.workers || []).length) kids.push(table(["Worker", "State", "Model", "Version", "Load", "Jobs/h", "Lost", "Last seen"],
+      // a GPU worker's own log (deploy/stt-worker/worker.py LogShip → CloudWatch /sizeup/stt-worker): its last batch
+      const logs = (w) => {
+        const l = w.logs;
+        if (!l) return "";
+        if (l.error) return [`not shipped: ${l.error}`, "hl-warn", `Logs not shipped: ${l.error}. Kept on the PC (worker.log, logspool)`];
+        return l.at ? [`${longDur(serverNow() - l.at)} ago`, "", `Last batch ${when(l.at)} · ${l.lines} lines today · /sizeup/stt-worker`]
+          : ["none yet", "dim"];
+      };
+      if ((sp.workers || []).length) kids.push(table(["Worker", "State", "Model", "Version", "Load", "Jobs/h", "Lost", "Last seen", "Logs"],
         sp.workers.map((w) => {
           const g = w.gpu || {}, l = w.load || {};
           // a GPU worker's GPU; a station's whisper (#639 phase 2): its own clips waiting, its CPU, its pace
@@ -369,7 +377,7 @@ const StationHealth = (() => {
             : g.util_pct !== undefined ? `GPU ${g.util_pct}%` + (g.mem_used_mb !== undefined ? ` · ${g.mem_used_mb}/${g.mem_total_mb} MB` : "") : "";
           const st = [w.state, w.state === "online" ? "hl-ok" : w.state === "offline" || w.state === "cooling" ? "hl-bad" : "dim", l.why || ""];
           return [w.kind === "station" ? `${w.id.replace(/^station:/, "")} (station)` : w.id, st, w.model, ver(w), load,
-            w.jobs_h, w.lost, `${when(w.seen)} · ${longDur(w.seen_s)} ago`];
+            w.jobs_h, w.lost, `${when(w.seen)} · ${longDur(w.seen_s)} ago`, logs(w)];
         }), ""));
       const inf = sp.infer;
       if (inf) {  // the workers' local LLM (sizeup/cloud/infer.py): its own lane after the pre-alert clips; tasks, times, counts only
