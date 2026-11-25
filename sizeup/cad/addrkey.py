@@ -233,17 +233,18 @@ def same_building(a: str, b: str) -> bool:
     return ra == rb and ("-" in na or "-" in nb) and houserange.same_number(na, nb)
 
 
-def building_rows(q: Callable, table: str, bldg_key: str) -> list[dict]:
+def building_rows(q: Callable, table: str, bldg_key: str, active: bool = True) -> list[dict]:
     """The active rows of a table keyed by building (premise notes, pre-plan points and documents) at this building:
     its own key's, and the keys that are the same building (same_building): a range's numbers, the ranges holding this
-    number (on the building-key index, then a scan of that street's ranges). q: the store's query(sql, args)."""
+    number (on the building-key index, then a scan of that street's ranges). q: the store's query(sql, args). active:
+    the active rows only (else every row: expired notes too)."""
     if not bldg_key:
         return []
     num, street, town, b = bldg_parts(bldg_key)
     rest = f"|{street}|{town}" + (f"|{b}" if b else "")
     rng = houserange.parse_number(num)
     keys = [bldg_key] + ([f"{n}{rest}" for n in sorted(rng.labels())] if rng else [])
-    rows = q(f"SELECT * FROM {table} WHERE active = 1 AND (bldg_key IN ({','.join('?' * len(keys))}) OR "
+    rows = q(f"SELECT * FROM {table} WHERE {'active = 1 AND ' if active else ''}(bldg_key IN ({','.join('?' * len(keys))}) OR "
              f"(bldg_key GLOB ? AND bldg_key GLOB ?))", (*keys, "[0-9]*-[0-9]*|*", "*" + _glob(rest)))
     return [r for r in rows if r["bldg_key"] in keys or same_building(bldg_key, r["bldg_key"])]
 

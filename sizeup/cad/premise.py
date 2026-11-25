@@ -173,7 +173,7 @@ class Premise:
             a = acks.get(n["id"])
             s["ack"] = {"at": a["at"], "by": who(a["operator"])} if a and a["at"] >= n["updated_at"] else None
             # shown by its point, not its building: the card says whose it is ("nearby" and the note's own address)
-            s["nearby"] = not (inc.get("bldg_key") and n["bldg_key"] == inc.get("bldg_key"))
+            s["nearby"] = not (inc.get("bldg_key") and addrkey.same_building(n["bldg_key"], inc.get("bldg_key")))
             out.append(s)
         return out
 
@@ -198,8 +198,10 @@ class Premise:
         if where:
             k = self._key_text(where)
             like = "%" + where.lower().replace("%", "") + "%"
-            conds.append("(lower(label) LIKE ?" + (" OR bldg_key = ?" if k.bldg_key else "") + ")")
-            args += [like] + ([k.bldg_key] if k.bldg_key else [])
+            ids = ([r["id"] for r in addrkey.building_rows(self.store.q, "premise_notes", k.bldg_key, False)]
+                   if k.bldg_key else [])
+            conds.append("(lower(label) LIKE ?" + (f" OR id IN ({','.join('?' * len(ids))})" if ids else "") + ")")
+            args += [like] + ids                          # (the building's: a range and each of its numbers)
         rows = self.store.q("SELECT * FROM premise_notes" + (f" WHERE {' AND '.join(conds)}" if conds else "")
                             + " ORDER BY updated_at DESC, id DESC LIMIT 500", args)
         now = self.cad.clock()

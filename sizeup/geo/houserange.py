@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from .normalize import MULTIPLIERS, NUMBER_WORDS, STREET_TYPES, TENS, TYPE_ABBRS, UNITS, _parse_run
 
 SPAN_MAX = 50           # a building's range: its ends at most this far apart (more: a block, never one building)
+SPOKEN_SPAN_MAX = 10    # ... said on a page ("14 to 16"): this far at most (a page's words are looser than a typed address)
 SHORT_SPAN_MAX = 20     # "149-51": the second number's last digits only, its end at most this far from the first
 SUFFIX_REACH = 5        # a spoken range ("14 to 16"): a street's suffix within this many words after it
 
@@ -57,7 +58,9 @@ def make(lo_text: str, hi_text: str, letter: str = "") -> HouseRange | None:
     if not (lo_text.isdigit() and hi_text.isdigit()) or lo_text[0] == "0" or len(lo_text) > 5 or len(hi_text) > 5:
         return None
     lo, hi = int(lo_text), int(hi_text)
-    if len(hi_text) < len(lo_text):                       # "149-51": the end's last digits
+    if len(hi_text) < len(lo_text):                       # "149-51": the end's last digits (two at least, of a
+        if len(hi_text) < 2 or len(lo_text) < 3:          # number of three: "12-4" is never 12 to 14)
+            return None
         step = 10 ** len(hi_text)
         full = lo - lo % step + hi
         if full <= lo:
@@ -82,7 +85,18 @@ NOT_AFTER = {"exit", "exits", "interchange", "mm", "mp", "marker", "milepost", "
              "tower", "rescue", "squad", "truck", "battalion", "car", "chief", "ambulance", "medic", "utility",
              "tanker", "brush", "unit", "units", "apt", "apartment", "suite", "ste", "room", "rm", "floor", "fl", "flr",
              "lot", "bldg", "building", "time", "box", "channel", "tac", "code", "number", "no", "phone", "callback",
-             "between", "ages", "age", "aged", "out"}
+             "between", "ages", "age", "aged", "out", "station", "stations", "company", "co", "district", "zone",
+             "zones", "post", "patrol", "ems", "level", "levels", "story", "stories", "floors", "cars", "radio",
+             "talkgroup", "group", "boxes", "sector", "beat"}
+# words that are never part of a street's name between a range and its suffix: "2 to 4 story building on Sample
+# Avenue", "20 to 30 people on Sample Ave", "4 to 6 minutes Sample St" are no ranges
+FILLER = {"on", "at", "of", "in", "for", "the", "a", "an", "to", "and", "or", "by", "near", "from", "with", "into",
+          "onto", "off", "is", "are", "was", "were", "be", "it", "its", "this", "that", "there", "their", "people",
+          "person", "persons", "patients", "victims", "minutes", "minute", "mins", "min", "hours", "hour", "seconds",
+          "cars", "car", "vehicles", "vehicle", "story", "stories", "floor", "floors", "family", "families", "units",
+          "unit", "times", "feet", "ft", "foot", "yards", "miles", "mile", "percent", "degrees", "years", "year",
+          "old", "inches", "gallons", "building", "buildings", "house", "houses", "homes", "home", "apartments",
+          "apartment", "rooms", "room", "alarm", "alarms", "calls", "call", "trucks", "engines", "ladders"}
 _SUFFIX_WORDS = {w for w, a in STREET_TYPES.items() if a in TYPE_ABBRS} | TYPE_ABBRS | {"broadway"}
 
 
@@ -124,11 +138,14 @@ def _number_at(toks: list[re.Match], i: int) -> tuple[str, int, bool] | None:
     return got, j, True
 
 
-def find(text: str) -> list[Found]:
-    """The house-number ranges in free text (a page's transcript, a feed's or a person's location), each before a
-    street's words: written ("14-16 Sample Ave": a word after it) or spoken ("14 to 16 Sample Avenue", "fourteen dash
-    sixteen ...": a street's suffix within SUFFIX_REACH words after it). Never after NOT_AFTER's words, never glued to
-    other digits ("914-555-0100", "189-1/2", "1.5-3")."""
+def find(text: str, address: bool = False) -> list[Found]:
+    """The house-number ranges in free text (a page's transcript, a dispatch's words), each right before a street: a
+    street's name and its suffix within SUFFIX_REACH words after it, no FILLER word between ("14-16 Sample Ave", "14 to
+    16 Sample Avenue", "fourteen dash sixteen Sample Avenue"); a range said in words, or with "to" / "through" / "dash",
+    at most SPOKEN_SPAN_MAX wide. address: the text is a location itself (a feed's, a person's): a written range needs
+    only a word after it ("14-16 SAMPLE BROADWAY", "14-16 THE CRESCENT"). Never after NOT_AFTER's words or in a list of
+    numbers ("Engine 58, 60 to 62 ..."), never glued to other digits or letters ("914-555-0100", "189-1/2", "1.5-3",
+    "E60-62")."""
     s = text or ""
     toks = list(_TOKEN.finditer(s))
     out: list[Found] = []
@@ -140,9 +157,12 @@ def find(text: str) -> list[Found]:
             continue
         lo, j, lo_words = a
         prev = toks[i - 1] if i else None
-        glued_before = prev is not None and prev.end() == toks[i].start() and prev.group(0) in "-./:"
+        glued_before = prev is not None and prev.end() == toks[i].start() and (prev.group(0) in "-./:"
+                                                                               or prev.group(0)[-1:].isalpha())
         after_word = prev is not None and prev.group(0).lower() in NOT_AFTER
-        if glued_before or after_word or j >= len(toks) or toks[j].group(0).lower() not in CONNECTORS:
+        listed = (prev is not None and prev.group(0).lower() in (",", "and", "&") and i >= 2
+                  and (toks[i - 2].group(0).isdigit() or toks[i - 2].group(0).lower() in NUMBER_WORDS))   # "58, 60 to 62"
+        if glued_before or after_word or listed or j >= len(toks) or toks[j].group(0).lower() not in CONNECTORS:
             i = j if lo_words else i + 1
             continue
         conn = toks[j].group(0).lower()
@@ -161,14 +181,15 @@ def find(text: str) -> list[Found]:
             i += 1
             continue
         spoken = conn != "-" or lo_words or hi_words
-        if spoken:                                        # said: only before a street (a suffix soon after)
+        if spoken or not address:                         # only right before a street (its suffix soon after)
             words = [t.group(0).lower() for t in toks[k:k + SUFFIX_REACH]]
             cut = next((n for n, w in enumerate(words) if not w.isalpha()), len(words))
-            if not any(w in _SUFFIX_WORDS for w in words[:cut]):
+            at = next((n for n, w in enumerate(words[:cut]) if w in _SUFFIX_WORDS and (n or w == "broadway")), None)
+            if at is None or any(w in FILLER for w in words[:at]):
                 i += 1
                 continue
         r = make(lo, hi, letter)
-        if r is None:
+        if r is None or (spoken and r.hi - r.lo > SPOKEN_SPAN_MAX):
             i += 1
             continue
         out.append(Found(toks[i].start(), toks[k - 1].end(), r, spoken))
@@ -176,14 +197,17 @@ def find(text: str) -> list[Found]:
     return out
 
 
+_LEAD = re.compile(r"\s*\d{1,5}\s*(?:-|to\b|through\b|thru\b|dash\b)\s*\d", re.I)
+
+
 def at_start(text: str) -> tuple[HouseRange, int] | None:
     """A location that starts with a range ("14-16 SAMPLE AVE ..."): (the range, where the rest starts); None for one
     that doesn't (a single number, a span too wide, nothing after it)."""
     s = text or ""
-    m = re.match(r"\s*\d", s)
+    m = _LEAD.match(s)                                    # (cheap: most locations start with one number)
     if not m:
         return None
-    for f in find(s):
+    for f in find(s[:m.end() + 120], address=True):
         if not s[:f.start].strip():
             return f.range, f.end
         break

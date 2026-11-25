@@ -66,6 +66,19 @@ def test_a_range_written_or_said(text, want):
     "14 to 16 people",                            # said, but no street after it
     "1.5-3 miles Sample Avenue",
     "16-10-191-22, time out",                     # 60 Control's run number
+    "12-4 SAMPLE AVE", "20-2 SAMPLE AVE",         # one digit after the dash: never 12 to 14
+    # a page's words (the review's): no street right after it, a span too wide to say, a list of units, a station
+    "respond 2 to 14 Sample Avenue",
+    "station 2 to 14 Sample Avenue",
+    "Engine 58, 60 to 62 Sample Avenue",
+    "E60 to 62 Sample Ave",
+    "about 20 to 30 people Sample Ave",
+    "4 to 6 minutes Sample St",
+    "for 2 to 4 cars on Sample Road",
+    "zone 12-14 Sample Ave",
+    "district 12-14 Sample Ave",
+    "two to four story building on Sample Avenue",
+    "a 2-4 story building on Sample Avenue",
 ])
 def test_not_a_range(text):
     assert hr.find(text) == []
@@ -96,6 +109,18 @@ def test_the_page_keeps_the_range(said):
     assert d.numbers == []                        # never 14 read as an engine
     assert d.cross_street == "example street" and d.time_out == "22:14"
     assert d.units == ["Engine 60", "Ladder 31"]
+
+
+def test_a_range_after_the_type_and_before_a_named_street():
+    assert [f.range.text for f in hr.find("an activated fire alarm 14 to 16 Sample Avenue")] == ["14-16"]
+    assert [f.range.text for f in hr.find("1-3 Court Street")] == ["1-3"]
+    assert hr.at_start("14-16 THE CRESCENT")[0].text == "14-16"          # a typed location: any street's words
+
+
+def test_a_number_range_said_before_a_street_with_no_number_stays_the_street():
+    """The review's regression: "two to four story building on Sample Avenue" is no house; the page is the street."""
+    for said in ("two to four story building on Sample Avenue", "a two to four story building on Sample Avenue"):
+        assert parse(PAGE.format(at=f"{said}, cross of Example Street")).location == "sample avenue"
 
 
 def test_the_page_never_reads_a_span_or_an_exit_as_a_range():
@@ -172,6 +197,10 @@ def test_a_page_for_either_end_joins_the_feeds_range(tmp_path, said):
 
 
 @pytest.mark.parametrize("feed, said", [("14-16 SAMPLE AVE PORT_CHESTER", "18 Sample Avenue"),
+                                        ("4 SAMPLE AVE PORT_CHESTER", "respond 2 to 14 Sample Avenue"),
+                                        ("6 SAMPLE AVE PORT_CHESTER", "station 2 to 14 Sample Avenue"),
+                                        ("60 SAMPLE AVE PORT_CHESTER", "Engine 58, 60 to 62 Sample Avenue"),
+                                        ("12-4 SAMPLE AVE PORT_CHESTER", "14 Sample Avenue"),
                                         ("1-3 SAMPLE AVE PORT_CHESTER", "5 Sample Avenue"),
                                         ("14-16 SAMPLE AVE PORT_CHESTER", "16 Example Avenue"),
                                         ("10-200 SAMPLE AVE PORT_CHESTER", "100 Sample Avenue")])
@@ -284,6 +313,17 @@ def test_a_premise_note_at_either_end_shows_on_a_range_and_back(hist):
     one = c.store.create_incident(type="STRU", subtype="RESD", address="14 Sample St")
     assert {n["id"] for n in c.addrs.here(one)["notes"]} == {nr["id"]}
     assert n20["id"] not in {n["id"] for n in c.addrs.here(one)["notes"]}
+
+
+def test_a_note_at_the_building_is_not_nearby_and_the_search_finds_it(hist):
+    c = hist
+    n16 = c.premise.create({"where": "16 Sample St", "text": "Knox box", "category": "access"})["note"]
+    iid = c.store.create_incident(type="STRU", subtype="RESD", address="14-16 Sample St")
+    inc = c.store.incident(iid)
+    [shown] = c.premise.for_incident(dict(inc) | {"bldg_key": "14-16|sample st|port chester"})
+    assert shown["id"] == n16["id"] and shown["nearby"] is False
+    found = c.premise.listing({"where": ["14-16 Sample St"]})["notes"]
+    assert [n["id"] for n in found] == [n16["id"]]
 
 
 def test_building_rows_for_pre_plans():
