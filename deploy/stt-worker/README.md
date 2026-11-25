@@ -514,22 +514,22 @@ the worker token and its Cloudflare service token, the same Access application (
 
 **Admin, once (AWS):** the hub's task role needs to write the group. Until it may, Health shows
 `not shipped: permission`, the worker keeps its batches on the PC (and `worker.log` as always), and nothing else is
-affected. The role's IAM is in sizeup-aws, not this repo. Add this inline policy to the task role (`$NAME-task`, as
+affected. The role's IAM is in sizeup-aws, not this repo. Add this inline policy to the task role (`${NAME}-task`, as
 in `25-station-logs.sh`):
 
 ```sh
 cd sizeup-aws && source ./env.sh            # NAME, AWS_REGION, ACCT
-G="arn:aws:logs:$AWS_REGION:$ACCT:log-group"
+G="arn:aws:logs:${AWS_REGION}:${ACCT}:log-group"   # (braces: zsh reads $ACCT:l as a modifier)
 work=$(mktemp -d)
-cat > "$work/policy.json" <<POLICY
+cat > "${work}/policy.json" <<POLICY
 {"Version":"2012-10-17","Statement":[
  {"Sid":"WorkerLogs","Effect":"Allow",
   "Action":["logs:CreateLogGroup","logs:PutRetentionPolicy","logs:CreateLogStream","logs:PutLogEvents"],
-  "Resource":["$G:/sizeup/stt-worker","$G:/sizeup/stt-worker:*"]}]}
+  "Resource":["${G}:/sizeup/stt-worker","${G}:/sizeup/stt-worker:*"]}]}
 POLICY
-aws iam put-role-policy --role-name "$NAME-task" --policy-name stt-worker-logs \
-  --policy-document "file://$work/policy.json"
-rm -rf "$work"
+aws iam put-role-policy --role-name "${NAME}-task" --policy-name stt-worker-logs \
+  --policy-document "file://${work}/policy.json"
+rm -rf "${work}"
 ```
 
 `logs:DescribeLogGroups` comes from step 25's `station-logs` policy. All four actions are needed: without any one
