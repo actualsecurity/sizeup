@@ -1636,6 +1636,32 @@ Each channel has its own speech-to-text model on the GPU workers (`sizeup/sttmod
 - **Discarded:** a repetition loop, or a llama-asr model's context read back as the text, is kept as a run (role
   `discarded`) and the clip goes to the next engine. A clip the worker finds near-silent isn't decoded (no speech).
 
+### Champion and challenger (#639)
+
+An admin can trial another catalog model on a channel (`sizeup/sttscore.py`; Settings > Station > STT workers).
+
+- **Sampled:** the channel's challenger and its share (10% by default). A clip whose text of record came from the
+  channel's own model (the champion) is sampled by its id's hash, so the choice is the same every time. Clips over
+  30 s aren't sampled.
+- **Never in the way:** the challenger's run is a pool class of its own (`challenger`), under every other one. It goes
+  only to a GPU worker that has the model loaded, holds no clip and finds nothing else waiting, and only once no clip of
+  ours has come in for 30 s. It waits up to 10 min for that; then the sample is skipped. It gets the same audio and the
+  same context the champion got.
+- **Kept privately:** the challenger's words are a run in `stt_runs` (role `challenger`), pruned with the transcript,
+  never on the radio log or in an API. Each holds its sample's scores (numbers only, `score`).
+- **Scored per domain**, after the pinned folding `norm/1` (lower case, spelled numbers in digits, ten-codes):
+  - fire/EMS: the dispatcher's trailing time (#727), and the county CAD's units and address found;
+  - police: the channel's terms found;
+  - airband: the ADS-B aircraft near the field found;
+  - any domain: once a person corrects the clip, word error and identifier recall against the correction.
+  "Found" means of what either side found, so the two are compared on the same clip. Agreement (1 - word error
+  between the two) is shown, never ranked.
+- **The board:** per channel, n, each side's mean, the difference and its 95% interval. The verdict is "challenger
+  better" or "champion better" only with 20 samples or more and an interval clear of 0.
+- **Promote** (admin, audited as Radios): the challenger becomes the channel's model, and the model it replaced
+  becomes the challenger at the same share. If, over the samples since, the replaced model scores better by more than
+  0.02 and the interval says so, the hub rolls the promotion back by itself (audited as "automatic rollback").
+
 ## Phone pre-alert (Tapout)
 
 > "can we bake in the ntfy.sh feed from tapout into this? lets receive that feed as a possible
