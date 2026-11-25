@@ -163,8 +163,8 @@ For the first install, `worker.py` is pinned to a commit. Check its hash after t
 more to get it.
 
 ```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/39c4de4b155d1a03db14168c66dcb57954f0ae12/tools/stt_worker/worker.py -OutFile "$d\worker.py"
-(Get-FileHash "$d\worker.py").Hash -eq 'DF31E5B282749F2AEE67C4C0403672133AE6CBDFF4D8068F27BD04F68C9D01A2'   # True
+Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/2d43243e463390e2a544ced00db3745730965093/tools/stt_worker/worker.py -OutFile "$d\worker.py"
+(Get-FileHash "$d\worker.py").Hash -eq '7D4DCBEA8F6C5CC95C9CEAC0898077FC92618A2C18ED45CE4550B5547F243340'   # True
 notepad "$d\worker.toml"
 ```
 
