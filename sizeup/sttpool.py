@@ -118,6 +118,8 @@ class Job:
                                                 # has it loaded first; any other decodes it on its own
     context: list = field(default_factory=list)   # a llama-asr model's context (sttmodels.context_list)
     plain: list = field(default_factory=list)   # the models its context is off for (whichever decodes it)
+    forced: bool = False                        # its channel's engine is "gpu" (sizeup/channels.py): taken whatever
+                                                # the class switches and however busy; its wait and lease still bound it
     extra: dict = field(default_factory=dict)   # the caller's own (catch-up, the page object, ...)
 
     def public(self) -> dict:
@@ -388,6 +390,8 @@ class Pool:
             return not (now - j.queued_at < STATION_DEFER_S and self._gpu_idle(now))
         if j.model and j.model not in w.models and now - j.queued_at < MODEL_DEFER_S and self._model_idle(j, w, now):
             return False                           # (a worker with its model takes it in a moment)
+        if j.cls in FAST_CLASSES and j.forced:       # (a "gpu" channel's pre-alert: any free worker, quick or not)
+            return w.polling > 0 and not w.leases and self._ready(w, now)
         return j.cls not in FAST_CLASSES or self._fast_ok(w, now)
 
     def _model_idle(self, j: Job, w: Worker, now: float) -> bool:
@@ -398,12 +402,19 @@ class Pool:
                    for o in self.workers.values())
 
     def ready(self, cls: float, now: float | None = None, gpu_only: bool = False, origin: str = "",
-              seconds: float | None = None) -> tuple[bool, str]:
+              seconds: float | None = None, forced: bool = False) -> tuple[bool, str]:
         """Can the pool take a clip of this class now: (yes, why not). gpu_only: on a GPU worker (an AWS channel's clip:
-        a station's whisper is slower than AWS); a pre-alert class always is."""
+        a station's whisper is slower than AWS); a pre-alert class always is. forced: a "gpu" channel's clip (its
+        engine is the GPU first): taken while any GPU worker is ready, whatever its class switch and however busy (its
+        class's wait for a claim and its lease still bound it, then the caller's fallback)."""
         now = self.clock() if now is None else now
         if cls not in BUDGETS:
             return False, "not a pool class"
+        if forced and not self._stop.is_set():
+            with self._cv:
+                if any(w.kind == "gpu" and self._ready(w, now) for w in self.workers.values()):
+                    return True, ""
+            return False, "no GPU worker ready"
         try:
             if not self.enabled(cls):
                 return False, "off"
@@ -449,7 +460,7 @@ class Pool:
         """Queued (True), or not taken: the pool not ready for its class, or the clip already open here. The caller
         goes its own way on False; on True exactly one of on_done / on_fallback follows."""
         ok, _why = self.ready(job.cls, gpu_only=job.gpu_only, origin=str(job.extra.get("origin") or ""),
-                              seconds=job.seconds)
+                              seconds=job.seconds, forced=job.forced)
         if not ok or self._stop.is_set():
             return False
         with self._cv:

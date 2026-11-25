@@ -1626,8 +1626,8 @@ class App:
         log(recording_note(page))
         heard = self._page_heard(page)
         eng = self.stt_engine(page.label) if heard else ""
-        page.stt = eng if eng in ("aws", "both") else ""  # type: ignore[attr-defined]
-        if eng == "aws" and self.forwarding():
+        page.stt = "aws" if eng == "gpu" else eng if eng in ("aws", "both") else ""  # type: ignore[attr-defined]
+        if eng in ("aws", "gpu") and self.forwarding():
             page.status = "remote"          # the hub transcribes it (Amazon Transcribe)
         self._emit("page", self._page_doc(page), page.id)
         if not heard:
@@ -2533,7 +2533,7 @@ class App:
         for cid in dict.fromkeys(ids):
             item, key = self._find(cid)
             eng = self.channel_pref(key)["engine"] if item is not None else ""
-            if eng not in ("aws", "both"):
+            if eng not in ("aws", "both", "gpu"):
                 local.append(cid)
                 continue
             ok, why = self.aws.available(key) if self.aws is not None and is_context(key) else (ok0, why0)
@@ -2691,7 +2691,7 @@ class App:
         p = self.channel_pref(key)
         if not p.get("transcribe", True):
             return ""
-        if (p.get("engine") in ("aws", "both") and is_context(key) and self.aws is not None
+        if (p.get("engine") in ("aws", "both", "gpu") and is_context(key) and self.aws is not None
                 and self.aws.available(key)[0] and self.aws.context_budget()["pct"] < CATCHUP_AWS_PCT):
             return "aws"
         return "whisper"
@@ -2948,13 +2948,16 @@ class App:
         return self.aws.available(key)
 
     def stt_engine(self, key: str) -> str:
-        """off | local | aws | both: what runs for this channel now ("aws" falls back to local without AWS). A county
+        """off | local | aws | both | gpu: what runs for this channel now ("aws" falls back to local without AWS; "gpu" is "aws" or local with no hub). A county
         talkgroup an incident of ours is worked on now (sizeup/cad/opchannel.py) is transcribed, and by Amazon Transcribe
         while AWS can take it (within the monthly limit: never its reserve), like Fire/EMS 15."""
         p = self.channel_pref(key)
         if key in _promoted(self):
             p = dict(p, transcribe=True, engine="aws" if p.get("engine", "local") == "local" else p["engine"])
-        return channels.effective(p, self.aws_ok(key)[0])
+        eng = channels.effective(p, self.aws_ok(key)[0])
+        if eng == "gpu" and not self.forwarding():     # (no hub, no GPU workers: AWS here if it can, else whisper)
+            eng = "aws" if self.aws_ok(key)[0] else "local"
+        return eng
 
     _promo_cache: tuple = (0.0, frozenset())
 
@@ -2996,7 +2999,7 @@ class App:
         """One transmission or page to speech-to-text the way its channel says (audio: whisper's 16 kHz input). late: a
         P25 key-up from while sizeup was down with no emergency (#747): whisper's RERUN class at the highest (_late_prio),
         so the live fire traffic after a restart never waits behind up to REPLAY_S of it."""
-        item.stt = eng if eng in ("aws", "both") else ""
+        item.stt = "aws" if eng == "gpu" else eng if eng in ("aws", "both") else ""
         if self._late_prio(self._stt_priority(item, key), late) in (URGENT, HIGH, LIVE):
             self.stt.ours_heard()              # ours, whichever engine takes it (AWS too): the catch-up's quiet spell
         if eng == "off":                       # kept, not transcribed
@@ -3004,8 +3007,8 @@ class App:
             item.model = ""
             return self._transcribed(item)
         self._stt_input(item, audio, key)      # (station) the same audio for the hub's engines, queued, never made here
-        if eng == "aws" and self.forwarding():
-            # The hub runs Amazon Transcribe on the clip it gets: no whisper here.
+        if eng in ("aws", "gpu") and self.forwarding():
+            # The hub transcribes the clip it gets (Amazon Transcribe; "gpu": its GPU workers first): no whisper here.
             item.raw, item.confidence, item.status, item.model = "", None, "remote", channels_model()
             if isinstance(item, Traffic):
                 item.transcript_pending = "aws"
@@ -3770,7 +3773,7 @@ class App:
         from sizeup.transcribe import is_context
         keys = {*self._chan_ov, *self.cfg.stt_aws_channels}
         promoted = {k for k in _promoted(self) if is_context(k)}     # a crash pre-alert's: forced to AWS (stt_engine)
-        return sorted({k for k in keys if is_context(k) and self.channel_pref(k).get("engine") in ("aws", "both")}
+        return sorted({k for k in keys if is_context(k) and self.channel_pref(k).get("engine") in ("aws", "both", "gpu")}
                       | promoted)
 
     def aws_split(self, ok: bool) -> tuple[list[str], list[str], str]:
@@ -3915,6 +3918,7 @@ class App:
                 "deny_ok": True,                                  # (takes aws.deny: radio-intel PR 3)
                 "promote_ok": True,                               # (takes aws.promote: sizeup/cad/opchannel.py)
                 "promote_p25_ok": True,                           # (... with another system's "p25:" keys: intel)
+                "engine_gpu_ok": True,                            # (takes engine "gpu": sizeup/channels.py)
                 "sig": channels.sig(self._chan_ov, self._hub_aws["ok"], self._tone_ov, self._hub_aws.get("reserve"),
                                     self._sq_ov, self._hub_aws.get("deny"), self._hub_aws.get("promote"))}
 

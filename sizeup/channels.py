@@ -14,6 +14,10 @@ One model for the FM channels (FG1, FG2, South 2) and every P25 talkgroup, keyed
                           skips whisper and forwards the clip with transcript_pending "aws"
                  "both":  whisper on the station and Transcribe on the hub: Transcribe's text is the
                           transcript, whisper's is kept as the alternative to compare
+                 "gpu":   a GPU worker on the hub first (the channel's model, sizeup/sttmodels.py), then Amazon
+                          Transcribe (its budget allowing), then the station's whisper: the station skips whisper and
+                          forwards the clip as for "aws", whatever AWS can do (a station from before "gpu" is sent
+                          "aws" instead: for_station)
 
 Defaults: [stt] aws_channels (South 2, FG1, FG2, Fire/EMS 15 = tg:307) record + transcribe with "aws";
 [stt] record_only (the hub: WCPD Ch 1 = tg:383, LLT Supervisor 1 = tg:3127, #201) recorded, not
@@ -47,7 +51,7 @@ import hashlib
 import json
 import re
 
-ENGINES = ("local", "aws", "both")
+ENGINES = ("local", "aws", "both", "gpu")
 FIELDS = ("record", "transcribe", "engine")
 # "tg:307": the county system's talkgroup; "p25:<system>:<tg>": another P25 system's (#409, sizeup/sourcekeys.py)
 KEY = re.compile(r"tg:\d{1,9}|p25:[a-z][a-z0-9_-]{0,23}:\d{1,9}|[A-Za-z0-9][A-Za-z0-9 ./_-]{0,39}")
@@ -108,11 +112,13 @@ def pref(key: str, overrides: dict, aws_channels=DEFAULT_AWS, record_only=DEFAUL
     return p
 
 
-def for_station(overrides: dict, record_only=DEFAULT_RECORD_ONLY) -> dict:
+def for_station(overrides: dict, record_only=DEFAULT_RECORD_ONLY, gpu_ok: bool = True) -> dict:
     """The map the hub sends the station (set_channel_prefs): its Settings overrides, plus {"transcribe": false}
     for each record_only channel whose override doesn't say (the station's defaults don't know the hub's
     record_only; a Settings choice wins). Only fields a station keeps (check_map), so its sig agrees."""
     out = {k: dict(v) for k, v in overrides.items() if isinstance(v, dict)}
+    if not gpu_ok:                     # (a station from before "gpu" refuses a map with it: "aws" is the nearest)
+        out = {k: dict(v, engine="aws") if v.get("engine") == "gpu" else v for k, v in out.items()}
     for key in record_only:
         if KEY.fullmatch(key) and "transcribe" not in out.get(key, {}):
             out[key] = {**out.get(key, {}), "transcribe": False}
@@ -120,11 +126,12 @@ def for_station(overrides: dict, record_only=DEFAULT_RECORD_ONLY) -> dict:
 
 
 def effective(p: dict, aws_ok: bool) -> str:
-    """off | local | aws | both: what runs for this channel now."""
+    """off | local | aws | both | gpu: what runs for this channel now ("gpu" whatever AWS can do: the hub's GPU
+    workers come first, and its fallbacks are its own)."""
     if not p.get("transcribe", True):
         return "off"
     eng = p.get("engine", "local")
-    return eng if eng == "local" or aws_ok else "local"
+    return eng if eng in ("local", "gpu") or aws_ok else "local"
 
 
 AWS_KEYS_MAX = 16          # channels in the hub's reserve / deny lists (the airband, the pages, Fire/EMS 15, police)

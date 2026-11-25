@@ -1738,7 +1738,10 @@ class HubApp(App):
         if pcm is None or getattr(self, "sttpool", None) is None:
             return False
         cls = self._pool_class(item, key)
-        if not self.sttpool.ready(cls, gpu_only=True)[0]:     # (an AWS channel's: never a station's slower whisper)
+        # a "gpu" channel: the GPU first whatever the pool's class switches say and however busy (its claim wait and
+        # lease rules still bound it: then AWS, then the station's whisper); "aws": only when it beats AWS
+        forced = self.channel_pref(key).get("engine") == "gpu" and self.hub.workers.pool_settings()["on"]
+        if not self.sttpool.ready(cls, gpu_only=True, forced=forced)[0]:   # (never a station's slower whisper)
             return False
         page = None if isinstance(item, Traffic) else item
         item.status, item.raw, item.confidence, item.model = "pending", "", None, sttpool.PENDING_MODEL
@@ -1756,7 +1759,7 @@ class HubApp(App):
         job = sttpool.Job(item.id, cls, key, "page" if page is not None else "traffic", len(pcm) / 8000.0,
                           audio_wait=True, audio=self._pool_audio_of(item.id, page, pcm), on_done=self._pool_done,
                           on_fallback=self._pool_fallback, prompt=prompt, clip_end=self._hub_time(getattr(item, "end", None)),
-                          gpu_only=True, extra={"pcm": pcm, "page": page, "vocab_v": vocab_v})
+                          gpu_only=True, forced=forced, extra={"pcm": pcm, "page": page, "vocab_v": vocab_v})
         self._pool_models(job, item, key)
         if not self.sttpool.submit(job):          # not ready any more in between: the AWS way, the row shown already
             self._pool_to_aws(job, "the GPU pool couldn't take it")
@@ -1791,6 +1794,19 @@ class HubApp(App):
             job.plain = ch.plain(key)
         except Exception as e:  # noqa: BLE001 - the channel's model and context are a help, never a must
             self.hub.log(f"stt pool: {job.id}: its model and context: {type(e).__name__}: {e}")
+
+    def channels_state(self) -> dict:
+        """Settings > Radios > Channels, and what a "gpu" channel can count on now: the GPU workers online (none: its
+        clips go to AWS, then the station's whisper)."""
+        out = super().channels_state()
+        try:
+            now = self.sttpool.clock()
+            online = sorted(w.id for w in list(self.sttpool.workers.values())
+                            if w.kind == "gpu" and self.sttpool.state_of(w, now) == "online")
+            out["gpu"] = {"on": bool(self.hub.workers.pool_settings()["on"]), "online": online}
+        except Exception:  # noqa: BLE001 - no word on the workers: none said
+            pass
+        return out
 
     def _extra_prompt(self, item) -> str:
         """The channel's call signs (Settings: a dispatch console's "908"), in whisper's prompt with the rest (its
@@ -2198,7 +2214,9 @@ class HubApp(App):
             # a station from before deny would never echo it in its signature (a push every 10 s): it isn't sent; that
             # station runs its police channel on our pool's word until it updates
             deny = []
-        prefs = channels.for_station(self._chan_ov, self.cfg.stt_record_only)   # + the hub's record_only (#201)
+        st_ch = _part(self.hub.status, "channels") or {}
+        # + the hub's record_only (#201); "gpu" only to a station that takes it (one from before refuses the map)
+        prefs = channels.for_station(self._chan_ov, self.cfg.stt_record_only, gpu_ok=bool(st_ch.get("engine_gpu_ok")))
         if "p25_systems" not in (self.hub.status or {}):
             # a station from before #409 refuses a whole map with a "p25:<system>:<tg>" key in it: left out for it
             prefs = {k: v for k, v in prefs.items() if not k.startswith("p25:")}
@@ -2209,7 +2227,6 @@ class HubApp(App):
             sq = channels.fit_squelch(self._sq_ov, kinds, self.squelch_defaults)[0]
         # the county talkgroups an incident of ours is worked on now (sizeup/cad/opchannel.py): only to a station that
         # takes them (one from before would never echo them in its signature: a push every 10 s)
-        st_ch = _part(self.hub.status, "channels") or {}
         promote = sorted((k for k in self.promoted_keys()
                           if k.startswith("tg:") or (k.startswith("p25:") and st_ch.get("promote_p25_ok"))),
                          key=lambda k: (not k.startswith("tg:"), k))[:channels.AWS_KEYS_MAX] if st_ch.get("promote_ok") else []

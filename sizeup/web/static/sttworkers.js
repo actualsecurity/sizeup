@@ -419,7 +419,14 @@ const SttWorkersCard = (() => {
       const r = await fetch("/api/cad/stt-workers", { headers: { Accept: "application/json" }, cache: "no-store" });
       if (r.status === 403 || r.status === 404 || r.status === 409) return null;
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return (await r.json()).models || null;
+      const d = await r.json();
+      if (!d.models) return null;
+      const loaded = {};                       // model id -> the online workers that have it loaded now
+      for (const w of d.workers || []) {
+        if (w.state !== "online" || w.revoked) continue;
+        for (const id of w.models || []) (loaded[id] = loaded[id] || []).push(w.id);
+      }
+      return { ...d.models, loaded };
     },
     save: async (key, body) => (await post({ action: "channel_model", key, ...body })).models,
   };

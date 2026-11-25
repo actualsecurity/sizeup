@@ -1359,7 +1359,7 @@ function radioRow(t, ctx = {}) {
     const fixes = (t.atc_snaps || []).map((x) => `“${x.from}” → ${x.to} (on ADS-B)`);
     txt.title = `As transcribed: ${t.text}` + (fixes.length ? `\nCallsign matched to ADS-B: ${fixes.join(", ")}` : "");
   }
-  if (!txt.title && t.model && t.status !== "off") txt.title = (shown ? "Transcribed by " : "Speech-to-text: ") + t.model;
+  if (!txt.title && t.model && t.status !== "off") txt.title = (shown ? "Transcribed by " : "Speech-to-text: ") + engineOf(t.model) + t.model;
   if (t.atc_weak) {                      // a marginal AM carrier (#257): transcribed, but the words may be wrong
     const w = el("span", "atc-weak", "weak signal");
     w.title = `Carrier ${t.carrier_db} dB over the noise floor: transcribed, but the words may be wrong`;
@@ -1772,6 +1772,13 @@ function repaintTx() {                   // the rows' busy state changed: draw t
   cad.txRev++;
   if (cad.state) render();
   txChanged();
+}
+// Which engine wrote a row's text, from its model (sizeup/sttpool.py model_label): "GPU · ", "AWS · ", "station · ".
+function engineOf(m) {
+  if (/\(GPU\b/.test(m)) return "GPU · ";
+  if (m.startsWith("aws-transcribe")) return "AWS · ";
+  if (/\(station\b/.test(m) || m.startsWith("whisper") || /^(ggml-)?(small|base|medium|large|tiny)/.test(m)) return "station · ";
+  return "";
 }
 // What a transmission without text says (its status): sizeup/app.py, sizeup/channels.py.
 // Pending: which engine has it (the row's model, sizeup/app.py _stt_row): AWS, or whisper after AWS failed.

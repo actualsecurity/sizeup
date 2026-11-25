@@ -35,7 +35,7 @@ window.RadioControls = (() => {
                names: null, namesRev: null, namesBusy: false, renaming: "", namePending: new Map(),
                services: null, servicesRev: null, servicesBusy: false, svcPending: new Map(), svcWaiting: new Set(),
                models: null, modelsAt: 0, modPending: new Map() };
-  const ENGINES = [["local", "Local"], ["aws", "AWS"], ["both", "Both"]];
+  const ENGINES = [["local", "Local"], ["aws", "AWS"], ["both", "Both"], ["gpu", "GPU"]];
   // Another P25 system's talkgroup has a tier instead of Record / Main / Transcribe (#409, sizeup/tiers.py)
   const TIERS = [["alert", "Alert"], ["text", "Transcribe"], ["record", "Record only"], ["off", "Off"], ["activity", "Activity only"]];
   const TIER_HELP = "Alert: recorded, transcribed, may raise a pre-alert.\nTranscribe: recorded and transcribed.\n"
@@ -44,7 +44,8 @@ window.RadioControls = (() => {
   const ENGINE_HELP = "Local: whisper.cpp large-v3 on the station (whisper-server, port 8179).\n"
     + "AWS: Amazon Transcribe streaming, called from the hub (its task role): $0.01 a minute, billed per second; "
     + "the station skips whisper and sends the clip.\nBoth: whisper on the station and AWS on the hub; AWS's text is "
-    + "shown, whisper's kept to compare (Radio view: \u21c4).\nWithout AWS (not set up, no credentials, the monthly "
+    + "shown, whisper's kept to compare (Radio view: \u21c4).\nGPU: a GPU worker on the hub first (the channel's speech model), "
+    + "then AWS (its limit allowing), then the station's whisper; the station skips whisper and sends the clip.\nWithout AWS (not set up, no credentials, the monthly "
     + "limit reached) AWS channels use Local until it's back.\nPolice (another P25 system): its own monthly AWS limit, "
     + "never the fire one; reached: Local.";
   const ro = () => typeof canDo === "function" && !canDo("admin");
@@ -1260,7 +1261,7 @@ window.RadioControls = (() => {
     if (q) Object.assign(p, q.vals, { cpending: true });
     // past the limit: the reserve channels keep AWS; police past its own limit: Local (radio-intel PR 3)
     const aws = (c.aws_ok || (c.aws_reserve || []).includes(key)) && !(c.aws_deny || []).includes(key);
-    p.effective = !p.transcribe ? "off" : p.engine === "local" || aws ? p.engine : "local";
+    p.effective = !p.transcribe ? "off" : (p.engine === "local" || p.engine === "gpu" || aws) ? p.engine : "local";
     return p;
   }
   function fmRows() {
@@ -1458,6 +1459,9 @@ window.RadioControls = (() => {
     const c = (st.state && st.state.channels) || {};
     if (!r.record) return "";
     if (!r.transcribe) return "not transcribed";
+    if (r.engine === "gpu" && c.gpu && !(c.gpu.on && (c.gpu.online || []).length)) {
+      return `GPU: ${c.gpu.on ? "no worker online" : "pool off"}, ${c.aws_ok ? "AWS" : "station whisper"}`;
+    }
     if (r.engine !== "local" && r.effective === "local") return `AWS off: local${c.aws_why ? ` (${c.aws_why})` : ""}`;
     return "";
   }
@@ -1650,12 +1654,19 @@ window.RadioControls = (() => {
     if (sel.options.length !== ids.length + 1 || ids.some((id, i) => sel.options[i + 1].value !== id)) {
       sel.replaceChildren(new Option("Auto", ""), ...ids.map((id) => new Option(id, id)));
     }
+    const loaded = m.loaded || {};
+    for (let i = 1; i < sel.options.length; i++) {
+      const id = sel.options[i].value, on = loaded[id] || [];
+      const text = on.length ? `${id} · loaded` : id;
+      if (sel.options[i].textContent !== text) sel.options[i].textContent = text;
+    }
     sel.options[0].textContent = `Auto (${auto})`;
     if (sel.value !== chosen) sel.value = chosen;
     sel.disabled = lock || st.modPending.has(k);
     const c = (m.catalog || []).find((x) => x.id === (chosen || auto));
     const ch = (m.channels || {})[k] || {};
     sel.title = c ? `Speech model: ${c.id}${chosen ? "" : " (auto)"}\n${c.kind} · ${(c.vram_mb / 1024).toFixed(1)} GB VRAM`
+      + `\nLoaded on: ${(loaded[c.id] || []).join(", ") || "no worker online"}`
       + `\nContext: ${ch.context || (c.context_default ? "on" : "off")}${ch.context ? "" : " (default)"}`
       + (ch.callsigns && ch.callsigns.length ? `\nCall signs: ${ch.callsigns.join(", ")}` : "")
       : "Speech model";
