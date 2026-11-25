@@ -1205,4 +1205,31 @@
   .hy-locbox > select.loc-qual { flex: 0 0 auto; max-inline-size: 9rem; }
   .hy-qual { font-weight: 600; }
   .hy-errs, .hy-diff { margin: 0; padding-inline-start: var(--s-5); max-block-size: calc(var(--s-8) * 8); overflow-y: auto; }
+
+  /* reminders (reminders.js, sizeup/cad/reminders.py): a call or a unit left too long. A slow pulse (2 s: 0.5 Hz, a soft
+     swing, never on/off), its chip ("Pending 6 min", "DP 6 min") the click's OK; reduced motion: a steady highlight */
+  [data-rem] { --rem: var(--warn); }
+  :is(.q > li.qi, .ov-card, .ulist > li.urow, #d-units > li.ou, #d-card > .card-head)[data-rem] {
+    outline: 2px solid var(--rem); outline-offset: -2px; animation: rempulse 2s ease-in-out infinite;
+  }
+  :is(.chip, .b-unit)[data-rem] { outline: 2px solid var(--rem); outline-offset: 1px; animation: rempulse 2s ease-in-out infinite; }
+  .cm-rig.rv[data-rem] .lbl { outline: 2px solid var(--rem); outline-offset: 0; animation: rempulse 2s ease-in-out infinite; }
+  @keyframes rempulse {
+    0%, 100% { outline-color: var(--rem); background-color: color-mix(in srgb, var(--rem) 16%, var(--raised)); }
+    50% { outline-color: color-mix(in srgb, var(--rem) 35%, transparent); }
+  }
+  .rem-slot:empty { display: none; }
+  .rem-chip {
+    display: inline-flex; align-items: center; flex: none; padding-inline: var(--s-1); margin-inline-start: var(--s-1);
+    font: 700 var(--fs-2xs)/var(--lh-2xs) var(--font); white-space: nowrap; color: var(--on-warn);
+    background: var(--rem, var(--warn)); border: var(--bw) solid var(--rem, var(--warn)); border-radius: var(--radius-s);
+  }
+  button.rem-chip { cursor: pointer; min-block-size: var(--ctl-sm); }
+  button.rem-chip:hover { filter: brightness(1.1); }
+  .cm-rig .lbl .rem-chip { margin-inline-start: var(--s-0); padding-inline: 2px; font: inherit; font-size: calc(var(--fs-2xs) - 2px); }
+  @media (prefers-reduced-motion: reduce) {
+    [data-rem], [data-rem] .lbl { animation: none !important; }
+    :is(.q > li.qi, .ov-card, .ulist > li.urow, #d-units > li.ou, #d-card > .card-head, .chip, .b-unit)[data-rem],
+    .cm-rig.rv[data-rem] .lbl { background-color: color-mix(in srgb, var(--rem) 16%, var(--raised)); }
+  }
 }

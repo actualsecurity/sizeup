@@ -264,6 +264,8 @@ POST /api/cad/alarm/<id>/ack              {operator?}  an emergency alarm (or no
 POST /api/cad/alarm/<id>/clear            {operator?}  all clear (resolved, not just seen): its emergency window ends
                                           (the talkgroup and radio no longer kept with Record off); acknowledges it
                                           too; in the chronology; dispatchers and admins
+POST /api/cad/reminders/ack               {key, operator}: a reminder (sizeup/cad/reminders.py) OK for everyone for the
+                                          snooze minutes; in the event's chronology. Dispatchers and admins
 POST /api/cad/settings/alarms             {action: set | reset, key: keywords | channels | other | drill, value}: admins
 GET  /api/cad/datasources[?rev=]          Settings > Data sources (#186, sizeup/datasources.py): every data pull with
                                           {key, name, group, source, last_fetched, next_due, ok, error, items, bytes,
@@ -438,6 +440,7 @@ INTEL_EVENT = re.compile(r"/api/cad/intel/(\d{1,9})/(dismiss|feedback)")        
 PREALERT_INFO = re.compile(r"/api/cad/prealerts/(airport|intel)/(\d{1,9})")      # a pre-alert's More info page
 ALARM_ACK = re.compile(r"/api/cad/alarm/(\d{1,9})/ack")
 ALARM_CLEAR = re.compile(r"/api/cad/alarm/(\d{1,9})/clear")
+REMINDER_ACK = re.compile(r"/api/cad/reminders/ack")                             # a reminder OK'd (reminders.py)
 DISPATCH_MODE = re.compile(r"/api/cad/dispatch-mode")
 DATASOURCE = re.compile(r"/api/cad/datasources/([A-Za-z0-9_.:%-]{1,200})/refresh")
 DVR_PIN = re.compile(r"/api/cad/cameras/([A-Za-z0-9_.:-]{1,64})/dvr/pin")      # keep recording a camera (#277)
@@ -486,6 +489,7 @@ WRITES = (
     (re.compile(r"/api/cad/intel/\d{1,9}/feedback"), "read"),                # ... a vote on it: anyone signed in
     (ALARM_ACK, "dispatch"),                                                # an emergency alarm seen (#128)
     (ALARM_CLEAR, "dispatch"),                                              # ... and resolved: its window closed
+    (REMINDER_ACK, "dispatch"),                                             # a reminder OK'd: quiet for everyone
     (re.compile(r"/api/cad/radio-id"), "dispatch"),                          # who a new FG1 radio is (#163)
     (PREMISE, "dispatch"),                                                  # premise notes: add, edit, expire, seen (#403)
     (PREPLAN, "dispatch"),                                                  # pre-plan points: add, edit, move, delete (#456)
@@ -770,6 +774,7 @@ DOES = (
                                      + f" ({_clip(o.get('what'), 60)})", "")),
     (ALARM_ACK, lambda m, b, o, c: (f"Acknowledged the emergency alarm: {_clip(o.get('who'), 30)} {o.get('what', '')} "
                                     f"on {o.get('channel', '')}".rstrip(), o.get("incident_number") or "")),
+    (REMINDER_ACK, lambda m, b, o, c: (f"Reminder OK: {_clip(o.get('text'), 60)}", o.get("incident_number") or "")),
     (ALARM_CLEAR, lambda m, b, o, c: (f"All clear on the emergency alarm: {_clip(o.get('who'), 30)} {o.get('what', '')} "
                                       f"on {o.get('channel', '')}".rstrip(), o.get("incident_number") or "")),
     (re.compile(r"/api/cad/radio-id"), lambda m, b, o, c: (
@@ -1518,6 +1523,8 @@ class CadApi:
             return c.alarm_ack(int(m.group(1)), body)
         if m := ALARM_CLEAR.fullmatch(path):
             return c.alarm_clear(int(m.group(1)), body)
+        if REMINDER_ACK.fullmatch(path):
+            return c.reminders.ack(body)
         if m := UNIT_STATION.fullmatch(path):
             return c.unit_station(int(m.group(1)), body)
         if path == "/api/cad/runcards":

@@ -83,6 +83,10 @@ Reset to default = drop the override (one item, or a whole section).
                                    CloudWatch (sizeup/cloud/cwlogs.py; Settings > Station > Logs, admins)
     hydrant_display                key "assume_c" -> true | false (default true): an untested hydrant drawn as Class C,
                                    always marked assumed ("C*"; #840, sizeup/cad/hydrants.py; Settings > Hydrants, admins)
+    reminders                      key "<rule>_on" -> true | false, "<rule>_min" -> minutes (rules: pending, dispatched,
+                                   queued, onscene, until), "units" -> fire_ems | agencies | all, "snooze_min" -> minutes:
+                                   what flashes when left too long (sizeup/cad/reminders.py; Settings > Dispatch >
+                                   Reminders, admins); not set: the defaults (pending and dispatched on, 5 min)
     department_units               key a feed's department entry code -> the department it pages ("Port Chester FD"), or
                                    {"name", "accepts": true}: a whole department, never a unit (#370,
                                    sizeup/cad/sources.py; admins, no panel); never a board unit's code
@@ -112,7 +116,7 @@ from pathlib import Path
 
 from sizeup import channels as channels_mod
 from sizeup.cad import alarms as alarms_mod
-from sizeup.cad import commonplaces, dispatcher, eta, mapview, radiofolders, runcards, tonelist
+from sizeup.cad import commonplaces, dispatcher, eta, mapview, radiofolders, reminders, runcards, tonelist
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
 from sizeup.cad.store import OPERATOR_MAX, SCHEMA_VERSION, TZ, CadError
@@ -149,6 +153,9 @@ PAGE_SECTION[ATC_SECTION] = "system"
 # How the hydrants are drawn (#840, sizeup/cad/hydrants.py): Settings > Hydrants, audited as System.
 HYD_SECTION, HYD_KEYS = "hydrant_display", {"assume_c": "Untested hydrants: assume Class C"}
 PAGE_SECTION[HYD_SECTION] = "system"
+# What flashes when a call or a unit is left too long (sizeup/cad/reminders.py): Settings > Dispatch, audited as Dispatch.
+REM_SECTION = reminders.SECTION
+PAGE_SECTION[REM_SECTION] = "dispatch"
 # A feed's department entries (#370, sizeup/cad/sources.py department_units): key the code as the feed writes it ->
 # the department ("Port Chester FD"), or {"name", "accepts": true} (it accepts a call alone in 60 Control mode). The
 # hub's own (never in the repo): set by admins (POST, no panel), audited as Dispatch. Never a board unit's code.
@@ -779,6 +786,7 @@ class Editor:
         out["boards"] = [{"id": b["id"], "title": b["title"], **lists_mod.board_meta(b)} for b in L.unit_boards]
         out["type_subtypes"] = self._map_page(L, ov)
         out["dispatch"] = self._dispatch_page(L, ov)
+        out["reminders"] = reminders.page(ov.get(REM_SECTION))
         out["operators"] = self.operators()
         out["system"] = self._system(ov, places=len(self._places_cached()[2]))      # (ov is without them)
         out["tones"] = self.tones_page()
@@ -1280,6 +1288,34 @@ class Editor:
                            [("system", f"{HYD_SECTION}/{key}", "on" if cur else "off", "on" if v else "off")])
         return {**out, HYD_SECTION: {key: v}}
 
+    def _rem_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key, value} | reset {key} | reset_section: admins (Settings > Dispatch > Reminders)."""
+        cur = self.section(REM_SECTION)
+        if action == "reset_section":
+            if not cur:
+                return {"ok": True, REM_SECTION: reminders.page(cur)}
+            out = self._commit([(REM_SECTION, k, REMOVE) for k in cur], op,
+                               [("dispatch", f"{REM_SECTION}/{k}", v, None) for k, v in cur.items()])
+            return {**out, REM_SECTION: reminders.page({})}
+        key = body.get("key")
+        if key not in reminders.keys():
+            raise CadError(f"key: one of {', '.join(reminders.keys())}")
+        if action == "reset":
+            v = reminders.default(key)
+        elif action == "set":
+            try:
+                v = reminders.clean(key, body.get("value"))
+            except ValueError as e:
+                raise CadError(str(e)) from None
+        else:
+            raise CadError("action: set, reset or reset_section")
+        was = cur.get(key, reminders.default(key))
+        if v == was:                                     # as it is: nothing written, nothing audited
+            return {"ok": True, REM_SECTION: reminders.page(cur)}
+        out = self._commit([(REM_SECTION, key, REMOVE if v == reminders.default(key) else v)], op,
+                           [("dispatch", f"{REM_SECTION}/{key}", was, v)])
+        return {**out, REM_SECTION: reminders.page(self.section(REM_SECTION))}
+
     def _dept_value(self, key, value, accepts=None) -> tuple[str, object]:
         """(code, the stored value: the name, or {"name", "accepts": true}). A board unit's code is refused."""
         if isinstance(value, dict):
@@ -1421,7 +1457,7 @@ class Editor:
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
               channels_mod.SQUELCH_SECTION: self._squelch_op,
               "places": self._places_op, COMMON_SECTION: self._common_op, ADDR_SECTION: self._addresses_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
-              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, HYD_SECTION: self._hyd_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, SIGNAL_SECTION: self._signal_op, FOLDERS_SECTION: self._folders_op, SVC_SECTION: self._services_op, RET_SECTION: self._retention_op,
+              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, HYD_SECTION: self._hyd_op, REM_SECTION: self._rem_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, SIGNAL_SECTION: self._signal_op, FOLDERS_SECTION: self._folders_op, SVC_SECTION: self._services_op, RET_SECTION: self._retention_op,
               TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, LOGS_SECTION: self._logs_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o),
               "intel": lambda a, b, o: self.cad.intel_admin.settings_op(a, b, o),
               FIX_SECTION: lambda a, b, o: self.cad.stt_fix.settings_op(a, b, o)}.get(section)
@@ -3473,6 +3509,11 @@ class Editor:
         a = ov.get(HYD_SECTION) or {}
         if set(a) - set(HYD_KEYS) or any(not isinstance(v, bool) for v in a.values()):
             raise CadError(f"overrides.{HYD_SECTION}: assume_c, true or false")
+        for k, v in (ov.get(REM_SECTION) or {}).items():      # sizeup/cad/reminders.py
+            try:
+                reminders.clean(k, v)
+            except ValueError as e:
+                raise CadError(f"overrides.{REM_SECTION}.{e}") from None
         fx = ov.get(FIX_SECTION) or {}
         if set(fx) - {"keep"} or any(not isinstance(v, bool) for v in fx.values()):
             raise CadError(f"overrides.{FIX_SECTION}: keep, true or false")

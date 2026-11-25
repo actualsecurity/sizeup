@@ -38,6 +38,7 @@ from sizeup.cad.hydrants import KEY_RE as HYDRANT_KEY
 from sizeup.cad.hydrants import Hydrants
 from sizeup.cad.preplan import Preplan
 from sizeup.cad.preplan_docs import PreplanDocs
+from sizeup.cad.reminders import Reminders
 from sizeup.cad.feed import Feed
 from sizeup.cad.newids import NewIds
 from sizeup.cad.oos import OosNotices
@@ -447,6 +448,8 @@ class Cad:
         # Hydrants (#799, sizeup/cad/hydrants.py): the department's overlay on the county's hydrant layer (status, flow,
         # class ...): the gis serves the layer through it (the app sets gis.overlays), each open call gets its nearest
         self.hydrants = Hydrants(self)
+        # Reminders (sizeup/cad/reminders.py): a call or unit left too long in one state flashes; an OK is shared
+        self.reminders = Reminders(self)
 
     @classmethod
     def from_config(cls, cfg, geocoder=None, log=print) -> Cad:
@@ -485,12 +488,15 @@ class Cad:
             except Exception as e:  # noqa: BLE001
                 self.log(f"CAD: incident sources: {type(e).__name__}")
             self._decorate_auto(incs)
+            units = self.store.units()
             self._state = (key, {
                 "department": self.s.department,
                 "dispatch_mode": self.auto.state(),       # #311: the header's switch
                 "lists": self.lists.public(),
-                "units": self.store.units(),
+                "units": units,
                 "incidents": incs,
+                # what has been left too long (Settings > Dispatch > Reminders): since / due by the hub's clock
+                "reminders": self.reminders.state(incs, units),
                 "closed_hours": CLOSED_HOURS,             # the queue's "Closed 24h" header
                 "unit_log": self.store.unit_log(),
                 "run_cards": cards,
