@@ -372,6 +372,12 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
           <span id="d-joint" class="st-badge" hidden title="Joint response: their units first"></span>
           <span id="d-scope" class="st-badge" hidden></span>
           <span id="d-source" class="dim"></span>
+          <!-- the incident's view (#797, sizeup-view.js): Details first, always; the board shows Details -->
+          <span id="d-tabs" class="seg console-only" role="group" aria-label="Incident view">
+            <button type="button" class="sm" data-tab="details" aria-pressed="true">Details</button>
+            <button type="button" class="sm" data-tab="sizeup" aria-pressed="false"
+                    title="The incident with its pre-plan, hazards, map, address notes and history">Size-Up</button>
+          </span>
           <span class="spacer"></span>
           <button id="d-accept" class="primary" hidden>Accept</button>
           <button id="d-dismiss" hidden>Dismiss</button>
@@ -405,7 +411,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         </form>
 
         <div id="d-grid" class="inc-grid">
-          <div>
+          <div id="d-info">
             <div id="d-type" class="d-type"></div>
             <div id="d-addr" class="d-addr"></div>
             <div id="d-cross" class="d-cross"></div>
@@ -487,6 +493,35 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
           <div id="d-cams" class="ml-cams" hidden aria-label="Cameras"></div>
           <div id="d-trains" class="ml-cams tr-panel" hidden aria-label="Trains approaching"></div>
           <div id="d-vessels" class="ml-cams" hidden aria-label="Vessels nearby"></div>
+        </div>
+        <!-- Size-Up (#797, sizeup-view.js): the detail's own nodes moved into these slots and back; nothing fetched twice -->
+        <div id="d-size" class="size-grid" hidden>
+          <div class="sz-col">
+            <section id="sz-incident" class="sz-slot sz-incident" aria-label="Incident"></section>
+            <section id="sz-preplan" class="sz-slot sz-preplan" aria-label="Pre-plan" data-own-head>
+              <h3 class="sz-head">Pre-plan</h3>
+              <div class="sz-none dim small">None on file</div>
+            </section>
+            <section id="sz-hazards" class="sz-slot sz-hazards" aria-label="Hazards">
+              <h3 class="sz-head">Hazards</h3>
+              <div class="sz-none dim small">No live feeds nearby</div>
+            </section>
+          </div>
+          <div class="sz-col">
+            <!-- Building and Street View: hidden placeholders until later parts of #797 fill them -->
+            <section id="sz-building" class="sz-slot sz-building" aria-label="Building" hidden>
+              <h3 class="sz-head">Building</h3>
+            </section>
+            <section id="sz-map" class="sz-slot sz-map" aria-label="Map"></section>
+            <section id="sz-notes" class="sz-slot sz-notes" aria-label="Address notes">
+              <h3 class="sz-head">Address notes</h3>
+              <div class="sz-none dim small">None on file</div>
+            </section>
+            <section id="sz-street" class="sz-slot sz-street" aria-label="Street View" hidden>
+              <h3 class="sz-head">Street View</h3>
+            </section>
+            <section id="sz-history" class="sz-slot sz-history" aria-label="History here"></section>
+          </div>
         </div>
 
         <form id="edit-form" class="form" hidden autocomplete="off">
@@ -839,6 +874,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/board.js"></script>
 <script src="/static/panels.js"></script>
 <script src="/static/incident-map.js"></script>
+<script src="/static/sizeup-view.js"></script>
 <script src="/static/alarm.js"></script>
 <script src="/static/camwall.js"></script>
 <script src="/static/camoverlay.js"></script>

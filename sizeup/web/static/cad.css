@@ -383,6 +383,29 @@
   .closebox select { min-inline-size: 12rem; }
   @container (width < 44rem) { .inc-grid { grid-template-columns: minmax(0, 1fr); } }
 
+  /* Size-Up (#797, sizeup-view.js): two columns of the detail's own nodes; one column, in the issue's order, when narrow */
+  .size-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(18rem, 48%); gap: var(--s-4); align-items: start; }
+  .sz-col { display: flex; flex-direction: column; gap: var(--s-3); min-inline-size: 0; }
+  .sz-slot { display: flex; flex-direction: column; gap: var(--s-1); min-inline-size: 0; }
+  .sz-slot:is(.sz-preplan, .sz-hazards, .sz-building, .sz-notes, .sz-street) {
+    padding: var(--s-2) var(--s-3); border: var(--bw) solid var(--line); border-radius: var(--radius);
+  }
+  .sz-none { margin: 0; }
+  .sz-slot > .card { padding: 0; border: 0; background: none; }      /* Assigned, moved in: no card in a card */
+  .size-grid .mapbox { block-size: var(--map-h); }
+  .size-grid .dmap-handle { display: none; }                          /* the drag sizes Details' grid only */
+  .size-grid .ml-cams-head { flex-wrap: wrap; row-gap: 0; }           /* a slot is narrower than Details' column */
+  @container (width < 44rem) {
+    .size-grid { display: flex; flex-direction: column; align-items: stretch; }
+    .sz-col { display: contents; }
+    .sz-incident { order: 1; }
+    .sz-notes { order: 2; }
+    .sz-map { order: 3; }
+    .sz-hazards { order: 4; }
+    .sz-preplan { order: 5; }
+    .sz-history { order: 6; }
+  }
+
   /* forms: two columns of stacked fields, one in a narrow column */
   .form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-3) var(--s-4); margin-block-start: var(--s-3); }
   .form[hidden] { display: none; }

@@ -41,6 +41,7 @@ const cad = {
   scene: null, state: null, lastMsgAt: 0, skew: 0,
   who: null,                 // signed in through Cloudflare Access (whoami): {email, name, callsign, role, may, ...}
   sel: null,                 // selected incident id
+  tab: "details",            // the incident's view: "details" or "sizeup" (sizeup-view.js, #797)
   voiceWaits: new Map(),     // dispatch id -> {at, seen}: sent from this page, its voice still rendering (#426, syncVoice)
   boxDispatch: null,         // the dispatch id the dispatch box shows (null: a preview, or hidden)
   mode: "none",              // none (Overview) | new | view | idle (Dispatch with nothing selected)
@@ -822,6 +823,8 @@ function selectIncident(id) {
   $("#r-full").checked = false;
   flash($("#r-error"));
   flash($("#c-error"));
+  cad.tab = "details";               // Details always opens first (#797); sizeup-view.js apply() also resets it
+                                     // on any change of cad.sel (other ways in): keep both
   render();
   recommend();
   if (window.innerWidth <= 1100) $("#detail").scrollIntoView({ behavior: "smooth", block: "start" });
