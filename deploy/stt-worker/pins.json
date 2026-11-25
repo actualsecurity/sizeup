@@ -16,9 +16,9 @@
     },
     "worker_py": {
       "what": "worker.py (first install; it updates itself afterwards)",
-      "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/0ba6408888f2558fbef3a83b8a12a47810456c7e/deploy/stt-worker/worker.py",
-      "bytes": 165440,
-      "sha256": "609C8422F2C8762AAEB9A9F2601D3715A1225017A2573DC821E9C675EADC38FF"
+      "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/ba21b4b14c3458e6ce3ee737153904b83aa86aec/deploy/stt-worker/worker.py",
+      "bytes": 219298,
+      "sha256": "4B056B689C7EB829E2E128795DB337B1693F823865677741B5D193227C780B87"
     },
     "llama_zip": {
       "what": "llama.cpp b12359, CUDA 12.4 (llama-server.exe)",
