@@ -630,8 +630,8 @@ class AutoDispatch:
             with self._lock:
                 if self.mode() != "60control" or not self.tracked(iid) or self._manual(iid, "close"):
                     return
-                if self.store.incident(iid)["status"] not in ("pending", "active"):
-                    return
+                if self.store.incident(iid)["status"] not in ("pending", "active") or self.close_pending(iid) is not None:
+                    return                           # (a close already waiting for its units: it goes ahead as it was)
                 ref = f"ask:gone:{at}"
                 if not self.store.one("SELECT 1 AS x FROM auto_steps WHERE incident_id = ? AND kind = 'close?' AND ref = ?",
                                       (iid, ref)):

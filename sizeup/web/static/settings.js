@@ -312,10 +312,11 @@ async function sCardMount(card, mount, must) {          // mount(node): reads, t
 const S_PART_OF = { lists: "lists", titles: "lists", units: "units", unit_kinds: "units", boards: "units", dispatch: "dispatch",
   operators: "users", tones: "radios", radio_emergencies: "radios", station_logs: "station",
   system: "system", audit_sections: "system", atc: "system", hub_errors: "system", map_display: "system",
-  premise_visibility: "system", audio_retention: "system", camera_wall: "system", alert_mutes: "system" };
+  premise_visibility: "system", audio_retention: "system", camera_wall: "system", alert_mutes: "system", feed_types: "lists" };
 const S_LIVE = new Set(["lists", "units"]);
 const S_LIVE_KEYS = { lists: new Set(["used", "now"]), units: new Set(["used", "status", "incident_number"]),
-  audio_retention: new Set(["clips", "bytes", "totals"]), camera_wall: new Set(["n", "streams"]) };
+  audio_retention: new Set(["clips", "bytes", "totals"]), camera_wall: new Set(["n", "streams"]),
+  feed_types: new Set(["n", "last_at"]) };
 function sSigs(d, sec) {           // [the section's settings, those and what moves with the calls]
   const quiet = [], live = [];
   for (const k of Object.keys(d).sort()) {

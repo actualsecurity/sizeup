@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import pytest
 
+import json
+
 from sizeup.cad import feedtypes
 from sizeup.cad.store import CadError
 from tests.test_dispatch_modes import AutoRig
@@ -294,3 +296,75 @@ def test_a_report_first_seen_late_by_the_station_still_only_asks(rig):
                           "first_seen": T0 + 25 * 60, "event": done})
     inc = rig.inc()
     assert inc["status"] == "active" and inc["auto"]["close_pending"] is not None
+
+
+# -- review: what the first cut got wrong -------------------------------------------------------------------------------
+
+
+def test_a_close_waiting_for_a_unit_still_goes_ahead_when_the_feed_stops_listing_it(rig):
+    from sizeup.sources.runner import SEEN_EVERY_S
+    rig.created()
+    rig.at(300)
+    rig.change(units=("E60",))                                  # L31 dropped by the county: still on the call here
+    rig.at(900)
+    rig.change(times={"in_service": T0 + 890})                  # in service, not closed: "close? (still on it: L31)"
+    assert rig.inc()["status"] == "active" and rig.here("L31")
+    del rig.feed.events["A1"]                                   # then off the county's list
+    rig.at(900 + SEEN_EVERY_S + 60)
+    rig.poll()
+    assert "no longer lists it" not in rig.inc()["auto"]["close_pending"]["text"]
+    rig.cad.unit_status(rig.uid("L31"), {"status": "AV", "operator": "Lt. Test"})     # they clear L31
+    assert rig.inc()["status"] == "closed"
+
+
+def test_a_sub_the_feed_changes_to_one_naming_none_clears_the_subtype_and_says_so(rig):
+    add_subtype(rig.cad, "SERVICE", "SAMPLE", "Sample")
+    a = county(rig)
+    assert rig.cad.store.incident(a)["subtype"] == "SAMPLE"
+    rig.at(60)
+    rig.feed.change("A1", extra={"county_type": "SERVICE,OTHERWORD"})
+    rig.poll()
+    inc = rig.cad.store.incident(a)
+    assert (inc["type"], inc["subtype"]) == ("SERVICE", "")
+    assert f"{LABEL} subtype OTHERWORD not in Service's subtypes" in rig.feed_lines(a)
+
+
+def test_a_code_mapped_to_no_subtype_or_whose_type_has_none_is_not_listed(rig):
+    county(rig)
+    county(rig, eid="B2", sent="BLS", code="BLS,SAMPLE", location="7 SAMPLE AVE", dt=60)
+    assert [r["code"] for r in rig.cad.settings_get()["feed_types"]["seen"]] == ["SERVICE,SAMPLE"]
+    post(rig.cad, "feed_types", action="set", feed="county", code="SERVICE,SAMPLE", type="SERVICE", subtype="")
+    assert rig.cad.settings_get()["feed_types"]["seen"] == []
+
+
+def test_a_row_matches_a_feeds_type_text_when_it_sends_no_county_code(tmp_path):
+    cad = Rig(tmp_path).cad
+    post(cad, "feed_types", action="set", feed="county", code="ZZMAIN,ZZSUB", type="INVEST", subtype="")
+    assert cad.map_type("ZZMAIN / zzsub", LABEL, source="county") == ("INVEST", "", "")
+
+
+def test_a_short_form_must_be_half_the_word_at_least(tmp_path):
+    L = Rig(tmp_path).cad.lists
+    assert L.match_subtype("ALARM", "COMMUNICATIONS") == ("", ())
+    assert L.match_subtype("SERVICE", "SPRINK")[0] == "SPRINK"
+
+
+def test_an_imported_row_the_lists_dont_allow_loads_and_shows_not_applied(tmp_path):
+    cad = Rig(tmp_path).cad
+    data = cad.settings_export()
+    data["overrides"]["feed_types"] = {"county|ZZMAIN": {"type": "SERVICE", "subtype": "COMM"}}
+    post(cad, "import", action="apply", settings=data)
+    rows = cad.settings_get()["feed_types"]["rows"]
+    assert [(r["code"], bool(r["off"])) for r in rows] == [("ZZMAIN", True)]
+    assert cad.map_type("ZZMAIN", LABEL, source="county", county="ZZMAIN")[:2] == ("", "")
+
+
+def test_lateness_of_a_co_run_is_read_from_its_own_report(rig):
+    """_seen_open's key for a second run is "<source>#<ref>": its first_seen is still found by the source alone."""
+    rig.created()
+    iid = rig.iid()
+    seen = rig.cad.store.one("SELECT first_seen FROM source_reports WHERE source = 'county' AND ref = 'A1'")["first_seen"]
+    rig.at(30 * 60)                                             # the hub much later than the station's first sight
+    data = rig.cad.store.one("SELECT data FROM source_reports WHERE ref = 'A1'")["data"]
+    assert rig.cad.auto._seen_open(iid, "county#A1", json.loads(data)) is True
+    assert seen == T0

@@ -3035,6 +3035,10 @@ class Cad:
             got, hits = L.match_subtype(typ, said)
             if got:
                 return typ, got, ""
+            if not hits and hit is None:                 # the words read like a page's, under this same type only
+                t2, s2, _ = self._map_words(raw if feedtypes.split(raw)[1] else county, label)
+                if t2 == typ and s2:
+                    return typ, s2, ""
             note = feedtypes.miss_note(label, said, L.name("event_types", typ), hits)
         return typ, sub, note
 
@@ -3061,6 +3065,10 @@ class Cad:
         moved = self.moved_type(typ)
         if moved[0]:
             return moved[0], moved[1], f"type from {label or 'the feed'}: {raw}"[:200] if sub.strip() else ""
+        return self._map_words(raw, label)
+
+    def _map_words(self, raw: str, label: str = "") -> tuple[str, str, str]:
+        """A feed's type read like a page's (runcards.from_page)."""
         from sizeup.dispatch import parse
         d = parse(f"respond to {raw}")
         typ, sub, note = runcards.from_page(d.incident_type, d.category, re.sub(r"[/,]", " ", raw))

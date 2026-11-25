@@ -1427,6 +1427,7 @@ class Sources:
                 if col.split()[0] not in have:
                     self.store.db.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
         self._towns_for = None
+        self._seen_cache: tuple = (None, [])        # feed_types_seen: (what it was worked out from, the rows)
         self._acting_logged: tuple | None = None   # (source, label) of the acting primary last logged
         self._started = clock()                    # a row silent since before this: unknown, not bad (on_health)
         try:
@@ -2581,8 +2582,11 @@ class Sources:
             self._type_seen(new, code, label)
         if new["type"] and (new["type"] != old["type"] or county_type(new) != county_type(old) or attach):
             typ, sub, note = self.feed_type(new, label)
-            if typ and typ == inc["type"] and not sub and inc["subtype"]:
-                sub, note = inc["subtype"], inc["type_note"]  # a subtype the feed doesn't name (a page's): kept
+            named = feedtypes.split(new["type"])[1] or feedtypes.split(county_type(new))[1]
+            if typ and typ == inc["type"] and not sub and inc["subtype"] and (not named or prev is None):
+                # a subtype the feed's code doesn't contradict (a page's, the feed naming no SUB): kept; a SUB the feed
+                # changed to one that names none of ours clears it (the line below says so)
+                sub, note = inc["subtype"], inc["type_note"]
             differs = bool(typ) and (typ, sub) != (inc["type"], inc["subtype"])
             if auth and differs and "type" in hand:
                 notes.append((now, f"{label}: type {new['type']} (kept the type set by hand)"))
@@ -2688,19 +2692,32 @@ class Sources:
 
     def feed_types_seen(self) -> list[dict]:
         """Settings > Lists > Feed types: the codes seen lately that nothing maps fully (no type of ours, or our type
-        with no subtype for the code's SUB), newest first, with what they map to now."""
+        with no subtype for the code's SUB when that type has subtypes and no exact row says "none"), newest first, with
+        what they map to now. Worked out again only when a code is seen, the rows or the lists change (every Settings
+        read asks)."""
+        L = self.cad.lists
+        rows = self.cad._feed_type_rows()
+        mark = self.store.one("SELECT COUNT(*) AS n, MAX(last_at) AS at, TOTAL(n) AS events FROM feed_types_seen")
+        key = (tuple(mark.values()) if mark else (), json.dumps(rows, sort_keys=True), id(L),
+               int(self.clock() // 3600))
+        if self._seen_cache[0] == key:
+            return [dict(r) for r in self._seen_cache[1]]
         since = self.clock() - feedtypes.SEEN_DAYS * 86400
         out = []
         for r in self.store.q("SELECT * FROM feed_types_seen WHERE last_at >= ? ORDER BY last_at DESC", (since,)):
+            hit = feedtypes.lookup(rows, r["source"], r["code"], L)
+            if hit is not None and (hit[2] or hit[1]):
+                continue                                     # the department's row says it all
             typ, sub, _ = self.feed_type({"type": r["sent"], "source": r["source"],
                                           "extra": {"county_type": r["code"]}}, r["label"])
-            if typ and (sub or not feedtypes.split(r["code"])[1]):
-                continue                                     # mapped in full now
+            if typ and (sub or not feedtypes.split(r["code"])[1] or not L.subtypes_for(typ)):
+                continue                                     # mapped in full now (or a type with no subtypes)
             out.append({"source": r["source"], "label": r["label"], "code": r["code"], "n": r["n"],
                         "last_at": r["last_at"], "type": typ, "subtype": sub, "state": "partly" if typ else "unmapped"})
             if len(out) >= feedtypes.SHOWN:
                 break
-        return out
+        self._seen_cache = (key, out)
+        return [dict(r) for r in out]
 
     def _comment_type(self, comments, label: str) -> tuple[str, str, str]:
         """(TYPE, SUBTYPE, note) from a feed's comment that is a type line (dispatch_lines: "~GENERAL FIRE ALARM")
@@ -2757,16 +2774,17 @@ class Sources:
                         continue
                     db.execute("UPDATE source_reports SET gone_at = ? WHERE source = ? AND ref = ?", (now, src, r["ref"]))
                     self.store._event(db, r["incident_id"], "feed", f"{label}: no longer listed (open here)", at=now)
-                    gone.append(r["incident_id"])
+                    if (json.loads(r["data"] or "{}").get("times") or {}).get("in_service") is None:
+                        gone.append(r["incident_id"])    # (one in service: its own close is under way)
                     n += 1
         if n:
             self.log(f"incident sources: {label}: {n} open no longer listed")
         auto = getattr(self.cad, "auto", None)
         for iid in dict.fromkeys(gone):                      # (outside this lock: automation takes its own)
             if auto is not None and not self.store.one(
-                    "SELECT 1 AS x FROM source_reports WHERE incident_id = ? AND source = ? AND merged_into = '' AND "
+                    "SELECT 1 AS x FROM source_reports WHERE incident_id = ? AND source != ? AND merged_into = '' AND "
                     "gone_at IS NULL AND NOT json_extract(data, '$.closed') AND "
-                    "json_extract(data, '$.times.in_service') IS NULL", (iid, src)):
+                    "json_extract(data, '$.times.in_service') IS NULL", (iid, PAGING)):
                 auto.on_gone(iid, now, label)                # no live run of it still listed: a person closes it
         return n
 

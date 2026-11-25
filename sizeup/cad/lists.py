@@ -286,14 +286,15 @@ class Lists:
         """A feed's or a page's subtype word under one of our types -> (the subtype when exactly one of the type's own
         matches, every match). Matched against each allowed subtype's code and name, case, spaces and punctuation
         aside: the same first, else a simple plural ("SPRINKLERS"), else one the short form of the other, 4 letters
-        at least ("SPRINK", "APPLIANCE"). Only the type's own subtypes: never another type's."""
+        and half its length at least ("SPRINK", "APPLIANCE"; never "COMMUNICATIONS" for COMM). Only the type's own subtypes: never another type's."""
         w = _squash(said)
         subs = self.subtypes_for(typ) if typ in self.type_codes else ()
         if not w or not subs:
             return "", ()
         keys = {s: {_squash(s), _squash(self.name("event_subtypes", s))} - {""} for s in subs}
         for same in (lambda a, b: a == b, lambda a, b: bool(_stems(a) & _stems(b)),
-                     lambda a, b: min(len(a), len(b)) >= 4 and (a.startswith(b) or b.startswith(a))):
+                     lambda a, b: (min(len(a), len(b)) >= 4 and 2 * min(len(a), len(b)) >= max(len(a), len(b))
+                                   and (a.startswith(b) or b.startswith(a)))):
             hits = tuple(s for s in subs if any(same(w, k) for k in keys[s]))
             if hits:
                 return (hits[0] if len(hits) == 1 else ""), hits
