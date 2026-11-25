@@ -371,14 +371,14 @@ const SttWorkersCard = (() => {
     const head = el("div", "card-head");
     head.append(el("h3", "", "Speech models"), el("span", "spacer"));
     if (window.Help && Help.info) {
-      head.append(Help.info("The GPU workers' models (tools/stt_worker/pins.json). A channel's model: Settings > Radios > "
+      head.append(Help.info("The GPU workers' models (tools/stt_worker/models.json). A channel's model: Settings > Radios > "
         + "Channels, else its service's default (Default for). Context: who keyed up by name, the channel's call signs, "
         + "aircraft near the field, its terms; never a radio ID", "About"));
     }
     mbody = el("div");
     msay = el("p", "dim small");
     msay.hidden = true;
-    mcard.append(head, mbody, msay, el("p", "dim small", "pins.json · hub.sqlite"));
+    mcard.append(head, mbody, msay, el("p", "dim small", "models.json · hub.sqlite"));
     mcard.addEventListener("focusout", (e) => { if (mlater && !mcard.contains(e.relatedTarget)) setTimeout(() => renderModels(true)); });
   }
 
