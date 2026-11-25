@@ -123,7 +123,7 @@ def test_a_challenger_runs_on_the_same_clip_is_scored_promoted_and_rolled_back(t
     fake = FakeTranscribe(phrases={500: AWS_TEXT})
     hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
     app = hub.app
-    app.stt_choices.set("FG1", {"challenger": Q8, "pct": 100})
+    app.stt_choices.set("FG1", {"model": QWEN, "challenger": Q8, "pct": 100})
     token = app.hub.workers.add("gpu-1", "Test box")
     w = ModelWorker(hub.url, token, text="Engine 60 Ladder 13 on location").start()
     try:
@@ -153,7 +153,7 @@ def test_a_challenger_runs_on_the_same_clip_is_scored_promoted_and_rolled_back(t
         assert boards and boards[0]["key"] == "FG1" and "Engine 60 Ladder 31" not in raw.decode()   # scores only
         assert app.stt_choices.model_for("FG1", "fire") == Q8 and app.stt_choices.challenger_for("FG1")[0] == QWEN
         audit = app.cad.store.q("SELECT key, old, new FROM settings_audit WHERE key LIKE 'stt_models/FG1/%'")
-        assert {"key": "stt_models/FG1/model", "old": "default", "new": Q8} in audit
+        assert {"key": "stt_models/FG1/model", "old": QWEN, "new": Q8} in audit
         # the model it replaced scores better since: rolled back, audited
         monkeypatch.setattr(app, "challenge_board", lambda key: {"n": 40, "diff": 0.2, "ci": 0.05, "champ": 0.4,
                                                                  "chall": 0.6, "champion": Q8, "challenger": QWEN})
@@ -181,7 +181,7 @@ def test_a_promotion_is_watched_only_while_its_pair_stands_and_a_new_choice_ends
     from tests.test_stt_models import Meta
     from tests.test_stt_pool import Clock
     c = sttmodels.Choices(Meta(), clock=Clock())
-    c.set("tg:307", {"challenger": "large-v3-turbo-q8_0"})
+    c.set("tg:307", {"model": "qwen3-asr-1.7b-q8_0", "challenger": "large-v3-turbo-q8_0"})
     c.service_of = lambda k: "fire"
     old, new = c.promote("p25:westchester:307")                                           # (the county's key, as routed)
     assert new["model"] == "large-v3-turbo-q8_0" and new["challenger"] == "qwen3-asr-1.7b-q8_0"

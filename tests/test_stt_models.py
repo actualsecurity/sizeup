@@ -320,8 +320,8 @@ def test_a_hub_names_the_model_and_context_and_a_loop_goes_to_aws(tmp_path, fake
 
 def test_challengers_are_loaded_after_every_champion():
     c = choices()
-    c.set("HPN Tower", {"challenger": Q5})
-    c.set("tg:307", {"challenger": "large-v3-turbo-q8_0", "pct": 5})
+    c.set("HPN Tower", {"model": ATC, "challenger": Q5})
+    c.set("tg:307", {"model": QWEN, "challenger": "large-v3-turbo-q8_0", "pct": 5})
     assert c.want({"HPN Tower": "air", "tg:307": "fire"}) == [QWEN, ATC, "large-v3-turbo-q8_0", Q5]
     assert c.challenger_for("tg:307") == ("large-v3-turbo-q8_0", 5.0) and c.challenger_for("HPN Tower")[1] == 10.0
     with pytest.raises(ValueError):
