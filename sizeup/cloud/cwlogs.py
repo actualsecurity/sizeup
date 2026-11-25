@@ -32,6 +32,7 @@ Settings (the CAD settings' SECTION "station_logs", Settings > Station > Logs, a
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import threading
@@ -500,3 +501,208 @@ class StationLogs:
 def _rx_escape(text: str) -> str:
     """Text as a Logs Insights regex literal's body: every character but letters, digits, _ and space escaped."""
     return "".join(ch if ch.isalnum() or ch in " _" else "\\" + ch for ch in text)
+
+
+# -- the GPU STT workers' own logs (deploy/stt-worker/worker.py LogShip) ---------------------------------------------
+
+WORKER_GROUP = "/sizeup/stt-worker"
+WORKER_MAX_BODY = 1024 * 1024                 # a gzipped batch from a worker (it sends ~200 KB uncompressed at most)
+WORKER_MAX_INFLATED = 4 * 1024 * 1024
+WORKER_MAX_LINES = 5000
+WORKER_SETUP = "the hub's task role needs the stt-worker-logs policy (deploy/stt-worker/README.md, Logs)"
+PERMISSION = ("AccessDeniedException", "NoCredentials", "UnrecognizedClientException")
+
+
+class WorkerLogs:
+    """POST /api/station/stt/logs (sizeup/cloud/sttworkers.py WorkerApi, a GPU worker's own token): its worker.log
+    lines, scrubbed on the PC (worker.py scrub_line) and here again (logscrub.scrub: a line with a credential's shape
+    is dropped), into CloudWatch Logs with the task role.
+
+        group      /sizeup/stt-worker (SIZEUP_STT_WORKER_LOG_GROUP): made here on first use when it isn't there
+                   (CreateLogGroup, Infrequent Access), its retention the station logs' (Settings > Station > Logs,
+                   retention_days, PutRetentionPolicy)
+        streams    one per worker id (the authenticated one, never the batch's own "worker"), made on first use
+        events     one JSON line each: {"worker", "level", "msg"}
+        not set up the task role may not (AccessDenied; IAM is the department's sizeup-aws, outside this repo): the
+                   worker is answered {accepted: false, retry_s: RETRY_S, reason} and keeps its spool on the PC (capped);
+                   Health says "not shipped: permission". Checked again every CHECK_S; nothing else depends on it
+    """
+
+    def __init__(self, settings: Callable[[], dict] = lambda: {}, log: Callable[[str], None] = print,
+                 call: Callable[..., dict] | None = None, clock: Callable[[], float] = time.time, region: str = ""):
+        self.settings, self.log, self.clock = settings, log, clock
+        self._call = call or _call
+        self.region = aws.region(region)
+        self.group = (os.environ.get("SIZEUP_STT_WORKER_LOG_GROUP") or WORKER_GROUP).strip()
+        self.configured: bool | None = None
+        self.reason = "not checked yet"
+        self.retention: int | None = None
+        self.checked = 0.0
+        self.streams: set[str] = set()
+        self.last: dict[str, dict] = {}              # worker id -> {at, lines, batches, dropped}: Health
+        self.last_error = ""
+        self._lock = threading.Lock()
+        self._said = ""
+
+    def _retention_wanted(self) -> int:
+        try:
+            return config(self.settings() or {})["retention_days"]
+        except Exception:  # noqa: BLE001 - the settings unreadable: the default
+            return DEFAULTS["retention_days"]
+
+    def _not_configured(self, why: str) -> None:
+        self.configured, self.reason = False, why
+        if self._said != why:
+            self._said = why
+            self.log(f"stt worker logs: not configured ({why})")
+
+    def _denied(self, e: aws.AwsError) -> str:
+        return "permission" if e.code in PERMISSION else (e.code or "error")
+
+    def check(self, force: bool = False) -> None:
+        """The group there (made when it isn't) and its retention the setting's. Every CHECK_S at most."""
+        now = self.clock()
+        if not force and self.checked and now - self.checked < CHECK_S:
+            return
+        self.checked = now
+        want = self._retention_wanted()
+        try:
+            d = self._call("DescribeLogGroups", {"logGroupNamePrefix": self.group, "limit": 5}, self.region)
+            g = next((x for x in d.get("logGroups") or [] if x.get("logGroupName") == self.group), None)
+            if g is None:
+                try:
+                    self._call("CreateLogGroup", {"logGroupName": self.group, "logGroupClass": "INFREQUENT_ACCESS"},
+                               self.region)
+                    self.log(f"stt worker logs: made {self.group}")
+                except aws.AwsError as e:
+                    if e.code != "ResourceAlreadyExistsException":
+                        raise
+                g = {"retentionInDays": None}
+            self.retention = g.get("retentionInDays")
+            if self.retention != want:
+                self._call("PutRetentionPolicy", {"logGroupName": self.group, "retentionInDays": want}, self.region)
+                self.retention = want
+        except aws.AwsError as e:
+            self.last_error = f"{e.code}"[:200]
+            self._not_configured(self._denied(e))
+            return
+        if self.configured is not True:
+            self.log(f"stt worker logs: writing to {self.group}")
+        self.configured, self.reason, self._said = True, "", ""
+
+    def ingest(self, wid: str, raw: bytes | None, headers) -> tuple[int, dict]:
+        """A worker's batch: (HTTP status, answer). accepted: the worker may delete it."""
+        if raw is None:
+            return 413, {"error": "too large"}
+        if (headers.get("Content-Encoding") or "").strip().lower() == "gzip":
+            z = zlib.decompressobj(wbits=31)
+            try:
+                raw = z.decompress(raw, WORKER_MAX_INFLATED)
+            except zlib.error as e:
+                return 400, {"error": f"bad gzip: {e}"}
+            if z.unconsumed_tail:
+                return 413, {"error": "too large"}
+        try:
+            d = json.loads(raw or b"{}")
+        except ValueError:
+            return 400, {"error": "not JSON"}
+        if not isinstance(d, dict) or not isinstance(d.get("lines"), list) or len(d["lines"]) > WORKER_MAX_LINES:
+            return 400, {"error": f"{{v, worker, batch, lines: [[ms, level, msg]]}}, {WORKER_MAX_LINES} lines at most"}
+        answer = {"ok": True, "accepted": False}
+        if self.configured is not True:
+            self.check()
+        if self.configured is not True:
+            return 200, dict(answer, retry_s=RETRY_S, reason=f"hub: not configured ({self.reason})")
+        events, dropped = self.events(wid, d["lines"])
+        try:
+            self.put(_safe_station(wid), events)
+        except aws.AwsError as e:
+            self.last_error = f"{e.code}"[:200]
+            if e.code in PERMISSION or (e.code == "ResourceNotFoundException" and "group" in str(e).lower()):
+                self._not_configured(self._denied(e) if e.code in PERMISSION else "no log group")
+                if e.code not in PERMISSION:
+                    self.checked = 0.0                  # (the group was deleted: made again at the next batch)
+                return 200, dict(answer, retry_s=RETRY_S, reason=f"hub: not configured ({self.reason})")
+            return 503, {"error": f"CloudWatch: {e.code}"}
+        with self._lock:
+            day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            last = self.last.get(wid) or {}
+            same = last.get("day") == day
+            self.last[wid] = {"at": self.clock(), "day": day, "lines": (last.get("lines", 0) if same else 0) + len(events),
+                              "dropped": (last.get("dropped", 0) if same else 0) + dropped}
+            if len(self.last) > 100:
+                self.last.pop(next(iter(self.last)))
+        return 200, dict(answer, accepted=True, n=len(events))
+
+    def events(self, wid: str, lines: list) -> tuple[list[dict], int]:
+        now_ms = int(self.clock() * 1000)
+        out, dropped = [], 0
+        for r in lines:
+            if not (isinstance(r, list) and len(r) == 3 and isinstance(r[0], (int, float)) and not isinstance(r[0], bool)
+                    and math.isfinite(r[0]) and isinstance(r[2], str)):
+                dropped += 1
+                continue
+            ms, lv = int(r[0]), r[1] if r[1] in logscrub.LEVELS else "info"
+            if not (now_ms - MAX_AGE_S * 1000 < ms < now_ms + MAX_AHEAD_S * 1000):
+                dropped += 1
+                continue
+            clean = logscrub.scrub(r[2])
+            if clean is None:
+                dropped += 1
+                continue
+            m = json.dumps({"worker": wid, "level": lv, "msg": clean}, ensure_ascii=False, separators=(",", ":"))
+            if len(m.encode()) > MAX_EVENT_BYTES:
+                m = m.encode()[:MAX_EVENT_BYTES].decode("utf-8", "ignore")
+            out.append({"timestamp": ms, "message": m})
+        out.sort(key=lambda e: e["timestamp"])
+        return out, dropped
+
+    def put(self, stream: str, events: list[dict]) -> int:
+        """PutLogEvents into the worker's stream, in calls within CloudWatch's limits (24 h, 10,000 events, 1 MB)."""
+        n, i = 0, 0
+        while i < len(events):
+            size, j = 0, i
+            day = _day(events[i]["timestamp"])
+            while (j < len(events) and j - i < MAX_PUT_EVENTS and _day(events[j]["timestamp"]) == day
+                   and size + len(events[j]["message"].encode()) + 26 <= MAX_PUT_BYTES):
+                size += len(events[j]["message"].encode()) + 26
+                j += 1
+            j = max(j, i + 1)
+            self._put_stream(stream, events[i:j])
+            n += j - i
+            i = j
+        return n
+
+    def _put_stream(self, stream: str, evs: list[dict]) -> None:
+        body = {"logGroupName": self.group, "logStreamName": stream, "logEvents": evs}
+        if stream not in self.streams:
+            self._create_stream(stream)
+        try:
+            r = self._call("PutLogEvents", body, self.region, timeout=20.0)
+        except aws.AwsError as e:
+            if e.code != "ResourceNotFoundException" or "stream" not in str(e).lower():
+                raise
+            self.streams.discard(stream)
+            self._create_stream(stream)
+            r = self._call("PutLogEvents", body, self.region, timeout=20.0)
+        rej = (r or {}).get("rejectedLogEventsInfo")
+        if rej:
+            self.last_error = f"rejected: {json.dumps(rej)[:160]}"
+
+    def _create_stream(self, stream: str) -> None:
+        try:
+            self._call("CreateLogStream", {"logGroupName": self.group, "logStreamName": stream}, self.region)
+        except aws.AwsError as e:
+            if e.code != "ResourceAlreadyExistsException":
+                raise
+        self.streams.add(stream)
+        if len(self.streams) > 256:
+            self.streams = {stream}
+
+    def view(self, wid: str) -> dict:
+        """Health's Logs cell for a worker: its last batch the hub took ({at, lines today}), or why none is taken."""
+        last = self.last.get(wid) or {}
+        out = {"at": last.get("at"), "lines": last.get("lines", 0)}
+        if self.configured is False:
+            out["error"] = self.reason
+        return out

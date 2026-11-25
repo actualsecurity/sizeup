@@ -1,4 +1,4 @@
-"""The GPU STT worker's one-shot Windows installer (tools/stt_worker/install.ps1): its pins, the README's and
+"""The GPU STT worker's one-shot Windows installer (deploy/stt-worker/install.ps1): its pins, the README's and
 pins.json must agree, and what it writes must be a config the worker takes."""
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-import tools.stt_worker.worker as W
+from tests.stt_worker_module import W
 
 HERE = Path(W.__file__).parent
 PS1 = HERE / "install.ps1"
@@ -44,7 +44,7 @@ def _ps_string(name: str) -> str:
 def test_every_pin_is_a_fixed_https_download():
     allowed = (r"https://github\.com/ggml-org/(whisper|llama)\.cpp/releases/download/b\d+/[\w.-]+\.zip",
                r"https://huggingface\.co/[\w.-]+/[\w.-]+/resolve/[0-9a-f]{40}/[\w.-]+",
-               r"https://raw\.githubusercontent\.com/actualsecurity/sizeup/[0-9a-f]{40}/tools/stt_worker/worker\.py")
+               r"https://raw\.githubusercontent\.com/actualsecurity/sizeup/[0-9a-f]{40}/deploy/stt-worker/worker\.py")
     assert set(ART) >= {"whisper_zip", "whisper_model", "worker_py", "llama_zip", "llama_cudart_zip", "qwen3_8b"}
     for key, pin in ART.items():
         assert any(re.fullmatch(a, pin["url"]) for a in allowed), key
@@ -71,14 +71,14 @@ def test_pins_json_and_the_readme_agree():
 
 def test_install_ps1_embeds_pins_json():
     assert json.loads(_here_string("PinsJson")) == PINS, \
-        "install.ps1's $PinsJson must be tools/stt_worker/pins.json (copy it in, then re-pin the README's Quick install)"
+        "install.ps1's $PinsJson must be deploy/stt-worker/pins.json (copy it in, then re-pin the README's Quick install)"
 
 
 def test_the_readme_quick_install_pins_this_install_ps1():
     """The Quick install's hash is install.ps1's; when git has the pinned commit, the file there is this one. A change
     to install.ps1 needs a second, README-only commit that pins the commit with the change and its hash."""
     readme = _readme()
-    m = re.search(r"raw\.githubusercontent\.com/actualsecurity/sizeup/([0-9a-f]{40})/tools/stt_worker/install\.ps1",
+    m = re.search(r"raw\.githubusercontent\.com/actualsecurity/sizeup/([0-9a-f]{40})/deploy/stt-worker/install\.ps1",
                   readme)
     assert m, "README: the Quick install downloads install.ps1 from a pinned commit"
     digest = hashlib.sha256(PS1.read_bytes()).hexdigest().upper()
@@ -86,7 +86,7 @@ def test_the_readme_quick_install_pins_this_install_ps1():
         f"README Quick install: install.ps1's SHA256 is now {digest} (pin the commit that has it)"
     git = shutil.which("git")
     if git:
-        r = subprocess.run([git, "show", f"{m.group(1)}:tools/stt_worker/install.ps1"], cwd=HERE,
+        r = subprocess.run([git, "show", f"{m.group(1)}:deploy/stt-worker/install.ps1"], cwd=HERE,
                            capture_output=True)
         if r.returncode == 0:              # a shallow checkout (CI) may not have the commit
             assert hashlib.sha256(r.stdout).hexdigest().upper() == digest, "the pinned commit has another install.ps1"
@@ -95,8 +95,12 @@ def test_the_readme_quick_install_pins_this_install_ps1():
 def test_install_ps1_is_ascii_and_kept_byte_for_byte():
     # Windows PowerShell 5.1 reads a file without a BOM as the ANSI code page: ASCII reads the same everywhere
     PS1.read_bytes().decode("ascii")
-    attrs = (HERE.parent.parent / ".gitattributes").read_text()
-    assert re.search(r"^tools/stt_worker/install\.ps1 -text$", attrs, re.M)
+    attrs = (HERE / ".gitattributes").read_text()          # (deploy/station's convention: its own .gitattributes)
+    assert re.search(r"^install\.ps1 -text$", attrs, re.M)
+    git = shutil.which("git")
+    if git:
+        r = subprocess.run([git, "check-attr", "text", "--", "install.ps1"], cwd=HERE, capture_output=True, text=True)
+        assert r.returncode != 0 or r.stdout.strip().endswith("text: unset"), r.stdout
 
 
 def test_no_drive_qualified_variable_in_a_string():

@@ -28,6 +28,7 @@ token_revoked); 409 {error} for a lease that is gone.
     POST /api/station/stt/jobs/<lease>/complete   {text, segments: [{start, end, text, words: [{word, start, end,
                                                   probability}]}], model, timing: {fetch_ms, infer_ms}} -> {ok}
     POST /api/station/stt/jobs/<lease>/release    {why} -> {ok}: the next engine takes it now
+    POST /api/station/stt/logs                    gzipped worker.log lines (see "Its log" below) -> {ok, accepted}
 
 The heartbeat contract: while it runs, a worker sends a request (state, extend or claim) at least every 6 s, during a
 decode too. One unheard for 12 s (sttpool.LOST_S) loses every lease it holds, catch-up ones included, and those clips go
@@ -39,13 +40,19 @@ The LLM lane (sizeup/cloud/infer.py): a worker serving a local LLM says so in ev
 llm_version} and claims JSON classification jobs at /api/station/stt/infer/* with the same token; never while it holds
 a pre-alert lease, and never counted in the STT leases above.
 
-The self-update (tools/stt_worker/worker.py Updater): a GPU worker that sends self_update {sha256, commit, auto, state,
+The self-update (deploy/stt-worker/worker.py Updater): a GPU worker that sends self_update {sha256, commit, auto, state,
 bad} in its hello and state (its capability: a worker without it is never told) gets worker_update {mode, commit,
 sha256, url} in the answer: the version the hub wants it on. mode auto (the default): this hub's own build, SIZEUP_BUILD
-(the commit on main CI built the image from) and the SHA-256 of tools/stt_worker/worker.py in the image, read once at
+(the commit on main CI built the image from) and the SHA-256 of deploy/stt-worker/worker.py in the image, read once at
 the start (worker_build); pin: an admin's commit and hash; hold: none (it stays on what it runs). Settings > Station >
 STT workers sets it per worker (hub.sqlite meta "stt_update"). The hub only names a version: the worker fetches it from
 GitHub itself, only from main of actualsecurity/sizeup, and only a file with exactly that hash (its url is never used).
+A worker from before the move to deploy/ knows only tools/stt_worker/worker.py: the copy there is byte-identical (a test
+checks), so it finds the same hash at the same commit, and the version it updates to knows the new path.
+
+Its log (deploy/stt-worker/worker.py LogShip): POST /api/station/stt/logs, gzipped {v, worker, batch, lines: [[ms,
+level, msg]]} -> {ok, accepted, n | retry_s, reason}; a GPU worker's own token only. Into CloudWatch Logs
+/sizeup/stt-worker, a stream per worker (sizeup/cloud/cwlogs.py WorkerLogs).
 """
 
 from __future__ import annotations
@@ -75,7 +82,9 @@ META_LLM = "stt_llm"            # per GPU worker: its "LLM jobs" switch (JSON {i
 META_UPDATE = "stt_update"      # per GPU worker: its self-update (JSON {id: {mode, commit?, sha256?}}; absent: auto)
 UPDATE_MODES = ("auto", "hold", "pin")
 UPDATE_REPO = "actualsecurity/sizeup"
-WORKER_FILE = Path(__file__).resolve().parents[2] / "tools" / "stt_worker" / "worker.py"   # (the image: /app/tools/...)
+WORKER_PATH = "deploy/stt-worker/worker.py"     # in this repo (worker.py UPDATE_FILE); tools/stt_worker/worker.py is a
+                                                # byte-identical copy for the workers from before the move
+WORKER_FILE = Path(__file__).resolve().parents[2].joinpath(*WORKER_PATH.split("/"))   # (the image: /app/deploy/...)
 COMMIT = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 API = "/api/station/stt/"
@@ -129,7 +138,7 @@ def _same(a: str, b: str | None) -> bool:
 
 
 def worker_url(commit: str) -> str:
-    return f"https://raw.githubusercontent.com/{UPDATE_REPO}/{commit}/tools/stt_worker/worker.py"
+    return f"https://raw.githubusercontent.com/{UPDATE_REPO}/{commit}/{WORKER_PATH}"
 
 
 def worker_build(build: str | None = None, path: Path = WORKER_FILE) -> dict:
@@ -561,6 +570,7 @@ class WorkerApi:
     """Hub.handle's /api/station/stt/ routes. may_write(): this task is the leader (a standby hands out nothing)."""
 
     infer = None    # the LLM lane (sizeup/cloud/infer.py Lane), set by the hub: /api/station/stt/infer/* and models
+    logs = None     # the workers' logs (sizeup/cloud/cwlogs.py WorkerLogs), set by the hub: /api/station/stt/logs
 
     def __init__(self, registry: WorkerRegistry, pool: sttpool.Pool, may_write: Callable[[], bool] = lambda: True,
                  log: Callable[[str], None] = print, station: Callable[[str], str | None] | None = None,
@@ -617,6 +627,8 @@ class WorkerApi:
             fence_mod.refuse(f"{method} {path}")    # a standby: 503 + Retry-After (sizeup/web/server.py)
         if kind == "gpu":
             self.reg.touch(wid)
+        if path == API + "logs":
+            return self._logs(wid, method, headers, body)
         try:
             if method == "GET":
                 m = LEASE_PATH.fullmatch(path)
@@ -687,6 +699,20 @@ class WorkerApi:
         except (ValueError, RecursionError) as e:          # (a body nested too deep is no result either)
             return _json(400, {"error": f"bad request: {type(e).__name__}"})
         return _json(404, {"error": "not found"})
+
+    def _logs(self, wid: str, method: str, headers, body) -> tuple[int, bytes, str]:
+        """A GPU worker's own log lines (deploy/stt-worker/worker.py LogShip): gzipped, read by WorkerLogs (never parsed
+        here); not "seen" (the worker's log thread says nothing of its link); never in the way of its clips."""
+        from sizeup.cloud.cwlogs import WORKER_MAX_BODY
+        if method != "POST" or self.logs is None:
+            return _json(404, {"error": "not found"})
+        raw = body(WORKER_MAX_BODY) if body is not None else b""
+        try:
+            code, out = self.logs.ingest(wid, raw, headers)
+        except Exception as e:  # noqa: BLE001 - the worker keeps the batch and sends it again
+            self.log(f"stt workers: {wid}: logs: {type(e).__name__}")
+            return _json(503, {"error": f"logs: {type(e).__name__}"})
+        return _json(code, out)
 
     def _audio(self, wid: str, lease: str) -> tuple[int, bytes, str]:
         job = self.pool.job_for(wid, lease)
