@@ -33,7 +33,8 @@ window.RadioControls = (() => {
                rerunBusy: false, rerunMsg: "", confirm: null, confirmTimer: 0, closing: null, closeTimer: 0, n: {},
                stt: null, sttTimer: 0, vocabMsg: "", vocabBusy: false, vocabDirty: false,
                names: null, namesRev: null, namesBusy: false, renaming: "", namePending: new Map(),
-               services: null, servicesRev: null, servicesBusy: false, svcPending: new Map(), svcWaiting: new Set() };
+               services: null, servicesRev: null, servicesBusy: false, svcPending: new Map(), svcWaiting: new Set(),
+               models: null, modelsAt: 0, modPending: new Map() };
   const ENGINES = [["local", "Local"], ["aws", "AWS"], ["both", "Both"]];
   // Another P25 system's talkgroup has a tier instead of Record / Main / Transcribe (#409, sizeup/tiers.py)
   const TIERS = [["alert", "Alert"], ["text", "Transcribe"], ["record", "Record only"], ["off", "Off"], ["activity", "Activity only"]];
@@ -102,6 +103,7 @@ window.RadioControls = (() => {
       n.groups.addEventListener("change", onEngine);
       n.groups.addEventListener("change", onTier);
       n.groups.addEventListener("change", onService);
+      n.groups.addEventListener("change", onModel);
       n.systems = el("div", "dim small rc-systems");   // the other P25 systems: state, unknown talkgroups (#409)
       n.tiers = el("div", "dim small rc-tiers");       // each tier's audio retention and the expected storage
       n.sync = el("div", "small rc-sync");
@@ -156,6 +158,9 @@ window.RadioControls = (() => {
     if (st.namesApi && st.tab === "channels") loadNames();
     st.servicesApi = opts.services || null;        // ... and the service per source (settings.js S_RC_SERVICES)
     if (st.servicesApi && st.tab === "channels") loadServices();
+    st.modelsApi = opts.models || null;            // ... and each channel's speech model, the hub's admins' (settings.js)
+    if (!st.modelsApi) st.models = null;
+    else if (st.tab === "channels" && Date.now() - st.modelsAt > 60000) loadModels();
     poll();
   }
 
@@ -1605,6 +1610,57 @@ window.RadioControls = (() => {
     return sel;
   }
 
+  // ---- a channel's speech model on the GPU workers (sizeup/sttmodels.py): the hub's admins only, else no select ----
+  async function loadModels() {
+    st.modelsAt = Date.now();
+    try {
+      st.models = (await st.modelsApi.load()) || null;     // null: not this person's or this place's (403 / 404)
+    } catch (_) { st.modelsAt = 0; }                       // not reached: asked again on the next open
+    renderTalkgroups();
+  }
+  // its model when none is chosen: its service's default (air: the ATC whisper), else the fallback
+  const modelAuto = (r) => { const m = st.models || {}, svc = chosenService(r) || autoService(r);
+                             return (m.defaults || {})[svc] || m.fallback || ""; };
+  const modelChosen = (r) => { const k = r.fm ? r.chan : r.ckey;
+                               return st.modPending.has(k) ? st.modPending.get(k) : (((st.models || {}).channels || {})[k] || {}).model || ""; };
+  async function onModel(e) {
+    const s = e.target.closest("select.tg-mod");
+    if (!s || s.disabled || ro() || !st.models) return;
+    const li = s.closest(".tg-row"), key = li.dataset.ckey;
+    st.modPending.set(key, s.value);
+    st.error = "";
+    renderTalkgroups();
+    try {
+      st.models = (await st.modelsApi.save(key, { model: s.value || null })) || st.models;
+    } catch (err) {
+      st.error = `Couldn't set the speech model of ${li.dataset.label || key}: ${err.message}`;
+    }
+    st.modPending.delete(key);
+    renderTalkgroups();
+  }
+  function modelSelect() {
+    const sel = el("select", "tg-mod sm");
+    sel.append(new Option("Auto", ""));
+    sel.setAttribute("aria-label", "Speech model");
+    return sel;
+  }
+  function fillModel(sel, r, lock) {
+    const m = st.models, auto = modelAuto(r), chosen = modelChosen(r), k = r.fm ? r.chan : r.ckey;
+    const ids = (m.catalog || []).map((c) => c.id);
+    if (sel.options.length !== ids.length + 1 || ids.some((id, i) => sel.options[i + 1].value !== id)) {
+      sel.replaceChildren(new Option("Auto", ""), ...ids.map((id) => new Option(id, id)));
+    }
+    sel.options[0].textContent = `Auto (${auto})`;
+    if (sel.value !== chosen) sel.value = chosen;
+    sel.disabled = lock || st.modPending.has(k);
+    const c = (m.catalog || []).find((x) => x.id === (chosen || auto));
+    const ch = (m.channels || {})[k] || {};
+    sel.title = c ? `Speech model: ${c.id}${chosen ? "" : " (auto)"}\n${c.kind} · ${(c.vram_mb / 1024).toFixed(1)} GB VRAM`
+      + `\nContext: ${ch.context || (c.context_default ? "on" : "off")}${ch.context ? "" : " (default)"}`
+      + (ch.callsigns && ch.callsigns.length ? `\nCall signs: ${ch.callsigns.join(", ")}` : "")
+      : "Speech model";
+  }
+
   // ---- the Channels list, by radio system ------------------------------------------------------------------------
   // Analog FM (FG1, FG2, South 2, ...), Airband, County P25, then each other P25 system by its label; under a P25
   // system its groups (the talkgroups file's Tag). [{id, label, fm, list} | {id, label, groups: [{g, group, list}]}]
@@ -1668,11 +1724,13 @@ window.RadioControls = (() => {
     }
     const nameable = st.names !== null && !!st.namesApi && !lock;
     const servable = st.services !== null && !!st.servicesApi && !lock;
+    const modeled = !!st.models;
     const rowSig = (r) => JSON.stringify([shownName(r), r.record, r.main, r.encrypted, r.count, r.last, r.dropped, !!r.pending, fmtTime(r.last),
                                          st.confirm === r.src, lock, r.transcribe, r.engine, r.effective, !!r.cpending, channelNote(r), r.tier,
                                          r.tier_set, (((st.state && st.state.channels) || {}).sync || {}).state,
                                          nameable, st.renaming === nameKey(r), servable, chosenService(r), autoService(r),
-                                         st.svcWaiting.has(nameKey(r))]);
+                                         st.svcWaiting.has(nameKey(r)), modeled && [modelChosen(r), modelAuto(r),
+                                         ((st.models.channels || {})[r.fm ? r.chan : r.ckey] || null), (st.models.catalog || []).length]]);
     syncList(n.groups, items, {
       key: (x) => (x.head ? `s:${x.id}` : `g:${x.g}`),
       sig: (x) => (x.head ? JSON.stringify([x.label, x.n, x.heard])
@@ -1728,7 +1786,8 @@ window.RadioControls = (() => {
             const info = el("div", "tg-info");
             info.append(el("span", "tg-heard"), el("span", "tg-note"));
             const sw = el("div", "tg-sw");
-            sw.append(switchButton("record"), switchButton("main"), switchButton("transcribe"), engineSelect(), tierSelect());
+            sw.append(switchButton("record"), switchButton("main"), switchButton("transcribe"), engineSelect(), tierSelect(),
+                      modelSelect());
             li.append(id, info, sw);
             return li;
           },
@@ -1778,7 +1837,9 @@ window.RadioControls = (() => {
             setText(note, t);
             note.className = "tg-note" + (confirming ? " warn" : r.encrypted ? " enc" : "");
             show(note, !!t);
-            const [recB, mainB, sttB, engS, tierS] = sw.children;
+            const [recB, mainB, sttB, engS, tierS, modS] = sw.children;
+            show(modS, modeled);                          // the hub's admins only (sttworkers.js models)
+            if (modeled) fillModel(modS, r, lock);
             show(tierS, !!r.tier_set);                    // another system's talkgroup: its tier is the switch
             if (r.tier_set) {
               if (tierS.value !== r.tier) tierS.value = r.tier;
