@@ -1925,14 +1925,17 @@ class HubApp(App):
         # the context it was decoded with (the worker says which form; an older worker's: the prompt it was sent)
         ctx = str(res.get("context") or "") or ("prompt" if job.prompt else "none")
         prompt_v, prompt_n = sttmodels.context_version(ctx, job.prompt, job.context)
-        if raw and sttmodels.is_loop(raw):        # a model stuck on a phrase: discarded, the next engine takes it
+        echo = ctx == "list" and sttmodels.context_echo(raw, job.context)   # (its context list read back)
+        if raw and (echo or sttmodels.is_loop(raw)):   # a model stuck on a phrase: discarded, the next engine takes it
             self._stt_ran(job.id, "station-whisper" if kind == "station" else "gpu-worker", str(res.get("model") or ""),
-                          raw, "loop", None, key=job.channel, item=job.extra.get("page"), role="discarded",
+                          raw, "echo" if echo else "loop", None, key=job.channel, item=job.extra.get("page"),
+                          role="discarded",
                           queued_at=job.queued_at, engine_start=job.claimed_at, worker=job.worker, cls=job.cls,
                           clip_end=job.clip_end, prompt_v=prompt_v, prompt_n=prompt_n, ctx=ctx, want=job.model)
             job.extra["fell"] = "error"
-            self.hub.log(f"stt pool: {job.kind} {job.id}: a repetition loop from {job.worker}: the next engine")
-            return self._pool_fallback(job, "a repetition loop (discarded)")
+            what = "its context read back" if echo else "a repetition loop"
+            self.hub.log(f"stt pool: {job.kind} {job.id}: {what} from {job.worker}: the next engine")
+            return self._pool_fallback(job, f"{what} (discarded)")
         # (the read-back guard on the context it had: whisper's prompt, or a llama-asr model's list, which it can echo)
         sent = job.prompt if ctx == "prompt" else ", ".join(job.context) if ctx == "list" else ""
         text, status = judge(raw, job.seconds, prompt=sent, vocab_v=(vocab_v or "list") if ctx == "list" and sent

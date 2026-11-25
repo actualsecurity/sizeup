@@ -321,3 +321,18 @@ def is_loop(text: str) -> bool:
                 return True
             i += max(1, (k - 1) * n) if k > 1 else 1
     return False
+
+
+def _items(text: str) -> list[str]:
+    return [" ".join(WORD.findall(x.lower())) for x in re.split(r"[,.;:!?]+", str(text or "")) if WORD.findall(x.lower())]
+
+
+def context_echo(text: str, context: list) -> bool:
+    """A llama-asr model gave its context back instead of what was said (Qwen3-ASR does when the list nearly matches a
+    short clip): two or more of the text's phrases are context items and they are 80% or more of its phrases."""
+    if not text or not context:
+        return False
+    ctx = {" ".join(WORD.findall(str(c).lower())) for c in context}
+    items = _items(text)
+    hits = sum(1 for i in items if i in ctx)
+    return hits >= 2 and hits >= 0.8 * len(items)

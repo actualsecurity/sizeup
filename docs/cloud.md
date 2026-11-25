@@ -1606,6 +1606,36 @@ The sources the radio pre-alerts push alerts from are HIGH at least, in the stat
 - The catch-up takes the rows a stopped station left before other shed clips.
 - Health lists every worker, GPU or station, with its state, load, jobs/h and losses.
 
+### Per-channel speech models (#639)
+
+Each channel has its own speech-to-text model on the GPU workers (`sizeup/sttmodels.py`; the catalog is
+`tools/stt_worker/pins.json` `stt_models`, the worker side is `tools/stt_worker/README.md`, Speech models).
+
+- **Which model:** Settings > Radios > Channels, per channel; else by its service: fire, EMS and police Qwen3-ASR-1.7B,
+  airband the ATC whisper (large-v3-turbo with the US ATC LoRA), anything else today's large-v3-turbo q5_0.
+- **Which models a worker runs:** every hello and state answer names the catalog (the hub's build commit and
+  `pins.json`'s SHA-256) and the models wanted, fire's first, then police, airband, then challengers. The worker loads
+  them in that order while they fit its VRAM.
+- **Routing:** a clip names its channel's model. A worker that has it loaded and is free takes it first; another
+  worker waits at most `MODEL_DEFER_S` (1 s) for it, then takes it on its own model. The classes stay strict, so a fire
+  clip never waits behind a model preference. Without any worker the clip goes the way it always did (AWS, then the
+  station's whisper). The run records the model asked for (`want`) and the one that wrote the text (`model`).
+- **Context, built on the hub as the station builds it:** whisper's prompt (`App._prompt_v`), and for a llama-asr model
+  a ranked list of at most 12 spoken forms: who keyed up by name, the channel's call signs (Settings: "908",
+  "Headquarters": a dispatch console's), the aircraft near the field at the clip's time (none for a clip older than 2
+  min), then the channel's top terms. Names only: a radio's exact name with its "use as hint" switch on (Settings >
+  Radios > Radio IDs: on by default for a unit's or a console's exact entry, never a range's label), units as said
+  ("Engine 63"), aliases as said ("77 Alpha 4"); never a raw radio ID. The hub's `[stt] talker_prompt` is `ids`
+  (never `ids+time` until every station runs #736). Context is on or off per model (the ATC whisper's is off by
+  default: a prompt raised its repetition loops) and per channel (an A/B). A run keeps its context's hash, length
+  and form (`prompt_v`, `prompt_n`, `ctx`), never the content.
+- **AWS:** Amazon Transcribe streaming takes no prompt and no per-request phrases: only a custom vocabulary (or a
+  vocabulary filter) by name per stream, made ahead of time (minutes to build, a few per account). sizeup already gives
+  each channel its own (sizeup-pcfd, sizeup-pd, sizeup-atc and the term lists'). Per-clip names, call signs and
+  aircraft can't reach it.
+- **Discarded:** a repetition loop, or a llama-asr model's context read back as the text, is kept as a run (role
+  `discarded`) and the clip goes to the next engine. A clip the worker finds near-silent isn't decoded (no speech).
+
 ## Phone pre-alert (Tapout)
 
 > "can we bake in the ntfy.sh feed from tapout into this? lets receive that feed as a possible

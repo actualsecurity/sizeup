@@ -458,6 +458,10 @@ and SHA-256, the VRAM it holds, its services, and whether the channel's context 
 - **A clip:** the hub names the model it wants for each clip. The worker decodes it there if that model answers, else
   on the primary, and says which model wrote the text. Context: the clip's `prompt` (whisper) or `context` (a short
   list: a llama-asr model's system message), unless the hub says it is off for that model (`plain`).
+- **A llama-asr request:** `/v1/chat/completions` with the context list as the system message (a short comma list of
+  spoken forms) and the WAV as an `input_audio` part, temperature 0; llama-server gives the transcript as the
+  content and Qwen3-ASR's `language ...` as `reasoning_content` (`language None`: no speech). Not
+  `/v1/audio/transcriptions`: its prompt replaces the model's instruction and leaks into the text.
 - **Silence:** a clip whose speech level is under `gate_dbfs` (-55 dBFS) isn't decoded at all (every model makes words
   up on silence): the hub gets no text, which it reads as no speech.
 - `status` shows the models' states; Health on the hub shows each worker's.

@@ -321,3 +321,11 @@ def test_challengers_are_loaded_after_every_champion():
         c.set("tg:307", {"pct": 0})
     with pytest.raises(ValueError):
         c.set("FG1", {"model": Q5, "challenger": Q5})
+
+
+def test_a_context_list_read_back_is_caught():
+    ctx = ["Engine 60", "Ladder 31", "60 Control", "Main Street"]
+    assert sttmodels.context_echo("Engine 60, Ladder 31, 60 Control, Main Street.", ctx)
+    assert not sttmodels.context_echo("Engine 60 responding to Main Street.", ctx)
+    assert not sttmodels.context_echo("60 Control, Ladder 31 on scene, nothing showing, investigating.", ctx)
+    assert not sttmodels.context_echo("Engine 60, Ladder 31.", [])
