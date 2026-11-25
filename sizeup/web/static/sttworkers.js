@@ -2,6 +2,9 @@
 // pool's switches; admins, the hub only. GET /api/cad/stt-workers: each worker (id, name, last used, revoked, its live
 // state) and the pool {on, classes}; never a token or a hash. POST {action: add | rename | rotate | revoke | llm | update | pool}: add
 // and rotate answer the new token, shown here ONCE (this page's memory until Done, never stored) with a copy button.
+// The speech models (sizeup/sttmodels.py, GET's models): each worker's loaded ones and those not ready on its row; the
+// catalog and each channel's context and call signs in a section under them (POST channel_model, audited as Radios).
+// SttWorkersCard.models: the same panel for Settings > Radios > Channels' Speech model (radio-controls.js, via settings.js).
 "use strict";
 const SttWorkersCard = (() => {
   const POLL_MS = 10000;
@@ -11,6 +14,8 @@ const SttWorkersCard = (() => {
   let card = null, status = null, form = null, reveal = null, timer = null, busy = false, last = null, said = "";
   let idIn = null, nameIn = null, fresh = null;
   let pinForm = null, pinHead = null, pinCommit = null, pinSha = null, pinning = "";
+  let mcard = null, mbody = null, msay = null, msig = "", mlater = false, msaid = "";
+  const KIND = { "whisper-ggml": "whisper", "llama-asr": "llama-asr" };
 
   const when = (t) => (t ? fmtTime(t, true) : "—");
   const isOpen = () => !!card && card.isConnected && !(card.parentNode && card.parentNode.closest("[hidden]")) && !document.hidden;
@@ -173,6 +178,22 @@ const SttWorkersCard = (() => {
     return td;
   }
 
+  // a worker's speech models (sizeup/sttmodels.py): the loaded ones, then each one asked for that isn't ready, one line
+  function modelCell(w) {
+    const td = el("td", "");
+    const loaded = w.models || [], state = w.stt_state || {};
+    const waiting = Object.entries(state).filter(([m, s]) => s !== "ready" && !loaded.includes(m));
+    if (w.revoked || (!loaded.length && !waiting.length)) { td.append(w.model || "—"); return td; }
+    loaded.forEach((m, i) => td.append(...(i ? [" · "] : []), m));
+    for (const [m, s] of waiting) {
+      const bad = /^(no room|marked bad|failed)/.test(s);
+      td.append(...(td.childNodes.length ? [" · "] : []), el("span", bad ? "hl-warn" : "dim", `${m}: ${s.replace(/ model$/, "")}`));
+    }
+    td.title = [...loaded.map((m) => `${m}: ${state[m] || "ready"}`), ...waiting.map(([m, s]) => `${m}: ${s}`),
+      w.model ? `whisper_server: ${w.model}` : ""].filter(Boolean).join("\n");
+    return td;
+  }
+
   function render() {
     if (!card) return;
     const d = last;
@@ -209,7 +230,7 @@ const SttWorkersCard = (() => {
       const st = w.revoked ? `revoked ${when(w.revoked)}` : (w.state || "offline");
       tr.append(el("td", "", w.name || "—"), el("td", "mono", w.id),
         el("td", w.revoked || st === "offline" ? "hl-bad" : st === "online" ? "hl-ok" : "dim", st),
-        el("td", "", w.model || "—"), versionCell(w), llmCell(w), el("td", "t", when(w.seen || w.last_used)), acts);
+        modelCell(w), versionCell(w), llmCell(w), el("td", "t", when(w.seen || w.last_used)), acts);
       t.tBodies[0].append(tr);
     }
     if (!(d.workers || []).length) {
@@ -223,6 +244,142 @@ const SttWorkersCard = (() => {
     if (said) kids.push(el("p", "dim small", said));
     kids.push(el("p", "dim small", `hub.sqlite · ${when(d.at)}`));
     status.replaceChildren(...kids);
+    renderModels(false);
+  }
+
+  // ---- Speech models: the catalog, each channel's context and call signs (d.models; POST channel_model) ----------
+
+  async function setChannel(key, body, done) {
+    msaid = "";
+    try {
+      const d = await post({ action: "channel_model", key, ...body });
+      if (last && d.models) last.models = d.models;
+      msaid = done;
+    } catch (e) { msaid = `${key}: ${e.message}`; }
+    renderModels(true);
+  }
+
+  function contextSelect(v, title) {
+    const s = el("select", "sm");
+    for (const [k, label] of [["default", "Default"], ["on", "On"], ["off", "Off"]]) s.append(new Option(label, k));
+    s.value = v || "default";
+    s.title = title;
+    s.setAttribute("aria-label", "Context");
+    return s;
+  }
+
+  function signsInput(v) {
+    const i = el("input", "mono");
+    i.maxLength = 340;
+    i.spellcheck = false;
+    i.value = (v || []).join(", ");
+    i.placeholder = "—";
+    i.title = "Said on this channel whoever talks (a console's: 908, Headquarters); in every clip's context. Comma list, 8 at most";
+    i.setAttribute("aria-label", "Call signs");
+    return i;
+  }
+
+  function catalogTable(m) {
+    const t = el("table", "evtable");
+    const hr = el("tr");
+    for (const h of ["Model", "Kind", "VRAM", "Default for", "Context"]) hr.append(el("th", "", h));
+    t.append(el("thead"), el("tbody"));
+    t.tHead.append(hr);
+    const defaults = m.defaults || {};
+    for (const c of m.catalog || []) {
+      const tr = el("tr");
+      const id = el("td", "mono", c.id);
+      id.title = c.what || "";
+      const svc = Object.keys(defaults).filter((s) => defaults[s] === c.id);
+      if (m.fallback === c.id) svc.push("rest");
+      const ctx = el("td", c.context_default ? "" : "dim", `${c.context} · ${c.context_default ? "on" : "off"}`);
+      ctx.title = c.context === "list" ? "Context: a short list (names, call signs, aircraft, terms)" : "Context: whisper's prompt";
+      tr.append(id, el("td", "", KIND[c.kind] || c.kind), el("td", "t", `${(c.vram_mb / 1024).toFixed(1)} GB`),
+        el("td", svc.length ? "" : "dim", svc.join(" · ") || "—"), ctx);
+      t.tBodies[0].append(tr);
+    }
+    return t;
+  }
+
+  function channelsTable(m) {
+    const t = el("table", "evtable");
+    const hr = el("tr");
+    for (const h of ["Channel", "Model", "Context", "Call signs", ""]) hr.append(el("th", "", h));
+    t.append(el("thead"), el("tbody"));
+    t.tHead.append(hr);
+    const ctxTitle = "Default: the model's (catalog). On / Off: this channel's, whichever model decodes it";
+    for (const [key, v] of Object.entries(m.channels || {}).sort(([a], [b]) => a.localeCompare(b, "en", { numeric: true }))) {
+      const tr = el("tr");
+      const mod = el("td", v.model ? "mono" : "dim", v.model || "default");
+      mod.title = "Settings > Radios > Channels: Speech model";
+      const cs = contextSelect(v.context, ctxTitle);
+      cs.addEventListener("change", () => setChannel(key, { context: cs.value }, `${key}: context ${cs.value}`));
+      const ci = signsInput(v.callsigns);
+      ci.addEventListener("change", () => setChannel(key, { callsigns: ci.value }, `${key}: call signs saved`));
+      const tdc = el("td", ""), tds = el("td", "");
+      tdc.append(cs);
+      tds.append(ci);
+      tr.append(el("td", "mono", key), mod, tdc, tds, el("td", ""));
+      t.tBodies[0].append(tr);
+    }
+    // a channel not listed yet: its key, then its context and call signs
+    const tr = el("tr");
+    const k = el("input", "mono");
+    k.maxLength = 40;
+    k.spellcheck = false;
+    k.placeholder = "Add channel";
+    k.title = "Its key, as Settings > Radios > Channels has it: FG1, South 2, tg:307, p25:mrrs:9211";
+    k.setAttribute("aria-label", "Channel key");
+    const cs = contextSelect("default", ctxTitle), ci = signsInput([]);
+    const add = btn("Add", "sm", () => {
+      const key = k.value.trim();
+      if (!key) { msaid = "Channel?"; renderModels(true); return; }
+      const body = { callsigns: ci.value };
+      if (cs.value !== "default") body.context = cs.value;
+      if (!ci.value.trim() && !body.context) { msaid = `${key}: context or call signs?`; renderModels(true); return; }
+      setChannel(key, body, `${key} added`);
+    });
+    const tdk = el("td", ""), tdc = el("td", ""), tds = el("td", ""), tda = el("td", "");
+    tdk.append(k);
+    tdc.append(cs);
+    tds.append(ci);
+    tda.append(add);
+    tr.append(tdk, el("td", "dim", "default"), tdc, tds, tda);
+    t.tBodies[0].append(tr);
+    return t;
+  }
+
+  // drawn again only when the panel changed (or after a save), never under a field being typed in
+  function renderModels(force) {
+    if (!mcard) return;
+    const m = last && last.models;
+    mcard.hidden = !m;
+    if (!m) return;
+    msay.textContent = msaid;                    // (said at once, even while a field keeps the table as it is)
+    msay.hidden = !msaid;
+    const sig = JSON.stringify(m);
+    if (!force && sig === msig) return;
+    if (mcard.contains(document.activeElement) && /^(INPUT|SELECT)$/.test(document.activeElement.tagName)) { mlater = true; return; }
+    msig = sig;
+    mlater = false;
+    mbody.replaceChildren(catalogTable(m), channelsTable(m));
+  }
+
+  function buildModels() {
+    mcard = el("section", "stt-models");
+    mcard.hidden = true;
+    const head = el("div", "card-head");
+    head.append(el("h3", "", "Speech models"), el("span", "spacer"));
+    if (window.Help && Help.info) {
+      head.append(Help.info("The GPU workers' models (tools/stt_worker/models.json). A channel's model: Settings > Radios > "
+        + "Channels, else its service's default (Default for). Context: who keyed up by name, the channel's call signs, "
+        + "aircraft near the field, its terms; never a radio ID", "About"));
+    }
+    mbody = el("div");
+    msay = el("p", "dim small");
+    msay.hidden = true;
+    mcard.append(head, mbody, msay, el("p", "dim small", "models.json · hub.sqlite"));
+    mcard.addEventListener("focusout", (e) => { if (mlater && !mcard.contains(e.relatedTarget)) setTimeout(() => renderModels(true)); });
   }
 
   async function poll(now) {
@@ -246,14 +403,28 @@ const SttWorkersCard = (() => {
       card = el("div", "card s-card");
       card.hidden = true;
       build();
-      card.append(status, reveal, form);
+      buildModels();
+      card.append(status, reveal, form, mcard);
       node.replaceChildren(card);
+      msig = "";
     }
     render();
     poll();
   }
 
+  // Settings > Radios > Channels' Speech model (radio-controls.js): the panel; null when it isn't this person's or this
+  // place's (403 / 404: not an admin, a station); throws when the hub can't be reached (asked again next time)
+  const models = {
+    load: async () => {
+      const r = await fetch("/api/cad/stt-workers", { headers: { Accept: "application/json" }, cache: "no-store" });
+      if (r.status === 403 || r.status === 404 || r.status === 409) return null;
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return (await r.json()).models || null;
+    },
+    save: async (key, body) => (await post({ action: "channel_model", key, ...body })).models,
+  };
+
   document.addEventListener("visibilitychange", () => { if (isOpen() && !timer) poll(); });
-  return { mount };
+  return { mount, models };
 })();
 window.SttWorkersCard = SttWorkersCard;

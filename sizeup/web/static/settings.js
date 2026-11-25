@@ -516,7 +516,8 @@ function sRadioTab() {
   const rc = $("#settings-radio-controls");
   show(rc, S_RC_TABS.has(S.rtab));
   // receivers, talkgroups, vocabulary; the reception test card under Receivers only (#436)
-  if (S_RC_TABS.has(S.rtab) && window.RadioControls) RadioControls.mount(rc, { reception: true, tab: S.rtab, names: S_RC_NAMES, services: S_RC_SERVICES });
+  if (S_RC_TABS.has(S.rtab) && window.RadioControls) RadioControls.mount(rc, { reception: true, tab: S.rtab, names: S_RC_NAMES, services: S_RC_SERVICES,
+                                                                       models: window.SttWorkersCard ? SttWorkersCard.models : null });
   for (const n of panel.querySelectorAll("[data-rtab]")) show(n, n.dataset.rtab === S.rtab);
   if (S.rtab === "squelch" && window.SquelchPanel) SquelchPanel.mount($("#settings-squelch"));   // squelch-panel.js
   if (S.rtab === "signal" && window.SignalPanel) SignalPanel.mount($("#settings-signal"));       // signal-panel.js (#606)

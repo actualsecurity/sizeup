@@ -518,7 +518,7 @@ def test_the_channels_page_sends_the_source_key_and_automatic(channels_page):
 def test_the_settings_page_hands_the_services_store_to_the_channels_card():
     from tests.test_radio_emergency import STATIC
     js = (STATIC / "settings.js").read_text()
-    assert "RadioControls.mount(rc, { reception: true, tab: S.rtab, names: S_RC_NAMES, services: S_RC_SERVICES })" in js
+    assert "RadioControls.mount(rc, { reception: true, tab: S.rtab, names: S_RC_NAMES, services: S_RC_SERVICES," in js
     assert '"/api/cad/settings/radio_services", { action: "set", key, service' in js
     rc = (STATIC / "radio-controls.js").read_text()
     assert "radio_services\"" not in rc                                          # never from the station's page
