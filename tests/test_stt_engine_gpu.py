@@ -131,9 +131,11 @@ def test_a_station_from_before_gpu_is_sent_aws(tmp_path, monkeypatch):
             d.pop("engine_gpu_ok", None)
             return d
         st.channels_applied = old
+        seen = lambda: ((hub.app.hub.status or {}).get("channels") or {})                 # noqa: E731
+        assert wait(lambda: "prefs" in seen() and not seen().get("engine_gpu_ok"), 15)   # (its next state push)
         assert hub_post(hub, "channels", {"action": "set", "key": "FG1", "engine": "gpu"})[0] == 200
         assert wait(lambda: st.channel_pref("FG1")["engine"] == "aws", 15)
-        assert real()["prefs"]["FG1"]["engine"] == "aws"
+        assert wait(lambda: real()["prefs"]["FG1"]["engine"] == "aws", 5)
     finally:
         if st is not None:
             st.link.stop()
