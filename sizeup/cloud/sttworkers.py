@@ -665,7 +665,7 @@ class WorkerApi:
             # the self-update: a GPU worker that says its version is told the one it should run (never a station's)
             su = clean_self_update(d.get("self_update")) if gpu else None
             told = {"worker_update": self.wanted(wid)} if su is not None else {}
-            if gpu and self.stt_models is not None:
+            if gpu and self.stt_models is not None and path in (API + "hello", API + "state"):
                 try:
                     word = self.stt_models()
                 except Exception as e:  # noqa: BLE001 - no models named is still an answer

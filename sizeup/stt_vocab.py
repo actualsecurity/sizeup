@@ -326,7 +326,8 @@ def police_phrases(towns=("Port Chester", "Rye", "Rye Brook"), data: Path = DATA
 
 def police_prompt(prof: dict, data: Path = DATA, gazetteer: Path | None = None) -> str:
     """whisper's prompt for a police source: the profile's phrasing, the headquarters' callsigns, the towns and the
-    busiest prompt_streets streets of the towns as said. Never a talker's or a person's name (no talker_prompt)."""
+    busiest prompt_streets streets of the towns as said. Never a talker's or a person's name here (App._base_prompt adds
+    only a radio's exact name with its hint on: a dispatch console's, sizeup/talkers.py hint_names)."""
     from sizeup.transcribe import street_spoken
     towns = [str(t) for t in prof.get("towns") or ()]
     n = int(prof.get("prompt_streets") or 0)

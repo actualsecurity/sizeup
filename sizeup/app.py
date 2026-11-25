@@ -125,6 +125,7 @@ MARINE_OPEN_SQL = ("SELECT 1 FROM incidents i WHERE i.status IN ('queued', 'pend
 HUB_SWITCH_S = 0.001    # the hub's GIL switch interval (sys.setswitchinterval; Python's default 0.005), start_app() (#284)
 STATION_SWITCH_S = 0.001    # ... and a station's: its radio readers (start_app())
 SPLIT_PAGE_S = 30.0      # voice this soon after a tones-only page for us = that page's voice
+PROFILE_NAMES = 4          # a police profile's prompt: at most this many talkers' names after it (its budget)
 ATC_CONTEXT_AGE_S = 120.0  # an airband clip older than this gets no aircraft in its context (a catch-up, a re-run)
 # The gazetteer names a town only from this confidence up (#80: "34 Longdale Avenue" read as Port Chester at
 # 0.34 was a street near Fairview). The point and label stay for the map; the town is never a trigger anyway.
@@ -1172,6 +1173,9 @@ class App:
             log(f"speech-to-text terms: {type(e).__name__}: {e}")
             ts = None
         base = self._base_prompt(item, short=ts is not None)
+        extra = self._extra_prompt(item)
+        if extra:
+            base = f"{base} {extra}" if base else extra     # (in what the terms leave: with_terms counts it)
         try:
             text, vocab_v = stt_terms.with_terms(base, ts)
         except Exception as e:  # noqa: BLE001 - the source's own prompt then
@@ -1185,7 +1189,7 @@ class App:
         police profile's prompt keeps only its towns' busiest streets (stt_terms.PROFILE_STREETS: the addresses that
         matter; its 30 alone filled most of whisper's budget), the list the rest."""
         if self._kind.get(getattr(item, "source", "")) == "airband":
-            return self._atc_prompt(getattr(item, "source", ""), at=getattr(item, "end", None))
+            return self._atc_prompt(getattr(item, "source", ""), at=self._hub_time(getattr(item, "end", None)))
         prof = self._stt_profile(item)
         if prof is not None:          # another P25 system's police (radio-intel PR 3): its own words, and of its talkers
             if not short:             # only a radio's exact name with its hint on (a dispatch console's: hint_names)
@@ -1193,7 +1197,7 @@ class App:
             else:
                 n = min(int(prof.get("prompt_streets") or 0), stt_terms.PROFILE_STREETS)
                 base = self._profile_prompt(dict(prof, prompt_streets=n, name=f"{prof.get('name')}:{n}"))
-            names = self._talker_names(item) if self.cfg.stt_talker_prompt != "off" else []
+            names = self._talker_names(item)[:PROFILE_NAMES] if self.cfg.stt_talker_prompt != "off" else []
             return " ".join(p for p in (base, ", ".join(names) + "." if names else "") if p)
         parts = [self.cfg.stt_prompt]
         if self.cfg.stt_talker_prompt != "off":
@@ -1203,6 +1207,15 @@ class App:
                                        rig=str(getattr(item, "rig", "") or ""),
                                        radio_ids=str(getattr(item, "radio_id", "") or ""), named=named, blocked=blocked))
         return " ".join(p for p in parts if p)
+
+    def _extra_prompt(self, item) -> str:
+        """More of whisper's prompt for a clip, counted in its budget: none here (the hub: the channel's call signs)."""
+        return ""
+
+    @staticmethod
+    def _hub_time(t) -> float | None:
+        """A clip's time on this machine's clock (the hub corrects a station's skew)."""
+        return float(t) if isinstance(t, (int, float)) else None
 
     def _talker_hints(self, item) -> tuple[list[str], list[str]]:
         """(named, blocked) of the radios that keyed up (sizeup/cad/radios.py Registry.hints): the exact names that go
@@ -1232,6 +1245,8 @@ class App:
         if isinstance(item, Page):
             return []
         named, blocked = self._talker_hints(item)
+        if str(getattr(item, "system", "") or "") in radios_mod.OTHER_P25:
+            return named          # another system's: only its radios' exact names (its talker text holds range labels)
         return hint_names(getattr(item, "unit", "") or "", str(getattr(item, "rig", "") or ""),
                           str(getattr(item, "radio_id", "") or ""), named, blocked)
 

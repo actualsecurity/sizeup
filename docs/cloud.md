@@ -1625,7 +1625,9 @@ Each channel has its own speech-to-text model on the GPU workers (`sizeup/sttmod
   "Headquarters": a dispatch console's), the aircraft near the field at the clip's time (none for a clip older than 2
   min), then the channel's top terms. Names only: a radio's exact name with its "use as hint" switch on (Settings >
   Radios > Radio IDs: on by default for a unit's or a console's exact entry, never a range's label), units as said
-  ("Engine 63"), aliases as said ("77 Alpha 4"); never a raw radio ID. The hub's `[stt] talker_prompt` is `ids`
+  ("Engine 63"), aliases as said ("77 Alpha 4"); never a raw radio ID. Another P25 system's clip gives only its
+  radios' exact names (its talker text can hold a range's label). The station's own whisper prompt uses the same rules
+  on its own radio registry: the hint switches and MRRS names set on the hub reach only what the hub builds. The hub's `[stt] talker_prompt` is `ids`
   (never `ids+time` until every station runs #736). Context is on or off per model (the ATC whisper's is off by
   default: a prompt raised its repetition loops) and per channel (an A/B). A run keeps its context's hash, length
   and form (`prompt_v`, `prompt_n`, `ctx`), never the content.
@@ -1634,7 +1636,9 @@ Each channel has its own speech-to-text model on the GPU workers (`sizeup/sttmod
   each channel its own (sizeup-pcfd, sizeup-pd, sizeup-atc and the term lists'). Per-clip names, call signs and
   aircraft can't reach it.
 - **Discarded:** a repetition loop, or a llama-asr model's context read back as the text, is kept as a run (role
-  `discarded`) and the clip goes to the next engine. A clip the worker finds near-silent isn't decoded (no speech).
+  `discarded`) and the clip goes to the next engine (a catch-up clip: a failed try). Never an urgent clip's text (a
+  page, the firegrounds: a "mayday" said again and again is real). A clip the worker finds near-silent isn't decoded
+  (no speech).
 
 ## Phone pre-alert (Tapout)
 

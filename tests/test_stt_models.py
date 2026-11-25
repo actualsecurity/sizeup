@@ -290,6 +290,7 @@ def test_a_hub_names_the_model_and_context_and_a_loop_goes_to_aws(tmp_path, fake
     fake = FakeTranscribe(phrases={500: AWS_TEXT})
     hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
     hub.app.stt_choices.set("FG1", {"callsigns": ["Command"]})
+    hub.app._pool_class = lambda item, key: LIVE          # (an urgent clip's words are never discarded: a live one's)
     token = hub.app.hub.workers.add("gpu-1", "Test box")
     w = ModelWorker(hub.url, token, text="Engine 60 Engine 60 Engine 60 Engine 60 Engine 60").start()
     try:
@@ -317,3 +318,58 @@ def test_a_context_list_read_back_is_caught():
     assert not sttmodels.context_echo("Engine 60 responding to Main Street.", ctx)
     assert not sttmodels.context_echo("60 Control, Ladder 31 on scene, nothing showing, investigating.", ctx)
     assert not sttmodels.context_echo("Engine 60, Ladder 31.", [])
+
+
+def test_another_systems_talker_text_never_gets_in_only_its_exact_names(tmp_path):
+    from types import SimpleNamespace
+
+    from sizeup.app import App
+    c = cad(tmp_path)
+    r = c.radios
+    r.save_range({"system": "mrrs", "lo": "9904000", "hi": "9904999", "label": "4000 series patrol"}, "admin")
+    r.save({"system": "mrrs", "radio_id": "9900600", "label": "2398 Sgt", "hint": False}, "admin")
+    r.save({"system": "mrrs", "radio_id": "9900601", "label": "908"}, "admin")
+
+    class A:
+        _talker_hints = App._talker_hints
+        _talker_names = App._talker_names
+        radios = r
+    a = A()
+    for unit, rid, want in (("4000 series patrol", "9904123", []), ("2398 Sgt", "9900600", []),
+                            ("908", "9900601", ["908"]), ("Medic 5 officer", "9904124", [])):
+        item = SimpleNamespace(system="mrrs", unit=unit, radio_id=rid, rig="", talkgroup=9211)
+        assert a._talker_names(item) == want, unit
+
+
+def test_the_hint_switch_alone_is_no_edit_and_blocks_alias_names(tmp_path):
+    c = cad(tmp_path)
+    r = c.radios
+    r.heard("p25", "41290", "E63")
+    assert r.resolve("p25", "41290")["unit"] == "E63"
+    r.save({"system": "p25", "radio_id": "41290", "hint": False}, "admin")
+    assert r.resolve("p25", "41290")["unit"] == "E63" and not r.get("p25", "41290")["edited"]
+    r.save({"system": "mdc", "radio_id": "6105", "hint": False}, "admin")
+    named, blocked = r.hints("mdc", "6105")
+    # an FG1 radio named in the config's MDC aliases ("Engine 61 Portable 1"): its spoken unit blocked too
+    assert hint_names("Engine 61 Portable 1", "E61", "6105", named, blocked + ["E61"]) == []
+
+
+def test_county_talkgroup_keys_are_kept_as_routed():
+    c = choices()
+    c.set("p25:westchester:307", {"model": Q5})
+    assert c.model_for("tg:307", "fire") == Q5 and "p25:westchester:307" not in c.settings()
+
+
+def test_a_discard_goes_to_the_next_engine_once_on_the_fallback_thread_and_urgent_is_kept():
+    p, jobs = pool(Clock()), Jobs()
+    j = jobs.job("c1", LIVE)
+    p.discard(j, "a repetition loop (discarded)")
+    assert p.drain() == 1 and jobs.fell == {"c1": "a repetition loop (discarded)"}
+    assert p.fallbacks["discarded"] == 1 and j.extra["fell"] == "discarded"
+
+
+def test_the_catalog_is_in_the_hub_image():
+    from pathlib import Path
+    root = Path(sttmodels.__file__).resolve().parent.parent
+    assert "COPY tools/stt_worker/pins.json ./tools/stt_worker/pins.json" in (root / "Dockerfile").read_text()
+    assert "!tools/stt_worker/pins.json" in (root / ".dockerignore").read_text()

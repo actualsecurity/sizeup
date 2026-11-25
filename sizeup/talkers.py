@@ -47,13 +47,14 @@ def hint_names(units: list[str] | str = "", rig: str = "", radio_ids: str = "", 
     with no alias shows its MDC ID), and so is anything of a radio whose hint is off (blocked: its unit codes and
     aliases)."""
     ids = {x.strip().upper() for x in str(radio_ids or "").split(",") if x.strip()}
-    blocked = {str(b).strip().upper() for b in blocked if str(b).strip()}
+    raw = [" ".join(str(b).split()) for b in blocked if str(b).strip()]
+    blocked = {b.upper() for b in raw} | {s.upper() for s in (spoken(b) for b in raw) if s}
     if isinstance(units, str):
         units = units.split(",")
     said: list[str] = []
 
     def add(s: str | None) -> None:
-        if s and s not in said and s.upper() not in ids:
+        if s and s not in said and s.upper() not in ids and s.upper() not in blocked:
             said.append(s)
     for n in named:
         add(" ".join(str(n).split()))

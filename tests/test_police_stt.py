@@ -218,6 +218,8 @@ class _PromptApp:
     _profile_prompt = App._profile_prompt
     _talker_names = App._talker_names
     _talker_hints = App._talker_hints
+    _extra_prompt = App._extra_prompt
+    _hub_time = staticmethod(App._hub_time)
 
     def __init__(self):
         self._kind = {}

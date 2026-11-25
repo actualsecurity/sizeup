@@ -177,8 +177,12 @@ class Choices:
     def set(self, key: str, body: dict) -> tuple[dict, dict]:
         """One channel's {model?, context?, callsigns?} (null or "" a field back to its default). (old, new). ValueError."""
         from sizeup import channels
+        from sizeup import sourcekeys
         if not isinstance(key, str) or not channels.KEY.fullmatch(key):
             raise ValueError("key: a channel label or a talkgroup key")
+        got = sourcekeys.parse(key) if key.startswith("p25:") else None
+        if got is not None and got[0] == sourcekeys.COUNTY:
+            key = channels.tg_key(got[1])              # (the county's talkgroups are kept as "tg:307", as routed)
         with self._lock:
             cur = dict(self.settings())
             old = dict(cur.get(key) or {})

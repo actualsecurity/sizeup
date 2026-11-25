@@ -124,7 +124,7 @@ from sizeup.radio.page import page_from_dict
 from sizeup.sources import SourceError
 from sizeup import stt_time, sttmodels, sttpool, sttruns
 from sizeup.cloud import infer as infer_mod
-from sizeup.stt import CATCHUP, CATCHUP_NOTE, judge, wav_bytes
+from sizeup.stt import CATCHUP, CATCHUP_NOTE, URGENT, judge, wav_bytes
 from sizeup.transcribe import RESERVE_CHANNELS, deadline_for
 
 JSON = "application/json"
@@ -1104,6 +1104,8 @@ class HubApp(App):
         # each channel's speech model on the GPU workers (sizeup/sttmodels.py): the catalog in this build's pins.json,
         # the choices in Settings > Radios; the workers hear which models to run in their hello and state answers
         self.stt_choices = sttmodels.Choices(self.mdb)
+        if not self.stt_choices.catalog:
+            log("hub: no speech model catalog (tools/stt_worker/pins.json): every clip goes to the workers' own model")
         self.stt_api.stt_models = self._stt_models_word
         self.cad.stt_models = self.stt_choices
         from sizeup.cloud.metricsbackup import S3Copies
@@ -1774,20 +1776,31 @@ class HubApp(App):
                 if isinstance(item, Traffic) else ""
             job.model = ch.model_for(key, service)
             calls = ch.callsigns(key)
-            if calls:
-                job.prompt = " ".join(p for p in (job.prompt, ", ".join(calls) + ".") if p)
             names = self._talker_names(item) if self.cfg.stt_talker_prompt != "off" else []
             planes: list[str] = []
             if self._kind.get(getattr(item, "source", "")) == "airband":
                 from sizeup import atc
-                planes = atc.spoken_callsigns(self._atc_planes(getattr(item, "source", ""), getattr(item, "end", None)),
+                planes = atc.spoken_callsigns(self._atc_planes(getattr(item, "source", ""),
+                                                               self._hub_time(getattr(item, "end", None))),
                                               atc.telephony_words())
             ts = self._terms_for_item(item)
             terms = stt_terms.prompt_terms(ts.terms)[:sttmodels.CONTEXT_MAX] if ts is not None and ts.terms else []
             job.context = sttmodels.context_list(names, calls, planes, terms)
+            if terms and any(t in job.context for t in terms):
+                job.extra["list_vocab_v"] = ts.vocab_v
             job.plain = ch.plain(key)
         except Exception as e:  # noqa: BLE001 - the channel's model and context are a help, never a must
             self.hub.log(f"stt pool: {job.id}: its model and context: {type(e).__name__}: {e}")
+
+    def _extra_prompt(self, item) -> str:
+        """The channel's call signs (Settings: a dispatch console's "908"), in whisper's prompt with the rest (its
+        budget counts them)."""
+        ch = getattr(self, "stt_choices", None)
+        if ch is None or item is None:
+            return ""
+        key = traffic_key(item) if isinstance(item, Traffic) else str(getattr(item, "label", "") or "")
+        calls = ch.callsigns(key)
+        return ", ".join(calls) + "." if calls else ""
 
     def _stt_models_word(self) -> dict | None:
         """What a GPU worker hears in its hello and state answers (sizeup/sttmodels.py): the catalog in this build (its
@@ -1919,21 +1932,25 @@ class HubApp(App):
                  if isinstance(w[1], (int, float)) and math.isfinite(w[1]) and 0.0 <= w[1] <= 1.0]
         conf = round(sum(probs) / len(probs), 2) if probs else None
         vocab_v = str(job.extra.get("vocab_v") or "")       # a term list in its prompt: the read-back guard too
+        if str(res.get("context") or "") == "list":
+            vocab_v = str(job.extra.get("list_vocab_v") or "")   # (the list's own terms, when it had some)
         kind = str(job.extra.get("kind") or "gpu")
         # the context it was decoded with (the worker says which form; an older worker's: the prompt it was sent)
         ctx = str(res.get("context") or "") or ("prompt" if job.prompt else "none")
         prompt_v, prompt_n = sttmodels.context_version(ctx, job.prompt, job.context)
         echo = ctx == "list" and sttmodels.context_echo(raw, job.context)   # (its context list read back)
-        if raw and (echo or sttmodels.is_loop(raw)):   # a model stuck on a phrase: discarded, the next engine takes it
+        # a model stuck on a phrase: discarded, the next engine takes it (never a page or an urgent clip: its words,
+        # whatever they are, go now; a "mayday" said again and again is real)
+        if raw and job.cls != URGENT and (echo or sttmodels.is_loop(raw)):
             self._stt_ran(job.id, "station-whisper" if kind == "station" else "gpu-worker", str(res.get("model") or ""),
                           raw, "echo" if echo else "loop", None, key=job.channel, item=job.extra.get("page"),
                           role="discarded",
                           queued_at=job.queued_at, engine_start=job.claimed_at, worker=job.worker, cls=job.cls,
                           clip_end=job.clip_end, prompt_v=prompt_v, prompt_n=prompt_n, ctx=ctx, want=job.model)
-            job.extra["fell"] = "error"
             what = "its context read back" if echo else "a repetition loop"
             self.hub.log(f"stt pool: {job.kind} {job.id}: {what} from {job.worker}: the next engine")
-            return self._pool_fallback(job, f"{what} (discarded)")
+            self.sttpool.discard(job, f"{what} (discarded)")      # (the next engine on the pool's fallback thread)
+            return
         # (the read-back guard on the context it had: whisper's prompt, or a llama-asr model's list, which it can echo)
         sent = job.prompt if ctx == "prompt" else ", ".join(job.context) if ctx == "list" else ""
         text, status = judge(raw, job.seconds, prompt=sent, vocab_v=(vocab_v or "list") if ctx == "list" and sent
@@ -1971,7 +1988,7 @@ class HubApp(App):
         catch-up clip: back to the catch-up, no try burnt, when nobody took it (no worker, unclaimed, handed back); a
         lease lost or a result that couldn't be applied is a failed try on its row (a clip that kills workers ends)."""
         if job.extra.get("catchup"):
-            if job.extra.get("fell") in ("lease", "error"):
+            if job.extra.get("fell") in ("lease", "error", "discarded"):
                 self.hub.log(f"stt pool: catch-up {job.id}: {why}: a failed try")
                 self._rerun_finish(job.id, f"failed: GPU worker: {why[:80]}")     # ("; catch-up try N": its note)
                 return self.sync()
