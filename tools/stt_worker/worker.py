@@ -120,12 +120,12 @@ class Config:
     llm_fail_max: int = 3                  # failed generations in a row: no LLM until its health check passes again
     llm_no_think: bool = True              # chat_template_kwargs enable_thinking false (Qwen3; others ignore it)
     auto_update: bool = True               # self-update to the version the hub names (a commit on main + its hash)
-    # the catalog's models (pins.json stt_models; the hub says which): each on a server of its own beside whisper_server
+    # the catalog's models (models.json stt_models; the hub says which): each on a server of its own beside whisper_server
     managed_models: bool = True            # false: only whisper_server (and the LLM), as before
     models_dir: str = "models"             # their files go in <models_dir>/managed (downloaded, checked, pruned)
     whisper_bin: str = ""                  # whisper-server for whisper-ggml models (default: whisper_server's program)
     llama_bin: str = ""                    # llama-server for llama-asr models (default: llm_server's program)
-    catalog_file: str = ""                 # a local pins.json instead of the hub's (testing); "" the hub's, from GitHub
+    catalog_file: str = ""                 # a local models.json instead of the hub's (testing); "" the hub's, from GitHub
     vram_budget_mb: float = 0.0            # VRAM for all the servers; 0: the GPU's total less vram_reserve_mb
     vram_reserve_mb: float = 1536.0        # left for Windows, the desktop, a browser
     llm_vram_mb: float = 0.0               # the LLM's share; 0: its GGUF's size and a context's worth
@@ -1896,9 +1896,9 @@ class Updater:
         return True
 
 
-# --- speech-to-text models: the catalog (pins.json), managed downloads, a server each ---------------------------------
+# --- speech-to-text models: the catalog (models.json), managed downloads, a server each -------------------------------
 
-CATALOG_PATH = "tools/stt_worker/pins.json"   # never the hub's to choose: main of UPDATE_REPO, at the commit it names
+CATALOG_PATH = "tools/stt_worker/models.json"  # never the hub's to choose: main of UPDATE_REPO, at the commit it names
 CATALOG_KEY = "stt_models"
 CATALOG_MAX_BYTES = 256_000
 # whisper-ggml: whisper.cpp's whisper-server, one ggml file; context as whisper's initial prompt.
@@ -1980,7 +1980,7 @@ def _model_file(v, what: str) -> dict:
 
 
 def check_catalog(doc) -> dict:
-    """pins.json's stt_models, checked whole: {id: entry}. One entry that breaks a rule refuses the catalog (CI checks
+    """models.json's stt_models, checked whole: {id: entry}. One entry that breaks a rule refuses the catalog (CI checks
     the repo's with this same function, so such a catalog never reaches main). An entry's `recipe` (how a file was
     built: pinned inputs and tools) is the people's record; the worker only ever downloads the pinned file."""
     if not isinstance(doc, dict) or not isinstance(doc.get(CATALOG_KEY), dict):
@@ -2026,7 +2026,7 @@ def check_catalog(doc) -> dict:
 
 
 def download_catalog(commit: str, sha: str, fetch: Callable = https_get, now: float | None = None) -> bytes:
-    """pins.json at a commit on main (check_on_main first), exactly the hash the hub named. UpdateError otherwise."""
+    """models.json at a commit on main (check_on_main first), exactly the hash the hub named. UpdateError otherwise."""
     check_on_main(commit, fetch, now)
     status, headers, body = fetch(GITHUB_RAW, f"/{UPDATE_REPO}/{commit}/{CATALOG_PATH}", CATALOG_MAX_BYTES)
     if status == 404:
@@ -2258,10 +2258,10 @@ class ModelServer:
 
 class Models:
     """The catalog's models on this worker, beside the whisper-server in worker.toml (the primary, never touched here).
-    The hub names the catalog (a commit on main and pins.json's SHA-256) and the models it wants, best first (stt_models
+    The hub names the catalog (a commit on main and models.json's SHA-256) and the models it wants, best first (stt_models
     {catalog, want} in its hello and state answers). The models thread then, about every second:
 
-    1. the catalog: pins.json at that commit from GitHub (check_on_main, then exactly that hash), checked whole
+    1. the catalog: models.json at that commit from GitHub (check_on_main, then exactly that hash), checked whole
        (check_catalog), kept in state_dir/catalog.json;
     2. the plan (plan_models): the wanted models, in the hub's order, each that fits the VRAM budget (the GPU's total
        less vram_reserve_mb and the primary's); the local LLM gets what is left, and gives way (llm_room() false: the

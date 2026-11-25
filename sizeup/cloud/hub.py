@@ -1101,12 +1101,12 @@ class HubApp(App):
         # a station's whisper is a pool worker under its own station identity (#639 phase 2): no token more to issue,
         # rotate or revoke; revoking the station ends its worker too
         self.stt_api = WorkerApi(reg, self.sttpool, self._may_write_audio, log, station=self.hub.station_of)
-        # each channel's speech model on the GPU workers (sizeup/sttmodels.py): the catalog in this build's pins.json,
+        # each channel's speech model on the GPU workers (sizeup/sttmodels.py): the catalog in this build's models.json,
         # the choices in Settings > Radios; the workers hear which models to run in their hello and state answers
         self.stt_choices = sttmodels.Choices(self.mdb)
         self.stt_choices.service_of = lambda key: self._key_service(key)[1]
         if not self.stt_choices.catalog:
-            log("hub: no speech model catalog (tools/stt_worker/pins.json): every clip goes to the workers' own model")
+            log("hub: no speech model catalog (tools/stt_worker/models.json): every clip goes to the workers' own model")
         self.stt_api.stt_models = self._stt_models_word
         self.cad.stt_models = self.stt_choices
         self.cad.stt_challenges = self._challenge_boards
@@ -1806,7 +1806,7 @@ class HubApp(App):
 
     def _stt_models_word(self) -> dict | None:
         """What a GPU worker hears in its hello and state answers (sizeup/sttmodels.py): the catalog in this build (its
-        commit on main and pins.json's SHA-256: the worker fetches that file from GitHub itself) and the models the
+        commit on main and models.json's SHA-256: the worker fetches that file from GitHub itself) and the models the
         channels use, most important first. None without a build commit (a local run): the workers run only their own."""
         build = (self.stt_api.build or {}).get("commit", "")
         ch = self.stt_choices

@@ -42,7 +42,7 @@ The LLM lane (sizeup/cloud/infer.py): a worker serving a local LLM says so in ev
 llm_version} and claims JSON classification jobs at /api/station/stt/infer/* with the same token; never while it holds
 a pre-alert lease, and never counted in the STT leases above.
 
-The speech models (sizeup/sttmodels.py, tools/stt_worker/pins.json): a GPU worker's hello and state answers carry
+The speech models (sizeup/sttmodels.py, tools/stt_worker/models.json): a GPU worker's hello and state answers carry
 stt_models {catalog: {commit, sha256}, want: [ids]}: the catalog in this hub's build and the models the channels use,
 most important first. Its heartbeat's models carry stt_loaded (the catalog's that answer) and stt_state; a result says
 which model wrote it, its context form (prompt | list | none) and gate "quiet" when the clip was too quiet to decode.

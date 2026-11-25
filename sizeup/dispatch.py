@@ -22,6 +22,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from sizeup.geo import houserange
+
 # (display type, category, phrases). First match wins, so specific before generic.
 INCIDENT_TYPES: list[tuple[str, str, tuple[str, ...]]] = [
     # The airport's alert levels (#87: an Alert 2 or 3 brings Port Chester): the level is read again by
@@ -93,7 +95,8 @@ MPDS = {1: "Abdominal pain", 2: "Allergic reaction", 3: "Animal bite", 4: "Assau
 SUFFIX = (r"(?:street|st|avenue|ave|road|rd|drive|dr|lane|ln|place|pl|court|ct|boulevard|blvd|terrace|"
           r"parkway|pkwy|way|circle|highway|turnpike|plaza|square|path|crescent|close|walk|trail|run|"
           r"post road|ridge|hill|heights|extension|expressway|thruway)")
-ADDRESS = re.compile(rf"\b(\d{{1,5}}[a-z]?)\s+((?:[a-z]+\s+){{0,4}}?{SUFFIX})\b")
+# (a house-number range, "14-16": _norm wrote it so; sizeup/geo/houserange.py)
+ADDRESS = re.compile(rf"\b(\d{{1,5}}(?:-\d{{1,5}})?[a-z]?)\s+((?:[a-z]+\s+){{0,4}}?{SUFFIX})\b")
 STREET = re.compile(rf"\b((?:[a-z]+\s+){{1,4}}?{SUFFIX})\b")
 STOP_WORDS = {"the", "a", "an", "and", "in", "at", "on", "of", "to", "for", "cross", "between", "corner",
               "respond", "responding", "report", "reported", "female", "male", "year", "old"}
@@ -118,10 +121,14 @@ class Dispatch:
         return dict(self.__dict__)
 
 
+RANGE_DASH = "\u2012"     # a house-number range's dash while the text is normalised (every other "-" is a space)
+
+
 def _norm(text: str) -> str:
-    t = text.lower().replace("-", " ")
+    # a house-number range, written or said ("14-16", "14 to 16", "fourteen dash sixteen"): "14-16" (houserange)
+    t = houserange.canonical(text.lower(), dash=RANGE_DASH).replace("-", " ")
     t = re.sub(r"\bc\.\s?o\.", " co ", t)                  # "C.O. detector": AWS's spelling of the acronym
-    t = re.sub(r"[^a-z0-9:.,; ]+", " ", t)
+    t = re.sub(rf"[^a-z0-9:.,; {RANGE_DASH}]+", " ", t).replace(RANGE_DASH, "-")
     return re.sub(r"\s+", " ", t).strip()
 
 

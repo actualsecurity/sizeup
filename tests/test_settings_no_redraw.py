@@ -135,7 +135,8 @@ def site(tmp_path, monkeypatch):
 def test_a_running_call_moves_the_rev_but_not_what_settings_shows(site):
     """The premise: GET /api/cad/settings after a transmission, a call, a dispatch and a status change differs only in
     its rev and in what moves with the calls (a list item's "used 12×" and "3 now", a unit's status and its call, the
-    clips and bytes kept and the order of their rows), so there is nothing to redraw. The script compares the same."""
+    clips and bytes kept and the order of their rows, a feed code's count and when it was last seen on Settings > Lists >
+    Feed types), so there is nothing to redraw. The script compares the same."""
     def page():
         return site.j("GET", "/api/cad/settings")[1]
 
@@ -148,27 +149,44 @@ def test_a_running_call_moves_the_rev_but_not_what_settings_shows(site):
         kept = strip(d["audio_retention"], {"clips", "bytes", "totals"})
         kept["rows"].sort(key=lambda r: r["key"])
         return dict(d, rev=0, lists=strip(d["lists"], {"used", "now"}), units=strip(d["units"], {"used", "status", "incident_number"}),
-                    audio_retention=kept, camera_wall=strip(d["camera_wall"], {"n", "streams"}))
+                    audio_retention=kept, camera_wall=strip(d["camera_wall"], {"n", "streams"}),
+                    feed_types=strip(d["feed_types"], {"n", "last_at"}))
 
+    feeds = iter(range(10))
+
+    def a_feed_event():
+        """A county feed's event with a code nothing maps fully (invented): its count and last seen move."""
+        n, now = next(feeds), time.time()
+        ev = {"source": "county", "event_id": f"X{n}", "type": "SERVICE", "location": f"{40 + n} Example St",
+              "units": [], "times": {"dispatched": now}, "unit_times": {}, "comments": [], "closed": False,
+              "extra": {"county_type": "SERVICE,SAMPLE"}, "aliases": []}
+        site.cad.source_event({"source": "county", "label": "County feed", "rank": 1, "seen_at": now, "first_seen": now,
+                               "event": ev})
+
+    a_feed_event()
     before = page()
     assert before["audio_retention"]["totals"]["audio"]["clips"] == 2
     assert [r["key"] for r in before["audio_retention"]["rows"]] == ["FG1", "PC repeater"]
     for _ in range(3):
         site.a_call_runs()
+        a_feed_event()
     after = page()
     assert after["rev"] != before["rev"]
     assert after["audio_retention"]["totals"]["audio"]["clips"] == 5
     assert [r["key"] for r in after["audio_retention"]["rows"]] == ["PC repeater", "FG1"]          # largest first: it moved
-    for part in ("lists", "units", "audio_retention"):
+    assert after["feed_types"]["seen"][0]["n"] == 4 and before["feed_types"]["seen"][0]["n"] == 1
+    for part in ("lists", "units", "audio_retention", "feed_types"):
         assert after[part] != before[part], part                                                    # what moves moved
     assert quiet(after) == quiet(before)
     s = (STATIC / "settings.js").read_text()
     assert ('const S_LIVE_KEYS = { lists: new Set(["used", "now"]), units: new Set(["used", "status", "incident_number"]),\n'
-            '  audio_retention: new Set(["clips", "bytes", "totals"]), camera_wall: new Set(["n", "streams"]) };') in s
+            '  audio_retention: new Set(["clips", "bytes", "totals"]), camera_wall: new Set(["n", "streams"]),\n'
+            '  feed_types: new Set(["n", "last_at"]) };') in s
     assert 'const S_LIVE = new Set(["lists", "units"]);' in s
     # every part of the page is either one section's or everyone's: a new part is everyone's until it is named
     owner = dict(re.findall(r'(\w+): "(\w+)"', re.search(r"const S_PART_OF = \{(.*?)\};", s, re.S).group(1)))
     assert set(owner) <= set(after) and owner["audio_retention"] == owner["camera_wall"] == "system" and owner["tones"] == "radios"
+    assert owner["feed_types"] == "lists"                    # the feeds' codes redraw Lists only, never another section
     load = fn("sLoad")
     assert "const same = !!S.data && S.sigSec === S.section && sig === S.sig && (live === S.sigLive || !S_LIVE.has(S.section));" in load
     assert "if (!same || opts.must) sRender(false, !opts.fresh);" in load

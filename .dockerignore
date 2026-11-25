@@ -19,7 +19,7 @@ config.toml
 tests/
 tools/
 !tools/stt_worker/worker.py
-!tools/stt_worker/pins.json
+!tools/stt_worker/models.json
 docs/
 deploy/station/
 deploy/trunk-recorder/*

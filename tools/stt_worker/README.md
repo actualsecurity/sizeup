@@ -16,10 +16,37 @@ GPU back at once (see [The local LLM](#the-local-llm-optional)).
 - **Logs:** they hold job ids, timings and token counts. They never hold transcripts, prompts, the LLM's answers or
   the token.
 
+## Quick install (one script)
+
+In an ordinary (not elevated) PowerShell window, as the user who games on the PC:
+
+```powershell
+$u = 'https://raw.githubusercontent.com/actualsecurity/sizeup/0a5a5d7c88a2dbf56c500cb840c5711288b9415f/tools/stt_worker/install.ps1'
+Invoke-WebRequest $u -UseBasicParsing -OutFile "$env:TEMP\sizeup-stt-install.ps1"
+(Get-FileHash "$env:TEMP\sizeup-stt-install.ps1").Hash -eq '8B75D12E86859B8A9F33836DAECE0FA0CB6F0248FCF92ED2DA4E0173ED1175E9'   # True
+powershell -ExecutionPolicy Bypass -File "$env:TEMP\sizeup-stt-install.ps1"
+```
+
+Run the last line only if the one before printed `True`.
+
+`install.ps1` does steps 1-8 below. It asks its questions first: the local LLM (y/N), the hub URL, then the worker
+token and the Cloudflare client id and secret (read hidden, stored only as user environment variables). Then it
+downloads, checks each file's size and SHA-256 against [`pins.json`](pins.json) before using it, writes `worker.toml`,
+runs `check` with whisper-server on 127.0.0.1, and registers and starts the task.
+
+- **Again:** safe to run again. It keeps what already matches its pin and asks before it replaces `worker.toml`, a
+  secret or the task. A `worker.py` that has updated itself is kept.
+- **`-DryRun`:** prints what it would do, with no prompts, downloads or changes.
+- **`-Uninstall`:** removes the task, `%LOCALAPPDATA%\sizeup-stt` and the three variables, after you confirm. A copy
+  of the script stays in that folder for this.
+- **Pins:** the URLs, sizes and hashes in `pins.json`, in the script and in the steps below are the same (a test
+  checks). The script's own commit and hash above change with every change to it.
+
 ## Windows setup (NVIDIA GPU)
 
 Everything goes in `%LOCALAPPDATA%\sizeup-stt`. Only your Windows user can write there, so other local users can't
-swap the programs the worker runs. Run the commands in PowerShell as that user:
+swap the programs the worker runs. Every download's URL, size and SHA-256 is also in [`pins.json`](pins.json) (what
+`install.ps1` uses). Run the commands in PowerShell as that user:
 
 ```powershell
 $d = "$env:LOCALAPPDATA\sizeup-stt"
@@ -38,7 +65,7 @@ The python.org installer works too. It also installs the `py` launcher.
 
 ### 2. whisper.cpp with CUDA
 
-You need an NVIDIA driver from 2024 or later. `nvidia-smi` should print the GPU.
+You need an NVIDIA driver from 2024 or later (551.61 or newer, CUDA 12.4's minimum). `nvidia-smi` should print the GPU.
 
 Use whisper.cpp pre-release **b5454**, asset **`whisper-bin-win-cuda-12.4.0-x64.zip`** (684,913,404 bytes). It
 includes the CUDA runtime DLLs, so you don't need the CUDA Toolkit. The program is `Release\whisper-server.exe` in the
@@ -158,13 +185,13 @@ http://127.0.0.1:8180`. With it running, `py -3 "$d\worker.py" check` also tries
 
 ### 5. The worker
 
-For the first install, `worker.py` is pinned to a commit. Check its hash after the download. From then on it
+For the first install, `worker.py` is pinned to a commit (201,621 bytes). Check its hash after the download. From then on it
 [updates itself](#updating). A worker installed from an older pin (before the self-update) needs this download once
 more to get it.
 
 ```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/2d43243e463390e2a544ced00db3745730965093/tools/stt_worker/worker.py -OutFile "$d\worker.py"
-(Get-FileHash "$d\worker.py").Hash -eq '7D4DCBEA8F6C5CC95C9CEAC0898077FC92618A2C18ED45CE4550B5547F243340'   # True
+Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/d6456282285af2485473ca8a7ff8806498aabf12/tools/stt_worker/worker.py -OutFile "$d\worker.py"
+(Get-FileHash "$d\worker.py").Hash -eq '3D34FC01CCE69B8E4F65BDA7469365F9B9C408460DF254D9B5D8F96E835E40D2'   # True
 notepad "$d\worker.toml"
 ```
 
@@ -413,7 +440,8 @@ memory never counts as "another process" in the gaming check.
 
 Besides the whisper-server in `worker.toml` (the **primary**), the worker can run more speech-to-text models, one server
 each on its own loopback port (8181, 8182, ...), so each radio channel can have its own model (Settings > Radios, on
-the hub). The models are listed in [`pins.json`](pins.json) (`stt_models`): each one's files, their pinned URL, size
+the hub). The models are listed in [`models.json`](models.json) (`stt_models`; apart from `pins.json`, the installer's,
+so a model change never re-pins the installer): each one's files, their pinned URL, size
 and SHA-256, the VRAM it holds, its services, and whether the channel's context goes with each clip by default.
 
 | model | kind | VRAM | for |
@@ -428,9 +456,9 @@ and SHA-256, the VRAM it holds, its services, and whether the channel's context 
   projector (`--mmproj`), b12643 or later (the worker asks `llama-server --version` and says so in Health if it is
   older). Each llama-server gets its own random API key, as the LLM's does.
 - **What the hub names:** every hello and state answer carries `stt_models {catalog: {commit, sha256}, want}`: the
-  commit on main the hub was built from, the SHA-256 of `pins.json` in it, and the models the channels use, most
+  commit on main the hub was built from, the SHA-256 of `models.json` in it, and the models the channels use, most
   important first (fire/EMS, then police, then airband).
-- **Where the list comes from:** the worker fetches `tools/stt_worker/pins.json` at that commit, only after GitHub's
+- **Where the list comes from:** the worker fetches `tools/stt_worker/models.json` at that commit, only after GitHub's
   API says it is main's own (the same check as the [self-update](#updating)), and only with exactly that hash. It keeps
   it in `state\catalog.json`. One entry that breaks a rule (a URL not allowed, a bad hash, a missing file) refuses
   the whole list.
@@ -441,7 +469,7 @@ and SHA-256, the VRAM it holds, its services, and whether the channel's context 
   (resumed after a stop), must be exactly its pinned size and SHA-256, then is renamed. Files in `models\managed`
   that no model in the list uses are deleted; nothing else in `models` is touched.
 - **Built once, hosted here:** the airband model is a LoRA merged into whisper large-v3-turbo. Merging needs torch
-  and peft, which the worker doesn't have, so it was built once by the recipe in `pins.json` (pinned inputs and their
+  and peft, which the worker doesn't have, so it was built once by the recipe in `models.json` (pinned inputs and their
   hashes, [`recipes/merge_lora.py`](recipes/merge_lora.py), whisper.cpp's `convert-h5-to-ggml.py` at a pinned commit,
   the package versions; two runs from scratch gave the same file) and is a release asset of this repo (`stt-models-1`).
 - **VRAM:** the budget is the GPU's total less `vram_reserve_mb` (1.5 GB for Windows and the desktop), or
@@ -561,7 +589,7 @@ Without `-c`, the worker reads `SIZEUP_STT_WORKER_CONFIG`, else `worker.toml` or
 | `vram_budget_mb`, `vram_reserve_mb` | 0 (auto), 1536 | VRAM for all the servers: `vram_budget_mb`, else the GPU's total less the reserve |
 | `llm_vram_mb`, `primary_vram_mb` | auto, 1000 | the LLM's share (auto: its GGUF's size and a context's worth); `whisper_server`'s when its model isn't in the list |
 | `gate_dbfs` | -55 | clips quieter than this aren't decoded (no speech); -120 never |
-| `catalog_file` | | a local `pins.json` instead of the hub's (testing only) |
+| `catalog_file` | | a local `models.json` instead of the hub's (testing only) |
 
 ## Troubleshooting
 

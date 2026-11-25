@@ -1609,12 +1609,12 @@ The sources the radio pre-alerts push alerts from are HIGH at least, in the stat
 ### Per-channel speech models (#639)
 
 Each channel has its own speech-to-text model on the GPU workers (`sizeup/sttmodels.py`; the catalog is
-`tools/stt_worker/pins.json` `stt_models`, the worker side is `tools/stt_worker/README.md`, Speech models).
+`tools/stt_worker/models.json` `stt_models`, the worker side is `tools/stt_worker/README.md`, Speech models).
 
 - **Which model:** Settings > Radios > Channels, per channel; else by its service: fire, EMS and police Qwen3-ASR-1.7B,
   airband the ATC whisper (large-v3-turbo with the US ATC LoRA), anything else today's large-v3-turbo q5_0.
 - **Which models a worker runs:** every hello and state answer names the catalog (the hub's build commit and
-  `pins.json`'s SHA-256) and the models wanted, fire's first, then police, airband, then challengers. The worker loads
+  `models.json`'s SHA-256) and the models wanted, fire's first, then police, airband, then challengers. The worker loads
   them in that order while they fit its VRAM.
 - **Routing:** a clip names its channel's model. A worker that has it loaded and is free takes it first; another
   worker waits at most `MODEL_DEFER_S` (1 s) for it, then takes it on its own model. The classes stay strict, so a fire
@@ -3925,6 +3925,24 @@ inspection sheets, hazmat / Tier II, contact sheets, photos), opened in the app.
 The hub image carries pypdf, PDFium and Pillow for this (the `docs` extra: the `Dockerfile` runs
 `pip install ".[docs,intel-llm]"`); without them a PDF is refused.
 Tests: `tests/test_preplan.py`, `tests/test_preplan_docs.py`.
+
+## A call's building on its maps
+
+The county footprint(s) of the building a call is at, lit whole on the call's map, the large map, the Overview and the
+wall board (`sizeup/cad/footprints.py`, `static/bldg-highlight.js`). The county's footprints carry no address (OBJECTID,
+DESCRIPTION, FEA_CODE, PHOTO_DATE, the elevations and ACTUAL_HEIGHT in feet: the numbers drawn on them), so the
+address comes from the gazetteer's address points and the tax parcels:
+
+- **An address:** every footprint holding an address point of its number on its street (one building with several
+  numbers lights up for any of them); a range "40-44": each of its numbers. A point in no footprint: the nearest
+  within 15 m that faces the street on that side, with no other as near; no point for the number: the footprint the
+  pin is in. A lot that is the address (PARCEL_ADDR) adds its other large footprints (a campus).
+- **A named place** with no street address: its polygon (a place name's `geometry`), else the footprints its points
+  are in.
+- **Never:** an intersection, a highway, an exit, a mile marker, a bare pin, or anything ambiguous.
+- Resolved on the hub once per location and data version, the footprints, parcels and address points indexed on a grid
+  once per layer rev; each open call carries `building: {how, footprints: [{ref, geometry, addrs}]}` on the state push
+  (a closed one on its full read), so the maps draw it at every zoom. Tests: `tests/test_footprints.py`.
 
 ## Station logs (CloudWatch)
 

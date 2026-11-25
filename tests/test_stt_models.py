@@ -383,5 +383,5 @@ def test_a_discard_goes_to_the_next_engine_once_on_the_fallback_thread_and_urgen
 def test_the_catalog_is_in_the_hub_image():
     from pathlib import Path
     root = Path(sttmodels.__file__).resolve().parent.parent
-    assert "COPY tools/stt_worker/pins.json ./tools/stt_worker/pins.json" in (root / "Dockerfile").read_text()
-    assert "!tools/stt_worker/pins.json" in (root / ".dockerignore").read_text()
+    assert "COPY tools/stt_worker/models.json ./tools/stt_worker/models.json" in (root / "Dockerfile").read_text()
+    assert "!tools/stt_worker/models.json" in (root / ".dockerignore").read_text()
