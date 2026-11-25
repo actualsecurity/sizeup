@@ -5669,14 +5669,14 @@ class App:
                 self.roadgraph.cache_loaded = False        # (cachesync may have just put it back)
             self.roadgraph.load_cache()
             self.gis.load_cache()
-            if getattr(self, "cad", None) is not None:  # a call's building: the footprints indexed before a push needs them
-                self.cad.footprints.warm()
         except Exception as e:  # never in the way of the layers starting: they fetch from their sources
             log(f"layers: map caches not all read ({type(e).__name__}: {e}); fetched from their sources")
         finally:
             with self._layers_lock:
                 self.layers_ready.set()
                 on = self._layers_on
+            if getattr(self, "cad", None) is not None:   # a call's building: its footprints indexed ahead, on their own
+                threading.Thread(target=self.cad.footprints.warm, name="footprints-warm", daemon=True).start()
             log(f"layers: map caches read in {time.monotonic() - t0:.1f} s"
                 + (f" ({restored} restored from S3)" if restored else "") + ("" if on else "; layers stopped meanwhile"))
             if on:
