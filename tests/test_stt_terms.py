@@ -788,7 +788,7 @@ def test_each_pool_job_carries_the_vocab_v_of_its_own_prompt(tmp_path, monkeypat
         app.stt_terms.refresh()
         ts = app.stt_terms.get("county_fire")
         jobs = []
-        monkeypatch.setattr(app, "sttpool", SimpleNamespace(ready=lambda cls, **kw: (True, ""), has=lambda cid: False,
+        monkeypatch.setattr(app, "sttpool", SimpleNamespace(ready=lambda cls, **kw: (True, ""), has=lambda cid: False, heard=lambda cls: None,
                                                             submit=lambda job: jobs.append(job) or True))
         pcm = np.zeros(8000 * 2, np.int16)
         t = Traffic("FG1-901", "FG1", 1.0, 3.0, "")
