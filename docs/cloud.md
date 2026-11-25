@@ -1520,7 +1520,7 @@ clip waits for one only as long as its class allows. After that the clip goes th
   - Switches: the pool's On (Settings > Station > STT workers) turns the lane off too (`available()` false, no claims). Each GPU worker has an "LLM jobs" switch there, on by default and audited; off, it gets no prompts (a job it holds goes back to the queue). Only a GPU worker's own token (`sw1`) reaches `/api/station/stt/infer/*`: anything else (a station's whisper in the pool) gets 403 and never sees a prompt.
   - Futures are resolved on the lane's own result thread, never on a worker's request thread or under a lock; a job is answered at its deadline (the lane wakes for the earliest one). A done-callback must not log the answer.
   - `available()` and `submit()` never wait: they read what the lane last worked out (set on every worker request, switch, lease change and tick, under a lock that never does I/O). The switches are read from hub.sqlite outside the lane's lock (the tick at most once a second, a worker new to the lane, and at once on an admin's change), and a claim asks the STT pool before taking the lane's lock.
-  - The worker side (`tools/stt_worker/worker.py`, `llm_url`): llama.cpp's `llama-server` on 127.0.0.1, its GGUF checked against a pinned SHA-256, a random API key per start, constrained output (`response_format: json_schema`); a pre-alert clip, gaming or a pause aborts a generation and hands the job back; gaming stops llama-server after 60 s. The model chosen: Qwen3-8B Q4_K_M, thinking off (the comparison: `tools/stt_worker/llm_eval/`).
+  - The worker side (`deploy/stt-worker/worker.py`, `llm_url`): llama.cpp's `llama-server` on 127.0.0.1, its GGUF checked against a pinned SHA-256, a random API key per start, constrained output (`response_format: json_schema`); a pre-alert clip, gaming or a pause aborts a generation and hands the job back; gaming stops llama-server after 60 s. The model chosen: Qwen3-8B Q4_K_M, thinking off (the comparison: `tools/stt_worker/llm_eval/`).
   - Privacy: prompts and answers exist only in memory on their way to the worker and back. They are never logged, never in Health, `stt_runs` or a database. Health ("GPU workers: LLM") shows each worker's STT and LLM models, and per task the jobs an hour, p50 / p95, token counts and the failures by why.
 - **Cloudflare:** each worker needs a Cloudflare Access service token. The recommended setup is a Cloudflare Access application of its own, scoped to `/api/station/stt/*`, so that token reaches nothing of the station's. This is an operator step.
 - **Every transcript is kept:** the hub appends each one to `stt_runs`, from every engine (the GPU worker, AWS, the station's whisper).
@@ -3899,6 +3899,12 @@ The whole of it is in **[docs/station-logs.md](station-logs.md)**: the path, the
 | Settings | Settings > Station > Logs (section `station_logs`, audited as System): on / off, the least level, units, retention (7 days to a year), and whether the adapter's own lines are shipped (off by default) |
 | Off | `SIZEUP_LOG_SHIP=off` in the station's `station.env`, or the Settings switch |
 
+The GPU STT workers' own `worker.log` goes the same way: `deploy/stt-worker/worker.py` LogShip (scrubbed, gzipped,
+spooled on the PC, deleted once accepted) → `POST /api/station/stt/logs` (the worker token) → `sizeup/cloud/cwlogs.py`
+WorkerLogs → log group `/sizeup/stt-worker`, a stream per worker id, the stations' retention. The hub makes the group
+on first use; the task role needs the `stt-worker-logs` policy ([deploy/stt-worker/README.md](../deploy/stt-worker/README.md#logs-cloudwatch)),
+and until it has it Health shows `not shipped: permission` and the workers keep their batches.
+
 ## Station metrics: signal over time
 
 So the squelch and the gain of each channel can be tuned from weeks of numbers instead of one log line (a rewire that
@@ -3988,7 +3994,7 @@ Beyond the three files:
 | The attachments bucket (`SIZEUP_ATTACHMENTS_BUCKET`) | [incident attachments](#incident-attachments-323). Versioned, Object Lock |
 | EFS at `/data/dvr` | the camera DVR's 12 h ([Shared storage](#shared-storage-12-h-of-our-response-area-322)) |
 | The task's own disk | the standby's copies (`/data/standby`), the leader's check copies (`/data/.replica-check`), `dispatch-audio/`, `audio-cache/`, the map caches: gone with the task |
-| CloudWatch Logs | `/ecs/sizeup-hub` (the hub's own log), `/sizeup/station` ([Station logs](#station-logs-cloudwatch)) |
+| CloudWatch Logs | `/ecs/sizeup-hub` (the hub's own log), `/sizeup/station` ([Station logs](#station-logs-cloudwatch)), `/sizeup/stt-worker` (the GPU workers') |
 
 The hub has no `captures/`. Dispatch WAVs are also cached in `dispatch-audio/` on the task's disk; after a
 redeploy they're served from `audio.sqlite` (or its S3 bucket).

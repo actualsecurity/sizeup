@@ -44,7 +44,7 @@ runs on a bare Linux box with Python + numpy.
                                   "seen" (a second station's metrics don't make the station look connected)
     GET  /api/station/hello      {ok}: the token works (the station's Test connection; not counted as "seen")
     /api/station/stt/...         the GPU speech-to-text workers (#639, sizeup/cloud/sttworkers.py): their own tokens
-                                 (sw1...), never a station's; claim / audio / extend / complete / release
+                                 (sw1...), never a station's; claim / audio / extend / complete / release; logs
     GET  /api/station/status     read only, for the deploy check (tools/deploy_check.py): the hub's build, the
                                  station's version and last update, the health alerts (sizeup/cloud/health.py).
                                  The station token or the status token, which opens nothing else; not "seen"
@@ -1199,6 +1199,11 @@ class HubApp(App):
         self.station_logs = StationLogs(settings=lambda: self.cad.settings.section(LOGS_SECTION),
                                         station_status=lambda: self.hub.status, log=log)
         self.cad.station_logs = self.station_logs
+        # the GPU workers' own logs (POST /api/station/stt/logs) into /sizeup/stt-worker: the same retention setting;
+        # "not shipped: permission" on Health until the task role may write the group (deploy/stt-worker/README.md)
+        from sizeup.cloud.cwlogs import WorkerLogs
+        self.worker_logs = WorkerLogs(settings=lambda: self.cad.settings.section(LOGS_SECTION), log=log)
+        self.stt_api.logs = self.worker_logs
         self.cad.stations = self.hub.stations          # Settings > Station > Stations (sizeup/cad/api.py; admins)
         # the station's signal metrics (sizeup/cloud/metricstore.py): metrics.sqlite, its own file (not in Litestream:
         # copies in the backups bucket, sizeup/cloud/metricsbackup.py), opened at the first post; GET /api/cad/metrics
@@ -2084,8 +2089,11 @@ class HubApp(App):
         if not active and not self.sttpool.workers and not lat and self.stt_runs.health() is None:
             return None
         stats = self.sttpool.stats()
+        wl = getattr(self, "worker_logs", None)
         for w in stats["workers"]:
             w |= self._update_view(w["id"], w.get("update") or {})
+            if wl is not None and w.get("kind") != "station":
+                w["logs"] = wl.view(w["id"])          # its last log batch in CloudWatch, or why none goes
         return {"active": active, "settings": self.hub.workers.pool_settings(), **stats,
                 "infer": self.infer_lane.stats() if self.infer_lane.any_llm() else None,
                 "latency": lat, "target": {"p50_s": sttruns.TARGET_P50_S, "p95_s": sttruns.TARGET_P95_S},
