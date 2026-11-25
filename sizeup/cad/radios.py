@@ -385,7 +385,7 @@ class Registry:
             if row is None:
                 continue
             if row.get("hint") is not None and not row["hint"]:
-                blocked += [x for x in (row.get("unit"), row.get("alias"), rid) if x]
+                blocked += [x for x in (row.get("unit"), row.get("alias"), row.get("label"), rid) if x]
             elif system in OTHER_P25 and row.get("label") and self.hint_on(row) and row["label"] not in named:
                 named.append(row["label"])
         return named, blocked
@@ -537,19 +537,22 @@ class Registry:
             f["hint"] = None if h is None else int(h)
         now = self.clock()
         old = self.get(system, rid)
+        edits = any(k != "hint" for k in f)     # (the hint switch alone is no edit: what is heard still names its unit)
         with self.store.tx() as db:
             if old is None:
                 f.setdefault("source", "confirmed" if f.get("unit") or (system in OTHER_P25 and f.get("label"))
                              else "heard")
                 db.execute("INSERT INTO radios (system, radio_id, unit, label, source, notes, edited, updated_at, hint) "
-                           "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)", (system, rid, f.get("unit", ""), f.get("label", ""),
-                                                                f["source"], f.get("notes", ""), now, f.get("hint")))
+                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (system, rid, f.get("unit", ""), f.get("label", ""),
+                                                                f["source"], f.get("notes", ""), int(edits), now,
+                                                                f.get("hint")))
                 audit(db, now, operator, "radios", f"{system}:{rid}", "", self._describe(dict(f, unit=f.get("unit", ""))))
             else:
                 ch = {k: v for k, v in f.items() if old.get(k) != v}
                 if not ch:
                     return old
-                db.execute(f"UPDATE radios SET {', '.join(f'{k} = ?' for k in ch)}, edited = 1, updated_at = ? "
+                db.execute(f"UPDATE radios SET {', '.join(f'{k} = ?' for k in ch)}, "
+                           f"edited = {'1' if any(k != 'hint' for k in ch) else 'edited'}, updated_at = ? "
                            "WHERE system = ? AND radio_id = ?", (*ch.values(), now, system, rid))
                 said = lambda k, v: ({None: "default", 1: "on", 0: "off"}.get(v, str(v)) if k == "hint"  # noqa: E731
                                      else str(v or ""))

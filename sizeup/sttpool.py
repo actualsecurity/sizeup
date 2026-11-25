@@ -70,7 +70,8 @@ CLAIM_WAIT_MAX_S = 25.0   # a claim's long poll at most
 TICK_S = 0.25             # how often waits and leases are looked at
 WINDOW_S = 7200.0         # done jobs kept for the numbers (Health), seconds
 STATES = ("online", "gaming", "paused")
-REASONS = ("unclaimed", "lease", "released", "no_worker", "error")   # why a job fell back
+REASONS = ("unclaimed", "lease", "released", "no_worker", "error", "discarded")   # why a job fell back (discarded:
+# its text was a repetition loop or its context read back, sizeup/sttmodels.py)
 CLASSES = tuple(BUDGETS)
 # the pre-alert classes: an absolute deadline (no per-audio extension), only an idle quick worker, one greedy pass
 # (whisper-server's temperature_inc 0, as the station's WhisperClient fast=True), so a hard clip is never decoded five
@@ -619,6 +620,16 @@ class Pool:
             self._fall(job, "released", f"GPU worker {wid} handed it back" + (f": {why[:120]}" if why else ""))
             self._cv.notify_all()
         return True
+
+    def discard(self, job: Job, why: str) -> None:
+        """A job whose text came but is no transcript (a repetition loop, its context read back): counted, and its
+        fallback queued (the next engine), on the fallback thread: from on_done, never a second fallback."""
+        with self._cv:
+            job.extra["fell"] = "discarded"
+            self.fallbacks["discarded"] = self.fallbacks.get("discarded", 0) + 1
+        with self._fb_cv:
+            self._fb_q.append((job, why))
+            self._fb_cv.notify()
 
     def abandon(self, lease: str, why: str) -> bool:
         """A leased job the hub itself can't serve (its audio can't be read): the next engine now, the worker not

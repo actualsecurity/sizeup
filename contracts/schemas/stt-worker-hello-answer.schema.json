@@ -20,7 +20,7 @@
       "items": {
         "type": "string",
         "description": "A pool class (sizeup/sttpool.py).",
-        "x-known": ["urgent", "high", "live", "rerun", "context-fallback", "context", "low", "catchup"]
+        "x-known": ["urgent", "high", "live", "rerun", "context-fallback", "context", "low", "catchup", "challenger"]
       }
     },
     "worker_update": {

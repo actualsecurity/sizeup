@@ -63,7 +63,7 @@
           "items": {
             "type": "string",
             "description": "A pool class that is not a pre-alert class (sizeup/sttpool.py). A class a reader does not know is left out, never an error.",
-            "x-known": ["live", "rerun", "low", "catchup"],
+            "x-known": ["live", "rerun", "low", "catchup", "challenger"],
             "not": {"enum": ["urgent", "high", "context-fallback", "context"]}
           }
         },
@@ -88,7 +88,7 @@
           "items": {
             "type": "string",
             "description": "A pool class (sizeup/sttpool.py CLASSES). A class a reader does not know is left out, never an error.",
-            "x-known": ["urgent", "high", "live", "rerun", "context-fallback", "context", "low", "catchup"]
+            "x-known": ["urgent", "high", "live", "rerun", "context-fallback", "context", "low", "catchup", "challenger"]
           }
         },
         "fast": {"type": "boolean", "description": "It may take the pre-alert classes. This can only narrow the hub's measured speed gate, never bypass it."},
