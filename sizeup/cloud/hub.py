@@ -2147,14 +2147,16 @@ class HubApp(App):
         return out
 
     def _worker_live(self, wid: str) -> dict:
-        """A worker's live state for Settings > Station > STT workers."""
+        """A worker's live state for Settings > Station > STT workers: with the speech models it has loaded (models) and
+        each one it was asked for: ready, downloading, no room ... (stt_state; sizeup/sttmodels.py)."""
         w = self.sttpool.workers.get(wid)
         if w is None:
             return {"state": "offline"}
         now = self.sttpool.clock()
         lw = self.infer_lane.workers.get(wid)
         return {"state": self.sttpool.state_of(w, now), "model": w.model, "seen": w.seen, "gpu": dict(w.gpu),
-                "version": w.version, "llm": lw.llm if lw is not None else "", **self._update_view(wid, w.update)}
+                "version": w.version, "llm": lw.llm if lw is not None else "", "models": list(w.models),
+                "stt_state": dict(w.stt_state), **self._update_view(wid, w.update)}
 
     def _update_view(self, wid: str, update: dict) -> dict:
         """A GPU worker's self-update for Settings and Health: what it runs (update), what the hub wants it on
