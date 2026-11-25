@@ -774,7 +774,8 @@ DOES = (
                                      + f" ({_clip(o.get('what'), 60)})", "")),
     (ALARM_ACK, lambda m, b, o, c: (f"Acknowledged the emergency alarm: {_clip(o.get('who'), 30)} {o.get('what', '')} "
                                     f"on {o.get('channel', '')}".rstrip(), o.get("incident_number") or "")),
-    (REMINDER_ACK, lambda m, b, o, c: (f"Reminder OK: {_clip(o.get('text'), 60)}", o.get("incident_number") or "")),
+    (REMINDER_ACK, lambda m, b, o, c: None if o.get("already") else (f"Reminder OK: {_clip(o.get('text'), 60)}",
+                                                                      o.get("incident_number") or "")),
     (ALARM_CLEAR, lambda m, b, o, c: (f"All clear on the emergency alarm: {_clip(o.get('who'), 30)} {o.get('what', '')} "
                                       f"on {o.get('channel', '')}".rstrip(), o.get("incident_number") or "")),
     (re.compile(r"/api/cad/radio-id"), lambda m, b, o, c: (

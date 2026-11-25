@@ -111,14 +111,14 @@ def test_the_hubs_status_time_counts_not_when_anyone_looked(world):
 def test_units_setting_fire_ems_by_default_third_party_dispatch_other_with_all(world):
     cad, clock = world
     iid = call(cad)
-    cad.attach(iid, {"unit_ids": [uid(cad, "77A1"), uid(cad, "PCPD"), uid(cad, "BAT10")], "operator": "JD"})
+    cad.attach(iid, {"unit_ids": [uid(cad, "77A1"), uid(cad, "PCPD"), uid(cad, "BAT10"), uid(cad, "KNOX_BOX")], "operator": "JD"})
     cad.unit_status(uid(cad, "PCPD"), {"status": "DO", "operator": "JD", "incident_id": iid})
     names = lambda: sorted(i["unit"] for i in items(cad).values() if i["kind"] == "dispatched")   # noqa: E731
     assert names() == ["77A1"]                                     # EMS yes; another agency and a third party not
     cad.settings.post("reminders", {"action": "set", "key": "units", "value": "agencies", "operator": "KM"})
     assert names() == ["77A1", "BAT10"]
     cad.settings.post("reminders", {"action": "set", "key": "units", "value": "all", "operator": "KM"})
-    assert names() == ["77A1", "BAT10", "PCPD"]
+    assert names() == ["77A1", "BAT10", "PCPD"]          # a third party in its Dispatch other; the keyholder's Dispatched never
     pc = next(i for i in items(cad).values() if i["unit"] == "PCPD")
     assert pc["status"] == "DO"
 
@@ -211,6 +211,7 @@ def test_the_route_is_for_dispatchers_and_admins_and_in_the_activity():
     said = next(fn for rx, fn in api_mod.DOES if rx is api_mod.REMINDER_ACK)(m, {}, {"text": "E60 DP 6 min",
                                                                                    "incident_number": "26-000001"}, None)
     assert said == ("Reminder OK: E60 DP 6 min", "26-000001")
+    assert next(fn for rx, fn in api_mod.DOES if rx is api_mod.REMINDER_ACK)(m, {}, {"already": True, "text": "x"}, None) is None
 
 
 # -- settings -----------------------------------------------------------------------------------------------------
@@ -240,6 +241,7 @@ def test_settings_defaults_edits_resets_and_audit(world):
     assert cad.settings.section("reminders") == {}
     for body, why in (({"action": "set", "key": "pending_min", "value": 0}, "1 to 240"),
                       ({"action": "set", "key": "pending_min", "value": 2.5}, "whole"),
+                      ({"action": "set", "key": "pending_min", "value": float("inf")}, "whole"),
                       ({"action": "set", "key": "pending_on", "value": "yes"}, "true or false"),
                       ({"action": "set", "key": "units", "value": "pd"}, "fire_ems"),
                       ({"action": "set", "key": "snooze_min", "value": 61}, "1 to 60"),

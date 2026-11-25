@@ -850,7 +850,7 @@ function renderDetail() {
   if (!inc) return;
   const open = isOpen(inc);
   const dh = $("#d-card > .card-head");                // the event's reminder flashes its head, "Pending 6 min" (reminders.js)
-  if (open) { if (dh.dataset.remInc !== String(inc.id)) dh.dataset.remInc = String(inc.id); } else delete dh.dataset.remInc;
+  if (open) { if (dh.dataset.remInc !== String(inc.id)) dh.dataset.remInc = String(inc.id); } else { delete dh.dataset.remInc; delete dh.dataset.rem; $("#d-rem").replaceChildren(); }
   setText($("#d-number"), incTitle(inc));
   const es = eventStatus(inc);
   stBadge($("#d-status"), es.name, es.bg);
@@ -3800,6 +3800,7 @@ function renderUnits() {
     });
   });
   dropGoneHover();
+  if (window.Reminders) Reminders.dirty();        // (drawn outside render() too: a row opened, a board folded)
 }
 
 function renderUnitLog() {

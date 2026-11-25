@@ -3509,6 +3509,8 @@ class Editor:
         a = ov.get(HYD_SECTION) or {}
         if set(a) - set(HYD_KEYS) or any(not isinstance(v, bool) for v in a.values()):
             raise CadError(f"overrides.{HYD_SECTION}: assume_c, true or false")
+        if not isinstance(ov.get(REM_SECTION) or {}, dict):
+            raise CadError(f"overrides.{REM_SECTION}: an object")
         for k, v in (ov.get(REM_SECTION) or {}).items():      # sizeup/cad/reminders.py
             try:
                 reminders.clean(k, v)

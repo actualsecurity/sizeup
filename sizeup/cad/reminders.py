@@ -28,6 +28,8 @@ snooze belongs to that spell (its since): once the condition clears, the next on
 
 from __future__ import annotations
 
+import math
+
 from sizeup.cad import store as store_mod      # (store.py makes the table: SCHEMA, read at its open)
 
 SECTION = "reminders"
@@ -48,7 +50,7 @@ RULES = {
 }
 INCIDENT_RULES = ("pending", "queued", "until")
 MAX_MIN = 240
-UNITS = {"fire_ems": "Fire & EMS", "agencies": "+ other agencies", "all": "+ third party (DO)"}
+UNITS = {"fire_ems": "Fire & EMS", "agencies": "+ other agencies", "all": "+ third party in DO"}
 UNITS_DEFAULT = "fire_ems"
 SNOOZE_DEFAULT, SNOOZE_MAX = 5, 60
 KEEP_S = 86400                           # a snooze row past its until this long: dropped (with the next OK)
@@ -82,7 +84,8 @@ def clean(key: str, value):
             raise ValueError(f"units: {', '.join(UNITS)}")
         return value
     lo, hi = (1, SNOOZE_MAX) if key == "snooze_min" else (RULES[key.rpartition("_")[0]][3], MAX_MIN)
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != int(value) or not lo <= value <= hi:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value != int(value) \
+            or not lo <= value <= hi:
         raise ValueError(f"{key}: whole minutes, {lo} to {hi}")
     return int(value)
 
@@ -155,7 +158,8 @@ def candidates(cfg: dict, incs: list[dict], units: list[dict], lists) -> list[di
             if not u.get("incident_id") or u.get("placeholder") or not in_scope(u, cfg["units"]):
                 continue
             role = lists.role(u["status"])
-            if dp_on and (role == "dispatched" or (u.get("third_party") and u["status"] in tp_only)):
+            # a third party: only in its Dispatch other (requested of another agency); its plain Dispatched never
+            if dp_on and (u["status"] in tp_only if u.get("third_party") else role == "dispatched"):
                 # a move onto this call while still dispatched counts from the move
                 add("dispatched", max(u["status_at"], u.get("assigned_at") or 0.0), u["incident_id"], u.get("incident_number"),
                     u["name"], u["status"], u["id"])
@@ -223,12 +227,12 @@ class Reminders:
         if now < c["since"] + c["after"] - EARLY_S:
             raise store_mod.CadError("that reminder is not due yet")
         text = chip_text(c, now)
-        s = self.store.one("SELECT since, until, by FROM reminder_snoozes WHERE key = ?", (key,))
-        if s and abs(s["since"] - c["since"]) < 0.001 and s["until"] > now:      # someone else just did: theirs stands
-            return {"ok": True, "key": key, "until": s["until"], "by": s["by"], "already": True, "text": text,
-                    "incident_number": c["number"]}
         until = now + cfg["snooze_min"] * 60
-        with self.store.tx() as db:
+        with self.store.tx() as db:                      # (the look and the write under one lock: two OKs at once, one row)
+            s = db.execute("SELECT since, until, by FROM reminder_snoozes WHERE key = ?", (key,)).fetchone()
+            if s and abs(s["since"] - c["since"]) < 0.001 and s["until"] > now:      # someone else just did: theirs stands
+                return {"ok": True, "key": key, "until": s["until"], "by": s["by"], "already": True, "text": text,
+                        "incident_number": c["number"]}
             db.execute("DELETE FROM reminder_snoozes WHERE until < ?", (now - KEEP_S,))
             db.execute("INSERT INTO reminder_snoozes (key, since, until, by, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(key) DO "
                        "UPDATE SET since = excluded.since, until = excluded.until, by = excluded.by, at = excluded.at",

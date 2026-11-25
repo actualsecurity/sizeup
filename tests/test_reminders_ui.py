@@ -75,6 +75,14 @@ def page(browser, site, path="/cad", reduced=False, pc_off_s=0, who=None):
     return pg
 
 
+def snoozed(site):
+    """The OK's POST answered: the hub has the snooze."""
+    deadline = time.time() + 5
+    while not site.cad.store.q("SELECT 1 FROM reminder_snoozes") and time.time() < deadline:
+        time.sleep(0.05)
+    assert site.cad.store.q("SELECT 1 FROM reminder_snoozes")
+
+
 def shot(pg, name, sel=None):
     if not SHOTS:
         return
@@ -169,3 +177,49 @@ def test_the_wall_board_flashes_without_an_ok_unless_a_dispatcher_is_signed_in(s
     signed = page(browser, site, path="/monitor", who=WHO)
     signed.wait_for_function(f'document.querySelector(\'#ov-cards > li[data-key="{a}"] .rem-chip\')?.tagName === "BUTTON"')
     assert pg.errors == [] and signed.errors == []
+
+
+def test_the_settings_card_edits_the_rules(site, browser):
+    pg = page(browser, site, path="/cad#settings/dispatch")
+    card = pg.locator(".s-card", has=pg.locator("h2", has_text="Reminders"))
+    card.wait_for()
+    assert card.locator(".s-eta-l").all_inner_texts() == ["Pending, no unit", "Unit dispatched, not moving", "Page not accepted",
+                                                         "On scene, no status change", "Past its Until", "Units", "OK quiets"]
+    assert "null" not in card.inner_text()
+    card.get_by_label("Page not accepted: on").check()
+    deadline = time.time() + 5
+    while site.cad.settings.section("reminders") != {"queued_on": True} and time.time() < deadline:
+        time.sleep(0.05)
+    assert site.cad.settings.section("reminders") == {"queued_on": True}
+    pg.wait_for_function("[...document.querySelectorAll('.s-card h2')].some((h) => h.textContent === 'Reminders' "
+                         "&& h.parentElement.textContent.includes('3 on'))")
+    shot(pg, "reminders-settings", ".s-card:has(h2:text-is('Reminders'))")
+    assert pg.errors == []
+
+
+def test_keyboard_ok_keeps_the_focus_and_a_closed_call_stops_flashing(site, browser):
+    a, _ = calls(site)
+    pg = page(browser, site)
+    sel = f'#q-pending > li[data-key="{a}"]'
+    pg.wait_for_function(f'document.querySelector(\'{sel}\')?.dataset.rem === "pending"')
+    hb = pg.evaluate(f'(() => {{ const c = document.querySelector(\'{sel} .rem-chip\'), t = document.querySelector(\'{sel} .qt\');'
+                     ' return [c.getBoundingClientRect().height, t.getBoundingClientRect().height]; })()')
+    assert hb[0] <= hb[1] + 1                                             # no taller than its line: the card doesn't grow
+    pg.locator(sel).click()                                              # opened: its head flashes too (and that click OKs)
+    pg.wait_for_function('!("rem" in document.querySelector(\'#d-card > .card-head\').dataset)')
+    snoozed(site)
+    site.cad.store.db.execute("DELETE FROM reminder_snoozes")
+    site.cad.store.rev += 1
+    pg.wait_for_function('document.querySelector(\'#d-card > .card-head\').dataset.rem === "pending"')
+    pg.locator(f"{sel} button.rem-chip").focus()
+    pg.keyboard.press("Enter")
+    pg.wait_for_function(f'!("rem" in document.querySelector(\'{sel}\').dataset)')
+    assert pg.evaluate(f"document.activeElement === document.querySelector('{sel}')")
+    snoozed(site)
+    site.cad.store.db.execute("DELETE FROM reminder_snoozes")
+    site.cad.store.rev += 1
+    pg.wait_for_function('document.querySelector(\'#d-card > .card-head\').dataset.rem === "pending"')
+    site.cad.close(a, {"disposition": "FALSE", "operator": "JD"})
+    pg.wait_for_function('!("rem" in document.querySelector(\'#d-card > .card-head\').dataset)'
+                         ' && !document.querySelector("#d-rem .rem-chip")')
+    assert pg.errors == []

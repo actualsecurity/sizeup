@@ -1816,15 +1816,19 @@ const REM_TIPS = {
   until: "An open event past its Until",
 };
 function sReminders(r) {
-  const rows = el("div", "s-eta s-rem");
-  const reset = (item, label, shown) => (item.edited
-    ? sBtn("Reset", `Default: ${shown}`, () => sPost("reminders", { action: "reset", key: item.key }, `${label} reset`)) : null);
+  const rows = el("div", "s-eta");
+  const reset = (item, label, shown) => {
+    if (!item.edited) return null;
+    const b = sBtn("Reset", `Default: ${shown}`, () => sPost("reminders", { action: "reset", key: item.key }, `${label} reset`));
+    b.setAttribute("aria-label", `Reset ${label}: ${typeof item.default === "boolean" ? "on" : "minutes"}`);
+    return b;
+  };
   const line = (label, ctl, items, tip) => {
     const row = el("div", "row");
     const l = el("span", "s-eta-l", label);
     if (tip) l.title = tip;
     row.append(l, ...ctl, sState(items.some((x) => x.edited) ? "edited" : "default"), el("span", "spacer"),
-      ...items.map((x) => reset(x, label, typeof x.default === "boolean" ? (x.default ? "on" : "off") : `${x.default} min`)));
+      ...items.map((x) => reset(x, label, typeof x.default === "boolean" ? (x.default ? "on" : "off") : `${x.default} min`)).filter(Boolean));
     return row;
   };
   const minutes = (item, label) => {

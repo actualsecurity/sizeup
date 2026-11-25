@@ -53,13 +53,16 @@ window.Reminders = (() => {
     const out = new Map();
     for (const it of items()) {
       const q = st.quiet.get(it.key);
-      if (q && q > it.due && now < q) continue;          // OK'd here, the push not back yet
+      if (q && now < q.until) continue;                  // OK'd here, the hub's answer not in a push yet
       if (now < it.due) continue;
       const k = INC_KINDS.has(it.kind) ? `i:${it.iid}` : `u:${it.unit}`;
       const had = out.get(k);
       if (!had || RANK[it.kind] < RANK[had.kind]) out.set(k, it);
     }
-    for (const [key, q] of st.quiet) if (now >= q || !items().some((it) => it.key === key)) st.quiet.delete(key);
+    const rev = cad.state && cad.state.rev;               // a push after the hub's answer: the hub's word from then on
+    for (const [key, q] of st.quiet) {
+      if (now >= q.until || (q.rev !== undefined && q.rev !== rev) || !items().some((it) => it.key === key)) st.quiet.delete(key);
+    }
     return out;
   }
 
@@ -78,31 +81,37 @@ window.Reminders = (() => {
     if (!chip) {
       chip = el(asBtn ? "button" : "span", "rem-chip");
       if (asBtn) chip.type = "button";
-      slot.append(chip);
+      const st = host.dataset.remChip === "age" && slot.querySelector(":scope > .st");   // a map's label: right after its status
+      if (st) st.after(chip); else slot.append(chip);
     }
     const text = label(it, now, host.dataset.remChip === "age");
     if (chip.textContent !== text) chip.textContent = text;
-    chip.dataset.key = it.key;
+    if (chip.dataset.key !== it.key) chip.dataset.key = it.key;
     const t = tip(it, now);
     if (chip.title !== t) chip.title = t;
     const aria = (it.unit ? `${it.unit} ` : "") + `${WHAT[it.kind]}, ${label(it, now)}` + (asBtn ? `. OK for ${snoozeMin()} min` : "");
     if (chip.getAttribute("aria-label") !== aria) chip.setAttribute("aria-label", aria);
   }
 
-  // Once a second (cad.js tick) and after every render: the page touched only when what is due, or a chip's words,
-  // changed, or something was drawn since.
+  // Once a second (cad.js tick) and after every render (force: rows drawn again). With nothing due and nothing painted:
+  // nothing at all. Otherwise only the places of what is due and what flashes now are looked at, and an attribute or a
+  // chip's words written only when they differ: never a redraw.
   function apply(force) {
     const now = serverNow(), due = dueNow(now), ack = mayAck();
     const sig = `${ack}|` + [...due].map(([k, it]) => `${k}=${it.key}:${label(it, now)}`).join(",");
+    if (!due.size && !st.painted) { st.sig = sig; st.dirty = false; announce(due, now); return; }
     if (!force && !st.dirty && sig === st.sig) return;
-    if (!due.size && !st.painted && !force) { st.sig = sig; st.dirty = false; return; }
     st.sig = sig;
     st.dirty = false;
+    const q = (v) => (window.CSS && CSS.escape ? CSS.escape(v) : String(v).replace(/["\\]/g, "\\$&"));
+    const sel = ["[data-rem]", ...[...due.keys()].map((k) => (k.startsWith("i:") ? `[data-rem-inc="${q(k.slice(2))}"]`
+      : `[data-rem-unit="${q(k.slice(2))}"]`))].join(", ");
     let any = false;
-    for (const host of document.querySelectorAll("[data-rem-inc], [data-rem-unit]")) {
+    for (const host of document.querySelectorAll(sel)) {
+      if (!host.dataset.remInc && !host.dataset.remUnit) { delete host.dataset.rem; continue; }   // no longer a place
       const k = host.dataset.remInc ? `i:${host.dataset.remInc}` : `u:${host.dataset.remUnit}`;
       const it = due.get(k);
-      if (it || "rem" in host.dataset || host.querySelector(".rem-chip")) paint(host, it, now, ack);
+      paint(host, it, now, ack);
       any = any || !!it;
     }
     st.painted = any;
@@ -116,13 +125,7 @@ window.Reminders = (() => {
     const fresh = st.seen ? [...due.values()].filter((it) => !st.seen.has(it.key)) : [];
     st.seen = keys;
     if (!fresh.length) return;
-    let live = document.getElementById("rem-live");
-    if (!live) {
-      live = el("div", "sr-only");
-      live.id = "rem-live";
-      live.setAttribute("aria-live", "polite");
-      document.body.append(live);
-    }
+    const live = liveRegion();
     live.textContent = "Reminder: " + fresh.map((it) => {
       const inc = incidents().find((i) => i.id === it.iid);
       return `${it.unit || (inc ? incTitle(inc) : "")} ${WHAT[it.kind].toLowerCase()}, ${label(it, now)}`.trim();
@@ -130,15 +133,34 @@ window.Reminders = (() => {
     if (soundOn() && Date.now() - st.lastSound > 20000) { st.lastSound = Date.now(); chime(); }
   }
 
+  // the live region is in the page before anything is said in it (a screen reader says changes to one it knew)
+  function liveRegion() {
+    let live = document.getElementById("rem-live");
+    if (!live && document.body) {
+      live = el("div", "sr-only");
+      live.id = "rem-live";
+      live.setAttribute("aria-live", "polite");
+      document.body.append(live);
+    }
+    return live || { textContent: "" };
+  }
+  liveRegion();
+
   // ---- OK ---------------------------------------------------------------------------------------------------------
-  async function ack(key) {
+  async function ack(key, host) {
     const it = items().find((x) => x.key === key);
     if (!it || !mayAck()) return;
-    st.quiet.set(key, serverNow() + snoozeMin() * 60);
+    // the chip goes: a keyboard's focus on it stays on its card or row (else on the page)
+    const a = document.activeElement;
+    if (host && a && a.classList && a.classList.contains("rem-chip") && host.contains(a) && host.tabIndex >= 0) host.focus();
+    const q = { until: serverNow() + snoozeMin() * 60 };
+    st.quiet.set(key, q);
     apply(true);
     try {
       await api("POST", "/api/cad/reminders/ack", { key, operator: operator() });
+      q.rev = cad.state && cad.state.rev;
     } catch (e) {
+      if (/has cleared/.test(e.message || "")) return;   // the state changed meanwhile: nothing left to OK
       st.quiet.delete(key);
       apply(true);
       UI.toast(e.message, "err");
@@ -153,7 +175,7 @@ window.Reminders = (() => {
     if (!chip && other && other !== host) return;        // another of its controls (a status, Follow): that only
     if (chip && chip.tagName === "BUTTON") e.stopPropagation();   // the chip's OK alone, not the card's own click
     const key = (chip && chip.dataset.key) || (host.querySelector(".rem-chip") || {}).dataset?.key || keyFor(host);
-    if (key) ack(key);
+    if (key) ack(key, host);
   }, true);       // capture: before the item's own click, which may draw it again (a card selected)
   function keyFor(host) {
     const now = serverNow(), due = dueNow(now);
@@ -182,6 +204,18 @@ window.Reminders = (() => {
     try { had = localStorage.getItem(PREF_KEY) !== null; } catch (_) { /* none */ }
     MePrefs.register("reminders", { get: () => ({ ...st.prefs }), apply: (v) => keepPrefs(v), hadLocal: had });
   }
+  // Browsers allow sound only after a gesture: the context is made (and woken) on the first one, so an unattended
+  // screen with the sound on can chime later
+  function unlock() {
+    if (!soundOn()) return;
+    try {
+      const C = window.AudioContext || window.webkitAudioContext;
+      if (!C) return;
+      st.audio = st.audio || new C();
+      if (st.audio.state === "suspended") st.audio.resume().catch(() => {});
+    } catch (_) { /* no sound here */ }
+  }
+  for (const ev of ["pointerdown", "keydown"]) document.addEventListener(ev, unlock, { capture: true, passive: true });
   function chime() {
     try {
       const C = window.AudioContext || window.webkitAudioContext;
