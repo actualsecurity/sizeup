@@ -299,6 +299,8 @@ def test_a_hub_names_the_model_and_context_and_a_loop_goes_to_aws(tmp_path, fake
         job = w.jobs[0]
         assert job["model"] == QWEN and "Command" in job["context"] and job["prompt"].endswith("Command.")
         assert ATC in job["plain"]
+        live = hub.app._worker_live("gpu-1")              # Settings > Station > STT workers: what it has loaded
+        assert live["models"] == [Q5, QWEN] and live["stt_state"] == {}
         # its text was a loop: discarded, AWS gave the text of record
         assert wait(lambda: row(hub, "FG1-7").get("text") == AWS_TEXT + ".", 30), row(hub, "FG1-7")
         assert wait(lambda: len(hub.app.stt_runs.of("FG1-7")) >= 2, 5)
