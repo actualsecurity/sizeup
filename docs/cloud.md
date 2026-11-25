@@ -1611,8 +1611,10 @@ The sources the radio pre-alerts push alerts from are HIGH at least, in the stat
 Each channel has its own speech-to-text model on the GPU workers (`sizeup/sttmodels.py`; the catalog is
 `tools/stt_worker/models.json` `stt_models`, the worker side is `tools/stt_worker/README.md`, Speech models).
 
-- **Which model:** Settings > Radios > Channels, per channel; else by its service: fire, EMS and police Qwen3-ASR-1.7B,
-  airband the ATC whisper (large-v3-turbo with the US ATC LoRA), anything else today's large-v3-turbo q5_0.
+- **Which model:** Settings > Radios > Channels, per channel; else today's large-v3-turbo q5_0 on every channel. The
+  live model never changes by itself: an admin switches a channel once the evidence is there (challenger scores).
+  Settings recommends by service (fire, EMS and police: Qwen3-ASR-1.7B; airband: the ATC whisper, large-v3-turbo with
+  the US ATC LoRA), and the workers load a model only once a channel uses it (or trials it as a challenger).
 - **Which models a worker runs:** every hello and state answer names the catalog (the hub's build commit and
   `models.json`'s SHA-256) and the models wanted, fire's first, then police, airband, then challengers. The worker loads
   them in that order while they fit its VRAM.

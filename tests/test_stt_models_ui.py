@@ -72,18 +72,18 @@ def test_a_channels_speech_model_auto_by_its_service_and_chosen(site):
         row = lambda key: pg.locator(f"li.tg-row[data-ckey='{key}']")        # noqa: E731
         sel = lambda key: row(key).locator("select.tg-mod")                 # noqa: E731
         sel("FG1").wait_for()
-        # Auto: its service's default (FG1 fire, the airband the ATC whisper, PD Dispatch police); a choice over it
-        assert sel("FG1").locator("option").first.inner_text() == f"Auto ({QWEN})" and sel("FG1").input_value() == ""
-        assert sel("Tower").locator("option").first.inner_text() == f"Auto ({ATC})"
-        assert sel("p25:mrrs:9211").locator("option").first.inner_text() == f"Auto ({QWEN})"
+        # Auto: today's whisper on every channel until an admin switches it (the recommendation in the hover); a choice
+        assert sel("FG1").locator("option").first.inner_text() == f"Auto ({Q5})" and sel("FG1").input_value() == ""
+        assert sel("Tower").locator("option").first.inner_text() == f"Auto ({Q5})"
+        assert sel("p25:mrrs:9211").locator("option").first.inner_text() == f"Auto ({Q5})"
         assert sel("tg:307").input_value() == Q8
         assert [o.get_attribute("value") for o in sel("FG1").locator("option").all()] == ["", Q5, Q8, QWEN, ATC]
         t = sel("tg:307").get_attribute("title")
         assert Q8 in t and "Context: off" in t and "(auto)" not in t
         assert "Call signs: Command" in sel("FG1").get_attribute("title")
         shot(pg, "#settings-radio-controls .tg-group", "channels-speech-model")
-        sel("FG1").select_option(Q5)
-        until(pg, lambda: site.cad.stt_models.model_for("FG1", "fire") == Q5, "FG1: the turbo q5")
+        sel("FG1").select_option(QWEN)
+        until(pg, lambda: site.cad.stt_models.model_for("FG1", "fire") == QWEN, "FG1: Qwen3-ASR")
         sel("tg:307").select_option("")
         until(pg, lambda: "model" not in site.cad.stt_models.settings().get("tg:307", {}), "tg:307 back to Auto")
         assert site.cad.stt_models.settings()["tg:307"] == {"context": "off"}
@@ -124,7 +124,7 @@ def test_the_workers_models_and_each_channels_context_and_call_signs(site):
         assert cat.locator("tr", has_text=QWEN).locator("td").all_inner_texts() == [QWEN, "llama-asr", "3.7 GB",
                                                                                    "fire · ems · police", "list · on"]
         assert cat.locator("tr", has_text=ATC).locator("td").nth(3).inner_text() == "air"
-        assert cat.locator("tr", has_text=Q5).first.locator("td").nth(3).inner_text() == "rest"
+        assert cat.locator("tr", has_text=Q5).first.locator("td").nth(3).inner_text() == "default"
         chans = m.locator("table").nth(1)
         fg1 = chans.locator("tr", has_text="FG1")
         assert fg1.locator("input").first.input_value() == "Command" and fg1.locator("select").first.input_value() == "default"
