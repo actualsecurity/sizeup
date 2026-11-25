@@ -340,6 +340,9 @@ POST /api/cad/settings/hub_errors         {action: set {key: on | per_signature 
 POST /api/cad/settings/department_units  {action: set {key: a feed's department entry code, value: the department,
                                           accepts?: true} | reset {key}}: a whole department paged, never a unit
                                           (#370; accepts: it accepts a call alone in 60 Control mode); admins
+POST /api/cad/settings/feed_types        {action: set {feed, code: MAIN | MAIN,SUB, type, subtype?} | reset {key:
+                                          "<feed>|<code>"}}: a feed's own type code mapped to ours, over the automatic
+                                          mapping (sizeup/cad/feedtypes.py; Settings > Lists > Feed types); admins
 POST /api/cad/settings/map_display        {action: set {key: detail_zoom | active_zoom | board_detail_zoom |
                                           board_active_zoom, value: a zoom} | reset {key}}: below it a rig is drawn small on
                                           the maps (#376, sizeup/cad/mapview.py); admins

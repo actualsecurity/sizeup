@@ -141,7 +141,8 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                call moves onto it and is dismissed (#365, _sweepable): untouched, no "possibly the same" note on
                another open incident, and its page matched again now takes this incident, for the same call
     stale      the station sends the ids still in each feed's snapshot ("source_seen"): an open report the feed no
-               longer lists is noted once on its incident and flagged in Settings > Station > Health
+               longer lists is noted once on its incident and flagged in Settings > Station > Health; a 60 Control call
+               with no live run still listed asks "close?" (automode.on_gone)
     address    a feed's or a page's location is stored normalised (normal_location): its streets as the gazetteer
                spells them, else suffixes and directions abbreviated, in proper case, an intersection "A Rd & B Ave",
                and its town ("12 Example Ave, Sample Village"; out of area too, from the feed's town token). Every
@@ -195,7 +196,7 @@ from collections import OrderedDict
 from statistics import median
 from typing import Callable
 
-from sizeup.cad import pagematch
+from sizeup.cad import feedtypes, pagematch
 from sizeup.cad.fuzzy import SNAP_MARGIN, STREET_SIM, fold, misread, name_sim, snap
 from sizeup.cad.store import OPEN, TZ, CadError
 from sizeup.dispatch import highway, near_marker, same_marker, split_joined
@@ -1315,6 +1316,12 @@ RUN_ID_DIGITS = 5
 EVENT_ID = re.compile(rf"([A-Za-z]\d{{{RUN_ID_DIGITS},}})(?:-(\d{{1,2}}))?")
 
 
+def county_type(data: dict | None) -> str:
+    """A feed report's own code beside our type: the adapter's extra "county_type" ("MAIN,SUB"), spaces folded."""
+    x = (data or {}).get("extra")
+    return " ".join(str(x.get("county_type") or "").split()) if isinstance(x, dict) else ""
+
+
 def feed_event_number(ref: str, data: dict | None = None) -> str:
     """The county event a feed's report is a run of ("F0000123" for "F0000123-2"); "" when it can't be told."""
     x = ((data or {}).get("extra") or {}).get("event_number")
@@ -1410,6 +1417,7 @@ class Sources:
         self._backfill_thread: threading.Thread | None = None
         with self.store.lock:
             self.store.db.executescript(SCHEMA)
+            self.store.db.executescript(feedtypes.SCHEMA)
             for table, col in (("source_health", "received REAL"), ("source_reports", "gone_at REAL"),
                                ("source_reports", "seen_at REAL"),
                                ("source_health", "bad_since REAL"), ("source_health", "ok_since REAL"),
@@ -1419,6 +1427,7 @@ class Sources:
                 if col.split()[0] not in have:
                     self.store.db.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
         self._towns_for = None
+        self._seen_cache: tuple = (None, [])        # feed_types_seen: (what it was worked out from, the rows)
         self._acting_logged: tuple | None = None   # (source, label) of the acting primary last logged
         self._started = clock()                    # a row silent since before this: unknown, not bad (on_health)
         try:
@@ -2045,7 +2054,7 @@ class Sources:
             raise CadError("no CAD feed on this event")
         d = json.loads(r["data"] or "{}")
         if field == "type":
-            typ, sub, note = self.cad.map_type(d.get("type") or "", r["label"])
+            typ, sub, note = self.feed_type(d, r["label"])
             if not typ:
                 raise CadError(f"{r['label']}'s type isn't one of ours: {d.get('type') or '(none)'}")
             f = {"type": typ, "subtype": sub, "type_note": note}
@@ -2160,7 +2169,7 @@ class Sources:
             if inc is None:
                 # a match is always the same place (match): attach, whoever made the incident and whatever its status
                 # (open), so a page that beat the feed gets the feed's report, not a duplicate
-                typ, sub = self.cad.map_type(data["type"], label)[:2] if data["type"] else ("", "")
+                typ, sub = self.feed_type(data, label)[:2] if data["type"] else ("", "")
                 inc, similar = self.match_all(ev.source, at, self._match_location(data["location"], data), data["units"],
                                               typ)
                 lag = PAGE_LAG_S if inc is not None and inc.get("_misheard") else SAME_CALL_S
@@ -2232,7 +2241,7 @@ class Sources:
         watch's Alert 1 pre-alert (sizeup/airport_watch.py standby: the open one, or one raised from it; never pushed:
         the county's details stay in the CAD), once per type it says; recorded here with no incident, so the event
         makes one when it becomes an Alert 2 / 3."""
-        typ, sub = (self.cad.map_type(data["type"], label)[:2] if data["type"] else ("", ""))
+        typ, sub = (self.feed_type(data, label)[:2] if data["type"] else ("", ""))
         if (typ, sub) != ("AIRPORT", "ALERT-1"):
             return False
         watch = getattr(self.cad, "airport_watch", None)
@@ -2272,7 +2281,7 @@ class Sources:
         return True
 
     def _create_feed(self, source: str, ref: str, data: dict, label: str) -> int:
-        typ, sub, note = self.cad.map_type(data["type"], label)
+        typ, sub, note = self.feed_type(data, label)
         loc = data["location"].strip()
         f = {"type": typ, "subtype": sub, "type_note": note, "address": shown_location(loc)}
         named = self._common_fields(loc, data, True)         # a place's name: its address, the name as the place
@@ -2401,7 +2410,7 @@ class Sources:
         if not mine or mine.lower() not in ours:
             return None, []
         disp = self._disp(data)
-        typ = self.cad.map_type(data["type"], label)[0] if data["type"] else ""
+        typ = self.feed_type(data, label)[0] if data["type"] else ""
         if disp is None or not typ:
             return None, []
         loc = str(data.get("location") or "")
@@ -2417,7 +2426,7 @@ class Sources:
                     or abs(t - disp) > CROSS_TOWN_S or d.get("closed")
                     or (d.get("times") or {}).get("in_service") is not None):
                 continue
-            if (self.cad.map_type(str(d.get("type") or ""), label)[0] if d.get("type") else "") != typ:
+            if (self.feed_type(d, label)[0] if d.get("type") else "") != typ:
                 continue
             q = cross_town_place(loc, str(d.get("location") or ""), mine, town)
             shared = units_match(units, split_units(drop_departments(d.get("units") or [])))
@@ -2568,17 +2577,30 @@ class Sources:
         now = self.clock()
         pre = label if auth else f"{label} (secondary)"
         fields: dict = {}
-        if new["type"] and (new["type"] != old["type"] or attach):
-            typ, sub, note = self.cad.map_type(new["type"], label)
+        code = county_type(new) or new["type"]
+        if code and (prev is None or code != (county_type(old) or old["type"])):
+            self._type_seen(new, code, label)
+        if new["type"] and (new["type"] != old["type"] or county_type(new) != county_type(old) or attach):
+            typ, sub, note = self.feed_type(new, label)
+            named = feedtypes.split(new["type"])[1] or feedtypes.split(county_type(new))[1]
+            if typ and typ == inc["type"] and not sub and inc["subtype"] and (not named or prev is None):
+                # a subtype the feed's code doesn't contradict (a page's, the feed naming no SUB): kept; a SUB the feed
+                # changed to one that names none of ours clears it (the line below says so)
+                sub, note = inc["subtype"], inc["type_note"]
             differs = bool(typ) and (typ, sub) != (inc["type"], inc["subtype"])
             if auth and differs and "type" in hand:
                 notes.append((now, f"{label}: type {new['type']} (kept the type set by hand)"))
-            elif not created:
+            elif not created and new["type"] != old["type"]:
                 notes.append((now, f"{pre}: type {new['type']}"))
             if auth and differs and "type" not in hand:
                 fields.update(type=typ, subtype=sub, type_note=note)
+            if (auth and feedtypes.is_miss(note) and "type" not in hand and typ == fields.get("type", inc["type"])
+                    and not fields.get("subtype", inc["subtype"])
+                    and not self.store.one("SELECT 1 AS x FROM events WHERE incident_id = ? AND text = ? LIMIT 1",
+                                           (iid, note[:2000]))):
+                notes.append((now, note))                    # "... subtype X not in Service's subtypes": once
         if ("type" not in fields and auth and "type" not in hand and not inc["type"]
-                and not self.cad.map_type(new["type"], label)[0]):
+                and not self.feed_type(new, label)[0]):
             # the incident has no type at all and the feed's type field gives none of ours: a comment that is a type
             # line gives it ("authority"). Never over a type already set, whoever set it
             typ, sub, note = self._comment_type(new["comments"], label)
@@ -2652,6 +2674,52 @@ class Sources:
                 for at, text in notes:
                     self.store._event(db, iid, "feed", text[:2000], at=at)
 
+    def feed_type(self, data: dict, label: str) -> tuple[str, str, str]:
+        """A feed report's type as ours (Cad.map_type): its type, its feed and its own code (extra "county_type")."""
+        return self.cad.map_type(str(data.get("type") or ""), label, source=str(data.get("source") or ""),
+                                 county=county_type(data))
+
+    def _type_seen(self, data: dict, code: str, label: str) -> None:
+        """A feed's code counted for Settings > Lists > Feed types (feedtypes.note_seen). Never fails the report."""
+        try:
+            with self.store.tx() as db:
+                feedtypes.note_seen(db, str(data.get("source") or ""), code, label, str(data.get("type") or ""),
+                                    self.clock())
+        except FencedWrite:
+            raise                                            # not the leader: the report isn't ours to apply either
+        except Exception as e:  # noqa: BLE001 - only the Settings list
+            self.log(f"incident sources: {label}: feed type not counted ({type(e).__name__})")
+
+    def feed_types_seen(self) -> list[dict]:
+        """Settings > Lists > Feed types: the codes seen lately that nothing maps fully (no type of ours, or our type
+        with no subtype for the code's SUB when that type has subtypes and no exact row says "none"), newest first, with
+        what they map to now. Worked out again only when a code is seen, the rows or the lists change (every Settings
+        read asks)."""
+        L = self.cad.lists
+        rows = self.cad._feed_type_rows()
+        mark = self.store.one("SELECT COUNT(*) AS n, MAX(last_at) AS at, TOTAL(n) AS events FROM feed_types_seen")
+        ed = getattr(self.cad, "settings", None)
+        key = (tuple(mark.values()) if mark else (), ed.settings_rev() if ed is not None else id(L),
+               int(self.clock() // 3600))
+        if self._seen_cache[0] == key:
+            return [dict(r) for r in self._seen_cache[1]]
+        since = self.clock() - feedtypes.SEEN_DAYS * 86400
+        out = []
+        for r in self.store.q("SELECT * FROM feed_types_seen WHERE last_at >= ? ORDER BY last_at DESC", (since,)):
+            hit = feedtypes.lookup(rows, r["source"], r["code"], L)
+            if hit is not None and (hit[2] or hit[1]):
+                continue                                     # the department's row says it all
+            typ, sub, _ = self.feed_type({"type": r["sent"], "source": r["source"],
+                                          "extra": {"county_type": r["code"]}}, r["label"])
+            if typ and (sub or not feedtypes.split(r["code"])[1] or not L.subtypes_for(typ)):
+                continue                                     # mapped in full now (or a type with no subtypes)
+            out.append({"source": r["source"], "label": r["label"], "code": r["code"], "n": r["n"],
+                        "last_at": r["last_at"], "type": typ, "subtype": sub, "state": "partly" if typ else "unmapped"})
+            if len(out) >= feedtypes.SHOWN:
+                break
+        self._seen_cache = (key, out)
+        return [dict(r) for r in out]
+
     def _comment_type(self, comments, label: str) -> tuple[str, str, str]:
         """(TYPE, SUBTYPE, note) from a feed's comment that is a type line (dispatch_lines: "~GENERAL FIRE ALARM")
         and a type of ours as Cad.map_type reads it. ("", "", "") without one."""
@@ -2692,6 +2760,7 @@ class Sources:
         listed = {str(x) for x in ids}
         label = str(d.get("label") or src)[:60]
         now, n = self.clock(), 0
+        gone: list[int] = []
         with self._lock:
             rows = self.store.q(f"SELECT r.ref, r.incident_id, r.data, r.gone_at FROM source_reports r JOIN incidents i "
                                 f"ON i.id = r.incident_id WHERE r.source = ? AND r.merged_into = '' AND i.status IN "
@@ -2706,9 +2775,18 @@ class Sources:
                         continue
                     db.execute("UPDATE source_reports SET gone_at = ? WHERE source = ? AND ref = ?", (now, src, r["ref"]))
                     self.store._event(db, r["incident_id"], "feed", f"{label}: no longer listed (open here)", at=now)
+                    if (json.loads(r["data"] or "{}").get("times") or {}).get("in_service") is None:
+                        gone.append(r["incident_id"])    # (one in service: its own close is under way)
                     n += 1
         if n:
             self.log(f"incident sources: {label}: {n} open no longer listed")
+        auto = getattr(self.cad, "auto", None)
+        for iid in dict.fromkeys(gone):                      # (outside this lock: automation takes its own)
+            if auto is not None and not self.store.one(
+                    "SELECT 1 AS x FROM source_reports WHERE incident_id = ? AND source != ? AND merged_into = '' AND "
+                    "gone_at IS NULL AND NOT json_extract(data, '$.closed') AND "
+                    "json_extract(data, '$.times.in_service') IS NULL", (iid, PAGING)):
+                auto.on_gone(iid, now, label)                # no live run of it still listed: a person closes it
         return n
 
     # -- the paging decoder -------------------------------------------------------------------------------------------
@@ -3754,7 +3832,7 @@ class Sources:
             use = {}
             h = hand.get(inc["id"], set())
             if "type" in h and d.get("type"):
-                typ, sub, _ = self.cad.map_type(d["type"], r["label"])
+                typ, sub, _ = self.feed_type(d, r["label"])
                 if typ and (typ, sub) != (inc["type"], inc["subtype"]):
                     use["type"] = d["type"]
             loc = (d.get("location") or "").strip()

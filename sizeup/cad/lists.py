@@ -127,6 +127,21 @@ def key(typ: str, subtype: str = "") -> str:
     return f"{typ}/{subtype}" if subtype else typ
 
 
+def _squash(s) -> str:
+    """'Co-Resd ' -> 'CORESD': letters and digits only, upper case (Lists.match_subtype)."""
+    return re.sub(r"[^A-Z0-9]", "", str(s or "").upper())
+
+
+def _stems(w: str) -> set[str]:
+    """A word and its simple singular: 'SPRINKLERS' -> {'SPRINKLERS', 'SPRINKLER'}; 'BOXES' -> also 'BOX'."""
+    out = {w}
+    if len(w) > 3 and w.endswith("S"):
+        out.add(w[:-1])
+        if w.endswith("ES"):
+            out.add(w[:-2])
+    return out
+
+
 @dataclass
 class Lists:
     event_types: tuple[dict, ...]            # {"code", "name", "color"}
@@ -266,6 +281,39 @@ class Lists:
         """The subtypes a type allows now: its list in type_subtypes, active ones only. A type listed
         with none, or not in the map at all, takes no subtype."""
         return tuple(s for s in self.type_subtypes.get(typ, ()) if s in self.subtype_codes)
+
+    def match_subtype(self, typ: str, said: str) -> tuple[str, tuple[str, ...]]:
+        """A feed's or a page's subtype word under one of our types -> (the subtype when exactly one of the type's own
+        matches, every match). Matched against each allowed subtype's code and name, case, spaces and punctuation
+        aside: the same first, else a simple plural ("SPRINKLERS"), else one the short form of the other, 4 letters
+        and half its length at least ("SPRINK", "APPLIANCE"; never "COMMUNICATIONS" for COMM). Only the type's own subtypes: never another type's."""
+        w = _squash(said)
+        subs = self.subtypes_for(typ) if typ in self.type_codes else ()
+        if not w or not subs:
+            return "", ()
+        keys = {s: {_squash(s), _squash(self.name("event_subtypes", s))} - {""} for s in subs}
+        for same in (lambda a, b: a == b, lambda a, b: bool(_stems(a) & _stems(b)),
+                     lambda a, b: (min(len(a), len(b)) >= 4 and 2 * min(len(a), len(b)) >= max(len(a), len(b))
+                                   and (a.startswith(b) or b.startswith(a)))):
+            hits = tuple(s for s in subs if any(same(w, k) for k in keys[s]))
+            if hits:
+                return (hits[0] if len(hits) == 1 else ""), hits
+        return "", ()
+
+    def subtypes_named(self, typ: str, text: str) -> tuple[str, ...]:
+        """The subtypes of one of our types a page's words name ("... for a sprinkler" -> SPRINK under a type that
+        allows it): each allowed subtype's name, or its code when that is a word of 4 letters or more, as whole words
+        (a plural too). Never another type's."""
+        t = " " + " ".join(re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).split()) + " "
+        subs = self.subtypes_for(typ) if typ in self.type_codes else ()
+        out = []
+        for s in subs:
+            forms = {" ".join(re.sub(r"[^a-z0-9]+", " ", self.name("event_subtypes", s).lower()).split())}
+            if re.fullmatch(r"[A-Z]{4,}", s):
+                forms.add(s.lower())
+            if any(f and re.search(rf" {re.escape(f)}(?:e?s)? ", t) for f in forms):
+                out.append(s)
+        return tuple(out)
 
     def map_gaps(self) -> list[str]:
         """What the type -> subtype map is missing: an active type with no entry (it takes no subtype

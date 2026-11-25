@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Callable
 
 from sizeup import polly, sourcekeys, tiers
-from sizeup.cad import airport, commonplaces, dispatcher, eta, export, mapview, radiofolders, runcards
+from sizeup.cad import airport, commonplaces, dispatcher, eta, export, feedtypes, mapview, radiofolders, runcards
 from sizeup.cad.activity import Activity
 from sizeup.cad.prefs import Prefs
 from sizeup.cad.alarms import Alarms
@@ -2776,6 +2776,10 @@ class Cad:
                 sub, note = "", note or f"subtype heard as {sub}, not one for {self.lists.type_label(typ)}: pick the subtype"
             except ValueError:                         # a data file without that code: leave it to the operator
                 typ, sub, note = "", "", note or f"type heard: {inc.incident_type}"
+        if typ and not sub:                            # "... for a sprinkler": the one subtype of the type it names
+            named = self.lists.subtypes_named(typ, self._page_words(inc, heard, cross, geo.get("label") or ""))
+            if len(named) == 1:
+                sub, note = named[0], ""
         raw = (address or "")[:200]                    # matched as it is (sources.match_address); stored normalised
         f = {"type": typ, "subtype": sub, "type_note": note, "address": self._page_address(raw, geo if sure else {}, towns),
              "address_raw": raw, "cross_street": cross[:200], "remarks": remarks,
@@ -2961,11 +2965,38 @@ class Cad:
             fill = {"type": typ, "subtype": sub, "type_note": f.get("type_note") or ""}
         elif typ and sub and typ == cur["type"] and not cur["subtype"]:
             fill = {"subtype": sub, "type_note": ""}
+        elif cur["type"] and not cur["subtype"] and (not typ or typ == cur["type"]):
+            # the feed's type with no subtype, the page's words naming exactly one of that type's subtypes ("... for a
+            # sprinkler" on a Service call); never another type's
+            named = self.lists.subtypes_named(cur["type"], self._page_words(inc, f.get("address_raw") or "",
+                                                                             f.get("cross_street") or "",
+                                                                             f.get("geo_label") or "", cur))
+            if len(named) == 1:
+                fill = {"subtype": named[0], "type_note": ""}
         if fill and cur["status"] in ("queued", "pending", "active") and "type" not in self.sources.manual(iid):
             try:
                 self.store.update_incident(iid, fill, operator="Paging", log=False)
             except (CadError, ValueError):
                 pass
+
+    @staticmethod
+    def _page_words(inc, *places) -> str:
+        """A page's words for its type: each clause after "respond to", "for a(n)", "report of" (up to a comma, a
+        number or "at", "on", "in" ...: never the department's name before it, nor the address after it), the words of
+        its location left out too (the address and cross streets heard, the map's reading; an incident's): "Water St"
+        never names a Water subtype."""
+        from sizeup.dispatch import RESPOND
+        drop = set()
+        for p in places:
+            for v in ((p.get("address"), p.get("address_raw"), p.get("cross_street")) if isinstance(p, dict) else (p,)):
+                drop |= set(re.findall(r"[a-z0-9]+", str(v or "").lower()))
+        words: list[str] = []
+        for text in getattr(inc, "page_text", None) or []:
+            t = str(text).lower()
+            for m in RESPOND.finditer(t):
+                clause = re.split(r"[,.;:]|\d|\b(?:at|on|in|near|across|between|cross|time)\b", t[m.end():], maxsplit=1)[0]
+                words += re.findall(r"[a-z]+", clause)[:8]
+        return " ".join(w for w in words if w not in drop)
 
     def _create_from_page(self, data: dict) -> int:
         """A page's queued event (from_monitor's fields)."""
@@ -2981,23 +3012,63 @@ class Cad:
         self._prealert_match(self.store.incident(iid))
         return iid
 
-    def map_type(self, raw: str, label: str = "") -> tuple[str, str, str]:
-        """An external feed's event type -> (TYPE, SUBTYPE, note): one of our codes as it is ("STRU", "ALARM/COMM"),
-        else a type moved under another as a subtype (moved_type: "DRILL" once Drill is retired and a Drill subtype of
-        Notification), else read like a page's type (runcards.from_page); one nobody maps leaves the type to the
-        operator."""
-        raw = (raw or "").strip()
-        if not raw:
+    def map_type(self, raw: str, label: str = "", source: str = "", county: str = "") -> tuple[str, str, str]:
+        """An external feed's event type -> (TYPE, SUBTYPE, note) (sizeup/cad/feedtypes.py): the department's Feed types
+        row for the feed's own code (county: the adapter's extra "county_type", else raw) first; else automatically
+        (_map_auto). Our TYPE with no subtype and a SUB in the feed's code ("TYPE,SUB", or the county's "MAIN,SUB"
+        beside our TYPE): the one subtype of that TYPE it names (Lists.match_subtype); none or two: no subtype, noted
+        (feedtypes.miss_note), never another type's."""
+        raw, county = (raw or "").strip(), " ".join(str(county or "").split())
+        L = self.lists
+        rows = self._feed_type_rows() if source else {}
+        hit = feedtypes.lookup(rows, source, county or raw, L)
+        if hit is not None and (hit[2] or hit[1]):
+            return hit[0], hit[1], ""
+        if hit is not None:
+            typ, sub, note = hit[0], "", ""
+        elif not raw:
             return "", "", ""
+        else:
+            typ, sub, note = self._map_auto(raw, label)
+        said = feedtypes.split(raw)[1] or feedtypes.split(county)[1]
+        if typ and not sub and said and L.subtypes_for(typ):
+            got, hits = L.match_subtype(typ, said)
+            if got:
+                return typ, got, ""
+            if not hits and hit is None:                 # the words read like a page's, under this same type only
+                t2, s2, _ = self._map_words(raw if feedtypes.split(raw)[1] else county, label)
+                if t2 == typ and s2:
+                    return typ, s2, ""
+            note = feedtypes.miss_note(label, said, L.name("event_types", typ), hits)
+        return typ, sub, note
+
+    def _feed_type_rows(self) -> dict:
+        ed = getattr(self, "settings", None)
+        try:
+            return ed.section(feedtypes.SECTION) if ed is not None else {}
+        except Exception:  # noqa: BLE001 - the automatic mapping goes on
+            return {}
+
+    def _map_auto(self, raw: str, label: str = "") -> tuple[str, str, str]:
+        """One of our codes as it is ("STRU", "ALARM/COMM"), else our TYPE with a SUB it doesn't allow (the subtype left
+        to map_type), else a type moved under another as a subtype (moved_type: "DRILL" once Drill is retired and a
+        Drill subtype of Notification), else read like a page's type (runcards.from_page); one nobody maps leaves the
+        type to the operator."""
         typ, _, sub = re.sub(r"\s*,\s*", "/", raw.upper(), count=1).partition("/")   # "TYPE,SUBTYPE" too (#365)
         try:
             self.lists.check_type(typ.strip(), sub.strip(), required=True)
             return typ.strip(), sub.strip(), ""
         except ValueError:
             pass
+        if typ.strip() in self.lists.type_codes:          # our TYPE, a SUB of the feed's own: map_type matches it
+            return typ.strip(), "", ""
         moved = self.moved_type(typ)
         if moved[0]:
             return moved[0], moved[1], f"type from {label or 'the feed'}: {raw}"[:200] if sub.strip() else ""
+        return self._map_words(raw, label)
+
+    def _map_words(self, raw: str, label: str = "") -> tuple[str, str, str]:
+        """A feed's type read like a page's (runcards.from_page)."""
         from sizeup.dispatch import parse
         d = parse(f"respond to {raw}")
         typ, sub, note = runcards.from_page(d.incident_type, d.category, re.sub(r"[/,]", " ", raw))
