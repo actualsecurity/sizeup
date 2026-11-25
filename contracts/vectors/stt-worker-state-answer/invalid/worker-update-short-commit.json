@@ -1,0 +1,5 @@
+{
+  "ok": true,
+  "pool_on": true,
+  "worker_update": {"mode": "pin", "commit": "3b7e1f0", "sha256": "c4d1e8a07b2f9e3d6a5c1b0f8e7d2a9c3b6f5e4d1a0c9b8e7f6d5c4b3a2e1f0d"}
+}

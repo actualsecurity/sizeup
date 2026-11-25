@@ -1,4 +1,5 @@
 {
   "ok": true,
-  "pool_on": true
+  "pool_on": true,
+  "worker_update": {"mode": "auto"}
 }

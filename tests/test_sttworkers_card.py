@@ -22,6 +22,10 @@ from tests.test_roles import CASEY, JORDAN, people
 from tests.test_stations_card import Access, browser_page
 
 SHOTS = os.environ.get("SIZEUP_SHOTS", "")
+RUNS = "4f1c9e2a7b3d8c6e0a5f2b9d1c7e3a8f6b0d4c2e9a1f7b3c5d8e0a2f4b6c9d1e"     # made-up worker.py hashes
+WANTED = "c4d1e8a07b2f9e3d6a5c1b0f8e7d2a9c3b6f5e4d1a0c9b8e7f6d5c4b3a2e1f0d"
+UPDATE = {"update": {"sha256": RUNS, "commit": "", "auto": True, "state": f"staged {WANTED[:12]}, waiting: gaming",
+                     "bad": []}, "update_wanted": WANTED, "update_current": False}
 
 
 class FakeHealth:
@@ -34,7 +38,7 @@ class FakeHealth:
                 "fallbacks": {"unclaimed": 3, "lease": 1, "released": 0, "no_worker": 0, "error": 0}, "refused_late": 1,
                 "workers": [{"id": "gpu-1", "state": "online", "model": "ggml-large-v3-turbo-q5_0.bin",
                              "gpu": {"util_pct": 31, "mem_used_mb": 1650, "mem_total_mb": 12288}, "jobs_h": 412,
-                             "lost": 1, "seen": now - 2, "seen_s": 2},
+                             "lost": 1, "seen": now - 2, "seen_s": 2, **UPDATE},
                             {"id": "station:st-north", "kind": "station", "state": "paused", "model": "small.en-q5_1",
                              "load": {"own": 6, "cpu_pct": 91.0, "service_s": 14.2, "why": "its own clips first"},
                              "gpu": {}, "jobs_h": 38, "lost": 0, "seen": now - 1, "seen_s": 1},
@@ -58,7 +62,7 @@ def site(tmp_path):
     people(cad)
     reg = WorkerRegistry(MonitorDb(tmp_path / "hub.sqlite"), log=lambda m: None)
     cad.stt_workers = reg
-    cad.stt_workers_live = lambda wid: {"state": "online", "model": "large-v3-turbo-q5_0", "seen": time.time()}
+    cad.stt_workers_live = lambda wid: {"state": "online", "model": "large-v3-turbo-q5_0", "seen": time.time(), **UPDATE}
     cad.cloud = lambda: {"role": "hub", "state": "ok", "word": "", "detail": "connected"}
     ws = WebServer("127.0.0.1", 0, {"timezone": "America/New_York"}, lambda: {"time": 0}, lambda cid: None,
                    lambda iid: False, cad=CadApi(cad), access=Access(), role="hub", station_health=FakeHealth())
@@ -122,6 +126,8 @@ def test_health_shows_the_gpu_workers_and_the_latency_by_channel(site):
         assert panel.locator("td.hl-bad", has_text="17.5 s").is_visible()          # a pre-alert channel over target
         assert panel.get_by_text("st-north (station)").is_visible()                # a station's whisper (#639 phase 2)
         assert panel.get_by_text("6 own · CPU 91% · 14.2 s/clip").is_visible()
+        ver = panel.locator("td.hl-warn", has_text=RUNS[:12])                       # a GPU worker behind the hub's version
+        assert ver.is_visible() and f"Hub: {WANTED[:12]}" in ver.get_attribute("title")
         if SHOTS:                                  # (the panel scrolls: from the GPU workers' heading down)
             head = panel.get_by_text("GPU workers (hub)")
             pg.evaluate("el => el.scrollIntoView({block: 'start'})", head.element_handle())
@@ -129,6 +135,41 @@ def test_health_shows_the_gpu_workers_and_the_latency_by_channel(site):
             Path(SHOTS).mkdir(parents=True, exist_ok=True)
             pg.screenshot(path=str(Path(SHOTS) / "health-gpu-workers.png"),
                           clip={"x": box["x"] - 8, "y": box["y"] - 8, "width": 980, "height": 470})
+        assert pg.errors == []
+    finally:
+        browser.close()
+        pw.stop()
+
+
+def test_an_admin_holds_pins_and_frees_a_workers_self_update(site):
+    site.reg.add("gpu-1", "Gaming PC")
+    pw, browser, pg = browser_page(site, CASEY)
+    try:
+        pg.goto(site.base + "/cad#settings/station/workers")
+        card = pg.locator("#s-station-workers .card")
+        row = card.locator("tr", has_text="Gaming PC")
+        row.locator("span.mono.hl-warn", has_text=RUNS[:12]).wait_for()          # behind the hub's version
+        sel = row.locator("select")
+        assert sel.input_value() == "auto"
+
+        def mode(want):                    # (the page's requests go through Playwright's route: wait in Playwright)
+            deadline = time.time() + 5
+            while site.reg.update_of("gpu-1") != want and time.time() < deadline:
+                pg.wait_for_timeout(100)
+            assert site.reg.update_of("gpu-1") == want
+        sel.select_option("hold")
+        mode({"mode": "hold"})
+        sel.select_option("pin")
+        card.locator("label", has_text="Commit").locator("input").fill("3b7e1f0c9a2d4e6b8c0a1f3e5d7b9c2a4e6f8a0b")
+        card.locator("label", has_text="SHA-256").locator("input").fill(WANTED)
+        shot(pg, "#s-station-workers", "sttworkers-pin")
+        card.get_by_role("button", name="Pin", exact=True).click()
+        mode({"mode": "pin", "commit": "3b7e1f0c9a2d4e6b8c0a1f3e5d7b9c2a4e6f8a0b", "sha256": WANTED})
+        pg.wait_for_function("[...document.querySelectorAll('#s-station-workers select option')].some(o => o.textContent === 'Pin 3b7e1f0')")
+        sel.select_option("auto")
+        mode({"mode": "auto"})
+        audit = json.dumps(site.cad.settings.audit_log("system"))
+        assert "stt workers/gpu-1/update" in audit
         assert pg.errors == []
     finally:
         browser.close()

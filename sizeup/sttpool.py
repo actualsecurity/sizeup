@@ -129,6 +129,7 @@ class Worker:
     state: str = "online"
     model: str = ""
     version: str = ""
+    update: dict = field(default_factory=dict)  # a GPU worker's self-update: {sha256, commit, auto, state, bad}
     gpu: dict = field(default_factory=dict)
     seen: float = 0.0
     polling: int = 0
@@ -249,7 +250,8 @@ class Pool:
     # -- workers ---------------------------------------------------------------------------------------------------
 
     def seen(self, wid: str, state: str | None = None, model: str | None = None, gpu: dict | None = None,
-             version: str | None = None, kind: str | None = None, load: dict | None = None) -> Worker:
+             version: str | None = None, kind: str | None = None, load: dict | None = None,
+             update: dict | None = None) -> Worker:
         """A worker's request (hello, state, claim): its state and when it was last seen. A worker that is no longer
         online hands its pre-alert jobs back at once (the rest run to their lease: it may finish them). None: a worker
         whose token no longer stands (revoked meanwhile)."""
@@ -277,6 +279,8 @@ class Pool:
                 w.model = str(model)[:80]
             if version is not None:
                 w.version = str(version)[:40]
+            if isinstance(update, dict):
+                w.update = dict(update)
             if isinstance(gpu, dict):
                 w.gpu = {k: gpu[k] for k in ("util_pct", "mem_used_mb", "mem_total_mb", "others", "name")
                          if isinstance(gpu.get(k), (int, float, str)) and not isinstance(gpu.get(k), bool)}
@@ -623,6 +627,7 @@ class Pool:
                 mine = [x for x in hour if x[5] == w.id]
                 workers.append({"id": w.id, "kind": w.kind, "load": dict(w.load),
                                 "state": self.state_of(w, now), "model": w.model, "version": w.version,
+                                "update": dict(w.update),
                                 "gpu": dict(w.gpu), "seen": w.seen, "seen_s": round(now - w.seen, 1),
                                 "jobs_h": len(mine), "done": w.done, "lost": w.lost, "leases": len(w.leases),
                                 "cool_until": w.cool_until if w.cool_until > now else None})
