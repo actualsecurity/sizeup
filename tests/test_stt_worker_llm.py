@@ -1,4 +1,4 @@
-"""The GPU worker's local LLM (tools/stt_worker/worker.py: llama.cpp's llama-server, the hub's infer lane in
+"""The GPU worker's local LLM (deploy/stt-worker/worker.py: llama.cpp's llama-server, the hub's infer lane in
 sizeup/cloud/infer.py) against a fake hub and a fake llama-server on 127.0.0.1: the config's loopback rules, the
 pinned model, the constrained request, a pre-alert clip first, gaming (abort, hand back, llama-server stopped after a
 while), and that no prompt or answer ever reaches a log. Every prompt and answer is invented ("Example Road")."""
@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler
 
 import pytest
 
-import tools.stt_worker.worker as W
+from tests.stt_worker_module import W
 from tests.test_stt_worker import (API, CF_ID, CF_SECRET, TOKEN, FakeHub, FakeProc, FakeSmi, FakeWhisper, _serve,
                                    make_cfg, no_smi, running, tone_wav, wait_for)
 

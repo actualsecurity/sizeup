@@ -1,4 +1,4 @@
-"""The GPU STT worker (tools/stt_worker/worker.py, #639) against a fake hub and a fake whisper-server, both on
+"""The GPU STT worker (deploy/stt-worker/worker.py, #639) against a fake hub and a fake whisper-server, both on
 127.0.0.1. The hub side follows the worker API in #639: hello / state / claim (long poll) / audio / extend /
 complete / release, leases that expire, 401 with a reason, 503 with Retry-After. The whisper-server answer has the
 shape of whisper.cpp's server.cpp verbose_json (task, language, duration, text, segments with tokens, words with
@@ -32,7 +32,7 @@ from pathlib import Path
 
 import pytest
 
-import tools.stt_worker.worker as W
+from tests.stt_worker_module import W
 
 WORKER_PY = Path(W.__file__)
 SECRET = secrets.token_urlsafe(32)                 # a fresh one per run: the leak checks look for it
@@ -1361,10 +1361,18 @@ def test_the_readme_pins_this_worker_py():
     import hashlib
     import re
     readme = (WORKER_PY.parent / "README.md").read_text()
-    m = re.search(r"raw\.githubusercontent\.com/actualsecurity/sizeup/([0-9a-f]{40})/tools/stt_worker/worker\.py", readme)
-    assert m, "the README downloads worker.py from a pinned commit"
+    m = re.search(r"raw\.githubusercontent\.com/actualsecurity/sizeup/([0-9a-f]{40})/deploy/stt-worker/worker\.py", readme)
+    assert m, "the README downloads worker.py from a pinned commit, at its path from the move on"
     digest = hashlib.sha256(WORKER_PY.read_bytes()).hexdigest().upper()
     assert digest in readme, f"README: worker.py's SHA256 is now {digest} (pin the commit that has it)"
+    import shutil
+    import subprocess
+    git = shutil.which("git")
+    if git:                                # (a shallow checkout, as CI's, may not have the commit)
+        r = subprocess.run([git, "show", f"{m.group(1)}:deploy/stt-worker/worker.py"], cwd=WORKER_PY.parent,
+                           capture_output=True)
+        if r.returncode == 0:
+            assert hashlib.sha256(r.stdout).hexdigest().upper() == digest, "the pinned commit has another worker.py"
 
 
 def test_the_readme_task_runs_as_the_user_and_can_be_checked():

@@ -1,5 +1,5 @@
 """Local LLM inference on the GPU workers (#639's pool, its own lane): a short JSON classification asked of the model a
-worker serves next to its whisper (tools/stt_worker: llama.cpp's llama-server on 127.0.0.1), never a cloud model.
+worker serves next to its whisper (deploy/stt-worker: llama.cpp's llama-server on 127.0.0.1), never a cloud model.
 
 The contract (the intel engine's, sizeup/intel; it owns the task names, the prompts and the schemas):
 

@@ -32,6 +32,10 @@ jobs:
         shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
+      - name: "The GPU worker as installed before its move (tests/test_stt_worker_move.py: its self-update across it)"
+        # f13acff2: the installer the first worker came from; 39c4de4b: the worker.py it pins. The shallow checkout
+        # hasn't them; one commit each, no history
+        run: git fetch --no-tags --depth=1 origin f13acff29be3623cfd4f9410300c1886364ac817 39c4de4b155d1a03db14168c66dcb57954f0ae12
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"

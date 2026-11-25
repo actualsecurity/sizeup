@@ -6,7 +6,7 @@
   Asks its questions first (the local LLM, the hub URL, the three secrets), then downloads, checks and registers the
   task without further input.
 
-  - Every download is pinned: URL, size and SHA-256 (the $PinsJson below is tools/stt_worker/pins.json). A file is
+  - Every download is pinned: URL, size and SHA-256 (the $PinsJson below is deploy/stt-worker/pins.json). A file is
     used only after its hash matched; a mismatch deletes it and stops.
   - The secrets are read hidden (Read-Host -AsSecureString) and stored only as user environment variables, as in the
     README. They are never printed, logged or written anywhere else.
@@ -36,7 +36,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-# tools/stt_worker/pins.json, verbatim (tests/test_stt_worker_install.py keeps the two the same)
+# deploy/stt-worker/pins.json, verbatim (tests/test_stt_worker_install.py keeps the two the same)
 $PinsJson = @'
 {
   "_what": "Every download of the GPU STT worker's Windows setup: URL, size and SHA-256. README.md and install.ps1 (its $PinsJson) must say the same (tests/test_stt_worker_install.py).",
@@ -56,9 +56,9 @@ $PinsJson = @'
     },
     "worker_py": {
       "what": "worker.py (first install; it updates itself afterwards)",
-      "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/d6456282285af2485473ca8a7ff8806498aabf12/tools/stt_worker/worker.py",
-      "bytes": 201621,
-      "sha256": "3D34FC01CCE69B8E4F65BDA7469365F9B9C408460DF254D9B5D8F96E835E40D2"
+      "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/ba21b4b14c3458e6ce3ee737153904b83aa86aec/deploy/stt-worker/worker.py",
+      "bytes": 219298,
+      "sha256": "4B056B689C7EB829E2E128795DB337B1693F823865677741B5D193227C780B87"
     },
     "llama_zip": {
       "what": "llama.cpp b12728, CUDA 12.4 (llama-server.exe; Qwen3-ASR's audio needs b12643 or later)",
@@ -90,7 +90,7 @@ $PinsJson = @'
 
 # worker.toml (README step 5); relative paths are from the folder worker.toml is in
 $TomlStt = @'
-# written by install.ps1 (tools/stt_worker/README.md, step 5); relative paths are from this folder
+# written by install.ps1 (deploy/stt-worker/README.md, step 5); relative paths are from this folder
 hub_url = "{{HUB_URL}}"
 model = "large-v3-turbo-q5_0"
 # the worker starts whisper-server itself, restarts it when it exits, and knows its pid (its GPU use isn't a game)
