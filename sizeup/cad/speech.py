@@ -137,7 +137,7 @@ def highways(text: str) -> str:
 def ranges(text: str) -> str:
     """A building's range said as one: "14-16 Sample Ave" -> "fourteen to sixteen Sample Ave"."""
     out, at = [], 0
-    for f in find_ranges(text):
+    for f in find_ranges(text, address=True):          # (any street's words after it: "14-16 The Crescent")
         if f.spoken:                                       # "14 to 16" already: the numbers are said as they come
             continue
         r = f.range

@@ -79,6 +79,9 @@ def test_a_range_written_or_said(text, want):
     "district 12-14 Sample Ave",
     "two to four story building on Sample Avenue",
     "a 2-4 story building on Sample Avenue",
+    "Ladder 31 2 to 4 Sample Avenue",             # a number right before it: a list
+    "60 control 2 to 4 Sample Ave",
+    "E 60 to 62 Sample Ave",
 ])
 def test_not_a_range(text):
     assert hr.find(text) == []
@@ -259,6 +262,8 @@ def test_the_gazetteer_places_a_range_at_its_ends_points(gaz):
     assert m.precision == "exact" and m.lon == pytest.approx(lon_of(16), abs=1e-6) and m.label.startswith("16-18 ")
     m = gaz.geocode(f"18-20 Sample Ave, {TOWN}")                                        # no 18: 20's, never no point
     assert m.precision == "exact" and m.lon == pytest.approx(lon_of(20), abs=1e-6) and m.label.startswith("18-20 ")
+    m = gaz.geocode(f"14 - 16 Sample Ave, {TOWN}")                                      # spaced: never 1416
+    assert m.house_number == "14-16"
     m = gaz.geocode(f"10-200 Sample Ave, {TOWN}")                                       # no range: 10, as before
     assert m.house_number == "10" and m.lon == pytest.approx(lon_of(10), abs=1e-6)
 
@@ -359,6 +364,7 @@ def test_the_radio_log_hears_either_end():
     ("14-16 Sample Ave", "Fourteen to sixteen Sample Ave"),
     ("149-51 Example St", "One forty-nine to one fifty-one Example St"),
     ("14-16A Sample Ave", "Fourteen to sixteen A Sample Ave"),
+    ("14-16 The Crescent", "Fourteen to sixteen The Crescent"),
 ])
 def test_the_voice_says_to(written, said):
     assert words(written) == said

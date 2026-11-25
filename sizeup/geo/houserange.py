@@ -87,7 +87,7 @@ NOT_AFTER = {"exit", "exits", "interchange", "mm", "mp", "marker", "milepost", "
              "lot", "bldg", "building", "time", "box", "channel", "tac", "code", "number", "no", "phone", "callback",
              "between", "ages", "age", "aged", "out", "station", "stations", "company", "co", "district", "zone",
              "zones", "post", "patrol", "ems", "level", "levels", "story", "stories", "floors", "cars", "radio",
-             "talkgroup", "group", "boxes", "sector", "beat"}
+             "talkgroup", "group", "boxes", "sector", "beat", "control", "e", "l", "r", "tl", "tw", "sq"}
 # words that are never part of a street's name between a range and its suffix: "2 to 4 story building on Sample
 # Avenue", "20 to 30 people on Sample Ave", "4 to 6 minutes Sample St" are no ranges
 FILLER = {"on", "at", "of", "in", "for", "the", "a", "an", "to", "and", "or", "by", "near", "from", "with", "into",
@@ -160,8 +160,9 @@ def find(text: str, address: bool = False) -> list[Found]:
         glued_before = prev is not None and prev.end() == toks[i].start() and (prev.group(0) in "-./:"
                                                                                or prev.group(0)[-1:].isalpha())
         after_word = prev is not None and prev.group(0).lower() in NOT_AFTER
-        listed = (prev is not None and prev.group(0).lower() in (",", "and", "&") and i >= 2
-                  and (toks[i - 2].group(0).isdigit() or toks[i - 2].group(0).lower() in NUMBER_WORDS))   # "58, 60 to 62"
+        listed = prev is not None and (prev.group(0).isdigit() or prev.group(0).lower() in NUMBER_WORDS or (
+            prev.group(0).lower() in (",", "and", "&") and i >= 2
+            and (toks[i - 2].group(0).isdigit() or toks[i - 2].group(0).lower() in NUMBER_WORDS)))   # "58, 60 to 62"
         if glued_before or after_word or listed or j >= len(toks) or toks[j].group(0).lower() not in CONNECTORS:
             i = j if lo_words else i + 1
             continue
@@ -234,7 +235,10 @@ def ranges_in(text: str, street_at=None) -> tuple[str, dict[tuple[int, object], 
     s = text or ""
     out: dict[tuple[int, object], HouseRange] = {}
     parts, at = [], 0
-    for f in find(s):
+    strict = {f.start for f in find(s)}
+    for f in find(s, address=True):                   # a written one before a street the gazetteer knows: whatever its
+        if f.start not in strict and not (street_at and street_at(s[f.end:f.end + 80])):   # name's words ("The ...")
+            continue
         parts.append(s[at:f.start])
         parts.append(str(f.range.lo))
         at = f.end
