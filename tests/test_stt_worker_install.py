@@ -202,9 +202,10 @@ needs_pwsh = pytest.mark.skipif(not PWSH, reason="no pwsh")
 
 @needs_pwsh
 def test_install_ps1_parses():
-    cmd = ("$e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile($args[0], [ref]$null, [ref]$e); "
+    assert "'" not in str(PS1)
+    cmd = (f"$e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile('{PS1}', [ref]$null, [ref]$e); "
            "$e | ForEach-Object { \"$($_.Extent.StartLineNumber): $($_.Message)\" }; exit $e.Count")
-    r = subprocess.run([PWSH, "-NoProfile", "-NonInteractive", "-Command", cmd, str(PS1)], capture_output=True,
+    r = subprocess.run([PWSH, "-NoProfile", "-NonInteractive", "-Command", cmd], capture_output=True,
                        text=True, timeout=120)
     assert r.returncode == 0, r.stdout + r.stderr
 
@@ -212,15 +213,16 @@ def test_install_ps1_parses():
 @needs_pwsh
 @pytest.mark.parametrize("args", [["-Llm", "yes"], ["-Llm", "no"], ["-Uninstall"]])
 def test_install_ps1_dry_run(tmp_path, args):
-    home = tmp_path / "home"
+    home, local = tmp_path / "home", tmp_path / "local"          # pwsh keeps its own cache under HOME
     home.mkdir()
-    env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "LOCALAPPDATA": str(home / "AppData" / "Local")}
+    local.mkdir()
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "LOCALAPPDATA": str(local)}
     r = subprocess.run([PWSH, "-NoProfile", "-NonInteractive", "-File", str(PS1), "-DryRun", *args],
                        capture_output=True, text=True, timeout=180, env=env, stdin=subprocess.DEVNULL)
     out = r.stdout + r.stderr
     assert r.returncode == 0, out
     assert "STOPPED" not in out
-    assert not any(home.rglob("*")), "a dry run changed nothing"
+    assert not any(local.rglob("*")), "a dry run changes nothing"
     if "-Uninstall" in args:
         assert "would delete" in out and "Unregister-ScheduledTask" in out
         return
