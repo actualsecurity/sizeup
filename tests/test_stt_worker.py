@@ -12,6 +12,7 @@ import ast
 import os
 import contextlib
 import email.parser
+import hashlib
 import email.policy
 import io
 import json
@@ -760,7 +761,9 @@ def test_shutdown_releases_the_job_and_says_paused(tmp_path, hub, whisper):
     assert hub.calls("/release")[0][3]["why"] == "shutdown"
     wait_for(lambda: whisper.aborted == 1, what="whisper-server saw the client go")
     assert w.counts["failed"] == 0
-    assert hub.calls("/state")[-1][3] | {"gpu": None} == {"state": "paused", "reason": "shutdown", "gpu": None,
+    last = dict(hub.calls("/state")[-1][3])
+    assert last.pop("self_update")["sha256"] == hashlib.sha256(WORKER_PY.read_bytes()).hexdigest()
+    assert last | {"gpu": None} == {"state": "paused", "reason": "shutdown", "gpu": None,
                                                          "model": "large-v3-turbo-q5_0", "version": W.VERSION,
                                                          "models": {"stt": "large-v3-turbo-q5_0", "llm": "", "llm_version": ""}}
 

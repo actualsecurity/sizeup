@@ -1,0 +1,5 @@
+{
+  "ok": true,
+  "pool_on": true,
+  "worker_update": {"mode": "hold"}
+}

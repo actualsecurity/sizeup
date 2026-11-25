@@ -59,6 +59,20 @@
         "llm_version": {"type": "string", "description": "Its server's version.", "maxLength": 64}
       }
     },
-    "reason": {"type": "string", "description": "A GPU worker that is not online: why, in words. The hub does not read it."}
+    "reason": {"type": "string", "description": "A GPU worker that is not online: why, in words. The hub does not read it."},
+    "self_update": {
+      "title": "Self-update",
+      "description": "A GPU worker's self-update (tools/stt_worker/worker.py Updater): the worker.py it runs and what its updater is doing. Sending it is the capability: the hub answers `worker_update` only to a worker that sent it. A station's whisper never sends it.",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "sha256": {"type": "string", "description": "The SHA-256 of the worker.py it runs, lower-case hex (\"\" when it can't read its file).", "pattern": "^([0-9a-f]{64})?$"},
+        "commit": {"type": "string", "description": "The commit that file came from when the worker knows it (it updated itself to it), else \"\".", "pattern": "^([0-9a-f]{40})?$"},
+        "auto": {"type": "boolean", "description": "auto_update in its config: false, it never updates itself."},
+        "state": {"type": "string", "description": "The updater's state in words (current, staged, refused, rolled back, ...). The hub keeps 80 characters and shows it.", "maxLength": 80},
+        "bad": {"type": "array", "description": "Hashes it rolled back from and won't take again (the last 5).", "maxItems": 5, "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+      }
+    }
   }
 }
