@@ -739,8 +739,8 @@ class Whisper:
     fast (greedy, no fallback) job, and the WAV as file=tx.wav. The hub's WAV is already padded and processed: it goes
     as it is."""
 
-    def __init__(self, url: str, timeout_s: float = 60.0):
-        self.url, self.timeout_s = url, timeout_s
+    def __init__(self, url: str, timeout_s: float = 60.0, language: str = ""):
+        self.url, self.timeout_s, self.language = url, timeout_s, language     # language: sent with every request
         u = urlsplit(url)
         self.host, self.port = u.hostname or "127.0.0.1", u.port or 80
         self.path = u.path or "/inference"
@@ -748,6 +748,8 @@ class Whisper:
     def call(self, wav: bytes, prompt: str = "", fast: bool = False, timeout: float | None = None) -> WhisperCall:
         boundary = uuid.uuid4().hex
         fields = [("response_format", "verbose_json"), ("temperature", "0.0")]
+        if self.language:
+            fields.append(("language", self.language))
         if prompt:
             fields.append(("prompt", prompt))
         if fast:
@@ -2207,6 +2209,9 @@ MODEL_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}\.(?:bin|gguf)")
 MODEL_SERVICES = ("fire", "ems", "police", "air", "transit", "other")
 MODEL_MAX_BYTES = 8_000_000_000
 VRAM_MIN_MB, VRAM_MAX_MB = 100, 48_000
+# every catalog model is told English, never left to detect a language (language_setting, the one place)
+STT_LANGUAGE = "en"
+ASR_LANGUAGE_NAMES = {"en": "English"}     # Qwen3-ASR's own names for a forced language
 CONTEXT_MAX_ITEMS = 12                     # a llama-asr model's context list (Qwen3-ASR: short declarative lists help)
 # Where a model file may come from (nothing else, whatever a catalog says): Hugging Face at a pinned revision (a
 # 40-digit commit, never a branch name), a ggml-org release asset, or a release asset of this repo (a model built
@@ -2305,6 +2310,8 @@ def check_catalog(doc) -> dict:
         if not isinstance(langs, list) or not langs or not all(isinstance(x, str) and re.fullmatch(r"[a-z]{2,5}", x)
                                                                 for x in langs):
             raise CatalogError(f"{mid}: langs")
+        if STT_LANGUAGE not in langs:
+            raise CatalogError(f"{mid}: langs: no {STT_LANGUAGE!r} (every model is told {STT_LANGUAGE!r})")
         if not isinstance(services, list) or not set(services) <= set(MODEL_SERVICES):
             raise CatalogError(f"{mid}: services ({', '.join(MODEL_SERVICES)})")
         if not isinstance(e.get("context_default", True), bool):
@@ -2452,7 +2459,7 @@ def speech_dbfs(wav: bytes) -> float | None:
     return 20 * math.log10(level / 32768.0) if level > 0 else -120.0
 
 
-ASR_TAG = re.compile(r"^\s*language\s+[A-Za-z]+\s*<asr_text>", re.I)
+ASR_TAG = re.compile(r"^\s*(?:language\s+[A-Za-z]+\s*)?<asr_text>", re.I)     # (none after a prefill)
 
 
 class AsrCall:
@@ -2465,6 +2472,9 @@ class AsrCall:
             msgs.append({"role": "system", "content": ", ".join(context[:CONTEXT_MAX_ITEMS])})
         msgs.append({"role": "user", "content": [{"type": "input_audio", "input_audio": {
             "data": __import__("base64").b64encode(wav).decode("ascii"), "format": "wav"}}]})
+        prefill = language_setting(server.kind)["prefill"]
+        if prefill:
+            msgs.append({"role": "assistant", "content": prefill})      # (llama-server continues it)
         seconds = max(0.0, (len(wav) - 44) / 32000.0)          # (16 kHz, 16-bit mono)
         self.body = json.dumps({"messages": msgs, "temperature": 0, "stream": False,
                                 "max_tokens": int(min(2048, 256 + 8 * seconds))}).encode()
@@ -2505,6 +2515,15 @@ class AsrCall:
         WhisperCall.abort(self)          # (the same: shut the socket, close the connection)
 
 
+def language_setting(kind: str, lang: str = STT_LANGUAGE) -> dict:
+    """How a catalog model of this kind is told its language (the one place): whisper-server gets `-l en` and every
+    /inference request language=en; a llama-asr model (Qwen3-ASR) gets its answer begun as "language English<asr_text>",
+    the way Qwen3-ASR's own toolkit forces a language (an assistant prefill)."""
+    if kind == "whisper-ggml":
+        return {"argv": ["-l", lang], "request": lang, "prefill": ""}
+    return {"argv": [], "request": "", "prefill": f"language {ASR_LANGUAGE_NAMES[lang]}<asr_text>"}
+
+
 def plan_models(want: list, catalog: dict, budget_mb: float, primary: str = "", primary_mb: float = 0.0) -> list:
     """The models to run beside the configured whisper-server (primary): in the hub's order, each only when its vram_mb
     fits what the budget has left; at most MODEL_PORTS."""
@@ -2529,7 +2548,8 @@ class ModelServer:
         self.vram_mb = entry["vram_mb"]
         self.entry = entry
         self.inuse = 0                     # clips being decoded on it now (Models.acquire): never stopped meanwhile
-        self.whisper = Whisper(f"http://127.0.0.1:{port}/inference", timeout_s)
+        self.whisper = Whisper(f"http://127.0.0.1:{port}/inference", timeout_s,
+                               language=language_setting(self.kind)["request"])
         self.timeout_s = timeout_s
         self.key = secrets.token_urlsafe(24) if self.kind == "llama-asr" else ""
         self.ok = False                    # it answered a test decode
@@ -2885,11 +2905,12 @@ class Models:
         if e["kind"] == "whisper-ggml":
             prog = self.cfg.whisper_bin or (str(self.cfg.whisper_server[0]) if self.cfg.whisper_server else "")
             t = _arg(self.cfg.whisper_server, ("-t", "--threads")) or "4"
-            return [prog, "-m", str(p["model"]), "--host", "127.0.0.1", "--port", str(port), "-t", str(t)] if prog \
-                else None
+            return [prog, "-m", str(p["model"]), "--host", "127.0.0.1", "--port", str(port), "-t", str(t),
+                    *language_setting(e["kind"])["argv"]] if prog else None
         prog = self.cfg.llama_bin or (str(self.cfg.llm_server[0]) if self.cfg.llm_server else "")
         return [prog, "-m", str(p["model"]), "--mmproj", str(p["mmproj"]), "--host", "127.0.0.1", "--port", str(port),
-                "-c", "4096", "-ngl", "99", "-np", "1", "--no-webui", "--no-slots"] if prog else None
+                "-c", "4096", "-ngl", "99", "-np", "1", "--no-webui", "--no-slots",
+                *language_setting(e["kind"])["argv"]] if prog else None
 
     def _later(self, mid: str, why: str) -> None:
         self.status[mid] = why

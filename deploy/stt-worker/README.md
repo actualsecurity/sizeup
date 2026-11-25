@@ -461,6 +461,9 @@ and SHA-256, the VRAM it holds, its services, and whether the channel's context 
   program); a `llama-asr` model runs in llama-server (`llama_bin`, default `llm_server`'s program) with its audio
   projector (`--mmproj`), b12643 or later (the worker asks `llama-server --version` and says so in Health if it is
   older). Each llama-server gets its own random API key, as the LLM's does.
+- **English, always:** every model is told the language, never left to detect one: whisper-server runs with `-l en`
+  and each request says `language=en`; Qwen3-ASR's answer is begun `language English<asr_text>` (its own way to force
+  a language). A catalog entry without `en` in `langs` is refused.
 - **What the hub names:** every hello and state answer carries `stt_models {catalog: {commit, sha256}, want}`: the
   commit on main the hub was built from, the SHA-256 of `models.json` in it, and the models the channels use, most
   important first (fire/EMS, then police, then airband).
