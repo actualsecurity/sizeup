@@ -3,5 +3,12 @@
   "model": "large-v3-turbo-q5_0",
   "version": "2",
   "models": {"stt": "large-v3-turbo-q5_0", "llm": "", "llm_version": ""},
+  "self_update": {
+    "sha256": "9c2f4e1a9c2f4e1a9c2f4e1a9c2f4e1a9c2f4e1a9c2f4e1a9c2f4e1a9c2f4e1a",
+    "commit": "",
+    "auto": true,
+    "state": "starting",
+    "bad": []
+  },
   "worker": "gpu-1"
 }

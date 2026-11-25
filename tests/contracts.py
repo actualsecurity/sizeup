@@ -236,6 +236,8 @@ def scrub(name: str, body: dict, tmp: Path | str = "") -> dict:
         body["load"]["cpu_pct"] = 27.5
     if name.startswith("stt-worker-") and "model" in body:
         body["model"] = "large-v3-turbo-q5_0" if "version" in body else "small.en-q5_1"
+    if name.startswith("stt-worker-") and isinstance(body.get("self_update"), dict):     # (this worker.py's own hash)
+        body["self_update"]["sha256"] = "9c2f4e1a" * 8
     text = json.dumps(body)
     mine = [str(tmp), "pytest", "/private/", "/Users/", "/home/"]
     if os.environ.get(RECORD_ENV, "") not in ("", "0"):      # (written to the repo: this machine's and this user's name

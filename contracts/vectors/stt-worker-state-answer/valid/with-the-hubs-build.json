@@ -1,0 +1,10 @@
+{
+  "ok": true,
+  "pool_on": true,
+  "worker_update": {
+    "mode": "auto",
+    "commit": "3b7e1f0c9a2d4e6b8c0a1f3e5d7b9c2a4e6f8a0b",
+    "sha256": "c4d1e8a07b2f9e3d6a5c1b0f8e7d2a9c3b6f5e4d1a0c9b8e7f6d5c4b3a2e1f0d",
+    "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/3b7e1f0c9a2d4e6b8c0a1f3e5d7b9c2a4e6f8a0b/tools/stt_worker/worker.py"
+  }
+}

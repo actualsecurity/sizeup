@@ -308,7 +308,8 @@ GET  /api/cad/stt-workers                 Settings > Station > STT workers (size
                                           (id, name, created, rotated, revoked, last used, its live state) and the pool's
                                           switches; never a hash. The hub's only; a signed-in admin only
 POST /api/cad/stt-workers                 {action: add {id, name?} | rename {id, name} | rotate {id} | revoke {id} |
-                                          pool {on?, classes?}}: a signed-in admin only. add / rotate answer {token}
+                                          llm {id, on} | update {id, mode: auto|hold|pin, commit?, sha256?} (its
+                                          self-update) | pool {on?, classes?}}: a signed-in admin only. add / rotate answer {token}
                                           (no-store), the one time it is shown. In the Settings audit (System) and the
                                           person's activity: the action and id, no token
 GET  /api/cad/metrics?subject=&station=&from=&to=&res=raw|hour|auto&kind=&metric=

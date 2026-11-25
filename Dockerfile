@@ -65,6 +65,9 @@ RUN python -B -m sizeup.web.bundle
 COPY deploy/hub/constraints-intel-llm.txt ./
 RUN pip install --no-cache-dir -c constraints-intel-llm.txt ".[docs,intel-llm]" && rm -rf build
 COPY data ./data
+# the GPU STT worker as this build has it: the hub tells the workers its commit and this file's SHA-256 (their
+# self-update, sizeup/cloud/sttworkers.py worker_build); never run here
+COPY tools/stt_worker/worker.py ./tools/stt_worker/worker.py
 COPY deploy/hub ./deploy/hub
 COPY deploy/trunk-recorder/talkgroups.csv ./deploy/trunk-recorder/talkgroups.csv
 # the other P25 systems' talkgroups (#409: names, groups and tiers for the rows the station sends)

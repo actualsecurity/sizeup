@@ -2,12 +2,29 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/actualsecurity/sizeup/main/contracts/schemas/stt-worker-state-answer.schema.json",
   "title": "Worker state answer",
-  "description": "The hub's 200 answer to POST /api/station/stt/state (WorkerApi.handle, sizeup/cloud/sttworkers.py). The worker client reads `pool_on` and ignores the rest.",
+  "description": "The hub's 200 answer to POST /api/station/stt/state (WorkerApi.handle, sizeup/cloud/sttworkers.py). The worker client reads `pool_on` (and `worker_update`, for its self-update) and ignores the rest.",
   "x-status": "as-built",
   "x-version": 1,
   "x-complete": true,
   "type": "object",
   "required": ["ok", "pool_on"],
   "additionalProperties": true,
-  "properties": {"ok": {"const": true, "description": "Always true."}, "pool_on": {"type": "boolean", "description": "The pool is on and has a worker in it."}}
+  "properties": {
+    "ok": {"const": true, "description": "Always true."},
+    "pool_on": {"type": "boolean", "description": "The pool is on and has a worker in it."},
+    "worker_update": {
+      "title": "Worker update",
+      "description": "Only to a GPU worker that sent `self_update`: the version the hub wants it on (sizeup/cloud/sttworkers.py WorkerApi.wanted). The worker takes it only from main of actualsecurity/sizeup on GitHub, with exactly this hash, and never uses `url`.",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["mode"],
+      "properties": {
+        "mode": {"type": "string", "description": "`auto`: the hub's own build; `pin`: a version an admin chose; `hold`: none (no commit or hash). A worker takes a word it does not know as `hold`.", "x-known": ["auto", "pin", "hold"]},
+        "commit": {"type": "string", "description": "A commit on main. Absent with `hold`, and with `auto` while the hub can't tell its build (a local run).", "pattern": "^[0-9a-f]{40}$"},
+        "sha256": {"type": "string", "description": "The SHA-256 of tools/stt_worker/worker.py at that commit.", "pattern": "^[0-9a-f]{64}$"},
+        "url": {"type": "string", "description": "For people: raw.githubusercontent.com's address of that file. The worker builds its own."}
+      }
+    }
+  }
 }

@@ -2065,7 +2065,16 @@ class HubApp(App):
         now = self.sttpool.clock()
         lw = self.infer_lane.workers.get(wid)
         return {"state": self.sttpool.state_of(w, now), "model": w.model, "seen": w.seen, "gpu": dict(w.gpu),
-                "version": w.version, "llm": lw.llm if lw is not None else ""}
+                "version": w.version, "llm": lw.llm if lw is not None else "", **self._update_view(wid, w.update)}
+
+    def _update_view(self, wid: str, update: dict) -> dict:
+        """A GPU worker's self-update for Settings and Health: what it runs (update), what the hub wants it on
+        (update_wanted: a sha256, "" for none) and whether that is what it runs (update_current; None: it can't say)."""
+        if not update:
+            return {}
+        wanted = self.stt_api.wanted(wid).get("sha256", "")
+        return {"update": dict(update), "update_wanted": wanted,
+                "update_current": (update.get("sha256") == wanted) if wanted and update.get("sha256") else None}
 
     def pool_health(self) -> dict | None:
         """Settings > Station > Health: the pool (its workers, queue, fallbacks, p50/p90) and every channel's latency.
@@ -2074,7 +2083,10 @@ class HubApp(App):
         active = self.hub.workers.any() or bool(self.sttpool.workers)
         if not active and not self.sttpool.workers and not lat and self.stt_runs.health() is None:
             return None
-        return {"active": active, "settings": self.hub.workers.pool_settings(), **self.sttpool.stats(),
+        stats = self.sttpool.stats()
+        for w in stats["workers"]:
+            w |= self._update_view(w["id"], w.get("update") or {})
+        return {"active": active, "settings": self.hub.workers.pool_settings(), **stats,
                 "infer": self.infer_lane.stats() if self.infer_lane.any_llm() else None,
                 "latency": lat, "target": {"p50_s": sttruns.TARGET_P50_S, "p95_s": sttruns.TARGET_P95_S},
                 "copies": self.stt_runs.health()}      # (stt.sqlite's copies in the bucket: unsettled since, last copy)

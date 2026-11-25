@@ -38,6 +38,14 @@ leases at most, and a pre-alert job only when it holds none.
 The LLM lane (sizeup/cloud/infer.py): a worker serving a local LLM says so in every request's models {stt, llm,
 llm_version} and claims JSON classification jobs at /api/station/stt/infer/* with the same token; never while it holds
 a pre-alert lease, and never counted in the STT leases above.
+
+The self-update (tools/stt_worker/worker.py Updater): a GPU worker that sends self_update {sha256, commit, auto, state,
+bad} in its hello and state (its capability: a worker without it is never told) gets worker_update {mode, commit,
+sha256, url} in the answer: the version the hub wants it on. mode auto (the default): this hub's own build, SIZEUP_BUILD
+(the commit on main CI built the image from) and the SHA-256 of tools/stt_worker/worker.py in the image, read once at
+the start (worker_build); pin: an admin's commit and hash; hold: none (it stays on what it runs). Settings > Station >
+STT workers sets it per worker (hub.sqlite meta "stt_update"). The hub only names a version: the worker fetches it from
+GitHub itself, only from main of actualsecurity/sizeup, and only a file with exactly that hash (its url is never used).
 """
 
 from __future__ import annotations
@@ -51,6 +59,7 @@ import secrets
 import sqlite3
 import threading
 import time
+from pathlib import Path
 from typing import Callable
 
 from sizeup import sttpool
@@ -63,6 +72,12 @@ ROTATE_GRACE_S = 600.0
 TOUCH_S = 300.0
 META_POOL = "stt_pool"
 META_LLM = "stt_llm"            # per GPU worker: its "LLM jobs" switch (JSON {id: bool}; absent: on)
+META_UPDATE = "stt_update"      # per GPU worker: its self-update (JSON {id: {mode, commit?, sha256?}}; absent: auto)
+UPDATE_MODES = ("auto", "hold", "pin")
+UPDATE_REPO = "actualsecurity/sizeup"
+WORKER_FILE = Path(__file__).resolve().parents[2] / "tools" / "stt_worker" / "worker.py"   # (the image: /app/tools/...)
+COMMIT = re.compile(r"[0-9a-f]{40}")
+SHA256 = re.compile(r"[0-9a-f]{64}")
 API = "/api/station/stt/"
 LEASE_PATH = re.compile(r"/api/station/stt/jobs/([0-9a-f]{16})/(audio|extend|complete|release)")
 INFER_MAX_BODY = 32 * 1024     # an LLM job's answer (its 16 KB at most, sizeup/cloud/infer.py) and its counts
@@ -111,6 +126,38 @@ def make_token(wid: str) -> str:
 
 def _same(a: str, b: str | None) -> bool:
     return hmac.compare_digest(a.encode(), (b or _DUMMY).encode())
+
+
+def worker_url(commit: str) -> str:
+    return f"https://raw.githubusercontent.com/{UPDATE_REPO}/{commit}/tools/stt_worker/worker.py"
+
+
+def worker_build(build: str | None = None, path: Path = WORKER_FILE) -> dict:
+    """The GPU worker version this hub's build carries: {commit, sha256, url}; {} when it can't tell (no SIZEUP_BUILD,
+    as in a local run, or no worker.py in the image). The commit is the build's own: the file at it is the image's."""
+    import os
+    build = (os.environ.get("SIZEUP_BUILD", "") if build is None else build).strip().lower()
+    if not COMMIT.fullmatch(build):
+        return {}
+    try:
+        sha = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return {}
+    return {"commit": build, "sha256": sha, "url": worker_url(build)}
+
+
+def clean_self_update(v) -> dict | None:
+    """A worker's self_update, checked and bounded: {sha256, commit, auto, state, bad}; None when it sent none (a worker
+    from before the self-update: never told a version)."""
+    if not isinstance(v, dict):
+        return None
+    sha, commit = v.get("sha256"), v.get("commit")
+    bad = v.get("bad") if isinstance(v.get("bad"), list) else []
+    return {"sha256": sha if isinstance(sha, str) and SHA256.fullmatch(sha) else "",
+            "commit": commit if isinstance(commit, str) and COMMIT.fullmatch(commit) else "",
+            "auto": v.get("auto") if isinstance(v.get("auto"), bool) else None,
+            "state": " ".join(str(v.get("state") or "").split())[:80],
+            "bad": [b for b in bad[:5] if isinstance(b, str) and SHA256.fullmatch(b)]}
 
 
 class WorkerRegistry:
@@ -248,6 +295,50 @@ class WorkerRegistry:
         self._switched()
         return old, on
 
+    # -- each GPU worker's self-update: auto (the hub's build), hold, or pin {commit, sha256} ------------------------
+
+    def update_settings(self) -> dict:
+        """{worker id: {mode, commit?, sha256?}}: what an admin set (a worker not in it: auto)."""
+        try:
+            saved = json.loads(self.mdb.get(META_UPDATE, "") or "{}")
+        except ValueError:
+            saved = {}
+        out = {}
+        for k, v in (saved.items() if isinstance(saved, dict) else ()):
+            if isinstance(v, dict) and v.get("mode") in UPDATE_MODES:
+                if v["mode"] == "pin" and not (COMMIT.fullmatch(str(v.get("commit") or ""))
+                                               and SHA256.fullmatch(str(v.get("sha256") or ""))):
+                    continue
+                out[str(k)] = {"mode": v["mode"], **({"commit": v["commit"], "sha256": v["sha256"]}
+                                                     if v["mode"] == "pin" else {})}
+        return out
+
+    def update_of(self, wid: str) -> dict:
+        return self.update_settings().get(wid, {"mode": "auto"})
+
+    def set_update(self, wid, mode, commit=None, sha256=None) -> tuple[dict, dict]:
+        wid = self._id(wid)
+        if self.row(wid) is None:
+            raise WorkerError(f"no worker {wid}")
+        if mode not in UPDATE_MODES:
+            raise WorkerError("mode: auto, hold or pin")
+        new: dict = {"mode": mode}
+        if mode == "pin":
+            commit, sha256 = str(commit or "").strip().lower(), str(sha256 or "").strip().lower()
+            if not COMMIT.fullmatch(commit):
+                raise WorkerError("commit: the full 40-digit commit on main")
+            if not SHA256.fullmatch(sha256):
+                raise WorkerError("sha256: worker.py's SHA-256 at that commit, 64 hex digits")
+            new.update(commit=commit, sha256=sha256)
+        saved = self.update_settings()
+        old = saved.get(wid, {"mode": "auto"})
+        if mode == "auto":
+            saved.pop(wid, None)
+        else:
+            saved[wid] = new
+        self.mdb.put(META_UPDATE, json.dumps(saved, sort_keys=True))
+        return old, new
+
     def _switched(self) -> None:
         for fn in list(self.listeners):
             try:
@@ -360,7 +451,7 @@ class WorkerRegistry:
             out.append({"id": r["id"], "name": r["name"], "created": r["created"], "created_by": r["created_by"],
                         "rotated": r["rotated"], "revoked": r["revoked"], "last_used": self.last_used(r["id"], r),
                         "grace_until": r["prev_until"] if (r["prev_until"] or 0) > now else None,
-                        "llm_on": self.llm_on(r["id"]),
+                        "llm_on": self.llm_on(r["id"]), "update_mode": self.update_of(r["id"]),
                         **((live or (lambda _w: {}))(r["id"]))})
         return {"at": now, "workers": out, "pool": self.pool_settings(), "active": self.any(),
                 "grace_s": ROTATE_GRACE_S}
@@ -383,6 +474,13 @@ class WorkerRegistry:
             if old != new:
                 note(f"stt workers/{wid}/llm jobs", "on" if old else "off", "on" if new else "off")
             return {"ok": True, "id": wid, "llm_on": new}
+        if a == "update":                              # a GPU worker's self-update: auto, hold, pin {commit, sha256}
+            wid = self._id(body.get("id"))
+            old, new = self.set_update(wid, body.get("mode"), body.get("commit"), body.get("sha256"))
+            if old != new:
+                said = lambda s: s["mode"] if s["mode"] != "pin" else f"pin {s['commit'][:12]} ({s['sha256'][:12]})"
+                note(f"stt workers/{wid}/update", said(old), said(new))
+            return {"ok": True, "id": wid, "update_mode": new}
         if a == "rotate":
             wid = self._id(body.get("id"))
             was = self.row(wid)
@@ -415,7 +513,7 @@ class WorkerRegistry:
                 if old["classes"].get(k) != v:
                     note(f"stt workers/pool/{k}", "on" if old["classes"].get(k) else "off", "on" if v else "off")
             return {"ok": True, "pool": new}
-        raise WorkerError("action: add, rename, rotate, revoke, llm or pool")
+        raise WorkerError("action: add, rename, rotate, revoke, llm, update or pool")
 
 
 def _json(code: int, obj) -> tuple[int, bytes, str]:
@@ -465,11 +563,23 @@ class WorkerApi:
     infer = None    # the LLM lane (sizeup/cloud/infer.py Lane), set by the hub: /api/station/stt/infer/* and models
 
     def __init__(self, registry: WorkerRegistry, pool: sttpool.Pool, may_write: Callable[[], bool] = lambda: True,
-                 log: Callable[[str], None] = print, station: Callable[[str], str | None] | None = None):
+                 log: Callable[[str], None] = print, station: Callable[[str], str | None] | None = None,
+                 build: dict | None = None):
         """station(bearer) -> the station id a station's own token proves (sizeup/cloud/stations.py), None when it
-        isn't one: a station's whisper is a pool worker under its station identity ("station:<id>"), no token more."""
+        isn't one: a station's whisper is a pool worker under its station identity ("station:<id>"), no token more.
+        build: the worker version this hub carries (worker_build(), read here once when not given)."""
         self.reg, self.pool, self.may_write, self.log, self.station = registry, pool, may_write, log, station
         self._said: dict[tuple[str, str], float] = {}
+        self.build = worker_build() if build is None else build
+
+    def wanted(self, wid: str) -> dict:
+        """The version this GPU worker should run: worker_update in its hello and state answers."""
+        s = self.reg.update_of(wid)
+        if s["mode"] == "hold":
+            return {"mode": "hold"}
+        if s["mode"] == "pin":
+            return {"mode": "pin", "commit": s["commit"], "sha256": s["sha256"], "url": worker_url(s["commit"])}
+        return {"mode": "auto", **self.build}
 
     def _pool_on(self) -> bool:
         return bool(self.reg.pool_settings()["on"]) and (self.reg.any() or self.reg.stations_on())
@@ -539,16 +649,19 @@ class WorkerApi:
             state = state if state in sttpool.STATES else None
             model = str(model)[:80] if isinstance(model, str) else None
             load = d.get("load") if isinstance(d.get("load"), dict) else None
+            # the self-update: a GPU worker that says its version is told the one it should run (never a station's)
+            su = clean_self_update(d.get("self_update")) if gpu else None
+            told = {"worker_update": self.wanted(wid)} if su is not None else {}
             if path == API + "hello":
                 self.pool.seen(wid, state, model, d.get("gpu"), d.get("version") if isinstance(d.get("version"), str) else None,
-                               kind=kind, load=load)
+                               kind=kind, load=load, update=su)
                 s = self.reg.pool_settings()
                 return _json(200, {"ok": True, "worker": wid, "poll_s": POLL_S, "pool_on": self._pool_on(),
-                                   "classes": [k for k, v in s["classes"].items() if v]})
+                                   "classes": [k for k, v in s["classes"].items() if v], **told})
             if path == API + "state":
                 self.pool.seen(wid, state, model, d.get("gpu"), d.get("version") if isinstance(d.get("version"), str) else None,
-                               kind=kind, load=load)
-                return _json(200, {"ok": True, "pool_on": self._pool_on()})
+                               kind=kind, load=load, update=su)
+                return _json(200, {"ok": True, "pool_on": self._pool_on(), **told})
             if path == API + "claim":
                 wait = _num(d.get("wait")) or 0.0
                 job = self.pool.claim(wid, wait, state, model, kind=kind, load=load)
