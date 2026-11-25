@@ -381,8 +381,12 @@ def test_a_note_after_close_is_marked_in_the_radio_view(cad_clock):
 def test_an_older_file_gets_the_label_column_its_lines_live(tmp_path):
     cad = make_cad(tmp_path)
     iid = cad.create({"type": "MVA", "operator": "JD"})["id"]
-    with cad.store.tx() as db:
-        db.execute("ALTER TABLE events DROP COLUMN label")                       # as a file from before
+    with cad.store.tx() as db:                                                     # the table as a file from before had it
+        db.execute("CREATE TABLE events_old AS SELECT id, incident_id, unit_id, at, kind, text, operator, units, places "
+                   "FROM events")
+        db.execute("DROP TABLE events")
+        db.execute("ALTER TABLE events_old RENAME TO events")
+        assert "label" not in {r[1] for r in db.execute("PRAGMA table_info(events)")}
     cad.store.shutdown()
     again = make_cad(tmp_path)
     assert {e["label"] for e in again.store.full(iid)["events"]} == {""}
