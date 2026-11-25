@@ -42,7 +42,7 @@ BUDGETS: dict[float, tuple[float, float, float]] = {
 # A challenger's run (sizeup/sttscore.py): under every class, the GPU idle, its model loaded, never a live clip of ours
 # lately (CHALLENGE_QUIET_S): it waits up to 10 min for that, else it is skipped (a sample less, nothing lost)
 CHALLENGE = 4
-BUDGETS[CHALLENGE] = (600.0, 60.0, 120.0)
+BUDGETS[CHALLENGE] = (600.0, 4.0, 30.0)   # (a short lease, renewed every 2 s: the hub can take it back at once)
 CHALLENGE_QUIET_S = 30.0
 CHALLENGE_MAX_S = 30.0         # a clip longer than this isn't sampled (it would hold the GPU too long)
 PER_AUDIO_S = 0.25        # each lease (and cap) this much longer per second of audio (never a pre-alert class's: its
@@ -80,7 +80,7 @@ FAST_CLASSES = (URGENT, HIGH, CONTEXT_FALLBACK, CONTEXT)
 
 
 def _extra(job) -> float:
-    return 0.0 if job.cls in FAST_CLASSES or job.cls == CATCHUP else PER_AUDIO_S * max(0.0, job.seconds)
+    return 0.0 if job.cls in FAST_CLASSES or job.cls in (CATCHUP, CHALLENGE) else PER_AUDIO_S * max(0.0, job.seconds)
 PENDING_MODEL = "gpu-worker"   # a row's model while a worker has it (the UI: "Transcribing (GPU)")
 
 
@@ -131,7 +131,7 @@ class Job:
         return {"lease": self.lease, "id": self.id, "kind": self.kind, "channel": self.channel,
                 "class": class_key(self.cls), "prompt": self.prompt, "seconds": round(self.seconds, 2),
                 "lease_s": round(max(0.0, self.expires - (self.claimed_at or 0.0)), 1), "cap_at": self.cap_at,
-                "fast": self.cls in FAST_CLASSES or self.cls == CATCHUP or self.extra.get("kind") == "station",
+                "fast": self.cls in FAST_CLASSES or self.cls in (CATCHUP, CHALLENGE) or self.extra.get("kind") == "station",
                 "audio": f"/api/station/stt/jobs/{self.lease}/audio",
                 **({"model": self.model} if self.model else {}),
                 **({"context": list(self.context)} if self.context else {}),
@@ -191,6 +191,7 @@ class Pool:
         self.fallbacks = {r: 0 for r in REASONS}
         self.refused_late = 0
         self.submitted = 0
+        self.challenges = {"done": 0, "skipped": 0, "preempted": 0}   # challengers' runs (never in the numbers above)
         self.last_ours = 0.0                      # a clip of ours (urgent, high, live) last submitted: challengers wait
         self._fb_q: deque = deque()
         self._fb_cv = threading.Condition()
@@ -252,7 +253,10 @@ class Pool:
         on the job (extra["fell"]): a catch-up clip's lost lease is a failed try, nobody taking it is none."""
         self._open.discard(job.id)
         job.extra["fell"] = reason
-        self.fallbacks[reason] = self.fallbacks.get(reason, 0) + 1
+        if job.cls == CHALLENGE:                  # (a sample less: never in the pool's own numbers)
+            self.challenges["skipped"] += 1
+        else:
+            self.fallbacks[reason] = self.fallbacks.get(reason, 0) + 1
         with self._fb_cv:
             self._fb_q.append((job, why))
             self._fb_cv.notify()
@@ -292,9 +296,10 @@ class Pool:
                 if state != "online" and w.state == "online":
                     for lease in list(w.leases):
                         job = self._leases.get(lease)
-                        if job is not None and job.cls in FAST_CLASSES:
+                        if job is not None and (job.cls in FAST_CLASSES or job.cls == CHALLENGE):
                             self._end_lease(job)
-                            self._fall(job, "released", f"GPU worker {wid} went {state}")
+                            self._fall(job, "preempted" if job.cls == CHALLENGE else "released",
+                                       f"GPU worker {wid} went {state}")
                 w.state = state
             if model is not None:
                 w.model = str(model)[:80]
@@ -456,7 +461,8 @@ class Pool:
             if any(w.polling > 0 and len(w.leases) < MAX_LEASES for w in ready) and \
                     not any(j.cls <= cls for j in self._queue):
                 return True, ""                    # a worker in a claim now and nothing ahead: it takes it at once
-            ahead = sum(1 for j in self._queue if j.cls <= cls) + len(self._leases)
+            ahead = sum(1 for j in self._queue if j.cls <= cls) + sum(1 for j in self._leases.values()
+                                                                    if j.cls != CHALLENGE)
             est = ahead * self._service_s() / len(ready)
         if est > BUDGETS[cls][0]:
             return False, f"busy (about {est:.0f} s of work ahead)"
@@ -468,9 +474,17 @@ class Pool:
         with self._cv:
             return cid in self._open
 
+    def heard(self, cls: float) -> None:
+        """A clip of ours (urgent, high, live, the police pre-alerts) came, whatever way it goes (the pool or AWS):
+        challengers wait CHALLENGE_QUIET_S from it, and one on a worker steps aside at its next extend."""
+        if cls in (URGENT, HIGH, LIVE) or cls in FAST_CLASSES:
+            with self._cv:
+                self.last_ours = self.clock()
+
     def submit(self, job: Job) -> bool:
         """Queued (True), or not taken: the pool not ready for its class, or the clip already open here. The caller
         goes its own way on False; on True exactly one of on_done / on_fallback follows."""
+        self.heard(job.cls)
         ok, _why = self.ready(job.cls, gpu_only=job.gpu_only, origin=str(job.extra.get("origin") or ""),
                               seconds=job.seconds, model=job.model)
         if not ok or self._stop.is_set():
@@ -479,8 +493,6 @@ class Pool:
             if job.id in self._open:
                 return False
             job.queued_at = self.clock()
-            if job.cls in (URGENT, HIGH, LIVE):
-                self.last_ours = job.queued_at
             self._queue.append(job)
             self._open.add(job.id)
             self.submitted += 1
@@ -555,6 +567,12 @@ class Pool:
             if job is None:
                 return None
             now = self.clock()
+            if job.cls == CHALLENGE and (self.last_ours > (job.claimed_at or 0.0)
+                                         or any(j.cls != CHALLENGE for j in self._queue)):
+                self._end_lease(job)              # a clip of ours came: the challenger steps aside (409: the worker
+                self._fall(job, "preempted", "a clip of ours came")   # stops its decode), never blamed
+                self.challenges["preempted"] += 1
+                return None
             _wait, lease_s, _cap = BUDGETS[job.cls]
             job.expires = min(job.cap_at, now + lease_s + _extra(job))
             return job
@@ -570,8 +588,10 @@ class Pool:
         if w is not None:
             w.leases.discard(job.lease)
 
-    def _failed(self, wid: str, now: float) -> None:
+    def _failed(self, wid: str, now: float, job: Job | None = None) -> None:
         w = self.workers.get(wid)
+        if job is not None and job.cls == CHALLENGE:
+            return                                # (a challenger's trouble never cools a worker down for our clips)
         if w is not None:
             w.fails += 1
             w.lost += 1
@@ -592,10 +612,13 @@ class Pool:
             self._end_lease(job, now - job.claimed_at if job.claimed_at is not None else None)
             self._open.discard(job.id)
             w = self.workers.get(wid)
-            if w is not None:
-                w.fails, w.cools, w.done = 0, 0, w.done + 1
-            self._done.append((now, job.cls, job.channel, now - job.queued_at,
-                               now - job.claimed_at if job.claimed_at is not None else None, wid))
+            if job.cls == CHALLENGE:              # (never in the pool's numbers, nor a worker's good record)
+                self.challenges["done"] += 1
+            else:
+                if w is not None:
+                    w.fails, w.cools, w.done = 0, 0, w.done + 1
+                self._done.append((now, job.cls, job.channel, now - job.queued_at,
+                                   now - job.claimed_at if job.claimed_at is not None else None, wid))
             while self._done and now - self._done[0][0] > WINDOW_S:
                 self._done.popleft()
             self._cv.notify_all()
@@ -616,7 +639,7 @@ class Pool:
             if job is None:
                 return False
             self._end_lease(job)
-            self._failed(wid, self.clock())
+            self._failed(wid, self.clock(), job)
             self._fall(job, "released", f"GPU worker {wid} handed it back" + (f": {why[:120]}" if why else ""))
             self._cv.notify_all()
         return True
@@ -653,12 +676,12 @@ class Pool:
                 w = self.workers.get(job.worker)
                 if now < job.expires and w is not None and now - w.seen >= LOST_S:
                     self._end_lease(job, lost=True)    # its worker unheard: gone (a crash, the network), not slow
-                    self._failed(job.worker, now)
+                    self._failed(job.worker, now, job)
                     self._fall(job, "lease", f"GPU worker {job.worker}: no word for {now - w.seen:.0f} s")
                     n += 1
                 elif now >= job.expires:
                     self._end_lease(job, lost=True)
-                    self._failed(job.worker, now)
+                    self._failed(job.worker, now, job)
                     past_cap = now >= job.cap_at
                     self._fall(job, "lease", f"GPU worker {job.worker}: no text in time"
                                + (" (its lease cap)" if past_cap else " (its lease ran out)"))
@@ -697,12 +720,14 @@ class Pool:
                                 "cool_until": w.cool_until if w.cool_until > now else None})
             queued: dict[str, int] = {}
             for j in self._queue:
-                queued[class_key(j.cls)] = queued.get(class_key(j.cls), 0) + 1
+                if j.cls != CHALLENGE:
+                    queued[class_key(j.cls)] = queued.get(class_key(j.cls), 0) + 1
             total = [x[3] for x in done]
             by_class: dict[str, list[float]] = {}
             for x in done:
                 by_class.setdefault(class_key(x[1]), []).append(x[3])
-            out = {"workers": workers, "queued": len(self._queue), "queued_by_class": queued,
+            out = {"workers": workers, "queued": sum(queued.values()), "queued_by_class": queued,
+                   "challengers": {**self.challenges, "queued": sum(1 for j in self._queue if j.cls == CHALLENGE)},
                    "leased": len(self._leases), "submitted": self.submitted, "done_h": len(hour),
                    "done_2h": len(done), "fallbacks": dict(self.fallbacks), "refused_late": self.refused_late,
                    "p50_s": pct(total, 50), "p90_s": pct(total, 90),

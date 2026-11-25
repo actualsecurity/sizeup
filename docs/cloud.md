@@ -1649,22 +1649,37 @@ An admin can trial another catalog model on a channel (`sizeup/sttscore.py`; Set
   30 s aren't sampled.
 - **Never in the way:** the challenger's run is a pool class of its own (`challenger`), under every other one. It goes
   only to a GPU worker that has the model loaded, holds no clip and finds nothing else waiting, and only once no clip of
-  ours has come in for 30 s. It waits up to 10 min for that; then the sample is skipped. It gets the same audio and the
-  same context the champion got.
+  ours (urgent, high, live, the police pre-alerts, whichever way it went: the pool or AWS) has come in for 30 s.
+  Its lease is 4 s, renewed every 2 s, and a clip of ours arriving takes it back at the next renewal (the worker stops
+  the decode). It is decoded in one greedy pass and handed back at once when gaming starts. It never counts in the
+  pool's numbers or its estimates, nor against a worker (no cooldown); its runs are on Health as challengers
+  done / skipped / stepped aside. It waits up to 10 min for its moment; then the sample is skipped. A challenger that
+  fails 5 times in a row on a channel isn't sampled there for 30 min. Its refs and scores are worked out on a thread
+  of their own, never on a worker's request.
+- **The same input:** the same audio and the same prompt and context list the champion was sent.
 - **Kept privately:** the challenger's words are a run in `stt_runs` (role `challenger`), pruned with the transcript,
   never on the radio log or in an API. Each holds its sample's scores (numbers only, `score`).
-- **Scored per domain**, after the pinned folding `norm/1` (lower case, spelled numbers in digits, ten-codes):
-  - fire/EMS: the dispatcher's trailing time (#727), and the county CAD's units and address found;
+- **Scored per domain**, after the pinned folding `norm/2` (lower case, spelled numbers in digits, ten-codes, street
+  suffixes in full; its version carries a hash of its rules and number words, and the board compares one version's
+  samples only):
+  - fire/EMS: the dispatcher's trailing time (#727: a time read wrong and none read both score 0 when the other side
+    read one; a time the prompt carried isn't counted), and the county CAD feed's units and address found (only
+    incidents the feed made, never one a page or the radio made from the champion's own words; read when the
+    challenger's text comes, so a feed's incident that lands later counts);
   - police: the channel's terms found;
-  - airband: the ADS-B aircraft near the field found;
-  - any domain: once a person corrects the clip, word error and identifier recall against the correction.
-  "Found" means of what either side found, so the two are compared on the same clip. Agreement (1 - word error
-  between the two) is shown, never ranked.
+  - airband: the ADS-B aircraft near the field at the clip's time found;
+  - any domain: once a person corrects the clip, word error and identifier recall against the correction (people
+    correct starting from the champion's words: a bias toward it, small next to the others).
+  "Found" means of what either side found, and each side is averaged over the metrics both have, so the two are
+  compared on the same clip and the same terms. A loop or a read-back context scores as no text. Agreement (1 - word
+  error between the two) is shown, never ranked.
 - **The board:** per channel, n, each side's mean, the difference and its 95% interval. The verdict is "challenger
   better" or "champion better" only with 20 samples or more and an interval clear of 0.
 - **Promote** (admin, audited as Radios): the challenger becomes the channel's model, and the model it replaced
-  becomes the challenger at the same share. If, over the samples since, the replaced model scores better by more than
-  0.02 and the interval says so, the hub rolls the promotion back by itself (audited as "automatic rollback").
+  becomes the challenger at the same share. The hub compares them at checkpoints (n = 20, 40, 80, ...: never after
+  every sample). When the replaced model scores better and even the low end of a 99% interval of the difference is past
+  0.02, the hub rolls the promotion back by itself (audited as "automatic rollback"). Any other change of the channel's
+  model or challenger ends the watch.
 
 ## Phone pre-alert (Tapout)
 

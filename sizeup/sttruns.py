@@ -282,10 +282,11 @@ class Runs:
                         "score": sc})
         return out
 
-    def text_of(self, clip_id: str) -> str:
-        """The text of record's raw words of a clip (its run in role text, the newest), "" for none."""
+    def text_of(self, clip_id: str, model: str = "") -> str:
+        """The raw words of a clip's text of record (its run in role text, the newest; model: that model's), ""
+        for none."""
         for r in reversed(self.of(clip_id)):
-            if r.get("role") == "text":
+            if r.get("role") == "text" and (not model or r.get("model") == model):
                 return str(r.get("text") or "")
         return ""
 

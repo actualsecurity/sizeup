@@ -122,11 +122,17 @@ class Choices:
         self.service_of: Callable[[str], str] = lambda key: ""    # a channel key's service (the hub's: _key_service)
 
     def settings(self) -> dict:
-        """{channel key: {model?, context?, callsigns?}} as stored (read at most once a second: asked per clip)."""
+        """{channel key: {model?, context?, callsigns?, ...}} as stored (read at most once a second: asked per clip)."""
         now = self.clock()
         at, s = self._cache
         if at and now - at < 1.0:
             return s
+        s = self._read()
+        self._cache = (now, s)
+        return s
+
+    def _read(self) -> dict:
+        """The choices as the store has them now (the writers' read, under the lock: never the cache)."""
         try:
             raw = json.loads(self.mdb.get(META, "") or "{}")
         except ValueError:
@@ -135,7 +141,6 @@ class Choices:
         for k, v in (raw.items() if isinstance(raw, dict) else ()):
             if isinstance(k, str) and isinstance(v, dict):
                 s[k] = {f: v[f] for f in FIELDS if f in v}
-        self._cache = (now, s)
         return s
 
     def default_for(self, service: str) -> str:
@@ -180,12 +185,15 @@ class Choices:
         so the two go on being compared: if the new one scores worse over the samples since (sttscore.should_roll_back),
         roll_back() puts the old one back. (old, new). ValueError with no challenger."""
         with self._lock:
-            cur = dict(self.settings())
+            cur = dict(self._read())
+            key = self.key_of(key)
             old = dict(cur.get(key) or {})
-            ch = self.challenger_for(key)
+            m = old.get("challenger")
+            ch = (m, float(old.get("pct") or PCT_DEFAULT)) if isinstance(m, str) and m in self.catalog else None
             if ch is None:
                 raise ValueError("no challenger on this channel")
-            was = self.model_for(key, self.service_of(key) if service is None else service)
+            was = old.get("model") if old.get("model") in self.catalog else \
+                self.default_for(self.service_of(key) if service is None else service)
             new = dict(old, model=ch[0], challenger=was, promoted={"from": was, "to": ch[0], "at": self.clock(),
                                                                    **({"why": why[:80]} if why else {})})
             cur[key] = new
@@ -196,7 +204,7 @@ class Choices:
         """A promotion undone: the model it replaced is the channel's again, the challenger cleared (the rolled-back
         model isn't sampled again until an admin says so). None when nothing was promoted."""
         with self._lock:
-            cur = dict(self.settings())
+            cur = dict(self._read())
             old = dict(cur.get(key) or {})
             p = old.get("promoted") if isinstance(old.get("promoted"), dict) else None
             if not p or p.get("from") not in self.catalog:
@@ -234,17 +242,24 @@ class Choices:
                 out.append(m)
         return out[:WANT_MAX]
 
-    def set(self, key: str, body: dict) -> tuple[dict, dict]:
-        """One channel's {model?, context?, callsigns?} (null or "" a field back to its default). (old, new). ValueError."""
+    @staticmethod
+    def key_of(key) -> str:
+        """A channel key as kept: a label or a talkgroup key; the county's talkgroups as "tg:307", as routed.
+        ValueError."""
         from sizeup import channels
         from sizeup import sourcekeys
         if not isinstance(key, str) or not channels.KEY.fullmatch(key):
             raise ValueError("key: a channel label or a talkgroup key")
         got = sourcekeys.parse(key) if key.startswith("p25:") else None
         if got is not None and got[0] == sourcekeys.COUNTY:
-            key = channels.tg_key(got[1])              # (the county's talkgroups are kept as "tg:307", as routed)
+            key = channels.tg_key(got[1])
+        return key
+
+    def set(self, key: str, body: dict) -> tuple[dict, dict]:
+        """One channel's {model?, context?, callsigns?} (null or "" a field back to its default). (old, new). ValueError."""
+        key = self.key_of(key)
         with self._lock:
-            cur = dict(self.settings())
+            cur = dict(self._read())
             old = dict(cur.get(key) or {})
             new = dict(old)
             if "model" in body:
@@ -288,6 +303,8 @@ class Choices:
                     new["pct"] = float(v)
             if new.get("challenger") and new.get("challenger") == (new.get("model") or old.get("model")):
                 raise ValueError("challenger: not the channel's own model")
+            if new.get("model") != old.get("model") or new.get("challenger") != old.get("challenger"):
+                new.pop("promoted", None)            # (a promotion is watched only while its pair stands)
             if new:
                 cur[key] = new
             else:

@@ -3,7 +3,8 @@ the champion's, per domain, and how the samples add up (n, the mean of each side
 
     normalize()     NORM: the pinned folding both texts go through before anything is compared: lower case, spelled
                     numbers in digits as radio says them (sizeup/stt_terms.py written(): "sixty one" 61, "ten four"
-                    10-4), punctuation out. A change to it is a new NORM (old and new scores never mix in one table).
+                    10-4), street suffixes in full ("Rd" road), punctuation out. A change to it (or to written()'s
+                    number words) is a new NORM, and the board compares one NORM's samples only.
     identifiers()   what matters in a transmission: unit IDs ("engine 60", "77 alpha 4"), ten-codes ("10-4"), numbers
                     of three digits or more (a box, an address, a callsign's number), callsigns as said ("delta 766").
     sample()        one clip's scores, per side, from what is known about it (refs, gathered when it was sampled):
@@ -28,7 +29,12 @@ import re
 
 from sizeup import stt_terms
 
-NORM = "norm/1"
+SUFFIXES = {"rd": "road", "st": "street", "ave": "avenue", "av": "avenue", "blvd": "boulevard", "ln": "lane",
+            "dr": "drive", "pl": "place", "ct": "court", "hwy": "highway", "pkwy": "parkway", "ter": "terrace",
+            "tpke": "turnpike", "cir": "circle", "sq": "square", "pk": "park"}
+# the folding's version: its rules here and stt_terms' number words (a change to either is another NORM)
+NORM = "norm/2:" + __import__("hashlib").sha1(repr((sorted(SUFFIXES.items()), sorted(stt_terms._ONES.items()),
+                                                    sorted(stt_terms._TENS.items()))).encode()).hexdigest()[:6]
 MIN_N = 20                  # samples before a verdict (and before a promotion's watch can roll it back)
 ROLLBACK_MARGIN = 0.02      # a promoted model rolled back when it scores this much under the one it replaced (and the
                             # interval says so)
@@ -47,7 +53,7 @@ def normalize(text: str) -> list[str]:
     """NORM's tokens of a text."""
     t = stt_terms.written(str(text or "")).lower().replace("x-ray", "xray")
     t = re.sub(r"(\d)\s*-\s*(\d)", r"\1-\2", t)
-    return _TOKEN.findall(t)
+    return [SUFFIXES.get(w, w) for w in _TOKEN.findall(t)]
 
 
 def edits(ref: list, hyp: list) -> int:
@@ -94,9 +100,8 @@ def identifiers(text: str) -> set[str]:
 
 
 def found(refs, text: str) -> set[str]:
-    """The refs (phrases: a unit's spoken name, an address's words, a callsign as said, a term) said in the text:
-    each ref's NORM tokens in a row in it; a ref with a number also counts when its number and the word before it
-    are there (a callsign's airline said, its number heard)."""
+    """The refs (phrases: a unit's spoken name, an address's words, a callsign as said, a term) said in the text: each
+    ref's NORM tokens in a row in it."""
     w = normalize(text)
     joined = f" {' '.join(w)} "
     hit: set[str] = set()
@@ -121,10 +126,19 @@ def time_score(check) -> float | None:
     return {"match": 1.0, "time_mismatch": 0.0}.get(getattr(check, "result", ""), None)
 
 
-def side(domain: str, metrics: dict) -> float | None:
-    """A side's score: the mean of its domain's metrics that apply."""
-    vals = [metrics[m] for m in METRICS.get(domain, METRICS["other"]) if metrics.get(m) is not None]
+def side(domain: str, metrics: dict, other: dict | None = None) -> float | None:
+    """A side's score: the mean of its domain's metrics that apply to both sides (other: the other side's), so the two
+    are always averaged over the same metrics."""
+    vals = [metrics[m] for m in METRICS.get(domain, METRICS["other"])
+            if metrics.get(m) is not None and (other is None or other.get(m) is not None)]
     return round(sum(vals) / len(vals), 4) if vals else None
+
+
+def _scores(out: dict) -> dict:
+    d = out.get("domain", "other")
+    a, b = out.get("champ") or {}, out.get("chall") or {}
+    a["score"], b["score"] = side(d, a, b), side(d, b, a)
+    return out
 
 
 def sample(domain: str, champ: str, chall: str, refs: dict, checks: tuple = (None, None),
@@ -138,10 +152,14 @@ def sample(domain: str, champ: str, chall: str, refs: dict, checks: tuple = (Non
     for k in ("cad", "aircraft", "terms"):
         if refs.get(k):
             hits[k] = (found(refs[k], champ), found(refs[k], chall))
+    times = [time_score(c) for c in checks] if domain == "fire" else [None, None]
+    if any(t is not None for t in times):       # (a time read by one side and none by the other: the other's 0)
+        times = [t if t is not None else 0.0 if getattr(checks[i], "result", "") == "no_time" else None
+                 for i, t in enumerate(times)]
     for i, (name, text) in enumerate((("champ", champ), ("chall", chall))):
         m: dict = {}
         if domain == "fire":
-            m["time"] = time_score(checks[i])
+            m["time"] = times[i]
         for k, (a, b) in hits.items():
             mine, other = (a, b) if i == 0 else (b, a)
             m[k] = _share(mine, other)
@@ -150,9 +168,8 @@ def sample(domain: str, champ: str, chall: str, refs: dict, checks: tuple = (Non
             m["edit"] = None if e is None else round(max(0.0, 1.0 - e), 4)
             ids = identifiers(edit)
             m["ids"] = round(len(ids & identifiers(text)) / len(ids), 4) if ids else None
-        m["score"] = side(domain, m)
         out[name] = m
-    return out
+    return _scores(out)
 
 
 def with_edit(s: dict, champ: str, chall: str, edit: str) -> dict:
@@ -164,9 +181,8 @@ def with_edit(s: dict, champ: str, chall: str, edit: str) -> dict:
         m["edit"] = None if e is None else round(max(0.0, 1.0 - e), 4)
         ids = identifiers(edit)
         m["ids"] = round(len(ids & identifiers(text)) / len(ids), 4) if ids else None
-        m["score"] = side(out.get("domain", "other"), m)
         out[name] = m
-    return out
+    return _scores(out)
 
 
 def compare(samples: list[dict]) -> dict:
@@ -200,11 +216,16 @@ def compare(samples: list[dict]) -> dict:
     return out
 
 
+ROLLBACK_Z = 2.58           # the rollback's interval: 99% (it is looked at again at each checkpoint)
+
+
 def should_roll_back(cmp: dict) -> bool:
-    """After a promotion the model it replaced runs as the challenger: roll back when it scores better by more than
-    ROLLBACK_MARGIN, with enough samples and the interval saying so."""
-    return (cmp.get("n", 0) >= MIN_N and cmp.get("diff") is not None and cmp.get("ci") is not None
-            and cmp["diff"] > ROLLBACK_MARGIN and cmp["diff"] > cmp["ci"])
+    """After a promotion the model it replaced runs as the challenger: roll back when, with enough samples, it scores
+    better and even the low end of a 99% interval of the difference is past ROLLBACK_MARGIN (the hub looks only at
+    checkpoints, n = 20, 40, 80 ...: never after every sample)."""
+    if cmp.get("n", 0) < MIN_N or cmp.get("diff") is None or cmp.get("ci") is None:
+        return False
+    return cmp["diff"] - cmp["ci"] * ROLLBACK_Z / 1.96 > ROLLBACK_MARGIN
 
 
 def sampled(clip_id: str, model: str, pct: float) -> bool:

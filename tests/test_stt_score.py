@@ -15,7 +15,9 @@ from tests.test_channels import fake_aws  # noqa: F401 (the fixture: test creden
 
 
 def test_the_folding_is_pinned():
-    assert S.NORM == "norm/1"
+    assert S.NORM.startswith("norm/2:")
+    assert S.normalize("40 Example Rd, 12 Sample St") == ["40", "example", "road", "12", "sample", "street"]
+    assert S.found(["40 Example Rd"], "forty Example Road") == {"40 example road"}
     assert S.normalize("Engine Sixty-One, ten four. 77 Alpha 4!") == ["engine", "61", "10-4", "77", "alpha", "4"]
     assert S.normalize("Delta seven six six") == ["delta", "766"]
 
@@ -164,3 +166,70 @@ def test_a_challenger_runs_on_the_same_clip_is_scored_promoted_and_rolled_back(t
         w.close()
         hub.close()
         fake.close()
+
+
+def test_a_missing_time_costs_as_much_as_a_wrong_one_and_both_sides_share_their_metrics():
+    s = S.sample("fire", "Engine 60 responding, 1549", "Engine 60 responding", {"cad": ["Engine 60"]},
+                 (Check("time_mismatch"), Check("no_time")))
+    assert s["champ"]["time"] == 0.0 and s["chall"]["time"] == 0.0
+    s = S.sample("fire", "Engine 60, 1549", "Engine 60", {}, (Check("match"), None))      # (the other not checked)
+    assert s["chall"]["time"] is None and s["champ"]["score"] is None                     # nothing both have
+
+
+def test_a_promotion_is_watched_only_while_its_pair_stands_and_a_new_choice_ends_it():
+    from sizeup import sttmodels
+    from tests.test_stt_models import Meta
+    from tests.test_stt_pool import Clock
+    c = sttmodels.Choices(Meta(), clock=Clock())
+    c.set("tg:307", {"challenger": "large-v3-turbo-q8_0"})
+    c.service_of = lambda k: "fire"
+    old, new = c.promote("p25:westchester:307")                                           # (the county's key, as routed)
+    assert new["model"] == "large-v3-turbo-q8_0" and new["challenger"] == "qwen3-asr-1.7b-q8_0"
+    assert c.promoted("tg:307")["from"] == "qwen3-asr-1.7b-q8_0"
+    c.set("tg:307", {"challenger": "large-v3-turbo-q5_0"})
+    assert c.promoted("tg:307") == {}                                                     # another pair: no watch
+
+
+# -- the pool: a challenger never costs a clip of ours ---------------------------------------------------------------
+
+def _challenge_pool():
+    from sizeup import sttpool
+    from tests.test_stt_pool import Clock, Jobs, online, pool
+    clk = Clock()
+    p, jobs = pool(clk), Jobs()
+    w = online(p, "gpu-a")
+    w.models = ["large-v3-turbo-q8_0"]
+    return sttpool, clk, p, jobs, w
+
+
+def test_a_challenger_waits_for_quiet_steps_aside_for_ours_and_never_cools_the_worker():
+    sttpool, clk, p, jobs, w = _challenge_pool()
+    from sizeup.stt import HIGH, LIVE
+    p.heard(HIGH)                                                   # a pre-alert went to AWS: no pool job at all
+    assert p.submit(jobs.job("c1~ch", sttpool.CHALLENGE, model="large-v3-turbo-q8_0"))
+    assert p.claim("gpu-a", 0) is None                              # not within CHALLENGE_QUIET_S of it
+    clk.t += sttpool.CHALLENGE_QUIET_S
+    j = p.claim("gpu-a", 0)
+    assert j.id == "c1~ch" and j.public()["fast"] is True and j.public()["lease_s"] <= 4.0
+    clk.t += 1
+    p.heard(LIVE)                                                   # one of ours came: it steps aside at its extend
+    assert p.extend("gpu-a", j.lease) is None
+    assert p.drain() == 1 and jobs.fell["c1~ch"] == "a clip of ours came" and j.extra["fell"] == "preempted"
+    for i in range(sttpool.FAIL_N + 1):                             # challengers handed back again and again ...
+        clk.t += sttpool.CHALLENGE_QUIET_S
+        assert p.submit(jobs.job(f"x{i}~ch", sttpool.CHALLENGE, model="large-v3-turbo-q8_0"))
+        k = p.claim("gpu-a", 0)
+        assert p.release("gpu-a", k.lease, "model failed")
+    assert w.cool_until <= clk.t and w.fails == 0                   # ... never cool the worker down for our clips
+    st = p.stats()
+    assert st["queued"] == 0 and st["challengers"]["skipped"] >= sttpool.FAIL_N and st["fallbacks"]["released"] == 0
+    assert p.challenges["preempted"] == 1
+
+
+def test_a_challenger_done_stays_out_of_the_pools_numbers():
+    sttpool, clk, p, jobs, w = _challenge_pool()
+    assert p.submit(jobs.job("c2~ch", sttpool.CHALLENGE, model="large-v3-turbo-q8_0"))
+    j = p.claim("gpu-a", 0)
+    assert p.complete("gpu-a", j.lease, {"text": "x", "model": "large-v3-turbo-q8_0"})
+    st = p.stats()
+    assert st["done_h"] == 0 and st["p50_s"] is None and st["challengers"]["done"] == 1 and w.done == 0
