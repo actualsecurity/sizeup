@@ -321,7 +321,7 @@ def test_the_layers_are_indexed_once_per_rev_and_the_answer_cached(cad):
     # a new rev of the layer (A only): indexed again in the background while the old grid serves, then worked out again
     set_layer(cad.gis, "buildings", list(cad.gis.data["buildings"])[:1])
     call(cad, "100 Sample Ave", at=(400, 60))
-    for t in [t for t in threading.enumerate() if t.name.startswith("footprints-")]:
+    for t in [t for t in threading.enumerate() if t.name == "footprints-index"]:
         t.join(10)
     assert reads.count("buildings") == 2
     assert "building" not in call(cad, "100 Sample Ave", at=(400, 60))        # H1 is gone from the layer

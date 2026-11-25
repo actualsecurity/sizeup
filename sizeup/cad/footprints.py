@@ -352,7 +352,7 @@ class Footprints:
             self._build(layer)
             return self._grids.get(layer) or (None, None)
         if not self._building[layer].locked():
-            threading.Thread(target=self._build, args=(layer, _rest), name=f"footprints-{layer}", daemon=True).start()
+            threading.Thread(target=self._build, args=(layer, _rest), name="footprints-index", daemon=True).start()
         return got
 
     def _addresses(self) -> tuple[Grid | None, dict, dict]:
