@@ -16,10 +16,37 @@ GPU back at once (see [The local LLM](#the-local-llm-optional)).
 - **Logs:** they hold job ids, timings and token counts. They never hold transcripts, prompts, the LLM's answers or
   the token.
 
+## Quick install (one script)
+
+In an ordinary (not elevated) PowerShell window, as the user who games on the PC:
+
+```powershell
+$u = 'https://raw.githubusercontent.com/actualsecurity/sizeup/<COMMIT>/tools/stt_worker/install.ps1'
+Invoke-WebRequest $u -UseBasicParsing -OutFile "$env:TEMP\sizeup-stt-install.ps1"
+(Get-FileHash "$env:TEMP\sizeup-stt-install.ps1").Hash -eq '<SHA256>'   # True
+powershell -ExecutionPolicy Bypass -File "$env:TEMP\sizeup-stt-install.ps1"
+```
+
+Run the last line only if the one before printed `True`.
+
+`install.ps1` does steps 1-8 below. It asks its questions first: the local LLM (y/N), the hub URL, then the worker
+token and the Cloudflare client id and secret (read hidden, stored only as user environment variables). Then it
+downloads, checks each file's size and SHA-256 against [`pins.json`](pins.json) before using it, writes `worker.toml`,
+runs `check` with whisper-server on 127.0.0.1, and registers and starts the task.
+
+- **Again:** safe to run again. It keeps what already matches its pin and asks before it replaces `worker.toml`, a
+  secret or the task. A `worker.py` that has updated itself is kept.
+- **`-DryRun`:** prints what it would do, with no prompts, downloads or changes.
+- **`-Uninstall`:** removes the task, `%LOCALAPPDATA%\sizeup-stt` and the three variables, after you confirm. A copy
+  of the script stays in that folder for this.
+- **Pins:** the URLs, sizes and hashes in `pins.json`, in the script and in the steps below are the same (a test
+  checks). The script's own commit and hash above change with every change to it.
+
 ## Windows setup (NVIDIA GPU)
 
 Everything goes in `%LOCALAPPDATA%\sizeup-stt`. Only your Windows user can write there, so other local users can't
-swap the programs the worker runs. Run the commands in PowerShell as that user:
+swap the programs the worker runs. Every download's URL, size and SHA-256 is also in [`pins.json`](pins.json) (what
+`install.ps1` uses). Run the commands in PowerShell as that user:
 
 ```powershell
 $d = "$env:LOCALAPPDATA\sizeup-stt"
@@ -38,7 +65,7 @@ The python.org installer works too. It also installs the `py` launcher.
 
 ### 2. whisper.cpp with CUDA
 
-You need an NVIDIA driver from 2024 or later. `nvidia-smi` should print the GPU.
+You need an NVIDIA driver from 2024 or later (551.61 or newer, CUDA 12.4's minimum). `nvidia-smi` should print the GPU.
 
 Use whisper.cpp pre-release **b5454**, asset **`whisper-bin-win-cuda-12.4.0-x64.zip`** (684,913,404 bytes). It
 includes the CUDA runtime DLLs, so you don't need the CUDA Toolkit. The program is `Release\whisper-server.exe` in the
@@ -158,7 +185,7 @@ http://127.0.0.1:8180`. With it running, `py -3 "$d\worker.py" check` also tries
 
 ### 5. The worker
 
-For the first install, `worker.py` is pinned to a commit. Check its hash after the download. From then on it
+For the first install, `worker.py` is pinned to a commit (147,764 bytes). Check its hash after the download. From then on it
 [updates itself](#updating). A worker installed from an older pin (before the self-update) needs this download once
 more to get it.
 

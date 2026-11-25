@@ -1,0 +1,48 @@
+{
+  "_what": "Every download of the GPU STT worker's Windows setup: URL, size and SHA-256. README.md and install.ps1 (its $PinsJson) must say the same (tests/test_stt_worker_install.py).",
+  "nvidia_driver_min": "551.61",
+  "artifacts": {
+    "whisper_zip": {
+      "what": "whisper.cpp b5454, CUDA 12.4 (whisper-server.exe and the CUDA runtime)",
+      "url": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-win-cuda-12.4.0-x64.zip",
+      "bytes": 684913404,
+      "sha256": "AFEF0B881C500958921C3F5523B50E59EE2EC9B6F5CBD25B324C51ED308A957A"
+    },
+    "whisper_model": {
+      "what": "ggml-large-v3-turbo-q5_0.bin",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo-q5_0.bin",
+      "bytes": 574041195,
+      "sha256": "394221709CD5AD1F40C46E6031CA61BCE88931E6E088C188294C6D5A55FFA7E2"
+    },
+    "worker_py": {
+      "what": "worker.py (first install; it updates itself afterwards)",
+      "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/39c4de4b155d1a03db14168c66dcb57954f0ae12/tools/stt_worker/worker.py",
+      "bytes": 147764,
+      "sha256": "DF31E5B282749F2AEE67C4C0403672133AE6CBDFF4D8068F27BD04F68C9D01A2"
+    },
+    "llama_zip": {
+      "what": "llama.cpp b12359, CUDA 12.4 (llama-server.exe)",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12359/llama-b12359-bin-win-cuda-12.4-x64.zip",
+      "bytes": 318976332,
+      "sha256": "E9C0ABF442E8339C06728366C1AD2C711332F9939C0C00603FB75D85FD44C914"
+    },
+    "llama_cudart_zip": {
+      "what": "llama.cpp b12359, the CUDA 12.4 runtime",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12359/cudart-llama-bin-win-cuda-12.4-x64.zip",
+      "bytes": 391443627,
+      "sha256": "8C79A9B226DE4B3CACFD1F83D24F962D0773BE79F1E7B75C6AF4DED7E32AE1D6"
+    },
+    "qwen3_8b": {
+      "what": "Qwen3-8B Q4_K_M GGUF (the default local LLM)",
+      "url": "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/7c41481f57cb95916b40956ab2f0b139b296d974/Qwen3-8B-Q4_K_M.gguf",
+      "bytes": 5027783488,
+      "sha256": "D98CDCBD03E17CE47681435B5150E34C1417F50B5C0019DD560E4882C5745785"
+    },
+    "gemma3_12b": {
+      "what": "Gemma-3-12B-it Q4_K_M GGUF (the other choice; install.ps1 doesn't fetch it)",
+      "url": "https://huggingface.co/bartowski/google_gemma-3-12b-it-GGUF/resolve/648e3a36a77c8a9f12d86e741f9dcb9089c769c4/google_gemma-3-12b-it-Q4_K_M.gguf",
+      "bytes": 7300575264,
+      "sha256": "FC57F67EFA46D711C346E587CBEF7D049E95F3DF8DB2EB2271153343EF0ACC7B"
+    }
+  }
+}
