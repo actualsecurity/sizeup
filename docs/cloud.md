@@ -1837,10 +1837,14 @@ Each channel has its own speech-to-text model on the GPU workers (`sizeup/sttmod
   else the hub-wide default an admin set here (`stt_models.llm_priority`, never sent unless set), else worker.toml's
   ("yield"). The worker downloads, checks and swaps the model; its state ("unavailable: gave its VRAM to the speech
   models") shows in the GPU workers' LLM table. Audited as System.
-- **A champion change** (Settings' model, a promote, an automatic rollback) goes through `HubApp.stt_champion_change`
-  BEFORE it applies: kept in hub.sqlite (meta `stt_champion_log`, what intel reads: `HubApp.stt_champion_log(since)`),
-  said in the hub's log (the channel key and model ids), and passed to each listener in `stt_champion_hooks`. A
-  pre-alert channel (one the radio pre-alerts push from, or promote now) is flagged `prealert`.
+- **A champion change** (Settings' model "settings", a promote, an automatic rollback) goes through
+  `HubApp.stt_champion_change` BEFORE it applies (the same request, ms before it is stored). It is kept in hub.sqlite
+  (table `stt_champion`, replicated with the rest), said in the hub's log (the channel key, model ids and how many
+  listeners heard it), and passed to each listener in `stt_champion_hooks`. Intel reads it with
+  `HubApp.champion_changes(since=None, until=None, channel=None)`: `[{at, channel, old, new, why}]`, `at` epoch
+  seconds when it took effect, `channel` the radio log's source key (`radio_traffic.source`: `p25:<system>:<tg>`,
+  `fm:<label>`, `air:<label>`; `HubApp.channel_source(key)` maps a hub key to it), `why` one of `settings`, `promote`,
+  `rollback`. Kept at least 90 days, and each channel's last 20 whatever their age. Model ids, keys and reasons only.
 - **Logs:** no text, prompt or context in a log line on these paths: an error says its type only
   (`tests/test_no_words_in_logs.py`).
 - **Discarded:** a repetition loop (`sizeup/stt_quality.py`, `repeated`), or a llama-asr model's context read back as the text, is kept as a run (role
