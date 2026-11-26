@@ -25,7 +25,10 @@ works as before; this is next to it, keyed by the same clip id.
                             terms put back: only when it changes it; the raw text is never changed), corr_n (how many
                             corrections: 0 when it ran and found none), corr_rules (JSON [[heard, to, rule, score], ...])
                             and corr_v (the rule, the term list's version and its sections' and towns',
-                            "vcorr/1@county_fire@0123456789ab@01234567"; "pending": on there, its matcher not built yet). Pruned by the hub's
+                            "vcorr/1@county_fire@0123456789ab@01234567"; "pending": on there, its matcher not built yet).
+                            input (#678): the audio the engine heard, "stt-src" (the station's own whisper input,
+                            16 kHz) | "listening-8k" (the 8 kHz listening clip in its place) | "" (not known: a run from
+                            before it). Pruned by the hub's
                             janitor: older than KEEP_DAYS, and a run whose radio log row is gone (its channel's transcript
                             retention: never longer than the transcript), batch after batch for up to PRUNE_BUDGET_S
     LatencyBook             transmission end -> text on the hub, per channel, over WINDOW_S in memory: p50 / p95 and
@@ -53,13 +56,21 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS stt_runs (
   text TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT '', confidence REAL, words TEXT NOT NULL DEFAULT '',
   channel TEXT NOT NULL DEFAULT '', class TEXT NOT NULL DEFAULT '', clip_end REAL, queued_at REAL, engine_start REAL,
   done_at REAL NOT NULL, wait_s REAL, run_s REAL, keyup TEXT NOT NULL DEFAULT '', call_id TEXT NOT NULL DEFAULT '',
-  turn INTEGER, vocab_v TEXT NOT NULL DEFAULT '');
+  turn INTEGER, vocab_v TEXT NOT NULL DEFAULT '', input TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS stt_runs_clip ON stt_runs (clip_id);
 CREATE INDEX IF NOT EXISTS stt_runs_done ON stt_runs (done_at);"""
 COLUMNS = ("clip_id", "engine", "model", "worker", "prompt_v", "role", "text", "status", "confidence", "words",
            "channel", "class", "clip_end", "queued_at", "engine_start", "done_at", "wait_s", "run_s", "keyup", "call_id", "turn",
-           "vocab_v")
+           "vocab_v", "input")
 ENGINES = ("gpu-worker", "aws", "station-whisper")
+INPUTS = ("stt-src", "listening-8k")     # (#678; sizeup/cloud/sttinput.py INPUT_SRC / INPUT_LISTENING)
+# the audio each engine hears when nothing else says: the station's whisper its own input; Amazon Transcribe the
+# listening clip (the hub sends it that). A pool worker's (GPU, or a station's whisper as one) is what the hub gave it
+ENGINE_INPUT = {"station-whisper": "stt-src", "aws": "listening-8k"}
+
+
+def engine_input(engine: str) -> str:
+    return ENGINE_INPUT.get(engine, "")
 ROLES = ("text", "alt", "late", "rerun", "catchup")
 KEEP_DAYS = 90.0
 # the dispatcher's trailing time (#727): added to a file from before them (Runs._open)
@@ -189,8 +200,11 @@ class Runs:
                 db.execute("PRAGMA synchronous = NORMAL")
                 db.execute("PRAGMA busy_timeout = 5000")
                 db.executescript(SCHEMA)
-                if "vocab_v" not in {r[1] for r in db.execute("PRAGMA table_info(stt_runs)")}:   # a file from before it
+                cols = {r[1] for r in db.execute("PRAGMA table_info(stt_runs)")}
+                if "vocab_v" not in cols:                                                         # a file from before it
                     db.execute("ALTER TABLE stt_runs ADD COLUMN vocab_v TEXT NOT NULL DEFAULT ''")
+                if "input" not in cols:                                                           # ... or before #678
+                    db.execute("ALTER TABLE stt_runs ADD COLUMN input TEXT NOT NULL DEFAULT ''")
             except Exception:
                 db.close()                        # (never a connection left open: the next write tries again)
                 raise
@@ -223,9 +237,9 @@ class Runs:
             channel: str = "", cls: str = "", clip_end: float | None = None, queued_at: float | None = None,
             engine_start: float | None = None, done_at: float | None = None, wait_s: float | None = None,
             run_s: float | None = None, keyup: dict | None = None, call_id: str = "", turn: int | None = None,
-            vocab_v: str = "") -> bool:
+            vocab_v: str = "", input: str = "") -> bool:       # noqa: A002 - the column's name
         """One transcript. True when it was written. vocab_v: the term list or vocabulary that biased it
-        (sizeup/stt_terms.py; prompt_v is the whole prompt's hash)."""
+        (sizeup/stt_terms.py; prompt_v is the whole prompt's hash). input: the audio it heard (INPUTS; "" unknown)."""
         row = (str(clip_id)[:128], engine if engine in ENGINES else "other", str(model or "")[:120], str(worker or "")[:40],
                str(prompt_v or "")[:20], role if role in ROLES else "text", str(text or "")[:20000],
                str(status or "")[:20], _fin(confidence),
@@ -233,7 +247,7 @@ class Runs:
                str(cls or "")[:20], _fin(clip_end), _fin(queued_at), _fin(engine_start),
                self.clock() if done_at is None else done_at, _sec(wait_s), _sec(run_s), _keyup(keyup),
                str(call_id or "")[:128], int(turn) if isinstance(turn, int) and not isinstance(turn, bool) else None,
-               str(vocab_v or "")[:80])
+               str(vocab_v or "")[:80], input if input in INPUTS else "")
         if not self.may_write():
             return False
         try:
