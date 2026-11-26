@@ -908,6 +908,8 @@ class StationLink:
                 self._stt_wake.clear()
                 continue
             rows = self.outbox.stt_batch()
+            if self.outbox.pending()[0]:            # an event queued meanwhile: it goes first (then the lane is woken)
+                continue
             body = {"v": 1, "station": self.station_id,
                     "items": [dict(r["data"], n=r["n"], stt=sttinput.to_wire(r["flac"], r["meta"])) for r in rows]}
             try:

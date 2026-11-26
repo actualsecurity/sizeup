@@ -18,7 +18,7 @@ from sizeup.radio.fm import RATE
 from tests.test_app import voice, wait
 from tests.test_cloud import HubRun, call, hub_cfg
 from tests.test_stt_encode import paused, resume
-from tests.test_stt_input import FakeHub, _event, _item, _transmission, offline_station, stt_rows
+from tests.test_stt_input import FakeHub, _event, _item, _transmission, offline_station, queued, stt_rows
 
 PRE, FIRE, NORMAL, LOW = sttinput.PRE, sttinput.FIRE, sttinput.NORMAL, sttinput.LOW
 
@@ -227,6 +227,48 @@ def test_a_burst_goes_up_pre_alert_first_and_in_its_own_order_within_each_class(
             assert [i for i in got if prio[i] == p] == [i for i, q in queued if q == p]
     finally:
         st.link.stop()
+
+
+class StuckWhisper:
+    """whisper-server stand-in that doesn't answer until let go: the station's whisper minutes behind."""
+
+    def __init__(self):
+        self.go = threading.Event()
+
+    def transcribe(self, audio, prompt="", **kw):
+        self.go.wait(30)
+        return "Engine 60 responding", 0.9
+
+
+def test_inputs_go_up_at_once_while_the_stations_whisper_is_stuck(tmp_path):
+    """#678 review: an input never waits for its own event. With whisper stuck (its clips' traffic events go only with
+    their text), their STT inputs still reach the hub at once, none dropped, so the pool can take them at 16 kHz."""
+    hub = FakeHub(["p25_systems", "stt_input"])
+    hub.down = False
+    st = offline_station(tmp_path, client=hub)
+    stuck = StuckWhisper()
+    st.stt.client = stuck
+    try:
+        ids = [_transmission(st, f"FG1-17900003{k:05d}", "FG1", voice(0.6, seed=70 + k), True).id for k in range(3)]
+        got = lambda: {it["id"] for body, _gz in list(hub.stt_posts) for it in body["items"]}   # noqa: E731
+        assert wait(lambda: set(ids) <= got(), 10), got()
+        assert not any(queued(st, "traffic", cid) for cid in ids)                  # (no event yet: whisper is stuck)
+        assert sum(st.link.stt_stats()["dropped"].values()) == 0
+    finally:
+        stuck.go.set()
+        st.link.stop()
+
+
+def test_a_fire_input_is_never_the_one_dropped_for_a_flood_of_context(tmp_path):
+    """#677 under pressure: 1 FIRE input then 200 LOW (a context talkgroup) over the lane's budget: the LOW ones go,
+    the fire one stays and goes first."""
+    ob = Outbox(tmp_path / "o.sqlite", max_audio_bytes=10_000)                 # the lane's budget: 3000
+    ob.add_stt({"id": "FG1-1"}, b"f" * 400, {}, prio=FIRE)
+    for k in range(200):
+        ob.add_stt({"id": f"ctx-{k}"}, b"l" * 400, {}, prio=LOW)
+    rows = ob.stt_batch(max_bytes=1 << 30, max_items=1000)
+    assert rows[0]["data"]["id"] == "FG1-1" and ob.dropped_stt_fire == 0 and ob.dropped_stt > 0
+    assert all(r["prio"] == LOW for r in rows[1:])
 
 
 def test_the_airband_never_costs_a_fireground_clip(tmp_path):

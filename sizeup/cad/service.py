@@ -377,6 +377,7 @@ class Cad:
         from sizeup.intel.engine import IntelEngine
         self.intel = IntelEngine(settings=lambda: {k: self.settings.section(k) for k in ("intel", "intel_packs", "intel_rules")},
                                  store=self.store, clock=clock, log=log, tz=TZ)
+        self.intel.talkers.radios = self.radios          # who keyed up: Settings > Radios > Radio IDs' labels (#844)
         from sizeup.intel.infer import Inference           # the model behind the rules: off unless Settings turn it on
         self.intel.infer = Inference(settings=lambda: self.intel.policy.cfg, store=self.store, clock=clock, log=log, tz=TZ,
                                      worker=True)            # its calls on the "infer" thread, never the engine's
