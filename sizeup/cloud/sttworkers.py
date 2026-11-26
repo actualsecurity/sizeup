@@ -210,6 +210,7 @@ class WorkerRegistry:
         self._lock = threading.Lock()
         self.listeners: list[Callable[[], None]] = []    # called after an admin changes a switch (the LLM lane)
         self.gpu_total: Callable[[str], float | None] = lambda wid: None   # a worker's GPU memory (MB) as it said last
+        self._config_lock = threading.Lock()
 
     def _q(self, sql: str, params=()) -> list[tuple]:
         try:
@@ -383,17 +384,19 @@ class WorkerRegistry:
         wid = self._id(wid)
         if self.row(wid) is None:
             raise WorkerError(f"no worker {wid}")
-        saved = workerconfig.saved(self.mdb)
-        old = saved.get(wid, {})
-        try:
-            new = workerconfig.changes(old, sets, self.gpu_total(wid))
-        except workerconfig.ConfigValueError as e:
-            raise WorkerError(str(e)) from None
-        if new:
-            saved[wid] = new
-        else:
-            saved.pop(wid, None)
-        self.mdb.put(workerconfig.META, json.dumps(saved, sort_keys=True))
+        total = self.gpu_total(wid)
+        with self._config_lock:                # (two admins at once: neither change lost)
+            saved = workerconfig.saved(self.mdb)
+            old = saved.get(wid, {})
+            try:
+                new = workerconfig.changes(old, sets, total)
+            except workerconfig.ConfigValueError as e:
+                raise WorkerError(str(e)) from None
+            if new:
+                saved[wid] = new
+            else:
+                saved.pop(wid, None)
+            self.mdb.put(workerconfig.META, json.dumps(saved, sort_keys=True))
         return old, new
 
     def _switched(self) -> None:
@@ -737,7 +740,8 @@ class WorkerApi:
             if cr is not None and path in (API + "hello", API + "state"):
                 self.config_seen[wid] = cr
                 want = self.reg.config_of(wid)
-                if cr["applied_rev"] != want["rev"]:
+                # (also while it waits to apply another rev: the admin went back to the one it has, #968 review)
+                if cr["applied_rev"] != want["rev"] or (cr["state"] == "pending" and cr["rev"] not in ("", want["rev"])):
                     told["config"] = want
             # keep_awake {on, held} and a clean stop's reason "shutdown": Health's "keeps PC awake" / "(asleep?)"
             ka = clean_keep_awake(d.get("keep_awake")) if gpu else None

@@ -729,6 +729,8 @@ a value `worker.toml` sets. The hub never sends, and the worker never takes from
   for 30 minutes.
 - The last good settings are kept in `state\hub-config.json` and used from the next start on, before any server starts.
 - `auto_update = false` stops code updates only: the hub's settings still arrive.
+- A hub from before this never sends settings, so a worker keeps the last good ones it has; delete
+  `state\hub-config.json` (then restart the worker) to go back to `worker.toml` alone.
 
 ## Troubleshooting
 

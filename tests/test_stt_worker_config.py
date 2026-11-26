@@ -545,3 +545,109 @@ def test_health_reads_the_workers_settings_end_to_end(tmp_path):
 def test_health_shows_a_config_column_for_gpu_workers():
     js = (Path(__file__).resolve().parents[1] / "sizeup" / "web" / "static" / "health.js").read_text()
     assert '"Version", "Config", "Load"' in js and "w.config_view" in js and 'w.kind === "station" ? "" : conf(w)' in js
+
+
+# --- review fixes -----------------------------------------------------------------------------------------------
+
+def test_a_rev_reverted_while_it_waited_is_never_applied(tmp_path, hub, whisper):
+    """A applied; B waits for the clip in hand; the admin goes back to A: B is dropped, and the hub tells the worker A
+    again although A is what it applied (it said it waits for another rev)."""
+    w = W.Worker(make_cfg(tmp_path, hub, whisper), run=FakeSmi())
+    a, b = {"gate_dbfs": -50}, {"gate_dbfs": -40}
+    w.hub_config.offer(offer(a), w)
+    w.hub_config.step(w)
+    w.job = {"lease": "a" * 16}
+    w.hub_config.offer(offer(b), w)
+    assert w.hub_config.step(w) is False
+    rep = w.hub_config.report()
+    assert rep["state"] == "pending" and rep["rev"] == wc.rev(doc(b)) and rep["applied_rev"] == wc.rev(doc(a))
+    want = wc.desired(doc(a))
+    assert wc.view(want, wc.clean_report(rep))["label"] == "pending"          # never "✓" while B waits
+    w.hub_config.offer({"config": want}, w)
+    w.job = None
+    assert w.hub_config.step(w) is False and w.cfg.gate_dbfs == -50.0
+    assert w.hub_config.report() == {"applied_rev": want["rev"], "state": "applied", "rev": want["rev"],
+                                     "keys": {"gate_dbfs": "ok"}}
+    # the hub's side: told again while it waits for another rev
+    from tests.test_stt_pool import Clock, pool
+    reg = registry(tmp_path)
+    token = reg.rotate("gpu-1")
+    wa = WorkerApi(reg, pool(Clock()), log=lambda s: None)
+    reg.set_config("gpu-1", a)
+    body = {"state": "online", "model": "m", "config": rep}
+    assert post(wa, "/api/station/stt/state", body, token)[1]["config"] == reg.config_of("gpu-1")
+
+
+def test_flags_for_a_stopped_server_are_self_tested_too(tmp_path, hub, whisper, monkeypatch):
+    monkeypatch.setattr(W, "HUB_CONFIG_SELFTEST_S", 1.0)
+    w = server_worker(tmp_path, hub, whisper, Popen())
+    w.proc.stop()                                     # (stopped while gaming, or crash-looping)
+    w.control.set(gaming=True)
+    w.hub_config.offer(offer({"whisper_flags": ["-t", "99"]}), w)
+    assert w.hub_config.step(w) is False and w.hub_config.why == "gaming" and w.cfg.whisper_server == SERVER
+    w.control.set(gaming=False)
+    assert w.hub_config.step(w) is True
+    assert w.hub_config.report()["state"] == "rolled back" and w.proc.argv == SERVER and w.proc.running()
+
+
+def test_a_stop_or_gaming_during_the_self_test_is_no_verdict(tmp_path, hub, whisper):
+    w = server_worker(tmp_path, hub, whisper, Popen())
+    real = w.check_whisper
+    w.check_whisper = lambda: (w.control.set(gaming=True), False)[1]        # a game starts while it loads
+    w.hub_config.offer(offer({"whisper_flags": ["-t", "6"]}), w)
+    assert w.hub_config.step(w) is False
+    assert w.cfg.whisper_server == SERVER and w.proc.argv == SERVER and not w.proc.running() and not w.config_hold
+    assert w.hub_config.offered is not None and w.hub_config.failed == {} and w.hub_config.why == "gaming"
+    w.control.set(gaming=False)
+    w.check_whisper = lambda: (w.stop(), False)[1]                          # the worker stops (Ctrl-C, a swap)
+    assert w.hub_config.step(w) is False and w.hub_config.why == "stopping"
+    assert w.proc.argv == SERVER and w.hub_config.failed == {}
+    kept = Path(w.cfg.state_dir) / W.HUB_CONFIG_FILE
+    assert not kept.exists() or "failed" not in json.loads(kept.read_text())
+    w.check_whisper = real
+
+
+def test_no_claim_and_no_self_update_while_settings_are_applied(tmp_path, hub, whisper):
+    w = W.Worker(make_cfg(tmp_path, hub, whisper), run=FakeSmi())
+    w.connected, w._gaming_seen, w.whisper_ok = True, -1e9, True
+    w.updater.started = -1e9
+    w.config_hold = True
+    assert w.state() == ("paused", "applying settings") and w.update_busy() == "applying settings"
+    w.step()
+    w.llm_step()
+    assert not hub.calls("/claim")
+
+
+def test_a_failed_rev_after_a_restart_says_rolled_back_with_its_key(tmp_path, hub, whisper, monkeypatch):
+    monkeypatch.setattr(W, "HUB_CONFIG_SELFTEST_S", 1.0)
+    w = server_worker(tmp_path, hub, whisper, Popen())
+    bad = {"whisper_flags": ["-t", "99"], "gate_dbfs": "loud"}
+    w.hub_config.offer(offer(bad), w)
+    w.hub_config.step(w)
+    r = w.hub_config.report()
+    assert r["keys"] == {"whisper_flags": "failed", "gate_dbfs": "invalid"} and set(r["errors"]) == {"whisper_flags",
+                                                                                                      "gate_dbfs"}
+    w2 = W.Worker(make_cfg(tmp_path, hub, whisper, whisper_server=list(SERVER)), run=no_smi, popen=Popen())
+    w2.hub_config.offer(offer(bad), w2)
+    r2 = w2.hub_config.report()
+    assert (r2["state"], r2["rev"], r2["keys"]) == ("rolled back", r["rev"], {"whisper_flags": "failed"})
+    assert wc.view(wc.desired(doc(bad)), wc.clean_report(r2))["label"] == "✗ whisper_flags"
+
+
+def test_an_error_while_applying_puts_the_last_good_values_back(tmp_path, hub, whisper, monkeypatch):
+    w = W.Worker(make_cfg(tmp_path, hub, whisper, gate_dbfs=-60.0, log_ship=False), run=FakeSmi())
+    monkeypatch.setattr(W, "LogShip", lambda cfg: 1 / 0)                  # (the log shipper can't be made)
+    w.hub_config.offer(offer({"gate_dbfs": -50, "log_ship": True, "gaming_samples": 3}), w)
+    assert w.hub_config.step(w) is True
+    assert (w.cfg.gate_dbfs, w.cfg.gaming_samples, w.cfg.log_ship) == (-60.0, 2, False)
+    r = w.hub_config.report()
+    assert r["state"] == "rolled back" and r["errors"] == {"log_ship": "self-test: error: ZeroDivisionError"}
+
+
+def test_keep_awake_off_from_the_hub_holds(tmp_path, hub, whisper):
+    w = W.Worker(make_cfg(tmp_path, hub, whisper), run=FakeSmi(), keep_awake=W.KeepAwake(True, windows=True,
+                                                                                         kernel32=object()))
+    w.keep_awake._want = True
+    w.hub_config.offer(offer({"keep_awake": False}), w)
+    w.keep_awake.want(True)                                                   # a heartbeat after it: nothing
+    assert w.keep_awake.on is False and w.keep_awake._want is False

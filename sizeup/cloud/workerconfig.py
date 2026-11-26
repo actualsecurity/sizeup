@@ -6,8 +6,8 @@ the worker's own worker.toml; in the Settings audit, a line per key). hub.sqlite
 
 The worker says config {applied_rev, rev, state, why, keys, errors} in every hello and state (deploy/stt-worker/worker.py
 HubConfig.report; sending it is the capability). The hub answers config {rev, values} only when the worker's applied_rev
-isn't the document's (sttworkers.WorkerApi): an older worker never sees it, and an older hub never sends it. A standby
-hub answers no worker at all (fenced, as the rest of the workers' API).
+isn't the document's, or while it waits to apply another one (sttworkers.WorkerApi): an older worker never sees it,
+and an older hub never sends it. A standby hub answers no worker at all (fenced, as the rest of the workers' API).
 
 Only KEYS are the hub's (the audit in #968): worker.toml keeps the bootstrap (hub_url, the token and Cloudflare's, the
 paths), which is never sent. The rules here are the worker's own (worker.py HUB_KEYS, check_hub_value, WHISPER_ARGS and
@@ -225,7 +225,9 @@ def view(want: dict, rep: dict | None) -> dict:
     keys = (rep.get("keys") or {}) if about else {}
     errs = (rep.get("errors") or {}) if about else {}
     bad = sorted(k for k, s in keys.items() if s in NOT_TAKEN)
-    if about and rep.get("state") == "rolled back":
+    if rep.get("state") == "pending" and rep.get("rev") and not about:
+        label, tone = "pending", "dim"                                 # (it still waits to apply another rev)
+    elif about and rep.get("state") == "rolled back":
         label, tone = f"✗ {bad[0] if bad else 'rolled back'}", "warn"
     elif ar == r:
         label, tone = (f"✗ {bad[0]}", "warn") if bad else (f"{r[:7]} ✓", "ok")

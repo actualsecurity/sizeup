@@ -3602,14 +3602,17 @@ class HubConfig:
                                            # back or unused
         self.errors: dict[str, str] = {}
         self.offered: tuple[str, dict, dict] | None = None
-        self.failed: dict[str, float] = {}  # rev -> when it failed (not tried again before HUB_CONFIG_RETRY_S)
+        self.failed: dict[str, tuple] = {}  # rev -> (when it failed, the key, why): not tried again before
+                                            # HUB_CONFIG_RETRY_S
         self._warned: set = set()
+        self._applied: tuple[dict, dict] = ({}, {})   # the statuses and errors of applied_rev (told again on a revert)
         self._mu = threading.Lock()
         self._apply = threading.Lock()
         kept = read_json(self.path)
         failed = kept.get("failed")
         if isinstance(failed, dict) and isinstance(failed.get("rev"), str) and isinstance(failed.get("at"), (int, float)):
-            self.failed[failed["rev"]] = self.clock() - max(0.0, self.wall() - failed["at"])   # (not again at once)
+            self.failed[failed["rev"]] = (self.clock() - max(0.0, self.wall() - failed["at"]),   # (not again at once)
+                                          str(failed.get("key") or "")[:40], str(failed.get("why") or "")[:120])
         last = kept.get("last_good")
         if isinstance(last, dict) and isinstance(last.get("rev"), str) and HUB_CONFIG_REV.fullmatch(last["rev"]) \
                 and isinstance(last.get("values"), dict):
@@ -3617,8 +3620,9 @@ class HubConfig:
             for k, v in clean.items():
                 self._set(None, k, v)
             self.values, self.applied_rev, self.rev, self.state = clean, last["rev"], last["rev"], "applied"
-            self.status = {**{k: "ok" for k in clean}, **{k: "invalid" for k in errors}}
-            self.errors = errors
+            self.status = {**{k: "ok" for k in clean}, **self._not_taken(errors)}
+            self.errors = {k: v for k, v in errors.items() if v not in ("unknown", "worker.toml only")}
+            self._applied = (dict(self.status), dict(self.errors))
             if clean:
                 log.info("hub settings: %s kept from the last start (%s)", last["rev"], ", ".join(sorted(clean)))
 
@@ -3662,9 +3666,12 @@ class HubConfig:
         elif key == "llm_timeout_s" and w.llm is not None:
             w.llm.timeout_s = v
         elif key == "keep_awake":
+            ka = w.keep_awake
+            ka.on = bool(v)                # (first: a heartbeat's want(True) after this is a no-op)
             if not v:
-                w.keep_awake.want(False)   # (while still on: its thread clears the flag)
-            w.keep_awake.on = bool(v)
+                with ka._cv:               # its thread clears the flag
+                    ka._want = False
+                    ka._cv.notify_all()
         elif key == "managed_models":
             w.stt_models.enabled = bool(v)
             if not v:
@@ -3692,19 +3699,31 @@ class HubConfig:
         if not isinstance(rev, str) or not HUB_CONFIG_REV.fullmatch(rev) or not isinstance(values, dict):
             return
         with self._mu:
-            if rev == self.applied_rev or (self.offered is not None and self.offered[0] == rev):
+            if rev == self.applied_rev:
+                if self.offered is not None or self.state != "applied":   # the admin went back to what is in effect
+                    self.offered, self.rev, self.state, self.why = None, rev, "applied", ""
+                    self.status, self.errors = dict(self._applied[0]), dict(self._applied[1])
                 return
-            if self.clock() - self.failed.get(rev, -1e18) < HUB_CONFIG_RETRY_S:
+            if self.offered is not None and self.offered[0] == rev:
+                return
+            failed = self.failed.get(rev)
+            if failed is not None and self.clock() - failed[0] < HUB_CONFIG_RETRY_S:
+                if self.rev != rev and failed[1]:            # (after a restart: say so again, not "pending")
+                    self.offered, self.rev, self.state, self.why = None, rev, "rolled back", ""
+                    self.status, self.errors = {failed[1]: "failed"}, {failed[1]: f"self-test: {failed[2]}"[:120]}
                 return
             gpu = (getattr(w, "gpu", None) and w.gpu.info) or {}
             clean, errors = check_hub_config(values, _num(gpu.get("mem_total_mb")))
             self.offered, self.rev, self.state, self.why = (rev, clean, errors), rev, "pending", ""
-            self.status = {**{k: "pending" for k in clean}, **{k: ("invalid" if v not in ("unknown", "worker.toml only")
-                                                                   else v) for k, v in errors.items()}}
+            self.status = {**{k: "pending" for k in clean}, **self._not_taken(errors)}
             self.errors = {k: v for k, v in errors.items() if v not in ("unknown", "worker.toml only")}
         log.info("hub settings: %s received (%d key(s))", rev, len(values))
         if w is not None and all(HUB_KEYS[k][3] == "now" for k in self.changes(clean)):
             self.step(w)
+
+    @staticmethod
+    def _not_taken(errors: dict) -> dict:
+        return {k: (v if v in ("unknown", "worker.toml only") else "invalid") for k, v in errors.items()}
 
     # -- applying (the config thread; "now" keys from offer)
 
@@ -3717,7 +3736,7 @@ class HubConfig:
                 w._stop.wait(30)
             w._stop.wait(1.0)
 
-    def busy(self, w: "Worker", idle: bool, restart: bool) -> str:
+    def busy(self, w: "Worker", idle: bool, restart: list) -> str:
         """Why the settings can't be applied now ("" when they can)."""
         if w.draining:
             return "updating"
@@ -3727,18 +3746,20 @@ class HubConfig:
             return "a clip"
         if w.llm_job is not None or w._llm_call is not None:
             return "an LLM job"
-        held = w.held() if restart else None
-        return held[0] if held else ""
+        if not restart:
+            return ""
+        held = w.held()
+        if held:
+            return held[0]
+        if "llm" in restart and not (w.llm_proc.running() or (w.llm_verified and w.stt_models.llm_room_ok)):
+            return "llama-server not running"           # (its own reasons: the model's check, the VRAM)
+        return ""
 
     def restarts(self, w: "Worker", changed: dict) -> list:
-        """The servers to restart for these changes: the worker's own, running now (one stopped takes its new flags at
-        its next start)."""
-        out = []
-        for server, (_attr, proc_attr) in HUB_SERVERS.items():
-            proc = getattr(w, proc_attr, None)
-            if f"{server}_flags" in changed and proc is not None and proc.running():
-                out.append(server)
-        return out
+        """The servers to restart (and self-test) for these changes: every one the worker runs itself, stopped now or
+        not (a stopped one would start on flags never tested)."""
+        return [server for server, (_attr, proc_attr) in HUB_SERVERS.items()
+                if f"{server}_flags" in changed and getattr(w, proc_attr, None) is not None]
 
     def step(self, w: "Worker") -> bool:
         """The settings offered, applied if the worker is free for them. True when they were (or rolled back)."""
@@ -3752,12 +3773,12 @@ class HubConfig:
             rev, clean, errors = off
             changed = self.changes(clean)
             restart = self.restarts(w, changed)
-            why = self.busy(w, any(HUB_KEYS[k][3] != "now" for k in changed), bool(restart))
+            why = self.busy(w, any(HUB_KEYS[k][3] != "now" for k in changed), restart)
             if why:
                 self.why = why
                 return False
             if restart and not self._hold(w):
-                self.why = "busy"
+                self.why = "updating" if w.draining else "busy"
                 return False
             try:
                 return self._apply_now(w, rev, clean, errors, changed, restart)
@@ -3770,15 +3791,15 @@ class HubConfig:
 
     def _hold(self, w: "Worker") -> bool:
         """No new jobs (state paused, "applying settings"); the clip, the LLM call or the claim in hand done first
-        (HUB_CONFIG_DRAIN_S at most). False when they aren't (tried again later)."""
+        (HUB_CONFIG_DRAIN_S at most). False when they aren't, or a self-update began (tried again later)."""
         w.config_hold = True
         w._wake.set()
         end = self.clock() + HUB_CONFIG_DRAIN_S
         busy = lambda: (w.job is not None or w.llm_job is not None or w._claiming or w._llm_claiming   # noqa: E731
                         or w._inferring or w._llm_call is not None)
-        while not w.stopped and self.clock() < end and busy():
+        while not w.stopped and self.clock() < end and busy() and not w.draining:
             w._stop.wait(0.2)
-        if w.stopped or busy():
+        if w.stopped or busy() or w.draining:
             w.config_hold = False
             w._wake.set()
             return False
@@ -3786,14 +3807,30 @@ class HubConfig:
 
     def _apply_now(self, w: "Worker", rev: str, clean: dict, errors: dict, changed: dict, restart: list) -> bool:
         prev = {k: self.current(k) for k in changed}
-        for k, v in changed.items():
-            self._set(w, k, v)
-        bad, why = "", ""
-        for server in restart:
-            why = self.selftest(w, server)
-            if why:
-                bad = f"{server}_flags"
-                break
+        bad, why, doing = "", "", "?"
+        try:
+            for doing, v in changed.items():
+                self._set(w, doing, v)
+            for server in restart:
+                doing = f"{server}_flags"
+                why = self.selftest(w, server)
+                if why:
+                    bad = doing
+                    break
+        except Exception as e:  # noqa: BLE001 - whatever went wrong: the last good values back
+            log.exception("hub settings: %s: applying %s failed", rev, doing)
+            bad, why = doing, f"error: {type(e).__name__}"
+        if why in ("stopped", "held"):
+            # the worker stopping, or gaming / the LLM's VRAM taken during the self-test: no verdict on this rev; the
+            # last good values back without a restart (the monitors start the servers on them when they may), and it
+            # is tried again later
+            for k, v in prev.items():
+                self._set(w, k, v)
+            if why == "held" and not w.stopped:
+                for server in restart:
+                    getattr(w, HUB_SERVERS[server][1]).stop()
+            self.why = "gaming" if why == "held" else "stopping"
+            return False
         if bad:
             for k, v in prev.items():
                 self._set(w, k, v)
@@ -3802,11 +3839,12 @@ class HubConfig:
                 if again:
                     log.error("hub settings: %s doesn't answer on the last good settings either: %s", server, again)
             with self._mu:
-                self.failed[rev] = self.clock()
+                self.failed[rev] = (self.clock(), bad, why[:120])
                 if not self._newer(rev):
                     self.offered, self.state, self.why = None, "rolled back", ""
-                    self.status = {**{k: "rolled back" for k in clean}, bad: "failed"}
-                    self.errors = {bad: f"self-test: {why}"[:120]}
+                    self.status = {**{k: "rolled back" for k in clean}, **self._not_taken(errors), bad: "failed"}
+                    self.errors = {**{k: v for k, v in errors.items() if v not in ("unknown", "worker.toml only")},
+                                   bad: f"self-test: {why}"[:120]}
             log.warning("hub settings: %s: %s failed its self-test (%s): back to %s", rev, bad, why,
                         self.applied_rev or "worker.toml's")
             self._keep({"failed": {"rev": rev, "key": bad, "why": why[:120], "at": self.wall()}})
@@ -3817,12 +3855,12 @@ class HubConfig:
                 log.warning("worker.toml: %s is set on the hub: worker.toml's value isn't used", k)
         unused = {f"{s}_flags" for s, (attr, _p) in HUB_SERVERS.items() if not getattr(self.cfg, attr)}
         with self._mu:
-            self.values, self.applied_rev = dict(clean), rev
+            status = {**{k: "unused" if k in unused else "ok" for k in clean}, **self._not_taken(errors)}
+            errs = {k: v for k, v in errors.items() if v not in ("unknown", "worker.toml only")}
+            self.values, self.applied_rev, self._applied = dict(clean), rev, (status, errs)
             if not self._newer(rev):
                 self.offered, self.state, self.why = None, "applied", ""
-                self.status = {**{k: "unused" if k in unused else "ok" for k in clean},
-                               **{k: s for k, s in self.status.items() if k in errors}}
-                self.errors = {k: v for k, v in self.errors.items() if k in errors}
+                self.status, self.errors = dict(status), dict(errs)
         if changed or errors:
             log.info("hub settings: %s applied (%s)%s", rev, ", ".join(sorted(changed)) or "no change",
                      f"; not taken: {', '.join(sorted(errors))}" if errors else "")
@@ -3843,7 +3881,8 @@ class HubConfig:
 
     def selftest(self, w: "Worker", server: str) -> str:
         """That server restarted on the flags now in effect, then its self-test: it answers, and a tiny decode (1 s of
-        silence) or generation. "" when it passed, else why."""
+        silence) or generation. "" when it passed, else why; "stopped" (the worker stops) or "held" (gaming or a pause
+        began, or the LLM's VRAM went to the speech models): no verdict."""
         _attr, proc_attr = HUB_SERVERS[server]
         proc = getattr(w, proc_attr)
         if server == "whisper":
@@ -3855,6 +3894,8 @@ class HubConfig:
         proc.ensure(False)
         end, last = self.clock() + HUB_CONFIG_SELFTEST_S, "no answer"
         while not w.stopped and self.clock() < end:
+            if w.held() is not None or (server == "llm" and not w.stt_models.llm_room_ok):
+                return "held"
             if not proc.running():
                 return f"{proc.name} exited ({proc.proc.poll()})" if proc.proc is not None else f"{proc.name} didn't start"
             if server == "whisper":
@@ -4408,6 +4449,8 @@ class Worker:
         """Why the worker can't switch to a new file now ("" when it can): the swap restarts it, and its servers."""
         if not self.connected:
             return "the hub"
+        if self.config_hold:
+            return "applying settings"
         if self.job is not None:
             return "a clip"
         if self.llm_job is not None or self._llm_call is not None:
@@ -4521,7 +4564,7 @@ class Worker:
         self.hub.interrupted = False
         self._claiming = True
         try:
-            if self.stopped or self.draining:      # (the self-update's drain began after the state was read)
+            if self.stopped or self.draining or self.config_hold:   # (a drain began after the state was read)
                 return
             ans = self.hub.request("POST", f"{API}/claim", {"wait": self.claim_wait, "state": state,
                                                             "model": self.cfg.model, "models": self.loaded()},
@@ -4773,7 +4816,7 @@ class Worker:
         self.llm_hub.interrupted = False
         self._llm_claiming = True
         try:
-            if self.stopped or self.draining:
+            if self.stopped or self.draining or self.config_hold:
                 return
             ans = self.llm_hub.request("POST", f"{API}/infer/claim",
                                        {"wait": self.claim_wait, "state": self.state()[0], "models": self.models()},
