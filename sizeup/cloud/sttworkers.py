@@ -22,7 +22,8 @@ own Access application scoped to /api/station/stt/*, so a worker's service token
 token_revoked); 409 {error} for a lease that is gone.
 
     POST /api/station/stt/hello                   {worker?, version, model, gpu?, state} -> {ok, worker, poll_s, classes, pool_on}
-    POST /api/station/stt/state                   {state: online|gaming|paused, model, gpu, version, keep_awake?}
+    POST /api/station/stt/state                   {state: online|gaming|paused, model, gpu, version, keep_awake?,
+                                                   runtimes?}
                                                   -> {ok, pool_on}
     POST /api/station/stt/claim                   {wait <= 25, state, model} -> {job: {lease, id, kind, channel, class,
                                                   prompt, seconds, lease_s, cap_at, fast, audio} | null}; fast: one
@@ -58,6 +59,10 @@ Keeping the PC awake (deploy/stt-worker/worker.py KeepAwake): a GPU worker on Wi
 hello and state. Health shows "keeps PC awake" while held, and a worker gone silent as "offline since HH:MM", with
 "(asleep?)" when its last word said keep_awake off or not held, or its heartbeats just stopped while online (no pause,
 gaming or clean stop first: sttpool.Pool.asleep). A hub from before ignores the key.
+
+Its runtimes (deploy/stt-worker/worker.py Runtimes): a GPU worker says runtimes {llama, whisper: {build, state}} in its
+hello and state, the llama.cpp / whisper.cpp builds it runs and its own update of them (it downloads, tests and switches
+them itself: no installer run). Kept as said (clean_runtimes) and shown on Health's worker row; never acted on.
 
 Its log (deploy/stt-worker/worker.py LogShip): POST /api/station/stt/logs, gzipped {v, worker, batch, lines: [[ms,
 level, msg]]} -> {ok, accepted, n | retry_s, reason}; a GPU worker's own token only. Into CloudWatch Logs
@@ -190,6 +195,26 @@ def clean_keep_awake(v) -> dict:
     out = {k: v[k] for k in ("on", "held") if isinstance(v.get(k), bool)}
     if isinstance(v.get("why"), str) and v["why"].strip():
         out["why"] = " ".join(v["why"].split())[:40]
+    return out
+
+
+RUNTIME_NAMES = ("llama", "whisper")
+RUNTIME_BUILD = re.compile(r"b[0-9]{1,7}")
+
+
+def clean_runtimes(v) -> dict:
+    """A GPU worker's runtimes {llama, whisper: {build, state}} (deploy/stt-worker/worker.py Runtimes): the build's
+    release tag ("" unknown) and the update's state in words (60 characters); {} when it sent none (a worker from
+    before)."""
+    if not isinstance(v, dict):
+        return {}
+    out = {}
+    for rt in RUNTIME_NAMES:
+        r = v.get(rt)
+        if isinstance(r, dict):
+            b = r.get("build")
+            out[rt] = {"build": b if isinstance(b, str) and RUNTIME_BUILD.fullmatch(b) else "",
+                       "state": " ".join(str(r.get("state") or "").split())[:60]}
     return out
 
 
@@ -686,15 +711,16 @@ class WorkerApi:
             told = {"worker_update": self.wanted(wid)} if su is not None else {}
             # keep_awake {on, held} and a clean stop's reason "shutdown": Health's "keeps PC awake" / "(asleep?)"
             ka = clean_keep_awake(d.get("keep_awake")) if gpu else None
+            rts = clean_runtimes(d.get("runtimes")) if gpu else None      # llama.cpp / whisper.cpp builds: Health
             why = d.get("reason") if isinstance(d.get("reason"), str) else ""
             if path == API + "hello":
                 self.pool.seen(wid, state, model, d.get("gpu"), d.get("version") if isinstance(d.get("version"), str) else None,
-                               kind=kind, load=load, update=su, keep_awake=ka, reason=why)
+                               kind=kind, load=load, update=su, keep_awake=ka, runtimes=rts, reason=why)
                 return _json(200, {"ok": True, "worker": wid, "poll_s": POLL_S, "pool_on": self._pool_on(),
                                    "classes": [sttpool.class_key(c) for c in sttpool.CLASSES], **told})
             if path == API + "state":
                 self.pool.seen(wid, state, model, d.get("gpu"), d.get("version") if isinstance(d.get("version"), str) else None,
-                               kind=kind, load=load, update=su, keep_awake=ka, reason=why)
+                               kind=kind, load=load, update=su, keep_awake=ka, runtimes=rts, reason=why)
                 return _json(200, {"ok": True, "pool_on": self._pool_on(), **told})
             if path == API + "claim":
                 wait = _num(d.get("wait")) or 0.0

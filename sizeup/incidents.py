@@ -266,7 +266,18 @@ class IncidentStore:
 
     def on_traffic(self, t: Traffic, attach: bool = True, save: bool = True) -> Incident | None:
         """attach=False: context traffic (another battalion's talkgroup) goes to the loose list. save=False: a loose one
-        is written with the next save (#927: a station's row at its close, saved with its text), one on an incident now."""
+        is written with the next save (#927: a station's row at its close, saved with its text), one on an incident now. An
+        id already here is never added twice: that row is updated in place."""
+        with self._lock:                 # (one row per id: the same transmission shown again is updated in place)
+            have = next(((i, x) for i in self.incidents for x in i.traffic if x.id == t.id), None) or next(
+                ((None, x) for x in self.loose if x.id == t.id), None)
+            if have is not None:
+                if have[1] is not t:
+                    have[1].__dict__.update(t.__dict__)
+        if have is not None:
+            if save or have[0] is not None:
+                self.save()
+            return have[0]
         inc = self.active() if attach else None
         with self._lock:
             if inc is not None:

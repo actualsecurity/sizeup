@@ -1,0 +1,13 @@
+{
+  "base": "stt-worker-state/valid/gpu-worker-online.json",
+  "patch": [
+    {
+      "op": "add",
+      "path": "/runtimes",
+      "value": {
+        "llama": {"build": "b12359", "state": "downloading b12728"},
+        "whisper": {"build": "b5454", "state": "ok"}
+      }
+    }
+  ]
+}

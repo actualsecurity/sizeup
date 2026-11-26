@@ -55,6 +55,7 @@ FAST_WINDOW_S = 1200.0         # a worker's pre-alert times are looked at over t
 PROBE_S = 180.0                # a worker found slow on them gets one pre-alert clip again this long after its last
                                # slow one or try (a probe: how it recovers; a quick answer opens the gate again)
 STATION_DEFER_S = 1.0          # a job a GPU worker could take now waits this long before a station's whisper may claim it
+NORM_QUIET_S = BG_QUIET_S     # an Auto · normal clip goes to a GPU only this long after the last priority clip came in
 BG_STATION_FIRST_S = 2.0       # ... but background work (#896) the other way round: a station's whisper first this long
                                # (the order: a GPU worker, an idle station's whisper, then AWS; #639 phase 2)
 KINDS = ("gpu", "station")
@@ -107,6 +108,13 @@ def rank(job) -> int:
     """Where a job queues (#896 + Auto · normal): priority work first (0), Auto · normal next (1), background and the
     catch-up last (2); then by class, then oldest first."""
     return 2 if job.bg else 1 if job.norm else 0
+
+
+def priority(job) -> bool:
+    """A priority-tier job (rank 0): what the pre-alert speed gate measures, what background and Auto · normal work
+    yields to, and what never waits behind either. Never a shadow copy (the latency guard's probe) nor a clip placed on
+    the stations (station_only: background or Auto · normal); a lower tier (a future challenger's) ranks above 0."""
+    return rank(job) == 0 and not job.extra.get("shadow") and not job.extra.get("station_only")
 
 
 def _extra(job) -> float:
@@ -191,6 +199,7 @@ class Worker:
     version: str = ""
     update: dict = field(default_factory=dict)  # a GPU worker's self-update: {sha256, commit, auto, state, bad}
     keep_awake: dict = field(default_factory=dict)  # a GPU worker's keep_awake on Windows: {on, held} (none: not said)
+    runtimes: dict = field(default_factory=dict)    # a GPU worker's llama.cpp / whisper.cpp: {rt: {build, state}}
     bye: bool = False                           # its last hello / state said a clean stop (reason "shutdown")
     gpu: dict = field(default_factory=dict)
     seen: float = 0.0
@@ -198,8 +207,9 @@ class Worker:
     fails: int = 0
     cool_until: float = 0.0
     cools: int = 0                              # cooldowns in a row (no job done since): each one twice as long
-    fast: deque = field(default_factory=deque)  # (at, claim -> text s) of its pre-alert jobs, FAST_WINDOW_S; a lease
-                                                # it lost counts as the whole cap (a gaming take-back doesn't count)
+    fast: deque = field(default_factory=deque)  # (at, claim -> text s) of its priority pre-alert jobs, FAST_WINDOW_S; a
+                                                # lease it lost counts as the whole cap (a gaming take-back doesn't
+                                                # count, nor any Auto · normal or background job: priority() only)
     probe_at: float = 0.0                       # its last pre-alert probe while slow
     done: int = 0
     lost: int = 0
@@ -232,7 +242,7 @@ class Pool:
         self._leases: dict[str, Job] = {}
         self._open: set[str] = set()              # clip ids queued or leased
         self.workers: dict[str, Worker] = {}
-        self._done: deque = deque()               # (at, class, channel, queued -> done s, claim -> done s, worker)
+        self._done: deque = deque()               # (at, class, channel, queued -> done s, claim -> done s, worker, kind)
         self.fallbacks = {r: 0 for r in REASONS}
         self.refused_late = 0
         self.submitted = 0
@@ -316,9 +326,11 @@ class Pool:
 
     def seen(self, wid: str, state: str | None = None, model: str | None = None, gpu: dict | None = None,
              version: str | None = None, kind: str | None = None, load: dict | None = None,
-             update: dict | None = None, keep_awake: dict | None = None, reason: str | None = None) -> Worker:
+             update: dict | None = None, keep_awake: dict | None = None, reason: str | None = None,
+             runtimes: dict | None = None) -> Worker:
         """A worker's request (hello, state, claim): its state and when it was last seen. A worker that is no longer
-        online hands its pre-alert jobs back at once (the rest run to their lease: it may finish them). None: a worker
+        online hands its pre-alert and Auto · normal jobs back at once (a normal clip has the stations and AWS still
+        ahead of it; the rest run to their lease: it may finish them). None: a worker
         whose token no longer stands (revoked meanwhile)."""
         if wid not in self.workers and not self.allowed(wid):
             return None
@@ -336,7 +348,7 @@ class Pool:
                 if state != "online" and w.state == "online":
                     for lease in list(w.leases):
                         job = self._leases.get(lease)
-                        if job is not None and job.cls in FAST_CLASSES:
+                        if job is not None and (job.cls in FAST_CLASSES or job.norm):
                             self._end_lease(job)
                             self._fall(job, "released", f"GPU worker {wid} went {state}")
                 w.state = state
@@ -348,6 +360,8 @@ class Pool:
                 w.update = dict(update)
             if isinstance(keep_awake, dict):
                 w.keep_awake = dict(keep_awake)
+            if isinstance(runtimes, dict):
+                w.runtimes = {k: dict(v) for k, v in runtimes.items() if isinstance(v, dict)}
             if reason is not None:
                 w.bye = reason == "shutdown"
             if isinstance(gpu, dict):
@@ -397,9 +411,9 @@ class Pool:
         return w.state == "online" or w.keep_awake.get("on") is False or w.keep_awake.get("held") is False
 
     def _service_s(self, gpu: bool = False) -> float:
-        """The median claim -> text of the last 50 jobs (gpu: the GPU workers' alone, never a station's whisper)."""
-        took = [x[4] for x in self._done if x[4] is not None
-                and (not gpu or getattr(self.workers.get(x[5]), "kind", "gpu") == "gpu")][-50:]
+        """The median claim -> text of the last 50 jobs (gpu: the GPU workers' alone, never a station's whisper: by the
+        kind it had when it was done, so a worker gone since never passes for a GPU)."""
+        took = [x[4] for x in self._done if x[4] is not None and (not gpu or x[6] == "gpu")][-50:]
         return pct(took, 50) or SERVICE_DEFAULT_S
 
     def _fast_s(self, w: Worker, now: float) -> float | None:
@@ -466,6 +480,13 @@ class Pool:
                 and not any(not j.bg and not j.extra.get("station_only") for j in self._queue)
                 and (seconds is None or seconds <= BG_GPU_MAX_S))
 
+    def _norm_free(self, w: Worker, now: float) -> bool:
+        """(lock held) May this GPU worker start Auto · normal work now: it holds nothing and is in a claim, no priority
+        job it could take waits (it goes first), and no priority clip came in the last NORM_QUIET_S (a page right behind a normal
+        decode would wait for it: a worker decodes one clip at a time)."""
+        return (self._ready(w, now) and w.polling > 0 and not w.leases and now - self._prio_at >= NORM_QUIET_S
+                and not any(priority(j) and self._fits(w, j, now) for j in self._queue))
+
     def _fits(self, w: Worker, j: Job, now: float) -> bool:
         """May this worker take this job now. A station's whisper: never a pre-alert clip nor an AWS channel's (slower
         than AWS), and only once a GPU worker that could take it now has had STATION_DEFER_S to. A GPU worker: a
@@ -487,8 +508,8 @@ class Pool:
                     or bool(j.extra.get("station_only")))
         if rank(j) == 0 and self._holds_bg(w):
             return False                           # (#878: never queued behind its background or normal decode)
-        if j.norm:                                 # (Auto · normal: after the priority work, leased like LOW: any free GPU)
-            return w.polling > 0 and not w.leases and self._ready(w, now)
+        if j.norm:                                 # (Auto · normal: after the priority work, leased like LOW: a free GPU
+            return self._norm_free(w, now)         # with no priority work waiting or just in)
         if j.cls in FAST_CLASSES and j.forced:     # (the pre-alert speed gate too; AWS out: any free worker)
             return w.polling > 0 and not w.leases and self._ready(w, now) and (
                 bool(j.extra.get("queue_ok")) or self._fast_ok(w, now))
@@ -521,16 +542,18 @@ class Pool:
                 idle = [w for w in ready if w.polling > 0 and not w.leases]
                 if not idle:
                     return False, "no worker idle now"
-                if any(j.cls in FAST_CLASSES and rank(j) == 0 for j in self._queue):
+                if any(j.cls in FAST_CLASSES and priority(j) for j in self._queue):
                     return False, "a pre-alert clip waits already"
                 if not any(self._fast_ok(w, now) for w in idle):
                     svc = min(self._fast_s(w, now) or 0.0 for w in idle)
                     return False, f"slow on pre-alert clips lately ({svc:.1f} s)"
                 return True, ""
             if any(w.polling > 0 and len(w.leases) < MAX_LEASES for w in ready) and \
-                    not any(j.cls <= cls and not j.bg for j in self._queue):
+                    not any(j.cls <= cls and priority(j) for j in self._queue):
                 return True, ""                    # a worker in a claim now and nothing ahead: it takes it at once
-            ahead = sum(1 for j in self._queue if j.cls <= cls and not j.bg) + len(self._leases)
+            # (the priority work ahead of it: Auto · normal and background work never is, it yields)
+            ahead = sum(1 for j in self._queue if j.cls <= cls and priority(j)) + sum(
+                1 for j in self._leases.values() if priority(j))
             est = ahead * self._service_s() / len(ready)
         if est > BUDGETS[cls][0]:
             return False, f"busy (about {est:.0f} s of work ahead)"
@@ -576,13 +599,15 @@ class Pool:
 
             def busy_why(w: Worker) -> str:
                 held = [self._leases.get(lease) for lease in w.leases]
-                return f"{_short(w.id)} busy" + (" (background)" if held and all(j is not None and j.bg
-                                                                                for j in held) else "")
+                tier = (" (background)" if held and all(j is not None and j.bg for j in held) else
+                        " (normal)" if held and all(j is not None and rank(j) > 0 for j in held) else "")
+                return f"{_short(w.id)} busy{tier}"
             if cls in FAST_CLASSES:
-                if any(j.cls in FAST_CLASSES and rank(j) == 0 for j in self._queue):
+                if any(j.cls in FAST_CLASSES and priority(j) for j in self._queue):
                     return False, "a pre-alert clip waits already"
-                if queue_ok:
-                    return True, ""
+                if queue_ok:                      # (AWS out: it may wait for a GPU busy with priority work, never for
+                    waitable = [w for w in ready if not self._holds_bg(w)]    # one decoding normal or background work)
+                    return (True, "") if waitable else (False, busy_why(ready[0]))
                 if not idle:
                     return False, busy_why(ready[0])
                 # the pool's pre-alert speed gate holds for a channel's engine too (_fast_ok: quick lately, or due a probe)
@@ -595,9 +620,9 @@ class Pool:
             free = [w for w in ready if not self._holds_bg(w)]
             if not free:
                 return False, busy_why(ready[0])
-            if any(w in idle for w in free) and not any(not j.bg and j.cls <= cls for j in self._queue):
+            if any(w in idle for w in free) and not any(priority(j) and j.cls <= cls for j in self._queue):
                 return True, ""
-            ahead = sum(1 for j in self._queue if rank(j) == 0 and j.cls <= cls) + sum(
+            ahead = sum(1 for j in self._queue if priority(j) and j.cls <= cls) + sum(
                 1 for w in free for _lease in w.leases)
             est = ahead * self._service_s() / len(free)
         if est > BUDGETS[cls][0]:
@@ -701,7 +726,7 @@ class Pool:
             if job.id in self._open:
                 return False
             job.queued_at = self.clock()
-            if rank(job) == 0:
+            if priority(job):
                 self._prio_at = job.queued_at      # (background work keeps off a GPU for BG_QUIET_S after it)
             self._queue.append(job)
             self._open.add(job.id)
@@ -710,10 +735,16 @@ class Pool:
         return True
 
     def _best(self, w: Worker | None = None, now: float | None = None) -> Job | None:
-        """The next job for this worker, among those it may take (_fits)."""
+        """The next job for this worker, among those it may take (_fits): by tier (rank), then a priority or background
+        job by its class, oldest queued first; Auto · normal by its air time (clip_end: a clip handed over late never
+        jumps ahead of one said before it), whatever its class."""
         now = self.clock() if now is None else now
-        return min((j for j in self._queue if w is None or self._fits(w, j, now)),
-                   key=lambda j: (rank(j), 0 if rank(j) == 1 else j.cls, j.queued_at), default=None)
+
+        def key(j: Job):
+            if rank(j) == 1:
+                return (1, 0, j.clip_end if j.clip_end is not None else j.queued_at, j.queued_at)
+            return (rank(j), j.cls, j.queued_at, 0.0)
+        return min((j for j in self._queue if w is None or self._fits(w, j, now)), key=key, default=None)
 
     def claim(self, wid: str, wait: float = 0.0, state: str | None = None, model: str | None = None,
               kind: str | None = None, load: dict | None = None) -> Job | None:
@@ -735,7 +766,8 @@ class Pool:
                         job = self._best(w, now)
                         if job is not None:
                             self._queue.remove(job)
-                            if job.cls in FAST_CLASSES and (self._fast_s(w, now) or 0.0) > PREALERT_MAX_SERVICE_S:
+                            if job.cls in FAST_CLASSES and priority(job) and \
+                                    (self._fast_s(w, now) or 0.0) > PREALERT_MAX_SERVICE_S:
                                 w.probe_at = now               # a slow worker's probe: the next one PROBE_S on
                             return self._lease(job, w, now)
                     left = end - time.monotonic()
@@ -785,7 +817,10 @@ class Pool:
         whole cap when the lease was lost (ran out, the worker unheard); a job handed back or taken back on gaming or a
         pause isn't slowness and isn't counted."""
         w = self.workers.get(job.worker)
-        if w is not None and job.cls in FAST_CLASSES and job.lease in self._leases and (took is not None or lost):
+        # (only a priority job's: an Auto · normal or background clip of a pre-alert class, the latency guard's shadow
+        # copy, is decoded under its own longer lease and says nothing of how quick the worker is on pre-alert clips)
+        if w is not None and job.cls in FAST_CLASSES and priority(job) and job.lease in self._leases and (
+                took is not None or lost):
             w.fast.append((self.clock(), took if took is not None else BUDGETS[job.cls][2]))
         self._leases.pop(job.lease, None)
         if w is not None:
@@ -816,7 +851,8 @@ class Pool:
             if w is not None:
                 w.fails, w.cools, w.done = 0, 0, w.done + 1
             self._done.append((now, job.cls, job.channel, now - job.queued_at,
-                               now - job.claimed_at if job.claimed_at is not None else None, wid))
+                               now - job.claimed_at if job.claimed_at is not None else None, wid,
+                               w.kind if w is not None else str(job.extra.get("kind") or "gpu")))
             while self._done and now - self._done[0][0] > WINDOW_S:
                 self._done.popleft()
             self._cv.notify_all()
@@ -856,7 +892,8 @@ class Pool:
 
     def tick(self, now: float | None = None) -> int:
         """Waits and leases run out: those jobs fall back. With no worker ready at all, every waiting job falls back
-        at once (nobody could take it). How many fell back."""
+        at once (nobody could take it); with no GPU worker ready, every GPU-only one does (an Auto · normal clip: the
+        stations, then AWS, never its whole 25 s wait for a GPU gone). How many fell back."""
         now = self.clock() if now is None else now
         n = 0
         with self._cv:
@@ -875,10 +912,11 @@ class Pool:
                                + (" (its lease cap)" if past_cap else " (its lease ran out)"))
                     n += 1
             anyone = any(self._ready(w, now) for w in self.workers.values())
+            gpu = any(w.kind == "gpu" and self._ready(w, now) for w in self.workers.values())
             for job in list(self._queue):
-                if not anyone:
+                if not anyone or (job.gpu_only and not gpu):     # (a GPU-only job: a pooled station never takes it)
                     self._queue.remove(job)
-                    self._fall(job, "no_worker", "no pool worker ready")
+                    self._fall(job, "no_worker", "no pool worker ready" if not anyone else "no GPU worker ready")
                     n += 1
                 elif now - job.queued_at >= _budgets(job)[0]:
                     self._queue.remove(job)
@@ -902,6 +940,7 @@ class Pool:
                 workers.append({"id": w.id, "kind": w.kind, "load": dict(w.load),
                                 "state": self.state_of(w, now), "model": w.model, "version": w.version,
                                 "update": dict(w.update), "keep_awake": dict(w.keep_awake),
+                                "runtimes": {k: dict(v) for k, v in w.runtimes.items()},
                                 "asleep": self.asleep(w, now),
                                 "gpu": dict(w.gpu), "seen": w.seen, "seen_s": round(now - w.seen, 1),
                                 "jobs_h": len(mine), "done": w.done, "lost": w.lost, "leases": len(w.leases),

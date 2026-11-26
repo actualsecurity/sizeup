@@ -369,6 +369,18 @@ const StationHealth = (() => {
           [u.commit ? `Commit ${u.commit.slice(0, 12)}` : "", u.state || "", w.update_wanted && !w.update_current
             ? `Hub: ${w.update_wanted.slice(0, 12)}` : "", u.auto === false ? "auto_update off" : ""].filter(Boolean).join("\n")];
       };
+      // a GPU worker's llama.cpp / whisper.cpp builds (deploy/stt-worker/worker.py Runtimes: it updates them itself):
+      // the builds, the update's state in the hover
+      const rts = (w) => {
+        const r = w.runtimes || {};
+        const names = Object.keys(r);
+        if (!names.length) return "—";
+        const st = (k) => r[k].state || "";
+        const bad = names.some((k) => /^(rolled back|bad|failed)|no disk space|download failed|unpack failed/.test(st(k)));
+        const busy = names.some((k) => st(k) && st(k) !== "ok" && !/^(not managed|off )/.test(st(k)));
+        return [names.map((k) => `${k} ${r[k].build || "?"}`).join(" · "), bad ? "mono hl-warn" : busy ? "mono dim" : "mono",
+          names.map((k) => `${k}: ${st(k) || "?"}`).join("\n")];
+      };
       // a GPU worker's own log (deploy/stt-worker/worker.py LogShip → CloudWatch /sizeup/stt-worker): its last batch
       const logs = (w) => {
         const l = w.logs;
@@ -391,7 +403,7 @@ const StationHealth = (() => {
         }
         return [w.state + (ka.held ? " · keeps PC awake" : ""), w.state === "online" ? "hl-ok" : w.state === "cooling" ? "hl-bad" : "dim", kaWhy];
       };
-      if ((sp.workers || []).length) kids.push(table(["Worker", "State", "Model", "Version", "Load", "Jobs/h", "Lost", "Last seen", "Logs"],
+      if ((sp.workers || []).length) kids.push(table(["Worker", "State", "Model", "Version", "Runtimes", "Load", "Jobs/h", "Lost", "Last seen", "Logs"],
         sp.workers.map((w) => {
           const g = w.gpu || {}, l = w.load || {};
           // a GPU worker's GPU; a station's whisper (#639 phase 2): its own clips waiting, its CPU, its pace
@@ -400,7 +412,8 @@ const StationHealth = (() => {
             : g.util_pct !== undefined ? `GPU ${g.util_pct}%` + (g.mem_used_mb !== undefined ? ` · ${g.mem_used_mb}/${g.mem_total_mb} MB` : "") : "";
           const st = w.kind === "station" ? [w.state, w.state === "online" ? "hl-ok" : w.state === "offline" || w.state === "cooling" ? "hl-bad" : "dim", l.why || ""]
             : gpuState(w);
-          return [w.kind === "station" ? `${w.id.replace(/^station:/, "")} (station)` : w.id, st, w.model, ver(w), load,
+          return [w.kind === "station" ? `${w.id.replace(/^station:/, "")} (station)` : w.id, st, w.model, ver(w),
+            w.kind === "station" ? "" : rts(w), load,
             w.jobs_h, w.lost, `${when(w.seen)} · ${longDur(w.seen_s)} ago`, logs(w)];
         }), ""));
       const inf = sp.infer;
