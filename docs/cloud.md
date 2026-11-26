@@ -1703,6 +1703,7 @@ Settings > Radios > Channels picks each channel's engine (a group heading's "Eng
 | engine | order |
 |---|---|
 | Auto · priority (`auto`) | an idle GPU worker → AWS (budget, reserve) → the station's whisper |
+| Auto · normal (`auto_norm`) | a GPU worker that can start it within 25 s (queued after every priority clip, before background work; FIFO within its class) → its own station's whisper, or a pooled station that can start it within 90 s → AWS within its budget (under 80% of its month) → else back to its own station's queue. A GPU gaming, offline, cooling or kept off by the guard is skipped at once. Never dropped |
 | Auto · background (`auto_bg`) | the stations first: its own station's whisper, or (when its estimated wait is over the class's budget: 90 s for context talkgroups, 60 s for context alert classes) another pooled station's that can start it in time → an idle GPU as overflow (no priority work on it) → AWS within its budget (under 80% of its month) → else back to its own station's queue. Never dropped. The default of every context or neighbour talkgroup (another system's, or a county one not Main) |
 | pinned (`pin:gpu-pc`, `pin:station:<id>`, `pin:aws`) | that engine → Auto · priority's order; pinned AWS uses a GPU worker only when AWS can't take the clip |
 | this station (`local`) | today's Local |

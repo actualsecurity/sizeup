@@ -98,7 +98,15 @@ def _budgets(job) -> tuple[float, float, float]:
     station's whisper decodes in seconds to tens of seconds, never a pre-alert lease)."""
     if job.extra.get("station_only"):
         return float(job.extra.get("claim_wait") or BUDGETS[LOW][0]), BUDGETS[LOW][1], BUDGETS[LOW][2]
+    if job.norm and job.extra.get("claim_wait"):     # (Auto · normal on a GPU: its start budget to be claimed)
+        return float(job.extra["claim_wait"]), BUDGETS[job.cls][1], BUDGETS[job.cls][2]
     return BUDGETS[job.cls]
+
+
+def rank(job) -> int:
+    """Where a job queues (#896 + Auto · normal): priority work first (0), Auto · normal next (1), background and the
+    catch-up last (2); then by class, then oldest first."""
+    return 2 if job.bg else 1 if job.norm else 0
 
 
 def _extra(job) -> float:
@@ -158,6 +166,7 @@ class Job:
     forced: bool = False                        # its channel's engine sends it here (sizeup/sttroute.py): whatever the
                                                 # class switches; its class's wait and lease still bound it
     pin: str = ""                               # that worker only (a pinned engine: "gpu-pc", "station:north")
+    norm: bool = False                          # Auto · normal: after every priority job, before background work
     bg: bool = False                            # background work (Auto · background, the catch-up): after every other
                                                 # job, and on a GPU only while no priority work is there (#878)
     avoid: frozenset = frozenset()              # workers it must not go to (the hub's latency guard)
@@ -597,7 +606,8 @@ class Pool:
         return (float(own or 0) + len(w.leases)) * svc
 
     def bg_place(self, cls: float, seconds: float, origin: str = "", budget: float = 90.0,
-                 avoid=frozenset(), now: float | None = None, stations: bool = True) -> tuple[str, str, float]:
+                 avoid=frozenset(), now: float | None = None, stations: bool = True,
+                 gpu: bool = True) -> tuple[str, str, float]:
         """Where an Auto · background clip its station couldn't start in time goes (#896): ("station", the soonest
         station's worker id, its estimated wait) when a station whisper in the pool can START it within budget (never
         its own station: it was behind; the job then goes to whichever station claims it first: station_only); else
@@ -618,11 +628,36 @@ class Pool:
                     best = (w.id, est)
             if best is not None and best[1] <= budget:
                 return "station", best[0], round(best[1], 1)
-            gpu = next((w.id for w in self.workers.values() if w.kind == "gpu" and w.id not in avoid
-                        and self._bg_free(w, now, seconds)), "")
-            if gpu:
-                return "gpu", gpu, 0.0
+            free = next((w.id for w in self.workers.values() if gpu and w.kind == "gpu" and w.id not in avoid
+                         and self._bg_free(w, now, seconds)), "")
+            if free:
+                return "gpu", free, 0.0
         return "", "", round(best[1], 1) if best is not None else -1.0
+
+    def norm_place(self, seconds: float, avoid=frozenset(), budget: float = 25.0,
+                   now: float | None = None) -> tuple[bool, str, float]:
+        """Can an Auto · normal clip START on a GPU within budget: (yes, why not, the estimated wait). The work ahead of
+        it there: every priority job waiting and the normal ones already waiting (it queues after them: FIFO), and what
+        the GPUs hold now, x the measured time per clip, over the GPU workers ready (none gaming, paused, cooling, gone
+        or kept off by the guard: avoid)."""
+        now = self.clock() if now is None else now
+        if not self._on() or self._stop.is_set():
+            return False, "pool off", -1.0
+        with self._cv:
+            gpus = [w for w in self.workers.values() if w.kind == "gpu"]
+            if not gpus:
+                return False, "no GPU worker online", -1.0
+            ready = [w for w in gpus if w.id not in avoid and self._ready(w, now)]
+            if not ready:
+                w = gpus[0]
+                why = (avoid_why(gpus, avoid) if all(x.id in avoid for x in gpus)
+                       else f"{_short(w.id)} {self.state_of(w, now)}" if len(gpus) == 1 else "no GPU worker ready")
+                return False, why, -1.0
+            ahead = sum(1 for j in self._queue if rank(j) <= 1) + sum(len(w.leases) for w in ready)
+            est = ahead * self._service_s() / len(ready)
+        if est > budget:
+            return False, f"GPU busy (about {est:.0f} s ahead)", round(est, 1)
+        return True, "", round(est, 1)
 
     def station_waits(self, now: float | None = None) -> dict:
         """Health: each pooled station's estimated wait for a new clip (s)."""
@@ -640,7 +675,9 @@ class Pool:
     def submit(self, job: Job) -> bool:
         """Queued (True), or not taken: the pool not ready for its class, or the clip already open here. The caller
         goes its own way on False; on True exactly one of on_done / on_fallback follows."""
-        if job.forced or job.pin:
+        if job.norm and job.forced:               # (Auto · normal: placed already, norm_place / bg_place)
+            ok = self._on()
+        elif job.forced or job.pin:
             ok, _why = self.ready_forced(job.cls, pin=job.pin, avoid=job.avoid, bg=job.bg, seconds=job.seconds,
                                          origin=str(job.extra.get("origin") or ""),
                                          queue_ok=bool(job.extra.get("queue_ok")))
@@ -665,7 +702,7 @@ class Pool:
         """The next job for this worker, among those it may take (_fits)."""
         now = self.clock() if now is None else now
         return min((j for j in self._queue if w is None or self._fits(w, j, now)),
-                   key=lambda j: (j.bg, j.cls, j.queued_at), default=None)
+                   key=lambda j: (rank(j), j.cls, j.queued_at), default=None)
 
     def claim(self, wid: str, wait: float = 0.0, state: str | None = None, model: str | None = None,
               kind: str | None = None, load: dict | None = None) -> Job | None:

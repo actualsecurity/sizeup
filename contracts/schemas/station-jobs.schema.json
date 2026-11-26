@@ -836,7 +836,8 @@
                   "aws",
                   "both",
                   "auto",
-                  "auto_bg"
+                  "auto_bg",
+                  "auto_norm"
                 ]
               }
             }
