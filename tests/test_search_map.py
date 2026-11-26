@@ -234,3 +234,19 @@ def test_the_search_and_preplan_maps_have_a_size_in_a_browser(site):
     finally:
         browser.close()
         pw.stop()
+
+
+BEHAVIOUR_PAST_TOP = r"""
+o.set(-200, false); out.past = { ...box() };                             // dragged above the map's top
+o.set(-200, true); out.pastEnd = { ...box() }; out.storedPast = store.v;
+console.log(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_drag_past_the_top_holds_the_least_never_the_layouts_height(tmp_path):
+    """#957: a drag up past the map's top (the height asked for under 0) is held at H_MIN; it used to be read as "no
+    height" and snap back to the layout's own."""
+    out = behaviour(tmp_path, "-", BEHAVIOUR_PAST_TOP)
+    assert out["past"] == {"--sv-map-h": "160px"} and out["pastEnd"] == {"--sv-map-h": "160px"}
+    assert json.loads(out["storedPast"]) == {"h": 160}
