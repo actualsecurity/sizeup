@@ -26,9 +26,11 @@
 //                its own that closes on the prediction along the track (never across it, never backwards): a new
 //                report changes its pace, not its position (#375); a big jump, the other way, another train
 //                number or the first real report of an estimated train is drawn at once. A feed older
-//                than the hub's stale_s (or one the hub calls stale): frozen and drawn faded. Redrawn about 10
-//                times a second (ANIMATE_MS) only while one moves, a map has the layer on and the page is
-//                visible: one setData for the cars and one for the labels a frame, none when nothing changed.
+//                than the hub's stale_s (or one the hub calls stale): frozen and drawn faded. Redrawn only while one
+//                moves, on the maps the layer is on and on screen, the page visible: each map as often as the fastest
+//                train moves STEP_PX on it at its zoom (at most every ANIMATE_MS, ~10 a second; at least every
+//                MAX_ANIMATE_MS), a timer sleeping between: one setData for the cars and one for the labels a
+//                draw, none when nothing changed.
 //                The click box says "predicted" while the train is drawn ahead of the MTA's report.
 //   Follow       a click on a train also follows it (mapfollow.js, as aircraft and rigs): centred and kept centred as
 //                it glides, a "Following 9901 · NH west · 67 mph · 3 s ago" chip with ✕; its box stays live while
@@ -68,7 +70,9 @@ window.TrainLayer = (() => {
   const DEP_STATIONS = ["2PC", "2RY"];        // Port Chester, Rye: their next departures in the station's box
   const KEY = "trains", REF_KEY = "railref", RAILREF = "/api/cad/trains/railref";   // poles and mileposts (#371)
   const POLL_MS = 5000, PANEL_MS = 30000;
-  const ANIMATE_MS = 100;                    // ~10 redraws a second while a train moves (motion.js)
+  const ANIMATE_MS = 100;                    // at most ~10 redraws a second while a train moves (motion.js) ...
+  const MAX_ANIMATE_MS = 500, STEP_PX = 0.75; // ... at least 2; between, one each time the fastest drawn train has moved
+                                             // STEP_PX on that map at its zoom (aircraft.js frameMs, #887)
   const PREDICTED_M = 5;                     // drawn this far ahead of the MTA's report: "predicted"
   const DIM_FIX_S = 20;                      // a GPS fix older than this: drawn a little faded, its prediction easing to a
                                              // stop (motion.js RAIL_CRUISE_S); past the oldest a fix normally is when read
@@ -207,28 +211,72 @@ window.TrainLayer = (() => {
     motion.forget(keep);
     frame.at = -1;
   }
-  // where each train is drawn now: one where() a train a frame, whichever maps draw it
+  // where each train is drawn now: one where() a train a frame, whichever maps draw it; and how fast the fastest of
+  // them is drawn moving (m/s, from where they were drawn last time: what a map's next draw is timed by), null until
+  // known (the first draws after a start: every ANIMATE_MS)
   const frame = { at: -1, pos: new Map() };
+  const pace = { at: -1, s: new Map(), v: null };
   function positions(now) {
     if (frame.at === now) return frame.pos;
     frame.at = now;
     frame.pos = new Map();
     const d = store.data;
     if (motion && d) for (const t of d.trains || []) { const p = motion.where(t.id, now); if (p) frame.pos.set(t.id, p); }
+    if (now > pace.at) {
+      const dt = (now - pace.at) / 1000;
+      let v = null;
+      if (pace.at >= 0 && dt <= 5) {
+        v = 0;
+        for (const [id, p] of frame.pos) { const s0 = pace.s.get(id); if (s0 === undefined) { v = null; break; } v = Math.max(v, Math.abs(p.s - s0) / dt); }
+      }
+      pace.v = v;
+      pace.at = now;
+      pace.s = new Map([...frame.pos].map(([id, p]) => [id, p.s]));
+    }
     return frame.pos;
   }
-  let animTimer = null, animMs = 0;
-  // redraw ~10 a second while a train moves (or a correction's ring is out) on a visible map; once a second while
-  // none moves but a GPS fix may go old (its train turns hollow); none with the layer off, the page hidden or all frozen
+  // A train moving (or a correction's ring out) on a map the layer is on and on screen: each such map redrawn once the
+  // fastest train has moved STEP_PX there (frameMs), a timer sleeping till the next is due; while none moves but a GPS
+  // fix may go old (its train turns hollow): once a second; none with the layer off, every map off screen (an Expand
+  // shut), the page hidden or all frozen (#887: it redrew every map ~10 times a second, zoomed in or out).
+  let animT = 0, animAt = 0;
+  const live = (m) => m.isOn() && m.shown();
+  const anyLive = () => { for (const m of maps) if (live(m)) return true; return false; };
+  function animMode() {
+    const d = store.data;
+    if (!motion || !anyLive() || document.visibilityState === "hidden") return "";
+    if (motion.busy()) return "moving";
+    return !!d && !d.stale && (d.trains || []).some((t) => t.pos_src === "traintime" && !t.estimated && !t.stale) ? "aging" : "";
+  }
+  // (a new answer, the layer ticked, a snap: drawn already; the next draw within ANIMATE_MS, not after a longer sleep)
   function animate() {
-    const on = !!motion && anyOn() && document.visibilityState !== "hidden", d = store.data;
-    const aging = !!d && !d.stale && (d.trains || []).some((t) => t.pos_src === "traintime" && !t.estimated && !t.stale);
-    const ms = !on ? 0 : motion.busy() ? ANIMATE_MS : aging ? AGE_MS : 0;
-    if (ms === animMs) return;
-    if (animTimer) clearInterval(animTimer);
-    animTimer = null;
-    animMs = ms;
-    if (ms) animTimer = setInterval(() => { const now = Date.now(); for (const m of maps) m.draw(false, now); animate(); }, ms);
+    if (!animMode()) return;
+    const at = Date.now() + ANIMATE_MS;
+    if (animT && animAt <= at) return;
+    sleep(ANIMATE_MS);
+  }
+  function wake() {                             // a zoom, a map on screen again: timed again from now
+    if (animMode()) sleep(0);
+    else if (animT) { clearTimeout(animT); animT = 0; }
+  }
+  function sleep(ms) {
+    if (animT) clearTimeout(animT);
+    animAt = Date.now() + ms;
+    animT = setTimeout(step, ms);
+  }
+  function step() {
+    animT = 0;
+    const mode = animMode();
+    if (!mode) return;
+    const now = Date.now();
+    let wait = Infinity;
+    for (const m of maps) {
+      if (!live(m)) continue;
+      const ms = mode === "moving" ? m.frameMs() : AGE_MS;
+      if (now - (m.drawnAt || 0) >= ms - 2) { m.drawnAt = now; m.draw(false, now); }
+      wait = Math.min(wait, (m.drawnAt || 0) + ms - now);
+    }
+    if (wait < Infinity && animMode()) sleep(Math.max(1, wait));
   }
 
   // ---- the marks: a train, pointing up (icon-rotate turns it to its heading), filled (reported) or hollow ----------
@@ -647,12 +695,27 @@ window.TrainLayer = (() => {
       this.at = new Map();                    // id -> [lon, lat]: each train's middle as last drawn
       // following a train (mapfollow.js, as aircraft and rigs): a click follows it; any pan of the viewer's, Recenter or
       // ✕ lets go
+      // on screen (kept, not read each draw: MapFollow.screen): shown again (an Expand opened), drawn now
+      this.screen = window.MapFollow && MapFollow.screen ? MapFollow.screen(this.map, () => { if (this.isOn()) wake(); })
+        : { shown: () => { try { return !!this.map.getContainer().offsetParent; } catch (_) { return false; } } };
+      this.map.on("zoom", () => { if (live(this)) wake(); });   // closer in, the trains move faster on screen
       this.fol = window.MapFollow && control.host ? new MapFollow.Follower(this.map, control.host, {
         cls: "ac-follow", textCls: "ac-follow-t", icon: "gis-train", onStop: () => this.ticking() }) : null;
       if (this.isOn()) kick();
       else if (this.isRefOn()) this.sync();     // the poles and mileposts alone (#371)
     }
     get following() { return (this.fol && this.fol.id) || ""; }
+    shown() { return this.screen.shown(); }
+    // how often to redraw this map while a train moves: each time the fastest has moved STEP_PX on it, at its zoom
+    frameMs() {
+      if (pace.v === null) return ANIMATE_MS;
+      try {
+        const metresPerPx = 40075016.686 * Math.cos(this.map.getCenter().lat * Math.PI / 180) / (512 * 2 ** this.map.getZoom());
+        const pxPerS = 1.25 * pace.v / metresPerPx;            // (a little ahead of a train speeding up)
+        if (!(metresPerPx > 0)) return ANIMATE_MS;
+        return Math.max(ANIMATE_MS, Math.min(MAX_ANIMATE_MS, pxPerS > 0 ? 1000 * STEP_PX / pxPerS : MAX_ANIMATE_MS));
+      } catch (_) { return ANIMATE_MS; }
+    }
     isOn() { return this.control.on(KEY, false); }
     isRefOn() { return this.control.on(REF_KEY, false); }
     keys() { return [[KEY, false], [REF_KEY, false]]; }
@@ -826,7 +889,7 @@ window.TrainLayer = (() => {
     draw(force, now = Date.now()) {
       const d = store.data;
       if (!d || !this.added || !this.isOn()) return;
-      if (!force && !this.map.getContainer().offsetParent) return;          // a map not on screen (the Expand closed)
+      if (!force && !this.shown()) return;                                  // a map not on screen (the Expand closed)
       const pos = positions(now), drawn = new Map(), key = [];
       const old = !!d.stale || (typeof store.feedAt === "number"                            // the feed's age
                                 && !((now - store.feedAt) / 1000 <= ((d.profile && d.profile.stale_s) || 60)));
@@ -1246,5 +1309,5 @@ window.TrainLayer = (() => {
     host.append(foot);
   }
 
-  return { panel, load, maps, data: () => store.data, KEY, REF_KEY, headline, placeRow, onTrack, poleFeatures, trackCorridor, railFilter, TrainMap };
+  return { panel, load, maps, data: () => store.data, animating: () => !!animT, KEY, REF_KEY, headline, placeRow, onTrack, poleFeatures, trackCorridor, railFilter, TrainMap };
 })();

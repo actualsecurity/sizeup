@@ -338,7 +338,10 @@ window.CadMap = (() => {
   // ones settle and stop), a rig followed, or the frames owed after a new state; each map redrawn once its fastest rig
   // has moved STEP_PX there. The ages tick on a one-second timer while any live fix is drawn.
   // #453: only rigs moved by the estimate (ticked a few times a second): the loop sleeps between ticks (a timer), no
-  // frames in between
+  // frames in between. #887: live fixes, a follow and a glide to a new place too: ticked each time the fastest rig moves
+  // STEP_PX at the map's zoom (a followed one too; a glide FRAME_MS), and no frame asked for on the vsyncs between (once
+  // AVL fixes are live that was a frame on every vsync for as long as a rig drove). The frames owed after a new state
+  // (fresh) still run on the next vsyncs. A zoom, or a map coming on screen, wakes it.
   let raf = 0, ageTimer = 0, sleepT = 0;
   const visible = () => typeof document === "undefined" || document.visibilityState !== "hidden";
   const wanted = () => visible() && [...rigLayers].some((l) => l.moving());
@@ -353,19 +356,23 @@ window.CadMap = (() => {
     if (!fixesShown()) { clearInterval(ageTimer); ageTimer = 0; return; }
     for (const l of rigLayers) if (l.hasFix && l.shown()) l.draw();
   }
+  function wake() {
+    if (sleepT) { clearTimeout(sleepT); sleepT = 0; }
+    animate();
+  }
   function frame(ts) {
     raf = 0;
     if (!wanted()) return;
-    let smooth = fresh > 0, wait = Infinity;
+    let wait = Infinity;
     for (const l of rigLayers) {
       if (!l.moving()) continue;
       const ms = l.frameMs();
       if (ts - (l.tickedAt || 0) >= ms - 2) { l.tickedAt = ts; l.tick(); }
-      if (l.smooth()) smooth = true;
-      else wait = Math.min(wait, (l.tickedAt || 0) + ms - ts);
+      wait = Math.min(wait, (l.tickedAt || 0) + ms - ts);
     }
+    const owed = fresh > 0;
     if (fresh > 0) fresh -= 1;
-    if (smooth || !(wait < Infinity) || typeof setTimeout !== "function") raf = requestAnimationFrame(frame);
+    if (owed || !(wait < Infinity) || typeof setTimeout !== "function") raf = requestAnimationFrame(frame);
     else sleepT = setTimeout(() => { sleepT = 0; if (!raf) raf = requestAnimationFrame(frame); }, Math.max(0, wait - 8));
   }
   if (typeof document !== "undefined" && document.addEventListener) {
@@ -598,6 +605,7 @@ window.CadMap = (() => {
       if (map.isStyleLoaded() || map.loaded()) tryInit();
       else { map.once("load", tryInit); map.once("idle", tryInit); }
       map.on("zoom", () => {
+        if (this.ready && this.shown()) wake();         // closer in, the rigs move faster on screen: ticked more often
         this.setScale();                                // #427: the vehicles to scale close in (one style property)
         const far = map.getZoom() < FAR_ZOOM;
         if (far !== this.far) { this.far = far; opts.host.classList.toggle("cm-far", far); this.setBand(); this.draw(); }
@@ -702,7 +710,14 @@ window.CadMap = (() => {
       rec.el.style.setProperty("--as", rec.as.toFixed(3));
       rec.el.style.setProperty("--ac", rec.ac.toFixed(3));
     }
-    shown() { try { return !!this.map.getContainer().offsetParent; } catch (_) { return false; } }
+    // on screen: kept (MapFollow.screen: read on a resize or a change in view), not read on every frame (#887)
+    shown() {
+      if (!this.screen) {
+        if (!window.MapFollow || !MapFollow.screen) { try { return !!this.map.getContainer().offsetParent; } catch (_) { return false; } }
+        this.screen = MapFollow.screen(this.map, () => { this.tickedAt = 0; wake(); });   // shown again: ticked at once
+      }
+      return this.screen.shown();
+    }
     // anything to animate here: a live fix moving or catching up (not a parked or a stale one: they settle), a rig
     // followed, or the frames owed after a new state
     moving() {
@@ -710,10 +725,10 @@ window.CadMap = (() => {
                                                || (this.hasFix && (fresh > 0 || (glide && glide.busy())))));
     }
     fixMoving() { return !!(this.hasFix && (fresh > 0 || (glide && glide.busy()))); }
-    // frames every frame (a live fix, a follow, a glide to a new place); else only the estimate's ticks (#453)
+    // a live fix, a follow or a glide to a new place: ticked by its pace on screen (frameMs); else the estimate's (#453)
     smooth() { return !!(this.fixMoving() || this.settling || this.folBusy()); }
-    // #473: the rig followed is moving (an estimate on its way, a glide, a live fix drawn on): the camera wants every
-    // frame; a followed rig standing still is looked at again only every PAN_MS (the loop sleeps between)
+    // #473: the rig followed is moving (an estimate on its way, a glide, a live fix drawn on): ticked each time it moves
+    // STEP_PX (#887; the camera eases between: mapfollow.js); a followed rig standing still is looked at again only every PAN_MS (the loop sleeps between)
     folBusy() {
       const rec = this.fol && this.fol.id ? this.chips.get(this.fol.id) : null;
       return !!(rec && (rec.settle || (rec.m.est && rec.moving) || (rec.m.place === "position" && this.fixMoving())));
@@ -728,7 +743,8 @@ window.CadMap = (() => {
         const pxPerS = v / metresPerPx;
         ms = Math.max(FRAME_MS, Math.min(MAX_FRAME_MS, pxPerS > 0 ? 1000 * STEP_PX / pxPerS : MAX_FRAME_MS));
       } catch (_) { ms = FRAME_MS; }
-      if (this.fol && this.fol.id) return this.folBusy() ? FRAME_MS : PAN_MS;   // followed: smooth while it moves
+      // followed: while it moves as often as it moves STEP_PX (FRAME_MS for a glide, its speed unknown); still, PAN_MS
+      if (this.fol && this.fol.id) return this.folBusy() ? (v > 0 && !this.settling ? ms : FRAME_MS) : PAN_MS;
       return fix || this.settling ? ms : Math.max(EST_MS, ms);
     }
     // #453: whether any rig here moves by the estimate or glides to a new place now (frames wanted), and the fastest
