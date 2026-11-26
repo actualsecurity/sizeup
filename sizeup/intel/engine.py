@@ -153,6 +153,7 @@ import time
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+from sizeup import stt_quality
 from sizeup.intel import counters as counters_mod
 from sizeup.intel import policy as policy_mod
 from sizeup.intel import push as push_mod
@@ -210,7 +211,7 @@ QUEUE_MAX = 5000
 WHO_MAX = 500                          # unplaced events whose talkers and units are kept past the window
 SEEN_MAX = 20000                       # traffic ids remembered with their text (the same text again: skipped)
 ROW_SQL = ("SELECT id, start, end, source, system, service, dept, tier, talkgroup, channel, talker, rig, radio_id, text, "
-           "alt_text, model FROM radio_traffic WHERE id = ?")
+           "alt_text, model, status FROM radio_traffic WHERE id = ?")
 SECTIONS = ("intel", "intel_packs", "intel_rules")
 SUMMARY_S = 3600.0                     # one "intel: considered N, in scope M, matched K, events E" line this often
 COUNTERS_META = "intel_counters"       # the counters' hours, kept with that line (never written at startup)
@@ -326,6 +327,7 @@ class IntelEngine:
         self._stop = threading.Event()
         self.dropped = 0
         self.stale = 0                        # rows too old to be a pre-alert (a backfill, a late re-record): skipped
+        self.unclear = 0                      # unclear transcripts (a loop, noise: sizeup/stt_quality.py): skipped
         self._seen: dict[str, int] = {}
         self.errors = 0
         self.last_error = ""
@@ -662,6 +664,15 @@ class IntelEngine:
             if scoped:
                 self._count(now, "too_old", scoped)
             return []
+        # an unclear transcript (sizeup/stt_quality.py: a repetition loop, more words than the clip holds, whisper's
+        # stock phrase) is never read: the CAD of record stores it with no text, and words that reach here some other
+        # way (a replay, an old row) are checked again; an unclear alternative is left out alike
+        secs = max(0.0, float(row.get("end") or 0.0) - start) if start else None
+        if str(row.get("status") or "") == stt_quality.UNCLEAR or (text and stt_quality.assess(text, secs)):
+            self.unclear += 1
+            return []
+        if row.get("alt_text") and stt_quality.assess(str(row["alt_text"]), secs):
+            row = dict(row, alt_text="")
         sig = hash((text, str(row.get("alt_text") or "")))
         if self._seen.get(tid) == sig:
             if scoped:

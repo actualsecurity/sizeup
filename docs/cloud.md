@@ -3946,7 +3946,7 @@ The whole of it is in **[docs/station-logs.md](station-logs.md)**: the path, the
 The GPU STT workers' own `worker.log` goes the same way: `deploy/stt-worker/worker.py` LogShip (scrubbed, gzipped,
 spooled on the PC, deleted once accepted) → `POST /api/station/stt/logs` (the worker token) → `sizeup/cloud/cwlogs.py`
 WorkerLogs → log group `/sizeup/stt-worker`, a stream per worker id, the stations' retention. The hub makes the group
-on first use; the task role needs the `stt-worker-logs` policy ([deploy/stt-worker/README.md](../deploy/stt-worker/README.md#logs-cloudwatch)),
+on first use; the task role needs the `stt-worker-logs` policy (sizeup-aws `31-stt-worker-logs.sh`, step 31; [deploy/stt-worker/README.md](../deploy/stt-worker/README.md#logs-cloudwatch)),
 and until it has it Health shows `not shipped: permission` and the workers keep their batches.
 
 ## Station metrics: signal over time

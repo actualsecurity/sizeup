@@ -512,30 +512,15 @@ the worker token and its Cloudflare service token, the same Access application (
 - **Off:** `log_ship = false` in `worker.toml`. A `worker.py` from before this key refuses a `worker.toml` that has
   it: take the line out before an `update rollback` to such a version or a **Pin** to one.
 
-**Admin, once (AWS):** the hub's task role needs to write the group. Until it may, Health shows
-`not shipped: permission`, the worker keeps its batches on the PC (and `worker.log` as always), and nothing else is
-affected. The role's IAM is in sizeup-aws, not this repo. Add this inline policy to the task role (`$NAME-task`, as
-in `25-station-logs.sh`):
+**Admin, once (AWS):** run `bash 31-stt-worker-logs.sh` in sizeup-aws (step 31). It makes `/sizeup/stt-worker`
+(Infrequent Access, 30 days) and gives the hub's task role an inline policy `stt-worker-logs`: `logs:CreateLogGroup`,
+`PutRetentionPolicy`, `CreateLogStream` and `PutLogEvents` on that group only (`logs:DescribeLogGroups` comes from step
+25). `bash 31-stt-worker-logs.sh undo` takes the policy away again.
 
-```sh
-cd sizeup-aws && source ./env.sh            # NAME, AWS_REGION, ACCT
-G="arn:aws:logs:$AWS_REGION:$ACCT:log-group"
-work=$(mktemp -d)
-cat > "$work/policy.json" <<POLICY
-{"Version":"2012-10-17","Statement":[
- {"Sid":"WorkerLogs","Effect":"Allow",
-  "Action":["logs:CreateLogGroup","logs:PutRetentionPolicy","logs:CreateLogStream","logs:PutLogEvents"],
-  "Resource":["$G:/sizeup/stt-worker","$G:/sizeup/stt-worker:*"]}]}
-POLICY
-aws iam put-role-policy --role-name "$NAME-task" --policy-name stt-worker-logs \
-  --policy-document "file://$work/policy.json"
-rm -rf "$work"
-```
-
-`logs:DescribeLogGroups` comes from step 25's `station-logs` policy. All four actions are needed: without any one
-of them (the retention too) nothing is written and Health says `not shipped: permission`. The hub notices within 10
-minutes; the workers send what they kept. (`SIZEUP_STT_WORKER_LOG_GROUP` names another group: the policy must name
-that one.)
+Until it has run, Health shows `not shipped: permission`, the worker keeps its batches on the PC (and `worker.log` as
+always), and nothing else is affected. All four actions are needed: without any one of them (the retention too)
+nothing is written. The hub notices within 10 minutes; the workers send what they kept. (`SIZEUP_STT_WORKER_LOG_GROUP`
+names another group: the policy must name that one.)
 
 ## Config
 
