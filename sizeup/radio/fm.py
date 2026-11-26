@@ -166,6 +166,7 @@ class Segment:
     breaks: list = field(default_factory=list, repr=False)
     q_open: float | None = None    # quieting over the first / last 0.3 s of carrier
     q_close: float | None = None
+    q_max: float | None = None     # its strongest quieting (a paging channel's static gate: App._static_open)
     hiss_db: float | None = None   # the idle hiss level (noise floor) it was measured against
     floor_db: float | None = None  # a background carrier's quieting, if one was on the channel
     # Key-ups (module doc): a piece cut from the transmission before it ("gap" | "id" | "level"; "" not cut), that
@@ -997,6 +998,7 @@ class NoiseSquelch:
                       for g0, g1 in breaks if i0 + lo < g1 <= i0 + hi]
         seg.q_open = float(np.median(qs[i0:i0 + LEVEL_FRAMES]))
         seg.q_close = float(np.median(qs[max(i0, i1 - LEVEL_FRAMES + 1):i1 + 1]))
+        seg.q_max = float(max(qs[i0:i1 + 1]))
         seg.hiss_db = float(10 * np.log10(self.hiss)) if self.hiss > 0 else None
         seg.floor_db = self.floor
         return seg

@@ -143,7 +143,8 @@ GET  /api/cad/stt                         Settings > Radios > Vocabulary: {vocab
 GET  /api/cad/squelch                     Settings > Radios > Squelch: {channels: [{key, set, default, running, hiss_db,
                                           quieting_db, floor_db, short_per_min}], sync, chatter_per_min, ranges}
 POST /api/cad/settings/squelch            {action: set {key, open_db?, close_db?, min_open_s?: null = default} | reset {key}}:
-                                          an FM channel's squelch, applied live on the station (sizeup/channels.py): admins
+                                          an FM channel's squelch, applied live on the station (sizeup/channels.py): admins;
+                                          a paging channel's Open / Close only, guarded (settings.py _paging_guard)
 POST /api/cad/settings/signal_metrics    {action: set {key, value} | reset {key}}: the suggested squelch's margin and the
                                           shift warnings' thresholds (sizeup/cloud/metricsinsight.py, #606): admins, audited
 GET  /api/cad/export/<name>.csv           incidents | calls | unit-history | event-log, the sheet's columns
@@ -213,8 +214,10 @@ POST /api/cad/runcards                    {type (TYPE or TYPE/SUBTYPE), slots, s
 POST /api/cad/runcards/delete             {type}
 GET  /api/cad/radios                      the radio registry (radio ID -> rig), conflicts, units not fitting
                                           the ID pattern, the edit log
-POST /api/cad/radios                      {system: mdc|fleetsync|p25|mrrs, radio_id, unit?, label?, source?, notes?, operator?}
-                                          add / edit (mrrs: a label, never a unit)
+POST /api/cad/radios                      {system: mdc|fleetsync|p25|mrrs, radio_id, unit?, label?, source?, notes?, operator?,
+                                          fix_past? (default false)} add / edit (mrrs: a label, never a unit); a unit
+                                          changed or cleared with fix_past true moves the radio's rows of the last 30 days
+                                          off the old unit (Comms.rerig, #977): the answer's "past" says how many
 POST /api/cad/radios/delete               {system, radio_id, operator?}
 POST /api/cad/radios/range                {system: mrrs, lo, hi, label, notes?, id? (edit), operator?}  another system's
                                           ID block -> a label (never overlapping another; an ID's own label wins)

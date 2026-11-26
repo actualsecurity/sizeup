@@ -68,6 +68,7 @@
     --viz-2: #D95926;                        /* page, uncovered grants */
     --viz-3: #199E70;                        /* an ID burst */
     --viz-4: #C98500;                        /* the suggested Open */
+    --viz-5: #C75AB8;                        /* a paging channel's tones (not ours), #973 */
 
     /* type */
     --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;

@@ -258,6 +258,53 @@ def test_a_read_back_by_another_talker_or_too_late_does_not_place_it(gaz):
     assert ev.suppressed == "unplaced" and ev.precision == "none" and not any(d.would_push for _p, d in sink.pushes)
 
 
+UNKNOWN = "unknown MRRS radio"              # every unlabelled radio's stored talker text (sizeup/cad/radios.py)
+
+
+@pytest.mark.parametrize("after", [30, 150])          # in the window, and past it (the held call's talkers: _note_who)
+@pytest.mark.parametrize("talker", [UNKNOWN, "Sampletown PD officer"])     # a generic text, a department's label
+def test_a_read_back_by_another_radio_with_the_same_text_does_not_place_it(gaz, after, talker):
+    clock = Clock()
+    e, sink = engine(gaz, clock=clock)
+    e.feed(row("c1-t1", UNPLACED, clock(), talker=talker, radio_id="7701"))
+    [ev] = fire_calls(sink)
+    assert ev.suppressed == "unplaced"
+    clock.t += after
+    e.feed(row("c1-t2", "That's going to be 40 Example Place.", clock(), talker=talker, radio_id="7702"))
+    [ev] = e.events.open_events()
+    assert ev.suppressed == "unplaced" and ev.precision == "none" and not any(d.would_push for _p, d in sink.pushes)
+    clock.t += 10
+    e.feed(row("c1-t3", "That's going to be 40 Example Place.", clock(), talker=talker, radio_id="7701"))
+    [ev] = e.events.open_events()                     # its own radio's read-back still places it
+    assert ev.label_full == "40 Example Pl, Port Chester" and ev.suppressed == ""
+
+
+class ConsoleRadios:
+    """The registry's name() and rev (sizeup/cad/radios.py Registry): TALK's radio labelled a dispatch console."""
+    rev = 1
+
+    def name(self, system, radio_id):
+        return "Sampletown PD dispatch" if (system, radio_id) == ("mrrs", TALK["radio_id"]) else ""
+
+
+@pytest.mark.parametrize("after", [30, 150])
+def test_a_labelled_consoles_own_read_back_places_its_held_call(gaz, after):
+    """#640's read-back by the call's own talker (the dispatcher repeating the address), with the registry naming that
+    radio a console: its rows are the dispatcher's, and its radio ID still ties its own held call."""
+    clock = Clock()
+    e, sink = engine(gaz, clock=clock)
+    e.talkers.radios = ConsoleRadios()
+    talk = {"talker": "Sampletown PD dispatch", "radio_id": TALK["radio_id"]}
+    e.feed(row("c1-t1", UNPLACED, clock(), **talk))
+    [ev] = fire_calls(sink)
+    assert ev.suppressed == "unplaced" and ev.mode == "log"
+    clock.t += after
+    e.feed(row("c1-t2", "That's going to be 40 Example Place.", clock(), **talk))
+    [ev] = e.events.open_events()
+    assert ev.label_full == "40 Example Pl, Port Chester" and ev.mode == "push" and ev.suppressed == ""
+    assert [p.category for p, d in sink.pushes if d.would_push] == ["fire_call"]
+
+
 def test_placed_late_by_its_own_words_updates_it_at_log_unpushed(gaz):
     clock = Clock()
     e, sink = held(gaz, clock)

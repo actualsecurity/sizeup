@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS series (station TEXT NOT NULL, subject TEXT NOT NULL,
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
+NOT_TX = ("noise", "tones_other")    # not a transmission's level: static / a carrier, a tone pair none of ours (#973)
 # The hourly rollups: metric -> (record kind, which records, the value). The rest of a record stays in raw only.
 METRICS: dict[str, tuple[str, Callable[[dict], bool], Callable[[dict], float | None]]] = {
     "floor":        ("floor", lambda d: True, lambda d: d.get("hiss", d.get("floor"))),   # FM hiss (rel dB) / AM dBFS
@@ -106,12 +107,12 @@ METRICS: dict[str, tuple[str, Callable[[dict], bool], Callable[[dict], float | N
     "open_s":       ("floor", lambda d: True, lambda d: d.get("open_s")),
     "sq_open":      ("floor", lambda d: True, lambda d: d.get("open")),      # the squelch as running (sent when it
     "sq_close":     ("floor", lambda d: True, lambda d: d.get("close")),     # changes and every 15 min): #606's steps
-    "tx_q":         ("tx", lambda d: d.get("kind") != "noise", lambda d: d.get("q")),
-    "tx_q_open":    ("tx", lambda d: d.get("kind") != "noise", lambda d: d.get("qo")),
-    "tx_q_close":   ("tx", lambda d: d.get("kind") != "noise", lambda d: d.get("qc")),
-    "tx_dbfs":      ("tx", lambda d: d.get("kind") != "noise", lambda d: d.get("cf")),
-    "tx_snr":       ("tx", lambda d: d.get("kind") != "noise", lambda d: d.get("snr")),
-    "tx_s":         ("tx", lambda d: d.get("kind") != "noise", lambda d: d.get("dur")),
+    "tx_q":         ("tx", lambda d: d.get("kind") not in NOT_TX, lambda d: d.get("q")),
+    "tx_q_open":    ("tx", lambda d: d.get("kind") not in NOT_TX, lambda d: d.get("qo")),
+    "tx_q_close":   ("tx", lambda d: d.get("kind") not in NOT_TX, lambda d: d.get("qc")),
+    "tx_dbfs":      ("tx", lambda d: d.get("kind") not in NOT_TX, lambda d: d.get("cf")),
+    "tx_snr":       ("tx", lambda d: d.get("kind") not in NOT_TX, lambda d: d.get("snr")),
+    "tx_s":         ("tx", lambda d: d.get("kind") not in NOT_TX, lambda d: d.get("dur")),
     "noise_q":      ("tx", lambda d: d.get("kind") == "noise", lambda d: d.get("q")),
     "cc_rate":      ("cc", lambda d: True, lambda d: d.get("rate")),
     "cc_lo":        ("cc", lambda d: True, lambda d: d.get("lo")),

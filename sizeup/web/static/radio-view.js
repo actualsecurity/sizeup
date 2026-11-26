@@ -241,7 +241,9 @@ window.RadioView = (() => {
     // cad.js: play, time, rig, channel (its one name, the system, name and talkgroup on hover), chips, the ⋯ menu, text
     return radioRow(t, { scope: "rv" });
   }
+  // (talker, radio_id: a label from Settings > Radios > Radio IDs, read through the table as it is now, redraws the row)
   const rowSig = (t) => JSON.stringify([t.text, t.fixed_text, t.atc_text, t.atc_weak, t.atc_snaps, t.status, t.model, t.alt_text, t.alt_model, t.rig, t.has_audio,
+                                       t.talker, t.radio_id,
                                        (t.events || []).map((e) => [e.id, e.why]), t.rerun_at, talkSig(t.rig), cad.txRev,
                                        emSig(t), window.atcSig ? atcSig(t) : ""]);
   const fillRow = (li, t) => {

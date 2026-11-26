@@ -473,6 +473,7 @@
 
   /* Settings > Radios > Squelch (squelch-panel.js) */
   .sq-table .sq-in { inline-size: 5.5em; }
+  .sq-table .sq-in.warn { border-color: var(--warn); color: var(--warn); }   /* paging: Open near the pages */
   .sq-table td.warn { color: var(--warn); font-weight: 600; }
   .sq-table .sq-sugg { white-space: nowrap; }
   .sq-table .sq-sugg .warn { color: var(--warn); }
@@ -501,6 +502,7 @@
   .sg-voice { fill: var(--viz-1); }
   .sg-page { fill: var(--viz-2); }
   .sg-burst { fill: var(--viz-3); }
+  .sg-tones { fill: var(--viz-5); }
   .sg-noise { fill: var(--dim); fill-opacity: 0.7; }
   .sg-close-dot { fill: none; stroke: var(--viz-2); stroke-width: 1.5; }
   .sg-whisker.sg-wl { stroke-width: 1.5; }
@@ -533,6 +535,7 @@
   .sg-key.sg-voice, .sg-key.sg-c1 { background: var(--viz-1); }
   .sg-key.sg-page { background: var(--viz-2); }
   .sg-key.sg-burst { background: var(--viz-3); }
+  .sg-key.sg-tones { background: var(--viz-5); }
   .sg-key.sg-sugg { background: var(--viz-4); }
   .sg-key.sg-open { background: var(--text-2); }
   .sg-key.sg-lost { background: var(--err); }

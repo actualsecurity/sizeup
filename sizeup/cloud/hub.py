@@ -3034,7 +3034,9 @@ class HubApp(App):
         sq = None
         if self._squelch_ok():          # what of it fits the station's channels, as it reported them (the station agrees)
             kinds = {r.get("label"): r.get("channel_kind") for r in self.hub.radio_rows() if r.get("channel_kind")}
-            sq = channels.fit_squelch(self._sq_ov, kinds, self.squelch_defaults)[0]
+            # (a paging channel's Open / Close only to a station that takes them: one from before leaves them out)
+            sq = channels.fit_squelch(self._sq_ov, kinds, self.squelch_defaults,
+                                      paging=bool(st_ch.get("squelch_paging_ok")))[0]
         # the county talkgroups an incident of ours is worked on now (sizeup/cad/opchannel.py): only to a station that
         # takes them (one from before would never echo them in its signature: a push every 10 s)
         promote = sorted((k for k in self.promoted_keys()
@@ -3168,6 +3170,9 @@ class HubApp(App):
             return {"state": "offline", "detail": "No station has reported yet: these apply when it connects"}
         if got.get("sig") == want["sig"] and self._sq_ov and not self._squelch_ok():
             return {"state": "pending", "detail": "The station runs an older sizeup: update it to apply the squelch"}
+        if got.get("sig") == want["sig"] and not got.get("squelch_paging_ok") and any(
+                r.get("channel_kind") == "paging" and r.get("label") in self._sq_ov for r in self.hub.radio_rows()):
+            return {"state": "pending", "detail": "The station runs an older sizeup: update it to apply the paging squelch"}
         if got.get("sig") == want["sig"]:
             return {"state": "applied", "detail": "Applied on the station"}
         if not self.hub.connected():

@@ -16,7 +16,9 @@ from tests.test_cad import make_cad
 from tests.test_roles import CASEY, JORDAN, people
 
 CONTRACT = {"clip_id", "channel", "talkgroup", "talker", "start", "end", "asr", "fixed_text", "correction"}
-EXTENSIONS = {"system", "service"}                 # ours, beside #428's fields (and correction.based_on)
+# ours, beside #428's fields (and correction.based_on); radio_id and talker_recorded (#977): "talker" is the label the
+# Radio IDs table gives at the export, so a snapshot keeps the ID and the label the row was recorded with
+EXTENSIONS = {"system", "service", "radio_id", "talker_recorded"}
 
 
 def tx(cad, tid, text, *, start=1_800_000_000.0, channel="Fire/EMS 15", talkgroup=307, system="westchester",

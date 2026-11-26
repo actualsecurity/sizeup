@@ -194,6 +194,7 @@ from sizeup.intel import rules as rules_mod
 from sizeup.intel import talkers as talkers_mod
 from sizeup.intel.model import Decision, Event, Hit, lowest, mode_rank
 from sizeup.intel.policy import Policy, level
+from sizeup.radio.p25 import UNKNOWN_SRC
 
 TICK_S = 15.0
 PRUNE_S = 3600.0
@@ -336,6 +337,7 @@ class Entry:
     talker: str = ""                   # who keyed up ("" not known)
     units: frozenset = frozenset()     # the units it names or its radio is ("car 3"), lower case
     dispatcher: bool = False           # the dispatcher / HQ voices every job: never a tie by talker alone
+    ties: frozenset = frozenset()      # who keyed up, as a tie by talker reads it (_talker_ties): radio IDs, not text
     place: object = None               # the place in its own words (model.Place), or None
     late: bool = False                 # logged late (#747, row["late"]; older than max_age_min) or read over the
                                        # pack's late_s after its clip ended: context and a record, never a push's origin
@@ -919,11 +921,13 @@ class IntelEngine:
         units = {f"{m.group(1).lower()} {m.group(2).lower()}" for m in UNIT_MENTION.finditer(text)}
         units |= {u.strip().lower() for u in str(row.get("rig") or "").split(",") if u.strip()}
         disp = (bool(row.get("dispatcher")) or bool(tk and tk.console)
-                or bool(talker and (DISPATCH_WORDS.search(talker) or talker in self._hq(row))))
+                or bool(talker and (DISPATCH_WORDS.search(talker) or CTRL_WORD.search(talker)
+                                    or talker in self._hq(row))))
         if talker and not disp and UNIT_MENTION.fullmatch(talker):
             units.add(talker.lower())
         end = max(at, float(row.get("end") or at))
         entry = Entry(at, hits, text, who, suppressed, talker, frozenset(units), disp, end=end,
+                      ties=_talker_ties(row, talker),
                       label=tk.label if tk else "", town=self._talker_town(pack, key, tk),
                       ties=_talker_ties(row, talker),
                       late=bool(row.get("late") or row.get("aged")) or self.clock() - end > pack.late_s,
@@ -1242,7 +1246,8 @@ class IntelEngine:
              it names a unit or car already tied to the event ("car 3 to dispatch, I'm at ..."),
              or repeats the event's category words,
              or reads back the event's place,
-             or the same talker said it, when that talker is known and is no dispatcher or HQ (who voices every job).
+             or the same talker said it (the same radio ID: _talker_ties), when that talker is known and is no
+               dispatcher or HQ (who voices every job).
         A row with another category's rule words is another job."""
         if mine - {ev.category, rules_mod.WILD, "routine"}:
             return False
@@ -1255,8 +1260,7 @@ class IntelEngine:
                            if not _unit_placeholder(u))
         if shared and not self._busy(pack, ev, shared, entry.at):
             return True                       # (a unit on two or more open jobs: only words or the place tie it)
-        if (entry.talker and not entry.dispatcher
-                and entry.talker in {e.talker for e in mine_entries if e.talker and not e.dispatcher}):
+        if not entry.dispatcher and _ties_with(entry.ties, [e.ties for e in mine_entries if not e.dispatcher]):
             return True
         # "now at", "last seen at": the one moving incident open on this source
         movable = lambda e: pack.category(e.category).get("moves") or e.category in PEOPLE      # noqa: E731
@@ -1681,7 +1685,7 @@ class IntelEngine:
         talkers, units = self._held_who(pack, ev)
         if entry.units - units or not self._address_only(entry):
             return False
-        return bool(entry.talker and entry.talker in talkers) or bool(entry.units & units)
+        return _ties_with(entry.ties, talkers) or bool(entry.units & units)
 
     @staticmethod
     def _address_only(entry) -> bool:
@@ -1702,10 +1706,11 @@ class IntelEngine:
         return all(w in ok or i in apt for i, w in enumerate(ws))
 
     def _held_who(self, pack, ev: Event) -> tuple[set, frozenset]:
-        """The talkers and units of an unplaced event's own transmissions (kept past the window, _note_who)."""
+        """The talkers (each row's ties: _talker_ties, _ties_with) and units of an unplaced event's own transmissions
+        (kept past the window, _note_who)."""
         talkers, units = self._who_of.get(ev.id, (set(), frozenset()))
         mine = [e for e in self._event_entries(pack, ev)]
-        return (talkers | {e.talker for e in mine if e.talker},
+        return (talkers | {e.ties for e in mine if e.ties},
                 units | frozenset(u for e in mine for u in e.units))
 
     def _note_who(self, pack, ev: Event) -> None:
@@ -2575,9 +2580,40 @@ def rung(evidence: list, damp: list, thr: float, cues: list = ()) -> str:
     return modes[-1] if modes else "off"
 
 
+# a talker text that names no one talker, the whole text: an unlabelled radio's ("unknown MRRS radio":
+# sizeup/cad/radios.py), or a list of them; never an alias that only starts so ("UNKNOWN-4", "Unknown 12")
+# a dispatcher's talker as DISPATCH_WORDS, a console's "ctrl" too (talkers.CONSOLE_WORDS)
+CTRL_WORD = re.compile(r"\bctrl\b", re.I)
+_GENERIC_ONE = r"(?:unknown(?: \w+)? radio|unknown|unk|unidentified)(?: caller)?"
+GENERIC_TALKER = re.compile(rf"{_GENERIC_ONE}(?:\s*[,/&+]\s*{_GENERIC_ONE})*", re.I)
+
+
+def _talker_ties(row: dict, talker: str) -> frozenset:
+    """Who keyed up, as a tie by talker reads it: each of the row's radio IDs as "<system>:<id>" ("a,b": one per
+    key-up), never an unknown one (p25.UNKNOWN_SRC: "-1", "0"); a row with no known radio ID, its talker text (an
+    alias heard on the channel), never a generic one ("unknown MRRS radio"). Never a radio's label: every unlabelled
+    radio has the same text, and a department's or a range's label is many radios' (the admin labels by department
+    and role, not per car). A console's IDs stay: _same_job never ties a dispatcher's row by talker, and a held call's
+    own console repeating the address places it (_may_place); _ties_with keeps two officers one console answered
+    apart."""
+    system = str(row.get("system") or "")
+    ids = [x.strip() for x in str(row.get("radio_id") or "").split(",") if x.strip() not in UNKNOWN_SRC]
+    if ids:
+        return frozenset(f"{system}:{x}" for x in ids)
+    t = str(talker or "").strip()
+    return frozenset({t}) if t and not GENERIC_TALKER.fullmatch(t) else frozenset()
+
+
+def _ties_with(ties: frozenset, others) -> bool:
+    """One talker: a row's ties and one of `others` (another row's), both known, and every radio of one of the two
+    rows keyed up in the other's ("a,b" ties a row of a alone; never a row of "c,b": a and c are two talkers that one
+    radio, a console nothing labels, answered in both)."""
+    return bool(ties) and any(o and (ties <= o or o <= ties) for o in others)
+
+
 def _unit_placeholder(unit: str) -> bool:
     """A department's placeholder unit (DPT239 ...: sizeup/cad/mapview.is_placeholder, a CAD unit placeholder): never a
-    tie between two rows. Talkers tie as they are (a bare radio ID is most MRRS talkers'), within window_s of air."""
+    tie between two rows. Talkers tie by radio ID (_talker_ties), within window_s of air."""
     w = str(unit or "").strip()
     if not w:
         return True

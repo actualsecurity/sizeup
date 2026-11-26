@@ -182,10 +182,11 @@ def test_under_a_day_of_data_is_not_enough():
 
 
 def test_paging_is_information_only_and_never_raised():
+    """Without frequent static, paging's advisory never goes above what it runs (static: tests/test_paging_squelch.py)."""
     floor = floor_minutes(NOW - 7 * DAY, 7 * 1440, q90=lambda k, r: r.gauss(9.5, 0.4), kind="paging")
     pages = transmissions(NOW - 7 * DAY, 7 * DAY, [random.Random(k).uniform(18, 26) for k in range(40)], kind="page")
     out = mi.suggest(floor, pages, CFG, NOW)
-    assert out["state"] == "ok" and out["info"] == "paging: read-only" and not out["apply"]
+    assert out["state"] == "ok" and out["info"] == "paging: advisory" and not out["apply"]
     assert out["open"] <= out["cur_open"] == 10.0                    # never above what it runs
     assert "paging: never above the running Open" in out["why"]
 

@@ -13,7 +13,9 @@
 window.SignalPanel = (() => {
   const RANGES = [["6h", "6 h", 6 * 3600], ["24h", "24 h", 86400], ["7d", "7 d", 7 * 86400], ["30d", "30 d", 30 * 86400]];
   const RAW_MAX_S = 7 * 86400;            // the API's raw span (metricstore RAW_SPAN_S)
-  const KINDS = [["voice", "Voice", "sg-voice"], ["page", "Page", "sg-page"], ["burst", "ID burst", "sg-burst"], ["noise", "Noise", "sg-noise"]];
+  // (tones_other: a paging channel's tone pair none of ours with nothing said, #973: never a page's level)
+  const KINDS = [["voice", "Voice", "sg-voice"], ["page", "Page", "sg-page"], ["tones_other", "Tones (not ours)", "sg-tones"],
+    ["burst", "ID burst", "sg-burst"], ["noise", "Noise", "sg-noise"]];
   const HOUR_FM = "idle_q50,idle_q90,idle_qmax,noise_opens,sq_open,sq_close,tx_q,tx_q_open,tx_q_close,noise_q,floor,tx_dbfs,tx_snr,stt_delay";
   const HOUR_CC = "cc_rate,cc_lo,cc_uncovered,stt_delay";
   const HOUR_STT = "stt_delay";

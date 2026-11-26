@@ -50,7 +50,7 @@ from sizeup.cad.opchannel import OpChannels
 from sizeup.cad import scope as scope_mod
 from sizeup.cad.scope import Scope
 from sizeup.cad import radios as radios_mod
-from sizeup.cad.radios import Registry, RadioError, is_pcfd
+from sizeup.cad.radios import OTHER_P25, Registry, RadioError, is_pcfd
 from sizeup.cad import settings as settings_mod
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.dispatcher import AudioUnavailable
@@ -287,6 +287,11 @@ class Cad:
         self.comms = Comms(self.store, s.tactical, s.incident_talkgroups, clock=clock, paging=s.paging,
                            airport_tgs=s.airport_talkgroups)
         self.comms.log = self.log
+        # talker labels from Settings > Radios > Radio IDs as they are now, on every row read (radios.show_talkers); an
+        # edit there reloads the Radio pages' rows and rebuilds the state (_radio_labels_changed)
+        self.radios.say = self.log
+        self.comms.talkers = self.radios.show_talkers
+        self.radios.on_change(self._radio_labels_changed)
         self.comms.prune()
         self._comms_cache: dict = {}       # GET /api/cad/comms answers by (filters, revs), COMMS_CACHE_S (#284)
         self._sources_cache: dict = {}     # GET /api/cad/comms/sources: {may see context: (rev, the tree)}
@@ -491,7 +496,8 @@ class Cad:
         # returning rigs) is never more than a minute behind, with no write to move the rev (#446: no rev without one).
         # state_rev, not rev: a transmission on no incident and not in the feed moves rev (comms_rev) and rebuilds
         # nothing (Comms.record: quiet_for_state)
-        key = (self.store.state_rev, int(self.clock() // STATE_CLOCK_S))
+        # and the Radio IDs' labels (radios.labels_rev, #977): an edit there builds the incidents' Radio cards again
+        key = (self.store.state_rev, int(self.clock() // STATE_CLOCK_S), self.radios.labels_rev)
         if self._state is None or self._state[0] != key:
             cards = runcards.cards(self.store)
             self.addrs.key_open()                         # a new or moved address keyed first: its notes show (#403)
@@ -549,6 +555,9 @@ class Cad:
                 "radio_views": radioviews.rev(self.radio_views),
                 # one name per source (sizeup/radionames.py): only its rev ("" none); every page asks the names again
                 "radio_names": radionames.rev(),
+                # Settings > Radios > Radio IDs' edits (Registry.labels_rev): every row's talker label is read through
+                # the table as it is now; the rows themselves come again with comms_rev (_radio_labels_changed)
+                "radio_labels": self.radios.labels_rev,
                 # the admins' service per source: only their rev ("" none); both pages ask again when it moves
                 "radio_services": services_rev(self.radio_services),
                 # the FM / airband channels' Main switches (Our calls): their rev; the rail and the player ask again
@@ -1999,15 +2008,47 @@ class Cad:
             self._hints = (now, hints)
         return hints
 
+    def _radio_labels_changed(self, keys) -> None:
+        """Settings > Radios > Radio IDs changed a label shown (Registry.on_change: an entry, keys {(system, id)}; a
+        range or the seed, None). The rows already logged show it at read time (Comms.talkers); here the pages are told.
+        The state is built again by its key (labels_rev: moved before this is called). The Radio pages reload their
+        rows: one change-log reset per system, another P25 system's for the readers who may see it (never another
+        reader's rev), the county's and the fireground's for everyone; comms_rev moves. Under the store's lock, as
+        every writer of the change log (flush_changes swaps what is pending)."""
+        systems = set(OTHER_P25) if keys is None else {s for s, _rid in keys}
+        with self.store.lock:
+            for system in sorted(systems & set(OTHER_P25)):
+                self.comms.rev += 1
+                self.comms.note_change("reset", system)
+            if systems - set(OTHER_P25):
+                self.comms.rev += 1
+                self.comms.note_change("reset", None)
+
     def save_radio(self, body: dict) -> dict:
-        """Settings > Radios: add / edit one; a radio given a unit takes its unnamed transmissions with it (#163)."""
+        """Settings > Radios: add / edit one; a radio given a unit takes its unnamed transmissions with it (#163).
+        fix_past (#977: "Also fix past transmissions", asked each time, default false: the admins' choice): true, a
+        unit changed or cleared moves the rows of the last RERIG_DAYS logged on the old one, and their unit links, to
+        the new one (Comms.rerig, audited with the count); false or left out: those rows keep the unit they were
+        logged with (a radio that really moved rigs keeps its history). Labels follow the table either way. The row,
+        with "past": how many rows moved."""
+        fix_past = body.get("fix_past", False)
+        if not isinstance(fix_past, bool):
+            raise CadError("fix_past: true or false")
+        operator = _text(body, "operator", OPERATOR_MAX)
+        before = None
         try:
-            row = self.radios.save(body, _text(body, "operator", OPERATOR_MAX))
+            system = str(body.get("system") or "")
+            rid = str(body.get("radio_id") or "").strip()
+            before = self.radios.get(system, rid.upper() if system == "mdc" else rid)
+            row = self.radios.save(body, operator)
         except RadioError as e:
             raise CadError(str(e)) from None
+        past = 0
+        if row and "unit" in body and fix_past and before and before["unit"] and before["unit"] != row["unit"]:
+            past = self.comms.rerig(row["system"], row["radio_id"], before["unit"], row["unit"], operator)["rows"]
         if row and row["unit"] and "unit" in body:
             self.comms.relink(row["system"], row["radio_id"], row["unit"])
-        return row
+        return dict(row, past=past) if row else row
 
     def delete_radio(self, body: dict) -> dict:
         try:
