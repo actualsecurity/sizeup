@@ -402,12 +402,13 @@ class Comms:
                 self.store.quiet_for_state()
         late = bool(t.get("late"))
         if other:
-            if (t.get("text") or "").strip() and not late:
-                self._heard_context(tid)            # committed: the intel pre-alerts, never our consumers (on_text)
+            if ((t.get("text") or "").strip() or t.get("status") == "unclear") and not late:
+                self._heard_context(tid)            # committed: the intel pre-alerts, never our consumers (on_text);
+                                                    # (unclear: words it had are withdrawn there, sizeup/stt_quality.py)
             elif late and self._late_for_intel(t, system):
                 self._heard_context(tid)            # (intel scores it at air time, never pushes it)
             elif had_text and (not (t.get("text") or "").strip() or (t.get("status") or "") == "unclear"):
-                self._heard_context(tid)            # its words gone (empty, unclear): intel withdraws what it scored
+                self._heard_context(tid)            # its words gone (empty; a late one's unclear): intel withdraws them
             return out
         kind = self._everyones(tid, system)              # each kind trimmed by its own count: never by the other's
         self._logged[kind] += 1
