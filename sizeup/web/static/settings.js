@@ -341,12 +341,15 @@ async function sLoad(opts = {}) {
     const d = await api("GET", "/api/cad/settings");
     S.loadedAt = Date.now();
     const [sig, live] = sSigs(d, S.section);
-    const same = !!S.data && S.sigSec === S.section && sig === S.sig && (live === S.sigLive || !S_LIVE.has(S.section));
+    const quiet = !!S.data && S.sigSec === S.section && sig === S.sig;          // the section's settings as drawn
+    const same = quiet && (live === S.sigLive || !S_LIVE.has(S.section));
+    const old = S.data;
     S.data = d;
     S.sig = sig;
     S.sigLive = live;
     S.sigSec = S.section;
-    if (!same || opts.must) sRender(false, !opts.fresh);
+    const inPlace = !same && !opts.must && quiet && S.section === "units" && sUnitsLive($("#s-units"), old);
+    if ((!same || opts.must) && !inPlace) sRender(false, !opts.fresh);
     if (same || S.deferred || S.pressDeferred) sRefresh();          // (a redraw that waits: what reports doesn't)
   } catch (e) {
     sMsg(`Load failed: ${e.message}`);
@@ -400,6 +403,16 @@ async function sPost(section, body, done) {
 
 // ---- routing --------------------------------------------------------------------------------------
 
+// The sections sRender builds whole from S.data (panel.replaceChildren): out of sight, their nodes are let go and built
+// again when shown, as sRoute does on every visit anyway. Kept, a section once opened stayed in the page for good:
+// Units alone (a row of fields per unit) was about 70k nodes, two thirds of the console's (GitHub #887).
+const S_BUILT = new Set(["lists", "units", "dispatch", "users", "system"]);
+function sRelease(keep) {
+  for (const p of document.querySelectorAll("#settings .s-panel")) {
+    if (p.dataset.s !== keep && S_BUILT.has(p.dataset.s) && p.firstChild) p.replaceChildren();
+  }
+}
+
 function sRoute() {
   const m = !BOARD && location.hash.match(/^#settings(?:\/([a-z]*))?(?:\/([a-z]+))?/);   // the wall board has no Settings
   const open = !!m;
@@ -409,6 +422,7 @@ function sRoute() {
   if (window.renderTabs) renderTabs();
   if (!open) {
     S.section = null;
+    sRelease(null);
     if (cad.map) setTimeout(() => cad.map.resize(), 0);
     return;
   }
@@ -445,6 +459,7 @@ function sRoute() {
     if (a.dataset.s === sec) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
   }
   for (const p of document.querySelectorAll(".s-panel")) show(p, p.dataset.s === sec);
+  sRelease(sec);
   sMsg("");
   if (sec === "runcards") { showRunCards(); sRunTools(); }
   if (sec === "radios" && window.RadiosPanel) {        // the radio-ID work's editor (radios-panel.js)
@@ -1790,6 +1805,20 @@ function sUnitRow(u, i, n, kinds, boards) {
     li.append(home);
   }
   if (!u.retired) li.append(sSelect(boards, u.board, (v) => edit({ board: v }, "board changed"), "Board"));
+  li.append(sUnitMeta(u), el("span", "spacer"));
+  if (u.retired) li.append(sBtn("Restore", "Back on its board", () => sPost("units", { action: "restore", code: u.code }, `${u.code} restored`)));
+  else li.append(sBtn("Retire", "Off the boards, history kept", () => {
+    sAsk(`Retire ${u.code}? Off the boards, history kept.`, () => sPost("units", { action: "retire", code: u.code }, `${u.code} retired`), "Retire");
+  }));
+  if (!u.used) li.append(sBtn("Delete", "No history", () => {
+    sAsk(`Delete ${u.code}?`, () => sPost("units", { action: "delete", code: u.code }, `${u.code} deleted`), "Delete");
+  }, "danger-quiet"));
+  if (u.state === "edited") li.append(sBtn("Reset", "Default", () => sPost("units", { action: "reset", code: u.code }, `${u.code} reset`)));
+  return li;
+}
+
+// A unit's status line: its status, its call, its records (what moves with the calls, S_LIVE_KEYS) and its state.
+function sUnitMeta(u) {
   const meta = el("span", "s-meta");
   if (u.status) meta.append(statusChip(u.status));
   if (u.incident_number) meta.append(el("span", "warn small", `On ${u.incident_number}`));
@@ -1801,16 +1830,25 @@ function sUnitRow(u, i, n, kinds, boards) {
     meta.append(w);
   }
   meta.append(el("span", "dim small", u.used ? `${u.used} records` : "no history"));
-  li.append(meta, el("span", "spacer"));
-  if (u.retired) li.append(sBtn("Restore", "Back on its board", () => sPost("units", { action: "restore", code: u.code }, `${u.code} restored`)));
-  else li.append(sBtn("Retire", "Off the boards, history kept", () => {
-    sAsk(`Retire ${u.code}? Off the boards, history kept.`, () => sPost("units", { action: "retire", code: u.code }, `${u.code} retired`), "Retire");
-  }));
-  if (!u.used) li.append(sBtn("Delete", "No history", () => {
-    sAsk(`Delete ${u.code}?`, () => sPost("units", { action: "delete", code: u.code }, `${u.code} deleted`), "Delete");
-  }, "danger-quiet"));
-  if (u.state === "edited") li.append(sBtn("Reset", "Default", () => sPost("units", { action: "reset", code: u.code }, `${u.code} reset`)));
-  return li;
+  return meta;
+}
+// Only what moves with the calls changed (sLoad: the section's settings the same): each unit's status line put right
+// in place. Building the section again for a status took every row's fields and buttons with it, about 300 nodes and a
+// dozen listeners a unit, every S_POLL.live ms while units moved (GitHub #887). False: build it (a row gained or lost
+// its history, which shows Delete, or a row isn't on the page as drawn).
+function sUnitsLive(panel, old) {
+  const was = new Map(((old && old.units && old.units.rows) || []).map((u) => [u.code, u]));
+  const swaps = [];
+  for (const u of S.data.units.rows) {
+    const o = was.get(u.code);
+    if (!o || !o.used !== !u.used) return false;
+    if (u.status === o.status && u.incident_number === o.incident_number && u.used === o.used) continue;
+    const meta = panel.querySelector(`li[data-row="${CSS.escape(u.code)}"] > .s-meta`);
+    if (!meta) return false;
+    swaps.push([meta, u]);
+  }
+  for (const [meta, u] of swaps) meta.replaceWith(sUnitMeta(u));
+  return true;
 }
 
 function sAddUnit(kinds, boards) {
