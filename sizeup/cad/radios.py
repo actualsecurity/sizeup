@@ -26,8 +26,8 @@ cached per `rev`): another system's rows by talker()'s order (the radio's learne
 sent; an ID with no entry and no range as recorded); the county's and the fireground's rows with no rig by a label a
 person set (label_shown). A label added, changed or removed, an ID range's too, calls the on_change() hooks after the
 commit (the CAD: the Radio pages reload their rows, the state is built again; intel: its own cache). A unit changed
-or cleared moves the radio's recent rows with it when the admin leaves "Also fix past transmissions" on
-(Comms.rerig). The one label function is name(system, radio_id): the entry's label, else its range's, else "".
+or cleared moves the radio's recent rows with it only when the admin ticks "Also fix past transmissions" for that
+edit (off by default: Comms.rerig). The one label function is name(system, radio_id): the entry's label, else its range's, else "".
 
 P25 needs no table to work: a talker alias that is a board code ("E60", "2398", "77A4") or starts
 with one ("E60 P2") names that unit. Every (radio ID, alias) pair heard is kept, so a radio heard

@@ -2026,10 +2026,12 @@ class Cad:
 
     def save_radio(self, body: dict) -> dict:
         """Settings > Radios: add / edit one; a radio given a unit takes its unnamed transmissions with it (#163).
-        fix_past (default true, #977: "Also fix past transmissions"): a unit changed or cleared moves the rows of the
-        last RERIG_DAYS logged on the old one, and their unit links, to the new one (Comms.rerig, audited with the
-        count); false: those rows keep the unit they were logged with. The row, with "past": how many rows moved."""
-        fix_past = body.get("fix_past", True)
+        fix_past (#977: "Also fix past transmissions", asked each time, default false: the admins' choice): true, a
+        unit changed or cleared moves the rows of the last RERIG_DAYS logged on the old one, and their unit links, to
+        the new one (Comms.rerig, audited with the count); false or left out: those rows keep the unit they were
+        logged with (a radio that really moved rigs keeps its history). Labels follow the table either way. The row,
+        with "past": how many rows moved."""
+        fix_past = body.get("fix_past", False)
         if not isinstance(fix_past, bool):
             raise CadError("fix_past: true or false")
         operator = _text(body, "operator", OPERATOR_MAX)

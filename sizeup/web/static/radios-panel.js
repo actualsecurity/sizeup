@@ -113,14 +113,15 @@ window.RadiosPanel = (() => {
     notes.maxLength = 300;
     const save = el("button", "primary mini", "Save"), cancel = el("button", "mini", "Cancel"), del = el("button", "mini danger-quiet", "Remove");
     [save, cancel, del].forEach((b) => { b.type = "button"; });
-    // "Also fix past transmissions" (#977): on by default; a radio that really moved rigs: untick to keep its history
+    // "Also fix past transmissions" (#977): asked each time, off by default (the admins' choice): ticked, a unit changed
+    // or cleared takes the radio's recent rows with it
     const past = el("label", "rp-past small");
     const pastBox = el("input");
     pastBox.type = "checkbox";
-    pastBox.checked = true;
+    pastBox.checked = false;
     past.append(pastBox, " Past too");
-    past.title = "Also fix past transmissions: a unit changed or cleared moves this radio's rows of the last 30 days "
-      + "(and their links) off the old unit. Untick when the radio really moved to another rig.";
+    past.title = "Also fix past transmissions: tick it to move this radio's rows of the last 30 days (and their links) "
+      + "off the old unit when you change or clear its unit. Unticked, past rows keep the unit they were logged with.";
     save.addEventListener("click", async () => {
       try {
         await post("/api/cad/radios", Object.assign({ system: r.system, radio_id: r.radio_id, label: label.value,

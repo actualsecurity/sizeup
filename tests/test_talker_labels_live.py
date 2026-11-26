@@ -277,7 +277,7 @@ def test_a_county_or_fireground_label_with_no_unit_names_rows_old_and_new(tmp_pa
     assert shown(api, "")["307-1-call_1"] == "EXAMPLE ALIAS"
 
 
-def test_a_unit_changed_with_past_transmissions_moves_their_rig_and_links_and_off_leaves_them(tmp_path):
+def test_past_transmissions_follow_a_unit_only_when_ticked_off_by_default(tmp_path):
     clock = Clock(1_800_000_000.0)
     c = cad(tmp_path, clock)
     z1, z2 = unit(c, "Z91"), unit(c, "Z92")
@@ -296,20 +296,27 @@ def test_a_unit_changed_with_past_transmissions_moves_their_rig_and_links_and_of
         "SELECT incident_id, why, unit FROM radio_links WHERE traffic_id = ?", (tid,))}
     assert links("FG1-a") == {(old_ev["id"], "unit", "Z91")}
     clock.t += 60
-    # on (the default): the rows on the old unit move, their unit links with them, audited with the count
+    # left out (the default, off: asked each time): the rows keep the unit they were logged with, nothing audited
     got = c.save_radio({"system": "mdc", "radio_id": "9A01", "unit": "Z92"})
+    assert got["past"] == 0
+    assert c.store.one("SELECT rig FROM radio_traffic WHERE id = 'FG1-a'")["rig"] == "Z91"
+    assert links("FG1-a") == {(old_ev["id"], "unit", "Z91")}
+    assert c.store.q("SELECT 1 FROM settings_audit WHERE key LIKE '%/past'") == []
+    c.save_radio({"system": "mdc", "radio_id": "9A01", "unit": "Z91"})            # (back, for the ticked edit below)
+    # ticked: the rows on the old unit move, their unit links with them, audited with the count
+    got = c.save_radio({"system": "mdc", "radio_id": "9A01", "unit": "Z92", "fix_past": True})
     assert got["past"] == 1
     assert c.store.one("SELECT rig FROM radio_traffic WHERE id = 'FG1-a'")["rig"] == "Z92"
     assert links("FG1-a") == {(new_ev["id"], "unit", "Z92")}
     audit = c.store.q("SELECT key, old, new FROM settings_audit WHERE key = 'mdc:9A01/past'")
     assert len(audit) == 1 and audit[0]["old"] == "Z91" and audit[0]["new"].startswith("Z92: 1 transmission")
-    # off: today's behaviour, the rows keep the unit they were logged with
+    # explicitly off: the same as left out
     got = c.save_radio({"system": "mdc", "radio_id": "9A02", "unit": "Z92", "fix_past": False})
     assert got["past"] == 0
     assert c.store.one("SELECT rig FROM radio_traffic WHERE id = 'FG1-b'")["rig"] == "Z91"
     assert links("FG1-b") == {(old_ev["id"], "unit", "Z91")}
-    # cleared, with it on: the rig goes, and so does its unit link (the county's rows the same way)
-    got = c.save_radio({"system": "p25", "radio_id": "9900611", "unit": ""})
+    # cleared, ticked: the rig goes, and so does its unit link (the county's rows the same way)
+    got = c.save_radio({"system": "p25", "radio_id": "9900611", "unit": "", "fix_past": True})
     assert got["past"] == 1
     assert c.store.one("SELECT rig FROM radio_traffic WHERE id = '307-1-call_1'")["rig"] == ""
     assert links("307-1-call_1") == set()
