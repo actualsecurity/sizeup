@@ -304,7 +304,7 @@ def test_auto_priority_gpu_first_then_aws_then_the_station_each_said_on_its_rout
         assert wait(lambda: _row(hub, "FG1-2").get("text") == AWS_TEXT + ".", 30), _row(hub, "FG1-2")
         assert wait(lambda: _row(hub, "FG1-2").get("stt_route") == "auto·priority: GPU → AWS (GPU: no GPU worker online)", 5)
         # AWS out of budget too: the station's whisper (never dropped), each step on the route
-        monkeypatch.setattr(hub.app.hub, "remote", lambda fn, args, timeout=None: asked.append((fn, args)) or 1)
+        monkeypatch.setattr(hub.app.hub, "remote", lambda fn, args, *a, **k: asked.append((fn, args)) or 1)
         assert hub_post(hub, "stt", {"action": "set", "key": "aws_monthly_limit_usd", "value": 0})[0] == 200
         send(hub, pending_event("FG1-3", seq=3))
         assert wait(lambda: ("transcribe_now", ["FG1-3"]) in asked, 10), asked
@@ -344,7 +344,8 @@ def test_pinned_aws_is_aws_and_the_legacy_aws_keeps_its_gpu_first_by_class(tmp_p
         time.sleep(0.2)
         send(hub, pending_event("FG1-6", seq=3))
         assert wait(lambda: _row(hub, "FG1-6").get("text") == GPU_TEXT, 30), _row(hub, "FG1-6")
-        assert _row(hub, "FG1-6")["stt_route"].startswith("pinned AWS: AWS → gpu-1 (AWS: ")
+        assert wait(lambda: _row(hub, "FG1-6").get("stt_route", "").startswith("pinned AWS: AWS → gpu-1 (AWS: "), 5), \
+            _row(hub, "FG1-6")
     finally:
         w.close()
         hub.close()
@@ -532,7 +533,7 @@ def test_a_background_clip_the_gpu_cant_take_goes_back_to_its_stations_whisper_n
     asked = []
     try:
         _set(hub, "tg:325", "auto_bg")
-        monkeypatch.setattr(hub.app.hub, "remote", lambda fn, args, timeout=None: asked.append((fn, args)) or 1)
+        monkeypatch.setattr(hub.app.hub, "remote", lambda fn, args, *a, **k: asked.append((fn, args)) or 1)
         ev = pending_event("TG325-1")
         ev["data"].update(source="Neighbor FD", talkgroup=325, transcript_pending="pool", stt_class="low", stt="")
         send(hub, ev)                                            # (no GPU worker: nobody takes it)
@@ -554,3 +555,38 @@ def test_the_legacy_pool_check_never_counts_background_work_as_a_waiting_pre_ale
     online(p, "gpu-2")
     p._queue.append(jobs.job("bg-ctx", sttpool.CONTEXT, forced=True, bg=True))
     assert p.ready(URGENT, gpu_only=True) == (True, "")
+
+
+def test_two_clips_of_one_channel_on_different_engines_stay_in_air_time_order_and_both_fill_in(tmp_path, monkeypatch):
+    """FIFO on the timeline: the older clip goes to the station's whisper (no GPU, AWS out), the newer one to a GPU
+    worker that answers first. Each row is in the log at once, at its air time, with its audio and "Transcribing";
+    the texts fill in where they are, whichever engine answers first."""
+    fake = FakeTranscribe(phrases={500: AWS_TEXT})
+    hub = _hub(tmp_path, fake)
+    asked = []
+    w = None
+    try:
+        _set(hub, "FG1", "auto")
+        monkeypatch.setattr(hub.app.hub, "remote", lambda fn, args, *a, **k: asked.append((fn, args)) or 1)
+        assert hub_post(hub, "stt", {"action": "set", "key": "aws_monthly_limit_usd", "value": 0})[0] == 200
+        old = pending_event("FG1-old")
+        send(hub, old)
+        assert wait(lambda: ("transcribe_now", ["FG1-old"]) in asked, 10), asked
+        r = hub.app.cad.store.one("SELECT status, text, start FROM radio_traffic WHERE id = 'FG1-old'")
+        assert r["status"] == "pending" and r["text"] == "" and hub.app.audio.has("FG1-old")     # (at once, audio too)
+        token = hub.app.hub.workers.add("gpu-1")
+        w = FakeWorker(hub.url, token).start()
+        assert wait(lambda: hub.app.sttpool.ready_forced(URGENT)[0], 5)
+        time.sleep(0.05)
+        send(hub, pending_event("FG1-new", seq=2))
+        assert wait(lambda: _row(hub, "FG1-new").get("text") == GPU_TEXT, 30), _row(hub, "FG1-new")
+        assert _row(hub, "FG1-old")["text"] == ""                                  # (the newer one answered first)
+        hub.app.apply("retext", {"id": "FG1-old", "text": "the older words", "status": "done", "model": "small.en"}, None)
+        rows = [x for x in hub.app.cad.comms_query({})["rows"] if x["id"] in ("FG1-old", "FG1-new")]
+        assert [x["id"] for x in rows] == ["FG1-new", "FG1-old"]                    # (newest first, by air time)
+        assert rows[0]["start"] > rows[1]["start"] and rows[1]["text"] == "the older words" and rows[0]["text"] == GPU_TEXT
+    finally:
+        if w is not None:
+            w.close()
+        hub.close()
+        fake.close()

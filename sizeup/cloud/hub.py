@@ -1686,7 +1686,8 @@ class HubApp(App):
                 and self._rerun_note.get(it.id) != CATCHUP_NOTE]                    # (nor one the catch-up sent it)
         todo.sort(key=lambda x: -x[0].end)
         n = 0
-        for it, key, kind in todo[:RESEND_MAX]:
+        # the newest RESEND_MAX, sent oldest first (FIFO: a channel's texts come back in the order they were said)
+        for it, key, kind in sorted(todo[:RESEND_MAX], key=lambda x: x[0].end):
             if not self.aws.available(key)[0]:
                 continue
             wav = self.audio.get(it.id)

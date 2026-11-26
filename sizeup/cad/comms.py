@@ -839,6 +839,7 @@ class Comms:
         """The way its text of record went (#875, sizeup/sttroute.py: "auto·priority: gpu-pc → AWS (gpu-pc: gaming)"),
         shown in the transcript's hover. Nothing else on the row changes (no change-log entry: not the words)."""
         with self.store.tx() as db:
+            self.touch(tid)
             n = db.execute("UPDATE radio_traffic SET stt_route = ? WHERE id = ?", (str(route or "")[:300], tid)).rowcount
             if n:
                 self.rev += 1
