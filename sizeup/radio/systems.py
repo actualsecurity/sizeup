@@ -82,6 +82,7 @@ class P25System:
     reception: dict = field(default_factory=dict)     # the reception test's (#410): {watch, antenna, caveat, alert}
     probe_only: bool = False                          # a probe-only system (#436, sizeup/radio/probes.py): never a job
     grant: dict = field(default_factory=dict)         # its "sizeup" block's grant split keys (#819: wire_grant_split)
+    per_tx: str = "off"                               # its "sizeup" block's "per_tx" (#986: sizeup/radio/p25.py, parts)
 
     @property
     def jobs(self) -> tuple[str, ...]:
@@ -153,10 +154,17 @@ def load(directory: Path) -> P25System:
     return P25System(name, label, str(mine.get("name") or label), os.path.abspath(directory), os.path.abspath(cap),
                      sources, freqs, read_talkgroups(tgf, name), dict(mine.get("site") or {}),
                      dict(mine.get("reception") or {}) if isinstance(mine.get("reception"), dict) else {},
-                     grant={k: mine[k] for k in GRANT_KEYS if k in mine})
+                     grant={k: mine[k] for k in GRANT_KEYS if k in mine}, per_tx=per_tx_of(mine))
 
 
 GRANT_KEYS = ("grant_split", "grant_split_tune")
+
+
+def per_tx_of(conf: dict | None) -> str:
+    """A config.json "sizeup" block's per-transmission hand-off mode (#986): "off" | "log" | "on", off unless it says."""
+    from sizeup.radio.p25 import PER_TX_MODES
+    mode = conf.get("per_tx") if isinstance(conf, dict) else None
+    return mode if mode in PER_TX_MODES else "off"
 
 
 def wire_grant_split(ingest, live, conf: dict | None, workdir: str | Path, state_path, file_name: str,
@@ -350,7 +358,7 @@ class Runtime:
     unknown and encrypted talkgroups: Activity)."""
 
     def __init__(self, system: P25System, recorder, prefs, on_call, log=lambda m: None, state_dir: Path | None = None,
-                 on_activity=None):
+                 on_activity=None, on_part=None):
         from sizeup.radio.live import LiveTalk
         from sizeup.radio.p25 import CallIngest
         self.system, self.recorder, self.prefs = system, recorder, prefs
@@ -366,6 +374,9 @@ class Runtime:
         self.ingest.alias_of = lambda src: self.live.aliases.get(src, "")
         wire_grant_split(self.ingest, self.live, system.grant, system.dir, getattr(recorder, "state_path", None),
                          system.name, system.name)
+        # (#986) each transmission as it ends: its mode, and what takes a part (on_part(runtime, call) -> taken)
+        self.ingest.per_tx = system.per_tx
+        self.ingest.on_part = (lambda call: on_part(self, call)) if on_part is not None else None
         self.probe = None                     # sizeup/radio/reception.py Probe while a reception test runs (#410)
         recorder.on_line = self._line
 

@@ -135,6 +135,44 @@ Known limit, to tune from the `log` data before `on`: when a terminator is misse
 keys is not in the WAV, so its grant maps late in the audio by that pause. With a pause of 1.5 s or more the cut lands
 1.2-2.2 s into the next talker, and past about 3.5 s it is missed. `before_s` (up to 3.0) widens the search back.
 
+**Each transmission as it ends (#986).** Without it a transmission's row waits for its whole call: trunk-recorder writes
+the call WAV and JSON only at the call's end (every later turn, plus `callTimeout`'s 3 s of quiet), so a first turn
+waits for all the others. Measured on the hub (from air start, median / p90): county first turn 13.3 / 30.6 s, later
+turns 26.4 / 52.6 s, MRRS 9.4 / 22.5 s. Yet the sink closes each transmission's own WAV when it ends (its header's
+lengths written, `close_wav`; the call WAV is a new file ffmpeg makes from them, so nothing rewrites it). The patch
+can hand that file on there and then, per system:
+
+```json
+"sizeup": {"per_tx": "log"}
+```
+
+| `per_tx` | trunk-recorder (`SIZEUP_TR_PERTX`) | sizeup |
+|---|---|---|
+| `off` (the default) | stock: nothing written | as before |
+| `log` | `1`: each transmission's WAV hard-linked into `<captureDir>/sizeup-tx/<call>-t<k>.wav`, then `<call>-t<k>.json` beside it (tmp + rename) | notes each one and removes it; an hourly line says what it would gain (`p25 MRRS: per-tx (log) last hour: 40 transmissions in 12 calls; ready 0.21 s after the release (p90 0.30), 9.8 s before the call's file (p90 24.0)`) |
+| `on` | the same | each one is its row at once: id `<call>-t<k>`, its radio ID, clip, speech-to-text, radio log row and pre-alert hooks, as the call's end would make it (#931's pending row comes with it). The call's JSON still comes at its end: a transmission taken already makes no second row, any other is made then under the same id |
+
+`<call>` is the call file's own stem (talkgroup, the first transmission's start to the ms, frequency, TDMA slot, call
+number: the default `filenameFormat`) and `k` the transmission's index in the call, which is its `srcList` index in the
+call JSON (`minTransmissionDuration` 0: none is dropped). The JSON holds the system, talkgroup, call number, `k`, `src`,
+the start and stop in ms, the sample count and rate, the error counts, the frequency and slot, and the call's
+`emergency` / `encrypted` flags. A part that can't be linked or written is left to the call's end (an error line).
+
+What sizeup leaves to the call's end, as before: an emergency call (its alarm, window and evidence come from the whole
+call), an encrypted one, a talkgroup whose Record switch is off (or tier doesn't record), and another system's call
+while a reception test could claim it. A part is never cut: `apply_grants` only names one with no radio ID from the
+live grant that opened it, and the grant split (#819) still plans and counts its cuts on the whole call but cuts nothing
+that was taken as a part. So the county, whose talker split is still `log` (two talkers in one transmission when a
+terminator is missed), should go `per_tx: on` only after its `split` does; MRRS (`split: on`) can go first. A part
+written after its call's JSON was taken is dropped; at a restart of sizeup the parts on disk are removed (their calls'
+JSON brings them in), and a call that was going on then looks for its rows taken before (`<call>-t<k>`) so none is made
+twice.
+
+Rollout, as #647's: `off` → `log` on MRRS (a restart of only its trunk-recorder, between calls) to see the gain, then
+`on`; the county the same once its `split` is `on`. The capture dir is polled every 0.25 s (was 1 s); a call WAV whose
+header says it is whole is taken at once (else once its size held 1 s, as before), so every P25 clip gains about a
+second whatever `per_tx` says.
+
 `pos` (both lists) is the sum of the earlier transmissions' lengths, each from its sample count: exactly where the
 transmission starts in the call WAV, which ffmpeg makes by concatenating them. 5.2.0 runs the call WAV through
 loudnorm by default (a short call then comes out at 192 kHz); that changes its level, never its length. sizeup cuts

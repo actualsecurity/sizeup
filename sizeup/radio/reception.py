@@ -1475,6 +1475,17 @@ class Tests:
 
     # -- the calls it captured ------------------------------------------------------------------------------------------
 
+    def busy(self, rt) -> bool:
+        """(#986) Whether a call of this system going on now could be a test's (one running, or one that ended in the
+        last LATE_CALL_S, plus a call's length to spare): a transmission of it is then left to its call's end, which
+        on_call() sees."""
+        with self._lock:
+            if rt.probe is not None:
+                return True
+            ended = self._ended.get(rt.system.name)
+            permanent = any(m in rt.system.jobs for m in self.app.assign.values())
+            return bool(ended and not permanent and self.clock() < ended + LATE_CALL_S + 600)
+
     def on_call(self, rt, call) -> bool:
         """A finished call of a system: True when it is a test's (counted, a sample kept; or one that settled after
         the test ended: dropped), so nothing else may take it."""

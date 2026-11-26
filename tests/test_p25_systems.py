@@ -787,8 +787,7 @@ def test_ingest_takes_only_the_systems_own_talkgroups(two, tmp_path):
         meta = json.loads((d / f"{name}.json").read_text())
         meta.update(short_name="mrrs", talkgroup_tag="PD Dispatch", freq=770181250)
         (d / f"{name}.json").write_text(json.dumps(meta))
-    rt.ingest.scan()
-    calls = rt.ingest.scan()
+    calls = rt.ingest.scan() + rt.ingest.scan()          # (a whole WAV is taken at its first look: #986)
     # MRRS's own talkgroup 307 is not in its file: never taken (and never the county's Fire/EMS 15)
     assert [(c.talkgroup, c.label, c.system, len(c.turns)) for c in calls] == [(PD, "PD Dispatch", "mrrs", 2)]
     assert rt.ingest.record_all is False and app.p25.dir != rt.ingest.dir and T0
