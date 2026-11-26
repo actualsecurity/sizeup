@@ -81,6 +81,7 @@ window.IntelPage = (() => {
   function close() {
     st.seq++;
     mp.seq++;
+    mp.key = "";                               // (a read cut short here: back on the page, read once again)
     st.open = false;
     if (st.timer) { clearInterval(st.timer); st.timer = null; }
   }
