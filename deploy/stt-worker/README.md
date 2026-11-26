@@ -103,7 +103,7 @@ The model needs about 1 GB of free VRAM while it is loaded.
 ### 4. Try whisper-server
 
 ```powershell
-& "$d\whisper\Release\whisper-server.exe" -m "$d\models\ggml-large-v3-turbo-q5_0.bin" --host 127.0.0.1 --port 8179 -t 4
+& "$d\whisper\Release\whisper-server.exe" -m "$d\models\ggml-large-v3-turbo-q5_0.bin" --host 127.0.0.1 --port 8179 -t 4 -l en -sns -et 2.4 -lpt -1.0 -nth 0.6
 ```
 
 The output should list the GPU (`ggml_cuda_init: found 1 CUDA devices`).
@@ -185,13 +185,13 @@ http://127.0.0.1:8180`. With it running, `py -3 "$d\worker.py" check` also tries
 
 ### 5. The worker
 
-For the first install, `worker.py` is pinned to a commit (220,801 bytes). Check its hash after the download. From then on it
+For the first install, `worker.py` is pinned to a commit (224,049 bytes). Check its hash after the download. From then on it
 [updates itself](#updating). A worker installed from an older pin (before the self-update) needs this download once
 more to get it.
 
 ```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/5970779576db905750b4549be28087a2ab9f206a/deploy/stt-worker/worker.py -OutFile "$d\worker.py"
-(Get-FileHash "$d\worker.py").Hash -eq '6E4A16025F5FD70C6170A5A5232EAA388BFAFEFA8A92AE6CA7E934447F44F5DF'   # True
+Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/a605ce400d2a705a870eca5984c9e1870101819c/deploy/stt-worker/worker.py -OutFile "$d\worker.py"
+(Get-FileHash "$d\worker.py").Hash -eq 'CE03FE00066544A74CD4D5AD50DC3234DE5CC4ECEA121F8A2FB946EF8FEE9C16'   # True
 notepad "$d\worker.toml"
 ```
 
@@ -203,7 +203,8 @@ hub_url = "https://hub.example.org"          # the hub's address (the one the st
 model = "large-v3-turbo-q5_0"
 # the worker starts whisper-server itself, restarts it when it exits, and knows its pid (its GPU use isn't a game)
 whisper_server = ['whisper\Release\whisper-server.exe', '-m', 'models\ggml-large-v3-turbo-q5_0.bin',
-                  '--host', '127.0.0.1', '--port', '8179', '-t', '4']
+                  '--host', '127.0.0.1', '--port', '8179', '-t', '4',
+                  '-l', 'en', '-sns', '-et', '2.4', '-lpt', '-1.0', '-nth', '0.6']
 # the local LLM (optional: leave these out for none; see "The local LLM" below)
 llm_url = "http://127.0.0.1:8180"
 llm_model = "qwen3-8b-q4_k_m"
@@ -374,6 +375,10 @@ that folder and keeps the file's mode. The state stays in `~/.local/state/sizeup
 - **Pre-alert classes:** urgent, high, context-fallback and context have a hard deadline: a 4 s first lease,
   renewable up to 8 s from the claim. Past that the hub gives the clip to the next engine. The worker then drops its
   result and stops the decoding.
+- **Decode:** every `/inference` request carries `language=en`, `suppress_nst=true`, `entropy_thold=2.4`,
+  `logprob_thold=-1.0` and `no_speech_thold=0.6` (whisper.cpp reads each per request, so they hold whatever
+  `whisper_server` says), and the temperature fallback: `temperature_inc=0.2`, or `0.4` for a pre-alert clip (at most
+  two more passes, so it fits the lease). The hub sends no prompt for the airband.
 - **Heartbeat:** every 5 s, also during a decode. The hub takes back the leases of a worker it hasn't heard from for
   12 s.
 - **Gaming or pause:** the hub takes back the worker's pre-alert jobs itself when the state changes. A later complete,
@@ -600,7 +605,7 @@ Without `-c`, the worker reads `SIZEUP_STT_WORKER_CONFIG`, else `worker.toml` or
 | `SIZEUP_STT_WORKER_TOKEN` (or `token_file`) | | the worker token; the worker id comes from it |
 | `SIZEUP_STT_CF_CLIENT_ID`, `SIZEUP_STT_CF_CLIENT_SECRET` | | the worker's Cloudflare Access service token |
 | `whisper_url` | `http://127.0.0.1:8179/inference` | loopback only |
-| `whisper_server` | | whisper-server's command line (`--host 127.0.0.1` only); when set, the worker runs it |
+| `whisper_server` | | whisper-server's command line; when set, the worker runs it. Only these options: `-m` (one local model), `--host` (127.0.0.1 only), `--port`, `-t`, `-l` (`en` only), `-sns`, `-et`, `-lpt`, `-nth`, `-mc`, `--vad`, `-vm`, `-vt` (and their long names); anything else is refused (`-nf`, language detection, translate, a public folder, the ffmpeg converter). The worker adds `-l en` when it names no language |
 | `whisper_process`, `whisper_pid` | `whisper-server` | how the GPU check recognises our whisper-server |
 | `model` | `large-v3-turbo-q5_0` | the label sent with each transcript |
 | `auto_gaming`, `fullscreen_gaming` | `true`, `true` | `false`: no GPU-load detection / no full-screen check |

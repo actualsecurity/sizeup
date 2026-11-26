@@ -299,7 +299,8 @@ class WhisperClient:
         whisper as a pool worker sends the hub its segments and words, #639 phase 2)."""
         boundary = uuid.uuid4().hex
         parts = []
-        fields = [("response_format", "verbose_json"), ("temperature", "0.0")]
+        # language=en: no language detection (small.en is English-only anyway; the same fields as the GPU worker's)
+        fields = [("response_format", "verbose_json"), ("temperature", "0.0"), ("language", "en")]
         if prompt:
             fields.append(("prompt", prompt))
         if fast:

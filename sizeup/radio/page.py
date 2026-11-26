@@ -163,6 +163,8 @@ def page_from_dict(d: dict) -> Page:
     p.history = d.get("history") or []  # type: ignore[attr-defined]
     p.rerun_at = d.get("rerun_at")  # type: ignore[attr-defined]
     p.model = d.get("model", "")  # type: ignore[attr-defined]
+    if d.get("quality"):                    # an unclear transcript's reason and words (sizeup/stt_quality.py)
+        p.quality, p.unclear_text = str(d["quality"]), str(d.get("unclear_text") or "")  # type: ignore[attr-defined]
     if isinstance(d.get("keyup"), dict):    # a piece cut from a recording at a key-up (PageHold), and who keyed it
         p.keyup = dict(d["keyup"])  # type: ignore[attr-defined]
     for k in ("radio_id", "unit"):
