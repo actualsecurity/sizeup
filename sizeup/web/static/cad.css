@@ -923,10 +923,11 @@
   .il-sl.high { color: var(--accent-text); font-weight: 700; }
   .il-sl.medium { color: var(--warn); }
   .il-sl.low { color: var(--dim); }
-  .il-parts { overflow-wrap: anywhere; font-family: var(--mono); font-size: var(--fs-2xs); line-height: var(--lh-2xs);
+  .il-parts { overflow-wrap: break-word; font-family: var(--mono); font-size: var(--fs-2xs); line-height: var(--lh-2xs);
               max-inline-size: 11rem; }                  /* (the score's parts: never what widens the table) */
+  .il-part { white-space: nowrap; }                      /* a part whole: the line wraps at its " · " */
   .il-acts { min-inline-size: var(--ctl-sm); }          /* the buttons stack in a narrow table */
-  .il-vote[aria-pressed="true"] { color: var(--accent-text); border-color: var(--accent-text); }
+  :is(.il-vote, .aa-acts .icon)[aria-pressed="true"] { color: var(--accent-text); border-color: var(--accent-text); }
   .il-n { margin-inline-start: var(--s-0); font-size: var(--fs-2xs); line-height: var(--lh-2xs); font-variant-numeric: tabular-nums; }
   .q-intel-all { margin-inline-start: auto; }
   /* notes and tags (intel-notes.js): the row's chip, More info's notes, the incident's */

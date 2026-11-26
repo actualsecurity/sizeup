@@ -243,7 +243,12 @@ window.IntelPage = (() => {
     const sc = cell("il-score", el("span", `il-sl ${e.score_level}`, `${e.score_level} ${pct(e.what)}`));
     sc.title = `${DECIDED[e.decided] || "—"}`;
     if ((e.parts || []).length) {
-      sc.append(el("div", "dim small il-parts", e.parts.map(([id, w]) => (isModel(id) ? `model ${pct(w)}` : `${id} ${w2(w)}`)).join(" · ")));
+      const parts = el("div", "dim small il-parts");             // each part whole (.il-part), the line wraps at " · "
+      e.parts.forEach(([id, w], i) => {
+        if (i) parts.append(" · ");
+        parts.append(el("span", "il-part", isModel(id) ? `model ${pct(w)}` : `${id} ${w2(w)}`));
+      });
+      sc.append(parts);
     }
     // why it didn't push
     const h = e.held;

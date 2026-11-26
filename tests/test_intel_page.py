@@ -315,6 +315,47 @@ def test_newest_first_paged_on_the_hub_last_24_hours_by_default(site):
     assert [e["id"] for e in rng["events"]] == [old.id]
 
 
+def test_a_dismiss_is_a_noise_vote_never_a_second_one(site):
+    """#906 re-check: the card's Dismiss after the person's Noise vote adds none; after Useful it makes it Noise."""
+    cad, _clock = site
+    api = CadApi(cad)
+    a, b, c = (save(cad, mode="push", first_at=T0 - i) for i in range(3))
+    call(api, f"/api/cad/intel/{a.id}/feedback", {"verdict": "noise"}, JORDAN)
+    call(api, f"/api/cad/intel/{b.id}/feedback", {"verdict": "useful"}, JORDAN)
+    for e in (a, b, c):
+        assert call(api, f"/api/cad/intel/{e.id}/dismiss", {}, JORDAN)[0] == 200
+    got = {e.id: sorted(r["verdict"] for r in cad.store.q("SELECT verdict FROM intel_feedback WHERE event_id = ?", (e.id,)))
+           for e in (a, b, c)}
+    assert got == {a.id: ["noise"], b.id: ["noise"], c.id: ["noise"]}
+
+
+def test_the_decided_backfill_commits_a_chunk_at_a_time(site, monkeypatch):
+    cad, _clock = site
+    from sizeup.intel import events as ev_mod
+    ids = [save(cad, first_at=T0 - i, rules=[["model.pc", 1, 0.9]] if i % 2 else [["pd.shots", 1, 0.7]]).id for i in range(7)]
+    with cad.store.tx() as db:
+        db.execute("UPDATE intel_events SET decided = NULL")
+    monkeypatch.setattr(ev_mod, "BACKFILL_CHUNK", 3)
+    seen = []
+    real = cad.store.db.execute
+    monkeypatch.setattr(cad.store, "db", type("Db", (), {
+        "execute": lambda self, sql, *a: (seen.append(sql.split()[0]), real(sql, *a))[1],
+        "executemany": lambda self, sql, rows: real.__self__.executemany(sql, rows),
+        "executescript": lambda self, sql: real.__self__.executescript(sql)})())
+    ev_mod.SqlEvents(cad.store)
+    assert seen.count("BEGIN") == 3 and seen.count("COMMIT") == 3              # 7 rows: three transactions
+    monkeypatch.undo()
+    got = {r["id"]: r["decided"] for r in cad.store.q("SELECT id, decided FROM intel_events")}
+    assert got == {i: ("model" if k % 2 else "rules") for k, i in enumerate(ids)}
+
+
+def test_a_to_day_ends_at_the_next_local_midnight_on_a_dst_day():
+    from sizeup.intel.eventlog import _when
+    assert _when("2026-11-01", True) - _when("2026-11-01", False) == 25 * 3600       # the clocks went back
+    assert _when("2026-03-08", True) - _when("2026-03-08", False) == 23 * 3600       # ... and forward
+    assert _when("2026-11-25", True) - _when("2026-11-25", False) == 24 * 3600
+
+
 def test_a_poll_reuses_the_count_and_the_facets_until_the_events_change(site, monkeypatch):
     """#906 review M2: the 30 s poll counts again only after a change, and the filters' choices are cached."""
     cad, _clock = site
@@ -475,6 +516,34 @@ def run_node(script: str, data: dict) -> dict:
         p = subprocess.run([NODE, str(js), str(inp)], capture_output=True, text=True, timeout=30)
         assert p.returncode == 0, p.stderr
         return json.loads(p.stdout.strip().splitlines()[-1])
+
+
+@needs_node
+def test_the_cards_votes_are_one_click_pressed_and_never_toggled_off_by_a_double_click():
+    script = f"""
+{(STATIC / "intel.js").read_text()}
+const list = el("ol", "pa-list");
+let posts = [];
+const deps = {{ api: (m, p, b) => {{ posts.push([p, b.verdict]); return Promise.resolve({{ ok: true, removed: false }}); }},
+               operator: () => "", time: () => "T", readonly: false, more: false }};
+const ev = {{ id: 7, level: "medium", what: 0.7, where: 0.5, precision: "address", rules: [["pd.shots", 1, 0.7]],
+             pack_label: "PD", label: "Weapon / shots", town: "Rye", place: "12 Example Road, Rye", confirmed: true,
+             first_at: 1, traffic_ids: ["c1"] }};
+IntelCard.column(list, {{ open: [ev] }}, deps);
+const btns = () => list.children[0].find("aa-acts")[0].children;      // the card's actions (not its play buttons)
+const noise = () => btns().find((x) => x.attrs["aria-label"] === "Noise" || x.textContent === "Noise");
+const n = noise();
+n.on.click[0]({{ stopPropagation() {{}} }});
+const off = btns().map((x) => x.disabled);
+n.on.click[0]({{ stopPropagation() {{}} }});             // the double click's second
+(async () => {{
+  await new Promise((r) => setTimeout(r, 10));
+  console.log(JSON.stringify({{ posts, off, pressed: noise().attrs["aria-pressed"], again: noise().disabled }}));
+}})();
+"""
+    out = run_node(script, {})
+    assert out["posts"] == [["/api/cad/intel/7/feedback", "noise"]]
+    assert all(out["off"]) and out["pressed"] == "true" and out["again"] is False
 
 
 @needs_node

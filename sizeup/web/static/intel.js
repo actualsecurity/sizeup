@@ -14,7 +14,10 @@
 "use strict";
 
 window.IntelCard = (() => {
-  const st = { busy: new Set(), audio: null, playing: "" };
+  // busy: the cards with a POST in flight (their buttons disabled); mine: the votes made here, per event (the state is
+  // everyone's, so a person's own votes are what this page sent: pressed, and the same one again takes it back)
+  const st = { busy: new Set(), audio: null, playing: "", mine: new Map() };
+  const PAIR = { useful: ["useful", "noise"], noise: ["useful", "noise"] };
   function el(tag, cls, text) {
     const n = document.createElement(tag);
     if (cls) n.className = cls;
@@ -52,7 +55,7 @@ window.IntelCard = (() => {
     if (!e.place || e.precision === "none") return "Location not heard";
     return e.confirmed ? e.place : `${e.place} ?`;
   }
-  function card(e, deps) {
+  function card(e, deps, list) {
     const li = el("li", `aa aa-${e.level}`);
     li.dataset.key = String(e.id);
     const head = el("div", "aa-head");
@@ -99,23 +102,41 @@ window.IntelCard = (() => {
     const row = el("div", "aa-btns");
     if (deps.more) row.append(more());
     const busy = st.busy.has(e.id);
+    const mine = st.mine.get(e.id) || new Set();
+    const btns = [];
     const act = (path, body, ok) => async (ev) => {
       ev.stopPropagation();
+      if (st.busy.has(e.id)) return;
       st.busy.add(e.id);
+      for (const x of btns) x.disabled = true;      // at once: a double click is one vote, never one taken back
       try {
         const r = await deps.api("POST", `/api/cad/intel/${e.id}/${path}`, { ...body, operator: deps.operator() });
+        const v = body.verdict || (path === "dismiss" ? "noise" : "");
+        if (PAIR[v]) {                               // (a dismiss is a Noise vote: events.ensure_vote)
+          const m = new Set(st.mine.get(e.id) || []);
+          for (const x of PAIR[v]) m.delete(x);
+          if (!(r && r.removed)) m.add(v);
+          st.mine.set(e.id, m);
+        }
         if (ok) UI.toast(r && r.removed ? "Vote taken back" : ok, "ok");      // a vote again takes it back (events.vote)
       } catch (err) {
         UI.toast(`${path}: ${err.message}`, "err");
       } finally {
         st.busy.delete(e.id);
+        for (const x of btns) x.disabled = false;
+        if (list && list._args) { list._sig = ""; column(list, ...list._args); }   // drawn again: the vote pressed
       }
     };
     // icon buttons (a narrow column never cuts their names short): the name is the aria-label, the hover says it all
-    const b = (icon, name, title, fn, cls = "") => iconBtn(icon, name, title, busy, fn, cls);
+    const b = (icon, name, title, fn, cls = "", vote = "") => {
+      const x = iconBtn(icon, name, title, busy, fn, cls);
+      if (vote) x.setAttribute("aria-pressed", String(mine.has(vote)));
+      btns.push(x);
+      return x;
+    };
     const acts = el("span", "aa-acts");             // (they wrap together, under More info, in a narrow column)
-    acts.append(b("thumbs-up", "Useful", "it was real", act("feedback", { verdict: "useful" }, "Noted: useful")),
-      b("thumbs-down", "Noise", "nothing to it (the rule's numbers)", act("feedback", { verdict: "noise" }, "Noted: noise")),
+    acts.append(b("thumbs-up", "Useful", "it was real", act("feedback", { verdict: "useful" }, "Noted: useful"), "", "useful"),
+      b("thumbs-down", "Noise", "nothing to it (the rule's numbers)", act("feedback", { verdict: "noise" }, "Noted: noise"), "", "noise"),
       b("map-pin-off", "Wrong place", "the place is wrong", act("feedback", { verdict: "wrong_place" }, "Noted: wrong place")));
     if (typeof canDo !== "function" || canDo("dispatch")) {
       acts.append(b("x", "Dismiss", "off the list (logged as noise)", act("dismiss", {}, ""), "pa-dismiss"));
@@ -126,13 +147,14 @@ window.IntelCard = (() => {
   }
   function column(list, s, deps) {
     if (!list) return;
+    list._args = [s, deps];
     const items = (s && s.open) || [];
     list.hidden = !items.length;
     const sig = JSON.stringify(items.map((e) => [e.id, e.level, e.what, e.where, e.place, e.confirmed, e.traffic_ids,
-      e.suppressed, e.pushed_at, e.delivery, e.fd_shown, st.busy.has(e.id), st.playing]));
+      e.suppressed, e.pushed_at, e.delivery, e.fd_shown, st.busy.has(e.id), st.playing, [...(st.mine.get(e.id) || [])]]));
     if (list._sig === sig) return;
     list._sig = sig;
-    list.replaceChildren(...items.map((e) => card(e, deps)));
+    list.replaceChildren(...items.map((e) => card(e, deps, list)));
   }
   return { column, delivered };
 })();

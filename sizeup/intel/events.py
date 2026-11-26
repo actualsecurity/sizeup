@@ -49,6 +49,8 @@ def decided_of(rules) -> str:
     return "both" if m and o else "model" if m else "rules" if o else ""
 
 
+BACKFILL_CHUNK = 5000              # intel_events.decided filled in at start: rows a transaction
+
 # a person's votes (vote()): one of each group per person and event; the same one again takes it back
 VOTE_PAIRS = {"useful": ("useful", "noise"), "noise": ("useful", "noise"), "should_push": ("should_push",)}
 VOTE_ROWS = "traffic_id IS NULL AND note_id IS NULL"     # (a vote is on the event: never one transmission,
@@ -208,7 +210,16 @@ class SqlEvents:
                         return decided_of(json.loads(raw or "[]"))
                     except ValueError:
                         return ""
-                store.db.executemany("UPDATE intel_events SET decided = ? WHERE id = ?", [(_d(r[1]), r[0]) for r in todo])
+                for k in range(0, len(todo), BACKFILL_CHUNK):     # a transaction a chunk: never a commit a row
+                    part = todo[k:k + BACKFILL_CHUNK]
+                    store.db.execute("BEGIN IMMEDIATE")
+                    try:
+                        store.db.executemany("UPDATE intel_events SET decided = ? WHERE id = ?",
+                                             [(_d(r[1]), r[0]) for r in part])
+                    except BaseException:
+                        store.db.execute("ROLLBACK")
+                        raise
+                    store.db.execute("COMMIT")
 
     @contextmanager
     def _w(self, listed: bool = True):
@@ -285,7 +296,11 @@ class SqlEvents:
                               json.dumps(ev.rules if ev else []), ev.ruleset_hash if ev else "", operator[:120], now))
             return int(cur.lastrowid)
 
-    def vote(self, eid: int, verdict: str, operator: str, now: float) -> tuple[int | None, bool]:
+    def ensure_vote(self, eid: int, verdict: str, operator: str, now: float) -> int | None:
+        """This person's vote is this one (a Dismiss is a Noise vote): set when it isn't, never taken back."""
+        return self.vote(eid, verdict, operator, now, toggle=False)[0]
+
+    def vote(self, eid: int, verdict: str, operator: str, now: float, toggle: bool = True) -> tuple[int | None, bool]:
         """A person's vote on an event (the Intel page's and the card's buttons; #906 review M1), one each: Useful and
         Noise exclusive (the other one replaced), Should have pushed on its own; the same one again takes it back.
         (id of the vote, or None; True when it was taken back). By operator: who signed in (the API sets it)."""
@@ -294,8 +309,10 @@ class SqlEvents:
         op = operator[:120]
         marks = ",".join("?" * len(pair))
         with self._w() as db:
-            had = {r[0] for r in db.execute(f"SELECT verdict FROM intel_feedback WHERE event_id = ? AND operator = ? AND "
-                                            f"verdict IN ({marks}) AND {VOTE_ROWS}", (eid, op, *pair))}
+            had = {r[0]: r[1] for r in db.execute(f"SELECT verdict, id FROM intel_feedback WHERE event_id = ? AND operator = ? "
+                                                  f"AND verdict IN ({marks}) AND {VOTE_ROWS}", (eid, op, *pair))}
+            if not toggle and verdict in had:
+                return int(had[verdict]), False
             db.execute(f"DELETE FROM intel_feedback WHERE event_id = ? AND operator = ? AND verdict IN ({marks}) AND {VOTE_ROWS}",
                        (eid, op, *pair))
             if verdict in had:
