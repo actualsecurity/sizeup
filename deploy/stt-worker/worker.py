@@ -2749,6 +2749,12 @@ def download_file(url: str, dest: Path, size: int, sha: str, stop: Callable[[], 
     _replace(part, dest)
 
 
+def retry_wait(n: int, first: float, cap: float) -> float:
+    """The one backoff of whatever the worker downloads or switches to (a model, the LLM, a runtime build): `first`
+    after the first failure in a row, doubling, `cap` at most."""
+    return min(first * 2 ** max(n - 1, 0), cap)
+
+
 class NoSpace(DownloadError):
     """Not enough free disk space for what is left to download (and DISK_MARGIN): nothing was fetched."""
 
@@ -3530,7 +3536,7 @@ class Models:
         pre = "try: " if s.trial else ""
         if cause:
             n = self._short_fails[s.id] = self._short_fails.get(s.id, 0) + 1
-            wait = min(MODEL_SHORT_RETRY_S * 2 ** (n - 1), MODEL_RETRY_S)
+            wait = retry_wait(n, MODEL_SHORT_RETRY_S, MODEL_RETRY_S)
             if cause == "port":
                 self._port_busy[s.port] = self.clock() + MODEL_RETRY_S
             elif n >= MODEL_OOM_PARK:
@@ -3551,7 +3557,7 @@ class Models:
             self.mark_bad(s.id, s.sha, f"{why} ({n} times)")
             self.status[s.id] = f"{pre}failed: its server (marked bad)"
             return
-        wait = min(MODEL_SHORT_RETRY_S * 2 ** (n - 1), MODEL_RETRY_S)
+        wait = retry_wait(n, MODEL_SHORT_RETRY_S, MODEL_RETRY_S)
         self._sha_retry[s.sha] = self.clock() + wait
         self.status[s.id] = (f"{pre}failed: {'exited' if exited else 'no test answer'} ({n} of {MODEL_BAD_TRIES}; "
                              f"again in {wait / 60:.0f} min)")
@@ -4359,7 +4365,7 @@ class Runtimes:
                 out["bad"] = f"{why} ({n} times)"
             else:
                 fails[to] = n
-                wait = min(RUNTIME_RETRY_S * 2 ** max(n - 1, 0), RUNTIME_RETRY_MAX_S)
+                wait = retry_wait(n, RUNTIME_RETRY_S, RUNTIME_RETRY_MAX_S)
                 r["next"], r["note"] = self.wall() + wait, f"rolled back: {why}"[:50]
                 out["wait"] = wait
             r["fails"] = fails
@@ -5032,6 +5038,19 @@ class Worker:
         log.info("llama-server: model %s verified (sha256 %s...)", path.name, got[:12])
         return True
 
+    def llm_answer(self) -> str:
+        """llama-server's test answer, the one every switch of it passes (a new llama.cpp build, a new model): a
+        1-token constrained answer ("" passed, else why)."""
+        try:
+            out, _tin, _tout = self.llm.check()
+        except LlmError as e:
+            return f"llama-server: {str(e)[:60]}"
+        return "" if out == {"ok": True} else "llama-server's test answer didn't follow its schema"
+
+    def llm_idle(self) -> bool:
+        """No LLM job in hand, no generation, no claim in flight (a switch of llama-server waits for this)."""
+        return self.llm_job is None and self._llm_call is None and not self._llm_claiming
+
     def _whisper_down(self, why: str) -> None:
         if self.whisper_ok:
             log.warning("whisper-server: %s: paused until it answers", why)
@@ -5197,8 +5216,8 @@ class Worker:
         self._wake.set()
         try:
             end = self.clock() + UPDATE_DRAIN_S
-            busy = lambda: (self.job is not None or self.llm_job is not None or self._llm_call is not None  # noqa: E731
-                            or self._claiming or self._llm_claiming or self._inferring > 0)
+            busy = lambda: (self.job is not None or not self.llm_idle() or self._claiming  # noqa: E731
+                            or self._inferring > 0)
             while not self.stopped and self.clock() < end and busy():
                 self._stop.wait(0.2)
             if self.stopped:
@@ -5271,14 +5290,7 @@ class Worker:
             if build and n != int(build[1:]):
                 why = f"--version says {f'b{n}' if n else 'nothing'}"
             elif started:
-                why = wait(lambda: self.llm.status() == 200, self.llm_proc, "llama-server")
-                if not why:
-                    try:
-                        out, _tin, _tout = self.llm.check()
-                        if out != {"ok": True}:
-                            why = "llama-server's test answer didn't follow its schema"
-                    except LlmError as e:
-                        why = f"llama-server: {str(e)[:60]}"
+                why = wait(lambda: self.llm.status() == 200, self.llm_proc, "llama-server") or self.llm_answer()
                 self._llm_checked = -1e9           # (the LLM's own check next: jobs again)
         elif started:
             why = wait(self.whisper.alive, self.proc, "whisper-server")
