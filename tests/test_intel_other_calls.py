@@ -342,3 +342,17 @@ def test_the_list_and_more_info_count_a_call_that_is_no_event(tmp_path):
         {"at": T0 + 300, "n": 3, "consoles": ["Example PD dispatch", "Testville PD dispatch"]}]
     code, d = get(CadApi(cad), f"/api/cad/prealerts/intel/{a.id}", VAL)
     assert code == 200 and d["siblings"]["calls"] == row_["calls"] and d["siblings"]["window_s"] == 600
+
+
+def test_a_tie_by_talker_is_by_radio_id_never_the_shared_talker_text():
+    """Every unlabelled radio of another system is stored with one talker text: two of them are two talkers. A row ties
+    to the call of its own radio, never to another radio's call that shares the text."""
+    e, sink = labelled(radios=False)
+    shared = {"talker": "unknown MRRS radio"}
+    e.clock.t = 1000
+    [a] = e.feed(row("t1", "Male waving a machete at 12 Sample Rd.", 1000, radio_id="7703", **shared))
+    e.clock.t = 1030
+    [b] = e.feed(row("t2", "Male waving a machete at 40 Test Rd.", 1030, radio_id="7704", **shared))
+    e.clock.t = 1060
+    [c] = e.feed(row("t3", "Be advised, male waving a machete, he's on the porch.", 1060, radio_id="7704", **shared))
+    assert a.id != b.id and c.id == b.id and c.traffic_ids == ["t2", "t3"]
