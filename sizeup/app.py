@@ -2974,8 +2974,9 @@ class App:
         text; the one before cleared (a new text). Nothing when this process corrects nothing (a station)."""
         if self.stt_correct is None and not getattr(item, "corr_v", ""):
             return
-        for k, v in stt_correct.columns(res).items():
-            setattr(item, k, v)
+        cols = stt_correct.columns(res)
+        for k in ("corr_text", "corr_rules", "corr_v"):      # (spelled out: tests/test_contracts_events.py reads them)
+            setattr(item, k, cols[k])
 
     # -- per-channel speech-to-text (Settings > Radios, sizeup/channels.py) --------------------------------
 
