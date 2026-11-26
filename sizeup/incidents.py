@@ -127,7 +127,7 @@ class IncidentStore:
         self.save_delay = 0.0
         self._save_timer: threading.Timer | None = None
         self._save_lock = threading.Lock()
-        self.writes = 0                     # how many times the file was written (the coalescing's measure)
+        self.writes = 0                     # how many times the file was written and in place (the coalescing's measure)
         self._load()
 
     def _load(self) -> None:
@@ -182,7 +182,6 @@ class IncidentStore:
     def _write(self) -> None:
         if not self.path:
             return
-        self.writes += 1
         with self._lock:
             d = {"incidents": [i.to_json() for i in self.incidents], "loose": [t.as_dict() for t in self.loose]}
         try:
@@ -190,7 +189,8 @@ class IncidentStore:
             tmp.write_text(json.dumps(d))
             os.replace(tmp, self.path)
         except OSError:
-            pass  # disk trouble must never stop the display
+            return  # disk trouble must never stop the display
+        self.writes += 1                    # counted once the file is in place (#967: a reader waits on it)
 
     def active(self) -> Incident | None:
         now = self.clock()
