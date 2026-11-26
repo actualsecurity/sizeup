@@ -216,3 +216,17 @@ def test_the_cads_alarms_status_hints_possible_incoming_and_transmit_off(tmp_pat
     seen = logs.text()
     assert "TRANSMIT OFF" in seen and "alarms:" in seen and "radio suggests" in seen and "possible incoming" in seen
     logs.check()
+
+
+def test_a_late_aws_answer_kept_as_the_alternative(tmp_path, logs):
+    """AWS's answer after the fallback already gave the clip its text: kept as the alternative, its words never logged."""
+    import time
+    from sizeup.app import App, AwsJob
+    from sizeup.incidents import Traffic
+    from tests.test_app import cfg
+    app = App(cfg(tmp_path))
+    t = Traffic("fg1-late", "FG1", time.time() - 5, time.time() - 2, "Engine 60 on location", status="done")
+    app.store.on_traffic(t)
+    app._aws_late(AwsJob("traffic", "fg1-late", "FG1"), f"{MARK} on location", 0.8)
+    assert "a late answer, kept as the alternative" in logs.text()
+    logs.check()

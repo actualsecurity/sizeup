@@ -3739,8 +3739,7 @@ class App:
         if getattr(item, "status", "") in ("error", "skipped") and job.alt is None and (not job.rerun or job.catchup):
             log(f"aws transcribe: {job.kind} {job.id}: a late answer, and the fallback had none: it is the text")
             return self._aws_done(job, text, conf)
-        log(f"aws transcribe: {job.kind} {job.id}: a late answer, kept as the alternative"
-            + ("" if self.clip_is_context(job.id) else f": {text}"))
+        log(f"aws transcribe: {job.kind} {job.id}: a late answer, kept as the alternative ({logscrub.said(text)})")
         self._set_alt(job.id, text, f"{channels_model()} (late)")
 
     def _aws_changed(self) -> None:
