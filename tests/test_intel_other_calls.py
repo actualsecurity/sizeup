@@ -300,7 +300,7 @@ const links = sib.find("il-sib").map((a) => [a.textContent, a.href]);
 console.log(JSON.stringify({{ text: sib.textContent, links, title: sib.title }}));
 """
     out = run_node(script, ev)
-    assert out["text"].startswith("3 other calls ") and "Example PD dispatch → Testville PD dispatch" in out["title"] and out["links"] == [["#6", "#prealert/intel/6"],
+    assert out["text"].startswith("3 other calls ") and "Example PD dispatch · Testville PD dispatch · 3 console tx" in out["title"] and out["links"] == [["#6", "#prealert/intel/6"],
                                                                          ["#7", "#prealert/intel/7"]]
     js = (STATIC / "prealert-info.js").read_text()
     assert 'other call${n === 1 ? "" : "s"} in this window' in js and '"pi-around": (d) => [d.before_after, d.siblings]' in js
@@ -313,14 +313,50 @@ def test_console_calls_are_the_consoles_transmissions_in_no_event_and_not_an_eve
     from sizeup.intel.eventlog import console_calls
     known = {rid: T.parse(label) for rid, label in LABELS.items()}
     tx = lambda i, at, rid: {"id": i, "start": at, "system": "mrrs", "radio_id": rid}         # noqa: E731
-    txs = [tx("e1", 1000, A_ID), tx("x0", 1030, A_ID),                    # an event, and its console just after it
+    txs = [tx("e1", 1000, A_ID), tx("x0", 1030, A_ID),                    # an event, and its console's answer
            tx("h1", 1220, A_ID), tx("h2", 1225, B_ID), tx("o1", 1240, OFFICER_ID), tx("h3", 1263, B_ID),
-           tx("x1", 1521, A_ID), tx("e2", 1550, A_ID)]                    # another event's conversation
+           dict(tx("x1", 1521, A_ID), words=2), tx("e2", 1550, A_ID)]     # a callsign alone, then another event
     out = console_calls(txs, {"e1", "e2"}, lambda t: known.get(t["radio_id"]), 120)
     assert out == [{"at": 1220, "n": 3, "consoles": ["Example PD dispatch", "Testville PD dispatch"]}]
     assert console_calls(txs, {"e1", "e2"}, lambda t: None, 120) == []    # no labels: none, as before
     short = [dict(t, words=1) for t in txs]                               # "yeah", "copy": no call
     assert console_calls(short, {"e1", "e2"}, lambda t: known.get(t["radio_id"]), 120) == []
+
+
+def of_label(t):
+    from sizeup.intel import talkers as T
+    return T.parse(LABELS[t["radio_id"]]) if t["radio_id"] in LABELS else None
+
+
+def tx_(i, at, rid, **kw):
+    return {"id": i, "start": at, "system": "mrrs", "radio_id": rid, **kw}
+
+
+def test_another_departments_call_right_after_an_event_shows():
+    """#961 re-review: the event's call-out at 1000, another department's console dispatching another call at 1090."""
+    from sizeup.intel.eventlog import console_calls
+    out = console_calls([tx_("e1", 1000, A_ID), tx_("c1", 1090, B_ID), tx_("c2", 1100, B_ID)], {"e1"}, of_label, 120)
+    assert out == [{"at": 1090, "n": 2, "consoles": ["Testville PD dispatch"]}]
+
+
+def test_a_busy_console_chain_is_split_into_calls_and_never_dropped_whole():
+    """#961 re-review: console traffic every 100 s for 15 min with an event's row in the middle."""
+    from sizeup.intel.eventlog import console_calls
+    txs = [tx_(f"c{i}", 400 + 100 * i, A_ID if i % 2 else B_ID) for i in range(16)]
+    txs.insert(6, tx_("e1", 1000, A_ID))
+    out = console_calls(txs, {"e1"}, of_label, 120)
+    assert out and all(c["n"] <= 2 for c in out) and sum(c["n"] for c in out) >= 14       # (only e1's answer left out)
+
+
+def test_a_third_console_starts_another_call_and_an_answer_is_its_events():
+    from sizeup.intel.eventlog import console_calls
+    labels = {**LABELS, "7901": "Sampleton PD dispatch"}
+    from sizeup.intel import talkers as T
+    of = lambda t: T.parse(labels[t["radio_id"]]) if t["radio_id"] in labels else None     # noqa: E731
+    txs = [tx_("e1", 1000, OFFICER_ID), tx_("a1", 1010, A_ID),           # a unit's report, its console's answer
+           tx_("p1", 1300, A_ID), tx_("p2", 1310, B_ID), tx_("p3", 1320, "7901")]
+    out = console_calls(txs, {"e1"}, of, 120)
+    assert [(c["at"], c["n"]) for c in out] == [(1300, 2), (1320, 1)]
 
 
 def test_the_list_and_more_info_count_a_call_that_is_no_event(tmp_path):

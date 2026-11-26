@@ -190,8 +190,8 @@ window.PrealertInfo = (() => {
       a.title = `#${x.id}: its More info`;
       return a;
     }]), ...calls.map((c) => [c.at, () => {
-      const t = el("span", "pi-sib", `${c.consoles.join(" → ")} ${tm(c.at)}`);
-      t.title = `No event: ${c.n} tx from a dispatch console (in the Timeline)`;
+      const t = el("span", "pi-sib", `${c.consoles.join(" · ")} ${tm(c.at)}`);
+      t.title = `${c.n} console tx, no event (in the Timeline)`;
       return t;
     }])].sort((a, b) => a[0] - b[0]);
     parts.forEach(([, make], i) => { if (i) line.append(" · "); line.append(make()); });

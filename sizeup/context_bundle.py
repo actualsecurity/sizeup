@@ -42,7 +42,7 @@ The bundle (SCHEMA_VERSION; every section says why it is empty in "empty", "" wh
     outcome       accepted / dismissed / expired / ended, by whom and when; the event it made or is near; the verdicts;
                   an intel event's handoff ([from console, to console, to town]: another department's console took the call)
     siblings      intel only: the other events on its source in its window ({items: [{id, at, category, label}],
-                  calls: [{at, n, consoles}], window_s}: sizeup/intel/eventlog.py siblings, console_calls), each
+                  calls: [{at, n, consoles}], window_s}: sizeup/intel/eventlog.py neighbours), each
                   event's own More info a link away; a call that is no event (a dispatch console's) in the Timeline
 
 Another P25 system's transmissions (an intel pre-alert's) are in it only for a reader who may see them: the caller
@@ -559,8 +559,8 @@ def _siblings(cad, raw: dict) -> dict:
     event's source in its window, and the calls in it that are no event (eventlog.console_calls)."""
     try:
         log = cad.intel_admin.eventlog
-        items = log.siblings([raw]).get(raw["id"], [])
-        calls = log.console_calls(raw)
+        nb = log.neighbours([raw])[raw["id"]]
+        items, calls = nb["siblings"], nb["calls"]
         span = log.span(raw["pack"])
     except Exception:  # noqa: BLE001 - the bundle never fails on its neighbours
         return {"items": [], "calls": [], "window_s": 0, "empty": "not read"}

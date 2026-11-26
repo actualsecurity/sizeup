@@ -42,8 +42,8 @@ A row (terse; the page shows it as is):
     ([[rule id, weight]]), decided, source_key, source (its name: source_name()), system, place, precision, confirmed,
     town, lat, lon, radius_m (null / 0 when unplaced), held ({key, label, detail} | None when pushed), pushed_at, n
     (transmissions), votes ({verdict: n}), mine (this reader's verdicts), near_incident, incident_id, siblings
-    ([{id, at, category, label}]: the other events in its window, siblings()), calls ([{at, n, consoles}]: the
-    calls in it that are no event, console_calls())
+    ([{id, at, category, label}]: the other events in its window), calls ([{at, n, consoles}]: the calls in it
+    that are no event, console_calls()): both neighbours()
 
 level      what happened: push (pushed_at set), held (at push, not pushed: the policy's or the sink's reason), else
            its mode: map, log, shadow
@@ -60,10 +60,12 @@ held       why it didn't push: HELD_SQL, one CASE over the row (the same express
 
 siblings   the other events on its source (any pack, category, level or status) whose first_at..last_at is within
            SIBLING_S (±10 min: More info's Timeline, the admin's "window") of its own, the nearest SIBLINGS_MAX, oldest
-           first. One bounded read per row, on intel_events_source.
+           first.
 calls      the calls in that window that are no event (console_calls(): a labelled dispatch console's transmissions
-           in no event and not part of an event's conversation, grouped), [{at, n, consoles}]: a call no rule
-           raised still shows ("2 other calls"). One read of the source's transmissions per row, cached a minute.
+           in no event, not an event row's answer, grouped by pair and time), [{at, n, consoles}]: a call no rule
+           raised still shows ("2 other calls"). Both from neighbours(): per source of the page, its rows' windows
+           merged, one read of the events and one of the transmissions (a word count, never the text) per span, on
+           Search's read-only connection.
 
 Source names come from one helper, source_name() (the radio log's channel per source key, comms.sources_seen: the
 Radio page's own), so a Settings > Radios name resolver can replace it in one place.
@@ -85,6 +87,12 @@ PAGE_SIZE = 50
 PAGE_MAX = 100
 MAP_MAX = 2000                     # the map's pins: the newest of the filters (the rest counted)
 SEARCH_MAX = 100                   # Search's intel matches returned (the rest counted)
+CALL_SPAN_S = 180.0                # console_calls(): a group is never longer than this (one call's exchange)
+EVENT_SPAN_S = 3600.0              # neighbours(): an event overlapping a window ends at most this long after it
+TX_MAX = 5000                      # ... and a span's transmissions read at most this many
+# a transcript's word count in SQL (its spaces + 1): neighbours() never reads the words themselves
+WORDS_SQL = ("(CASE WHEN length(trim(COALESCE(text, ''))) = 0 THEN 0 ELSE length(trim(text)) - "
+             "length(replace(trim(text), ' ', '')) + 1 END)")
 CALL_WORDS = 4                     # console_calls(): a group is a call when one of its transmissions says this many words
 SIBLINGS_MAX = 20                  # a row's other calls in its window (siblings()): the nearest this many
 SEARCH_SCAN = 5000                 # ... out of the range's newest this many events
@@ -185,34 +193,47 @@ COLS = ("id, pack, category, source_key, system, first_at, last_at, status, what
 PLACED = "COALESCE(precision, 'none') != 'none' AND lat IS NOT NULL AND lon IS NOT NULL"   # (the listing's columns; row()'s placed)
 
 
-def console_calls(txs: list[dict], event_tids: set, talker_of, gap_s: float) -> list[dict]:
+def console_calls(txs: list[dict], event_tids: set, talker_of, gap_s: float, span_s: float | None = None) -> list[dict]:
     """The calls on a source that are no intel event (the admin's "other calls in the window", #961): its labelled
-    dispatch consoles' transmissions (talkers.py: talker_of(row) -> Talker | None) in none of the events, grouped
-    while each is within gap_s of the one before, a group left out when any of its transmissions is within gap_s of
-    an event's own (that event's conversation), or when none of them has CALL_WORDS words (a "yeah", a stray
-    "therefore": no call). txs: [{id, start, system, radio_id, words?}] by air time. [{at, n, consoles: [labels]}],
-    oldest first. No labels: none (as before)."""
-    ev_at = [float(t["start"]) for t in txs if str(t["id"]) in event_tids]
+    dispatch consoles' transmissions (talkers.py: talker_of(row) -> Talker | None) in none of the events, grouped while
+    each is within gap_s of the one before, a group never longer than span_s (CALL_SPAN_S), never more than two
+    consoles' (one pair talking), never across an event's own row. Left out: the answer to an event's row (the very
+    next transmission, no other radio between, within gap_s, from a console of the row's own department, or any console
+    when the row is a unit's: that event's conversation), and a group none of whose transmissions says CALL_WORDS words
+    (a "yeah", a stray "therefore"). An event's own later console traffic may show (the lesser error: the hover says
+    "console tx"). txs: [{id, start, system, radio_id, words?}] by air time. [{at, n, consoles: [labels]}], oldest
+    first. No labels: none (as before)."""
+    span = CALL_SPAN_S if span_s is None else float(span_s)
     groups: list[dict] = []
+    g = None
+    prev = None                                   # (air time, its talker, an event's row)
     for t in txs:
+        at, tk = float(t["start"]), talker_of(t)
+        console = tk is not None and tk.console
         if str(t["id"]) in event_tids:
+            g, prev = None, (at, tk, True)
             continue
-        tk = talker_of(t)
-        if tk is None or not tk.console:
+        answer = (console and prev is not None and prev[2] and at - prev[0] <= gap_s
+                  and (prev[1] is None or not prev[1].console or _dept(prev[1]) == _dept(tk)))
+        prev = (at, tk, False)
+        if not console or answer:
             continue
-        at = float(t["start"])
-        if groups and at - groups[-1]["end"] <= gap_s:
-            g = groups[-1]
-        else:
-            g = {"at": at, "end": at, "n": 0, "consoles": [], "times": []}
+        dept = _dept(tk)
+        if (g is None or at - g["end"] > gap_s or at - g["at"] > span
+                or (dept not in g["depts"] and len(g["depts"]) >= 2)):
+            g = {"at": at, "end": at, "n": 0, "consoles": [], "depts": [], "words": 0}
             groups.append(g)
         g["end"], g["n"] = at, g["n"] + 1
-        g["times"].append(at)
-        g["words"] = max(g.get("words", 0), int(t.get("words", CALL_WORDS)))
+        g["words"] = max(g["words"], int(t.get("words", CALL_WORDS) or 0))
+        if dept not in g["depts"]:
+            g["depts"].append(dept)
         if tk.label not in g["consoles"]:
             g["consoles"].append(tk.label)
-    return [{"at": g["at"], "n": g["n"], "consoles": g["consoles"]} for g in groups
-            if g["words"] >= CALL_WORDS and all(abs(x - y) > gap_s for x in g["times"] for y in ev_at)]
+    return [{"at": g["at"], "n": g["n"], "consoles": g["consoles"]} for g in groups if g["words"] >= CALL_WORDS]
+
+
+def _dept(tk) -> str:
+    return " ".join(str(tk.agency or tk.label).lower().split())
 
 
 def _words(text: str) -> list[str]:
@@ -318,7 +339,6 @@ class IntelLog:
         self.cad, self.engine = cad, engine
         self._facets: tuple | None = None          # (key, facets): the range's choices, again only on a new revision
         self._totals: dict = {}                     # filters -> (revision, total): a poll's count, again only then
-        self._calls: dict = {}                      # (event id, last_at, minute) -> console_calls(): a poll reads none
         self._olders: dict = {}                     # (filters, revision, range bucket) -> (older, more)
 
     def _rev(self) -> int:
@@ -494,10 +514,9 @@ class IntelLog:
         ids = [r["id"] for r in rows]
         votes, mine = self._votes(ids, operator)
         notes = self._notes(ids)
-        sibs = self.siblings(rows)
+        nb = self.neighbours(rows)
         out = [{**self.row(r, names, votes.get(r["id"], {}), mine.get(r["id"], [])),
-                "notes": notes.get(r["id"], {"n": 0, "tags": [], "review": 0}), "siblings": sibs.get(r["id"], []),
-                "calls": self.console_calls(r)} for r in rows]
+                "notes": notes.get(r["id"], {"n": 0, "tags": [], "review": 0}), **nb[r["id"]]} for r in rows]
         from sizeup.intel.notes import REVIEW_TAGS, TAGS
         return {"events": out, "total": total, "page": page, "size": size, "since": f["since"], "until": f["until"],
                 "now": f["now"], "range": f["range"], "older": older, "older_more": older_more, "upto": upto,
@@ -655,59 +674,69 @@ class IntelLog:
         """An event's window for its other calls: More info's Timeline's (±SIBLING_S, context_bundle WINDOW_S)."""
         return SIBLING_S
 
-    def siblings(self, rows: list[dict]) -> dict[int, list[dict]]:
-        """{event id: [{id, at, category, label}]}: the other events on each row's source whose first_at..last_at is
-        within SIBLING_S of its own, the nearest SIBLINGS_MAX by first_at, oldest first. One bounded read per row
-        (intel_events_source), so a busy source never loses one to a shared LIMIT (#961 review)."""
+    def neighbours(self, rows: list[dict]) -> dict[int, dict]:
+        """{event id: {siblings: [{id, at, category, label}], calls: [{at, n, consoles}]}} for these rows (the module
+        doc): per source, the rows' windows merged into spans, then one read of its events and one of its
+        transmissions (no text: a word count) per span, on Search's read-only connection (_rq: never the store's
+        lock); split per row here."""
         from sizeup.intel.push import category_label
-        labels: dict = {}
-        out: dict[int, list[dict]] = {}
+        out: dict[int, dict] = {r["id"]: {"siblings": [], "calls": []} for r in rows}
+        groups: dict[str, list[dict]] = {}
         for r in rows:
-            if not r.get("source_key"):
-                continue
-            w, lo, hi = SIBLING_S, float(r["first_at"]), float(r["last_at"])
-            got = self.cad.store.q("SELECT id, pack, category, first_at FROM intel_events WHERE source_key = ? AND "
-                                   "last_at >= ? AND first_at <= ? AND id != ? ORDER BY ABS(first_at - ?), id LIMIT ?",
-                                   (r["source_key"], lo - w, hi + w, r["id"], lo, SIBLINGS_MAX))
-            for o in got:
-                lk = (o["pack"], o["category"])
-                if lk not in labels:
-                    p = self.engine.pack(o["pack"]) if hasattr(self.engine, "pack") else None
-                    labels[lk] = category_label(p.category(o["category"]) if p else {}, p.label if p else "",
-                                                o["category"])
-            out[r["id"]] = [{"id": o["id"], "at": o["first_at"], "category": o["category"],
-                             "label": labels[(o["pack"], o["category"])]}
-                            for o in sorted(got, key=lambda o: (o["first_at"], o["id"]))]
+            if r.get("source_key"):
+                groups.setdefault(r["source_key"], []).append(r)
+        labels: dict = {}
+        talker_of = getattr(getattr(self.engine, "talkers", None), "of", None)
+        for key, rs in groups.items():
+            gap = max(self._gap(r["pack"]) for r in rs)
+            spans: list[list[float]] = []
+            for lo, hi in sorted((float(r["first_at"]) - SIBLING_S - gap, float(r["last_at"]) + SIBLING_S + gap)
+                                 for r in rs):
+                if spans and lo <= spans[-1][1]:
+                    spans[-1][1] = max(spans[-1][1], hi)
+                else:
+                    spans.append([lo, hi])
+            evs: dict = {}
+            txs: dict = {}
+            for lo, hi in spans:
+                for e in self._rq("SELECT id, pack, category, first_at, last_at, traffic_ids FROM intel_events WHERE "
+                                  "source_key = ? AND last_at >= ? AND last_at <= ? AND first_at <= ?",
+                                  (key, lo, hi + EVENT_SPAN_S, hi)):
+                    evs[e["id"]] = e
+                if talker_of is not None:
+                    for t in self._rq("SELECT id, start, system, radio_id, " + WORDS_SQL + " AS words FROM radio_traffic "
+                                      "WHERE source = ? AND start >= ? AND start <= ? ORDER BY start, id LIMIT ?",
+                                      (key, lo, hi, TX_MAX)):
+                        txs[t["id"]] = t
+            tids: set = set()
+            for e in evs.values():
+                try:
+                    tids |= {str(t) for t in json.loads(e["traffic_ids"] or "[]")}
+                except ValueError:
+                    pass
+            ordered = sorted(txs.values(), key=lambda t: (t["start"], t["id"]))
+            for r in rs:
+                lo, hi = float(r["first_at"]) - SIBLING_S, float(r["last_at"]) + SIBLING_S
+                got = sorted((e for e in evs.values() if e["id"] != r["id"] and e["first_at"] <= hi
+                              and e["last_at"] >= lo), key=lambda e: (abs(e["first_at"] - r["first_at"]), e["id"]))
+                got = sorted(got[:SIBLINGS_MAX], key=lambda e: (e["first_at"], e["id"]))
+                for e in got:
+                    lk = (e["pack"], e["category"])
+                    if lk not in labels:
+                        p = self.engine.pack(e["pack"]) if hasattr(self.engine, "pack") else None
+                        labels[lk] = category_label(p.category(e["category"]) if p else {}, p.label if p else "",
+                                                    e["category"])
+                out[r["id"]]["siblings"] = [{"id": e["id"], "at": e["first_at"], "category": e["category"],
+                                             "label": labels[(e["pack"], e["category"])]} for e in got]
+                if talker_of is not None:
+                    g = self._gap(r["pack"])
+                    near = [t for t in ordered if lo - g <= t["start"] <= hi + g]
+                    out[r["id"]]["calls"] = [c for c in console_calls(near, tids, talker_of, g) if lo <= c["at"] <= hi]
         return out
 
-    def console_calls(self, r: dict, gap_s: float | None = None) -> list[dict]:
-        """The calls in an event's window that are no event at all (console_calls() below, over the source's
-        transmissions within SIBLING_S of its first_at..last_at): [{at, n, consoles}]. Cached a minute per event."""
-        if not r.get("source_key") or self.engine is None or not hasattr(self.engine, "talkers"):
-            return []
-        p = self.engine.pack(r["pack"]) if hasattr(self.engine, "pack") else None
-        gap = float(gap_s if gap_s is not None else (p.window_s if p is not None else 120.0))
-        key = (r["id"], r["last_at"], int(self.cad.clock() // 60))
-        hit = self._calls.get(key)
-        if hit is not None:
-            return hit
-        lo, hi = float(r["first_at"]) - SIBLING_S, float(r["last_at"]) + SIBLING_S
-        txs = self.cad.store.q("SELECT id, start, system, radio_id, text FROM radio_traffic WHERE source = ? AND "
-                               "start >= ? AND start <= ? ORDER BY start, id LIMIT 2000", (r["source_key"], lo - gap, hi + gap))
-        for t in txs:                              # (how many words only: the text itself goes no further)
-            t["words"] = len(str(t.pop("text") or "").split())
-        tids: set = set()
-        for e in self.cad.store.q("SELECT traffic_ids FROM intel_events WHERE source_key = ? AND last_at >= ? AND "
-                                  "first_at <= ?", (r["source_key"], lo - gap, hi + gap)):
-            try:
-                tids |= {str(t) for t in json.loads(e["traffic_ids"] or "[]")}
-            except ValueError:
-                pass
-        out = [c for c in console_calls(txs, tids, self.engine.talkers.of, gap) if lo <= c["at"] <= hi]
-        if len(self._calls) > 512:
-            self._calls.clear()
-        self._calls[key] = out
-        return out
+    def _gap(self, pack: str) -> float:
+        p = self.engine.pack(pack) if hasattr(self.engine, "pack") else None
+        return float(p.window_s) if p is not None else 120.0
 
     def _rq(self, sql: str, args) -> list[dict]:
         """Search's reads off the store's lock: the calls search's read-only connection (history.py _rq: WAL, it never

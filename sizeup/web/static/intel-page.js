@@ -390,7 +390,7 @@ window.IntelPage = (() => {
     if (!n) return null;
     const d = el("div", "dim small il-sibs", `${n} other call${n === 1 ? "" : "s"} `);
     d.title = ["Other calls on this channel within ±10 min",
-      ...calls.map((c) => `${when(c.at)} ${c.consoles.join(" → ")} · ${c.n} tx, no event`)].join("\n");
+      ...calls.map((c) => `${when(c.at)} ${c.consoles.join(" · ")} · ${c.n} console tx, no event`)].join("\n");
     xs.forEach((x, i) => {
       if (i) d.append(" ");
       const a = el("a", "il-sib", `#${x.id}`);
