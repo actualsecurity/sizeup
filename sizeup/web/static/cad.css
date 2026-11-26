@@ -1261,6 +1261,8 @@
   .lp-p { --c: var(--warn); }
   .lp-queue { font-variant-numeric: tabular-nums; }
   .lp-quick { flex: none; }
+  /* the header's Listen: an icon (words only while it needs the click: Tap for sound) */
+  #lp-on:not(.blocked) { inline-size: var(--ctl); padding-inline: 0; justify-content: center; }
   .lp-pause { display: inline-block; inline-size: var(--s-3); block-size: var(--s-3);
               border-inline: calc(3 * var(--bw)) solid currentColor; }   /* pause: two bars */
   .lp-vol { inline-size: calc(4 * var(--ctl)); accent-color: var(--ok); }

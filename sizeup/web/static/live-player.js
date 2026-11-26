@@ -685,20 +685,22 @@ window.LivePlayer = (() => {
   }
 
   // ---- wiring --------------------------------------------------------------------------------------------------------
-  $id("lp-on").addEventListener("click", toggleOn);
-  if ($id("rv-live")) $id("rv-live").addEventListener("click", toggleOn);
-  $id("lp").addEventListener("click", (e) => {
+  // each control of its own (cad.js's $)
+  $("#lp-on").addEventListener("click", toggleOn);
+  $("#rv-live").addEventListener("click", toggleOn);
+  $("#lp-pp").addEventListener("click", playPause);
+  $("#lp-skip").addEventListener("click", skip);
+  $("#lp-mute").addEventListener("click", () => mute());
+  $("#lp-ours").addEventListener("click", () => { st.p = { ...st.p, ours_only: !st.p.ours_only }; choicesChanged(); });
+  $("#lp-police").addEventListener("click", () => { st.p = { ...st.p, mute_police: !st.p.mute_police }; choicesChanged(); });
+  $("#lp-set").addEventListener("click", () => { if (st.panel) closePanel(); else openPanel(); });
+  $("#lp-off").addEventListener("click", () => setOn(false));
+  $("#lp-go").addEventListener("click", goToRow);
+  // the Listening panel's controls (drawn again on a change): one handler for them all
+  $id("lp-panel").addEventListener("click", (e) => {
     const t = e.target.closest("button, a");
     if (!t) return;
-    if (t.id === "lp-pp") playPause();
-    else if (t.id === "lp-skip") skip();
-    else if (t.id === "lp-mute") mute();
-    else if (t.id === "lp-ours") { st.p = { ...st.p, ours_only: !st.p.ours_only }; choicesChanged(); }
-    else if (t.id === "lp-police") { st.p = { ...st.p, mute_police: !st.p.mute_police }; choicesChanged(); }
-    else if (t.id === "lp-set") { if (st.panel) closePanel(); else openPanel(); }
-    else if (t.id === "lp-off") setOn(false);
-    else if (t.id === "lp-go") goToRow();
-    else if (t.dataset.mode) { st.p = { ...st.p, mode: t.dataset.mode }; choicesChanged(); }
+    if (t.dataset.mode) { st.p = { ...st.p, mode: t.dataset.mode }; choicesChanged(); }
     else if (t.dataset.drop) { st.p = C.setRule(st.p, t.dataset.drop, ""); choicesChanged(); }
     else if (t.dataset.act === "close") closePanel(true);
     else if (t.dataset.act === "reset") { st.p = C.norm(null); choicesChanged(); }
