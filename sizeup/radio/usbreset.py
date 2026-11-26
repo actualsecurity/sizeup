@@ -33,7 +33,7 @@ def in_wsl() -> bool:
 def _read(d: Path, name: str) -> str:
     try:
         return (d / name).read_text().strip()
-    except OSError:
+    except (OSError, ValueError):            # (ValueError: UnicodeDecodeError, a serial that is no UTF-8)
         return ""
 
 

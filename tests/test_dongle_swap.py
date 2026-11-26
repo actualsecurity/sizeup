@@ -516,6 +516,61 @@ def test_s8_a_failed_start_in_a_group_keeps_the_group_and_its_file(rig, usb, tmp
 UHF_SAVED = ["uhf-a", "uhf-b", "uhf-c"]
 
 
+def programs(app) -> dict[str, list[str]]:
+    """{serial: the jobs whose program runs (or waits) on it now}."""
+    out: dict[str, list[str]] = {}
+    for m in app.modes:
+        if m != "Off" and (sd := on(app, m)):
+            out.setdefault(sd, []).append(m)
+    return out
+
+
+@pytest.mark.parametrize("fails", ["start", "save"])
+def test_a_failed_grouped_use_it_never_leaves_two_programs_on_one_dongle(rig, usb, tmp_path, monkeypatch, fails):
+    """The UHF group runs Fire/EMS 15 on its stand-in (uhf-c) with FG1 short. A Use it whose start fails (or whose
+    groups file can't be written) may have moved programs on the way: everything goes back, one program per dongle."""
+    plugged, logs, make = rig
+    app = swapped(rig)
+    gone(app, "uhf-a")
+    before = programs(app)
+    assert before["uhf-c"] == [P25] and on(app, "FG1") is None
+    if fails == "start":
+        real = app._start_mode
+        monkeypatch.setattr(app, "_start_mode", lambda m, s: False if s == "nw-1" else real(m, s))
+    else:
+        def no_save(*a, **k):
+            raise OSError("disk full")
+        monkeypatch.setattr(appmod.antenna, "save", no_save)
+    assert app.replace_sdr("uhf-a", "nw-1") is not None
+    now = programs(app)
+    assert all(len(jobs) == 1 for jobs in now.values()), now
+    assert now == before and on(app, P25) == "uhf-c"
+    assert json.loads((tmp_path / "antenna_groups.json").read_text())["groups"][0]["sdrs"] == UHF_SAVED
+
+
+def test_the_station_state_survives_a_fault_in_the_swap_offers(rig, monkeypatch):
+    plugged, logs, make = rig
+    app = swapped(rig)
+
+    def boom(*a, **k):
+        raise RuntimeError("bad row")
+    monkeypatch.setattr(app, "replace_offers", boom)
+    for _ in range(3):
+        st = app.sdr()
+        assert st["replace"] == [] and st["missing"] == [] and st["sdrs"]
+    assert len([x for x in logs if "dongle swap offers" in x]) == 1          # said once
+
+
+def test_a_serial_in_sysfs_that_is_no_utf_8_never_breaks_the_ports(tmp_path):
+    from sizeup.radio import usbreset
+    for name, serial in (("1-1", b"\xff\xfe\x00bad"), ("1-2", b"00000102\n")):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "idVendor").write_text("0bda\n")
+        (d / "serial").write_bytes(serial)
+    assert usbreset.ports(tmp_path) == {"00000102": "1-2"}
+
+
 # -- what is never offered; two threads --------------------------------------------------------------------------------
 
 def test_a_new_serial_on_two_dongles_and_a_lent_dongle_are_never_offered(rig):

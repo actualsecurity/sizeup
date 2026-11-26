@@ -609,6 +609,7 @@ class App:
         self.swap_offers: list[dict] = []
         self._swap_said: set[tuple[str, str]] = set()
         self._swap_lock = threading.RLock()   # replace_offers runs from the status post and from sdr() (two threads)
+        self._swap_fault = ""                 # the last fault in the offers, said once (_swap_state)
         if self.recorder is not None:         # a config.json source naming a shared serial is left out (recorder.py)
             self.recorder.ambiguous_fn = lambda serial: self._ambiguity(serial, sdr_lookup.devices(cfg.rtl_fm, fresh=True))
         if not self.shared:                   # one dongle per channel: its serial is checked before each start too
@@ -5279,6 +5280,20 @@ class App:
             self.swap_offers = out
             return out
 
+    def _swap_state(self, devs) -> dict:
+        """sdr()'s "replace" and "missing". A fault in them is logged once and leaves both empty: sdr() is in every
+        status post (Link.status), which must never stop over this."""
+        try:
+            out = {"replace": self.replace_offers(devs), "missing": self.missing_rows()}
+            self._swap_fault = ""
+            return out
+        except Exception as e:  # noqa: BLE001 - the talkers and pages go up regardless
+            why = f"{type(e).__name__}: {e}"
+            if why != self._swap_fault:
+                self._swap_fault = why
+                log(f"sdr: dongle swap offers left out: {why}")
+            return {"replace": [], "missing": []}
+
     def _job_taken(self, job: str, sd: str, here: set[str]) -> bool:
         """`job` is another plugged-in dongle's own (auto-assign gave it, or a person picked it): not a group's
         stand-in, which only covers for the gone one."""
@@ -5369,8 +5384,15 @@ class App:
                {id(d): (d, dict(d)) for d in (self._gseen, self._gusable, self._gflap, self._gfail)})
         with self._noaudio_lock:
             noaudio = self._noaudio.get(missing)
+        ran = {m: self._program_on(m) for m in self.modes if m != OFF_MODE}   # each job's dongle before
 
         def back(why: str) -> str:
+            # first every program that moved on the way stops (a stand-in's own job started where the county's ran:
+            # two programs on one dongle once the plan puts the county's back), then the records, then the plan
+            for m, was_on in ran.items():
+                now_on = self._program_on(m)
+                if now_on is not None and now_on != was_on:
+                    self._stop_mode(m, f"Use it for SDR {self.sdr_name(missing)} undone", now_on)
             self.groups = was[0]
             for live, saved in ((self.assign, was[1]), (self._own, was[2]), (self.set_by, was[3])):
                 live.clear()
@@ -5791,7 +5813,7 @@ class App:
                          for sd in rows],
                 "groups": self.groups_state(),       # antenna groups: [] when there are none
                 # a dongle swapped for a new one: the new dongles that fit a gone one's jobs, and every gone dongle
-                "replace": self.replace_offers(devs), "missing": self.missing_rows(),
+                **self._swap_state(devs),
                 "no_park": [m for m in self.modes if m != OFF_MODE and not self._parkable(m)],   # (#637) the editor
                 "groups_problem": self._groups_problem}   # the groups file dropped (unreadable): "" when fine
 
