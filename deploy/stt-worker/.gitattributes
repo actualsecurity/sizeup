@@ -1,2 +1,2 @@
 # the one-shot Windows installer is pinned by its SHA-256 (README "Quick install"): its bytes must never be converted
-tools/stt_worker/install.ps1 -text
+install.ps1 -text

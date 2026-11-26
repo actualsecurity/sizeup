@@ -1,4 +1,4 @@
-"""The GPU STT worker's one-shot Windows installer (tools/stt_worker/install.ps1): its pins, the README's and
+"""The GPU STT worker's one-shot Windows installer (deploy/stt-worker/install.ps1): its pins, the README's and
 pins.json must agree, and what it writes must be a config the worker takes."""
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-import tools.stt_worker.worker as W
+from tests.stt_worker_module import W
 
 HERE = Path(W.__file__).parent
 PS1 = HERE / "install.ps1"
@@ -44,7 +44,7 @@ def _ps_string(name: str) -> str:
 def test_every_pin_is_a_fixed_https_download():
     allowed = (r"https://github\.com/ggml-org/(whisper|llama)\.cpp/releases/download/b\d+/[\w.-]+\.zip",
                r"https://huggingface\.co/[\w.-]+/[\w.-]+/resolve/[0-9a-f]{40}/[\w.-]+",
-               r"https://raw\.githubusercontent\.com/actualsecurity/sizeup/[0-9a-f]{40}/tools/stt_worker/worker\.py")
+               r"https://raw\.githubusercontent\.com/actualsecurity/sizeup/[0-9a-f]{40}/deploy/stt-worker/worker\.py")
     assert set(ART) >= {"whisper_zip", "whisper_model", "worker_py", "llama_zip", "llama_cudart_zip", "qwen3_8b"}
     for key, pin in ART.items():
         assert any(re.fullmatch(a, pin["url"]) for a in allowed), key
@@ -71,14 +71,14 @@ def test_pins_json_and_the_readme_agree():
 
 def test_install_ps1_embeds_pins_json():
     assert json.loads(_here_string("PinsJson")) == PINS, \
-        "install.ps1's $PinsJson must be tools/stt_worker/pins.json (copy it in, then re-pin the README's Quick install)"
+        "install.ps1's $PinsJson must be deploy/stt-worker/pins.json (copy it in, then re-pin the README's Quick install)"
 
 
 def test_the_readme_quick_install_pins_this_install_ps1():
     """The Quick install's hash is install.ps1's; when git has the pinned commit, the file there is this one. A change
     to install.ps1 needs a second, README-only commit that pins the commit with the change and its hash."""
     readme = _readme()
-    m = re.search(r"raw\.githubusercontent\.com/actualsecurity/sizeup/([0-9a-f]{40})/tools/stt_worker/install\.ps1",
+    m = re.search(r"raw\.githubusercontent\.com/actualsecurity/sizeup/([0-9a-f]{40})/deploy/stt-worker/install\.ps1",
                   readme)
     assert m, "README: the Quick install downloads install.ps1 from a pinned commit"
     digest = hashlib.sha256(PS1.read_bytes()).hexdigest().upper()
@@ -86,7 +86,7 @@ def test_the_readme_quick_install_pins_this_install_ps1():
         f"README Quick install: install.ps1's SHA256 is now {digest} (pin the commit that has it)"
     git = shutil.which("git")
     if git:
-        r = subprocess.run([git, "show", f"{m.group(1)}:tools/stt_worker/install.ps1"], cwd=HERE,
+        r = subprocess.run([git, "show", f"{m.group(1)}:deploy/stt-worker/install.ps1"], cwd=HERE,
                            capture_output=True)
         if r.returncode == 0:              # a shallow checkout (CI) may not have the commit
             assert hashlib.sha256(r.stdout).hexdigest().upper() == digest, "the pinned commit has another install.ps1"
@@ -95,8 +95,12 @@ def test_the_readme_quick_install_pins_this_install_ps1():
 def test_install_ps1_is_ascii_and_kept_byte_for_byte():
     # Windows PowerShell 5.1 reads a file without a BOM as the ANSI code page: ASCII reads the same everywhere
     PS1.read_bytes().decode("ascii")
-    attrs = (HERE.parent.parent / ".gitattributes").read_text()
-    assert re.search(r"^tools/stt_worker/install\.ps1 -text$", attrs, re.M)
+    attrs = (HERE / ".gitattributes").read_text()          # (deploy/station's convention: its own .gitattributes)
+    assert re.search(r"^install\.ps1 -text$", attrs, re.M)
+    git = shutil.which("git")
+    if git:
+        r = subprocess.run([git, "check-attr", "text", "--", "install.ps1"], cwd=HERE, capture_output=True, text=True)
+        assert r.returncode != 0 or r.stdout.strip().endswith("text: unset"), r.stdout
 
 
 def test_no_drive_qualified_variable_in_a_string():
@@ -138,6 +142,8 @@ def test_the_worker_toml_it_writes_loads(tmp_path, with_llm):
     assert cfg.hub_url == "https://hub.example.org"
     assert cfg.whisper_server[0] == r"whisper\Release\whisper-server.exe"
     assert cfg.whisper_server[cfg.whisper_server.index("--host") + 1] == "127.0.0.1"
+    assert cfg.whisper_server[cfg.whisper_server.index("-l") + 1] == "en"
+    assert " ".join(cfg.whisper_server[1:]) == _ps_string("WhisperArgs")     # the check's whisper-server, the same
     if with_llm:
         assert cfg.llm_model_sha256 == ART["qwen3_8b"]["sha256"].lower()
         assert cfg.llm_server[cfg.llm_server.index("--host") + 1] == "127.0.0.1"
@@ -162,6 +168,10 @@ def test_the_check_servers_listen_on_loopback_as_in_the_readme():
     assert "0.0.0.0" not in ps1
     whisper = _ps_string("WhisperArgs")
     assert "--host 127.0.0.1 --port 8179" in whisper and "--host 127.0.0.1 --port 8179 -t 4" in readme
+    # English only, with the anti-loop decode, and the same flags as worker.toml's whisper_server (the worker's allow-list)
+    flags = "-l en -sns -et 2.4 -lpt -1.0 -nth 0.6"
+    assert whisper.endswith(f"-t 4 {flags}") and f"--host 127.0.0.1 --port 8179 -t 4 {flags}\n" in readme
+    W.check_whisper_argv(["whisper-server.exe", *whisper.split()])
     llama = _ps_string("LlamaArgs")
     assert llama.startswith("-m models\\Qwen3-8B-Q4_K_M.gguf --host 127.0.0.1 --port 8180 ")
     assert llama.split(" ", 2)[2] in readme      # the README's step 4b flags, from --host on

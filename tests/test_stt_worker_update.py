@@ -1,4 +1,4 @@
-"""The GPU STT worker's self-update (tools/stt_worker/worker.py Updater) and the hub's side of it
+"""The GPU STT worker's self-update (deploy/stt-worker/worker.py Updater) and the hub's side of it
 (sizeup/cloud/sttworkers.py worker_build, WorkerApi.wanted, the per-worker setting). GitHub is a fake that answers
 with the shapes of its REST API's compare endpoint (docs.github.com, "Compare two commits": status ahead / behind /
 identical / diverged, merge_base_commit, ahead_by, behind_by, commits, files), of "List pull requests associated with a
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-import tools.stt_worker.worker as W
+from tests.stt_worker_module import W
 from tests.test_stt_worker import FakeSmi
 
 REPO_WORKER = Path(W.__file__)
@@ -64,14 +64,22 @@ def pull(merge_sha: str, number: int = 8123, base: str = "main", merged: bool = 
             "author_association": "OWNER", "draft": False}
 
 
+NEW_PATH, OLD_PATH = "deploy/stt-worker/worker.py", "tools/stt_worker/worker.py"
+
+
 class FakeGitHub:
     """api.github.com's compare and raw.githubusercontent.com's files, for actualsecurity/sizeup only. compare:
-    {commit: (status, merge base)}; files: {commit: bytes}. api_status / raw_status with headers: an error answer."""
+    {commit: (status, merge base)}; files: {commit: bytes}, worker.py at a commit from the move to deploy/ on (at both
+    paths: tools/stt_worker/worker.py the compatibility copy); before: {commit: bytes}, a commit from before the move
+    (tools/stt_worker/worker.py only); paths: {commit: {path: bytes}}, any other tree. api_status / raw_status with
+    headers: an error answer."""
 
     def __init__(self):
         self.compare = {COMMIT: ("behind", COMMIT)}
         self.pulls = {COMMIT: [pull(COMMIT)]}
         self.files = {COMMIT: NEW}
+        self.before: dict[str, bytes] = {}
+        self.paths: dict[str, dict[str, bytes]] = {}
         self.calls: list[tuple[str, str]] = []
         self.api_status, self.raw_status, self.headers = 200, 200, {}
 
@@ -91,11 +99,17 @@ class FakeGitHub:
             st, base = self.compare[m.group(1)]
             return 200, {"content-type": "application/json; charset=utf-8"}, compare_answer(st, base, m.group(1))
         assert host == W.GITHUB_RAW, host
-        m = re.fullmatch(r"/actualsecurity/sizeup/([0-9a-f]{40})/tools/stt_worker/worker\.py", path)
+        m = re.fullmatch(r"/actualsecurity/sizeup/([0-9a-f]{40})/(deploy/stt-worker/worker\.py|tools/stt_worker/worker\.py)",
+                         path)
         assert m, path
         if self.raw_status != 200:
             return self.raw_status, self.headers, b"503 Service Unavailable"
-        data = self.files.get(m.group(1))
+        commit, file = m.group(1), m.group(2)
+        tree = self.paths.get(commit)
+        if tree is None:
+            tree = {NEW_PATH: self.files[commit], OLD_PATH: self.files[commit]} if commit in self.files else \
+                {OLD_PATH: self.before[commit]} if commit in self.before else {}
+        data = tree.get(file)
         if data is None:
             return 404, {}, b"404: Not Found"
         return 200, {"content-type": "text/plain; charset=utf-8"}, data[:max_bytes + 1]
@@ -119,7 +133,7 @@ def offer(mode="auto", commit=COMMIT, sha=NEW_SHA, url=None) -> dict:
     wu = {"mode": mode}
     if commit:
         wu.update(commit=commit, sha256=sha, url=url or f"https://raw.githubusercontent.com/actualsecurity/sizeup/{commit}"
-                                                         "/tools/stt_worker/worker.py")
+                                                         "/deploy/stt-worker/worker.py")
     return {"ok": True, "pool_on": True, "worker_update": wu}
 
 
@@ -137,17 +151,18 @@ IDLE = lambda: ""                                       # noqa: E731
 
 def test_the_hub_names_its_own_build_and_the_hash_of_the_worker_py_in_its_image(tmp_path):
     from sizeup.cloud import sttworkers as S
-    assert S.WORKER_FILE == REPO_WORKER.resolve()                     # (/app/tools/stt_worker/worker.py in the image)
+    assert S.WORKER_FILE == REPO_WORKER.resolve()                     # (/app/deploy/stt-worker/worker.py in the image)
     f = tmp_path / "worker.py"
     f.write_bytes(b"print('made up')\n")
     v = S.worker_build(COMMIT.upper() + "\n", f)
     assert v == {"commit": COMMIT, "sha256": hashlib.sha256(f.read_bytes()).hexdigest(),
-                 "url": f"https://raw.githubusercontent.com/actualsecurity/sizeup/{COMMIT}/tools/stt_worker/worker.py"}
+                 "url": f"https://raw.githubusercontent.com/actualsecurity/sizeup/{COMMIT}/deploy/stt-worker/worker.py"}
     assert S.worker_build("", f) == {} and S.worker_build("main", f) == {} and S.worker_build(COMMIT[:12], f) == {}
     assert S.worker_build(COMMIT, tmp_path / "missing.py") == {}       # no worker.py in the image: nothing named
     docker = (REPO_WORKER.parents[2] / "Dockerfile").read_text()
-    assert "COPY tools/stt_worker/worker.py ./tools/stt_worker/worker.py" in docker
-    assert "!tools/stt_worker/worker.py" in (REPO_WORKER.parents[2] / ".dockerignore").read_text()
+    assert "COPY deploy/stt-worker/worker.py ./deploy/stt-worker/worker.py" in docker
+    ignore = (REPO_WORKER.parents[2] / ".dockerignore").read_text().splitlines()
+    assert "deploy/stt-worker/*" in ignore and "!deploy/stt-worker/worker.py" in ignore
 
 
 def test_the_hub_tells_a_worker_that_says_its_version_and_an_admin_holds_or_pins_it(tmp_path, monkeypatch):
@@ -162,7 +177,7 @@ def test_the_hub_tells_a_worker_that_says_its_version_and_an_admin_holds_or_pins
                                                               "self_update": mine}, token="sw1")
         assert code == 200 and ans["worker_update"] == {
             "mode": "auto", "commit": COMMIT, "sha256": NEW_SHA,
-            "url": f"https://raw.githubusercontent.com/actualsecurity/sizeup/{COMMIT}/tools/stt_worker/worker.py"}
+            "url": f"https://raw.githubusercontent.com/actualsecurity/sizeup/{COMMIT}/deploy/stt-worker/worker.py"}
         # a worker from before the self-update (no self_update): never told
         code, ans = lv.call("POST", "/api/station/stt/state", {"state": "paused", "model": "m"}, token="sw1")
         assert code == 200 and "worker_update" not in ans
@@ -181,7 +196,7 @@ def test_the_hub_tells_a_worker_that_says_its_version_and_an_admin_holds_or_pins
         reg.act({"action": "update", "id": c.WORKER, "mode": "pin", "commit": OTHER, "sha256": OLD_SHA.upper()}, "casey",
                 note)
         assert api.wanted(c.WORKER) == {"mode": "pin", "commit": OTHER, "sha256": OLD_SHA, "url":
-                                        f"https://raw.githubusercontent.com/actualsecurity/sizeup/{OTHER}/tools/stt_worker/worker.py"}
+                                        f"https://raw.githubusercontent.com/actualsecurity/sizeup/{OTHER}/deploy/stt-worker/worker.py"}
         (w,) = [x for x in lv.hub.app.pool_health()["workers"] if x["id"] == c.WORKER]
         assert w["update_current"] is True
         assert reg.panel()["workers"][0]["update_mode"] == {"mode": "pin", "commit": OTHER, "sha256": OLD_SHA}
@@ -248,7 +263,7 @@ def test_only_a_different_hash_with_auto_update_on_starts_an_update(tmp_path):
     assert up.step(IDLE) is True and up.status == f"updating to {NEW_SHA[:12]}"
     assert gh.calls == [(W.GITHUB_API, f"/repos/actualsecurity/sizeup/compare/main...{COMMIT}?per_page=1"),
                         (W.GITHUB_API, f"/repos/actualsecurity/sizeup/commits/{COMMIT}/pulls?per_page=5"),
-                        (W.GITHUB_RAW, f"/actualsecurity/sizeup/{COMMIT}/tools/stt_worker/worker.py")]
+                        (W.GITHUB_RAW, f"/actualsecurity/sizeup/{COMMIT}/deploy/stt-worker/worker.py")]
     assert up.new_path.read_bytes() == NEW and cur.read_bytes() == OLD
     if os.name != "nt":
         assert up.new_path.stat().st_mode & 0o777 == 0o750
@@ -295,7 +310,7 @@ def test_the_hubs_url_and_hosts_are_never_used(tmp_path):
     assert up.step(IDLE) is True
     assert {h for h, _ in gh.calls} == {W.GITHUB_API, W.GITHUB_RAW} and all("evil" not in p for _, p in gh.calls)
     assert (W.UPDATE_REPO, W.UPDATE_BRANCH, W.UPDATE_FILE) == ("actualsecurity/sizeup", "main",
-                                                              "tools/stt_worker/worker.py")
+                                                              "deploy/stt-worker/worker.py")
     src = REPO_WORKER.read_text()
     assert 'wu.get("url")' not in src and "wu['url']" not in src
 

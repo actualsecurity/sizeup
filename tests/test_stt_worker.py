@@ -1,4 +1,4 @@
-"""The GPU STT worker (tools/stt_worker/worker.py, #639) against a fake hub and a fake whisper-server, both on
+"""The GPU STT worker (deploy/stt-worker/worker.py, #639) against a fake hub and a fake whisper-server, both on
 127.0.0.1. The hub side follows the worker API in #639: hello / state / claim (long poll) / audio / extend /
 complete / release, leases that expire, 401 with a reason, 503 with Retry-After. The whisper-server answer has the
 shape of whisper.cpp's server.cpp verbose_json (task, language, duration, text, segments with tokens, words with
@@ -32,7 +32,7 @@ from pathlib import Path
 
 import pytest
 
-import tools.stt_worker.worker as W
+from tests.stt_worker_module import W
 
 WORKER_PY = Path(W.__file__)
 SECRET = secrets.token_urlsafe(32)                 # a fresh one per run: the leak checks look for it
@@ -1147,16 +1147,77 @@ def test_complete_refused_400_hands_the_job_back(tmp_path, hub, whisper):
     assert len(hub.calls("/complete")) == 1
 
 
-@pytest.mark.parametrize("fast, field", [(True, b"0.0"), (False, None), (None, None)])
-def test_fast_jobs_decode_greedily(tmp_path, hub, whisper, fast, field):
-    """9: the hub's fast flag (short-lease classes) -> temperature_inc=0.0, as WhisperClient(fast=True); an older hub
-    sends none: the full decode."""
+@pytest.mark.parametrize("fast, field", [(True, b"0.4"), (False, b"0.2"), (None, b"0.2")])
+def test_fast_jobs_cap_the_fallback(tmp_path, hub, whisper, fast, field):
+    """9: the hub's fast flag (short-lease classes) -> temperature_inc=0.4: the fallback capped at two more passes, never
+    off (a greedy pass alone kept a weak airband clip's loops); an older hub sends none: the full decode (0.2)."""
     hub.add_job("clip-fast", tone_wav(1.5), fast=fast)
     with running(W.Worker(make_cfg(tmp_path, hub, whisper), run=no_smi)):
         wait_for(lambda: hub.accepted(), what="done")
     (req,) = whisper.jobs()
     assert req["fields"].get("temperature_inc") == field
     assert req["fields"]["temperature"] == b"0.0"
+
+
+@pytest.mark.parametrize("fast", [True, False])
+def test_every_request_is_english_with_the_anti_loop_decode(tmp_path, hub, whisper, fast):
+    """A short noisy clip came out Icelandic: language=en on every /inference (whisper.cpp b5454 reads it per request,
+    whatever the install's whisper_server line says), with non-speech tokens suppressed and the fallback's thresholds;
+    never no_fallback, never a language other than en."""
+    hub.add_job("clip-en", tone_wav(1.5), fast=fast)
+    with running(W.Worker(make_cfg(tmp_path, hub, whisper), run=no_smi)):
+        wait_for(lambda: hub.accepted(), what="done")
+    (req,) = whisper.jobs()
+    f = req["fields"]
+    assert f["language"] == b"en"
+    assert (f["suppress_nst"], f["entropy_thold"], f["logprob_thold"], f["no_speech_thold"]) == (
+        b"true", b"2.4", b"-1.0", b"0.6")
+    assert "no_fallback" not in f and "detect_language" not in f
+    assert float(f["temperature_inc"]) > 0
+
+
+def test_the_health_check_inference_is_english_too(whisper):
+    W.Whisper(whisper.url).check()
+    (req,) = whisper.requests                       # (jobs() leaves the health check's second of silence out)
+    assert req["fields"]["language"] == b"en"
+
+
+@pytest.mark.parametrize("argv", [
+    ["whisper-server", "-m", "m.bin", "--host", "127.0.0.1", "--port", "8179", "-t", "4"],
+    ["whisper-server", "-m", "m.bin", "--host", "127.0.0.1", "--port", "8179", "-t", "4", "-l", "en", "-sns",
+     "-et", "2.4", "-lpt", "-1.0", "-nth", "0.6", "--vad", "-vm", "models/vad.bin", "-vt", "0.5"],
+    ["whisper-server", "--model=m.bin", "--language=en", "--suppress-nst", "--max-context", "0"],
+])
+def test_whisper_server_args_on_the_allow_list(argv):
+    W.check_whisper_argv(argv)
+
+
+@pytest.mark.parametrize("argv, msg", [
+    (["whisper-server", "-m", "m.bin", "-nf"], "-nf not allowed"),
+    (["whisper-server", "-m", "m.bin", "--no-fallback"], "--no-fallback not allowed"),
+    (["whisper-server", "-m", "m.bin", "-l", "auto"], "English only"),
+    (["whisper-server", "-m", "m.bin", "--language=is"], "English only"),
+    (["whisper-server", "-m", "m.bin", "-dl"], "-dl not allowed"),
+    (["whisper-server", "-m", "m.bin", "--public", "C:/"], "--public not allowed"),
+    (["whisper-server", "-m", "m.bin", "--convert"], "--convert not allowed"),
+    (["whisper-server", "-m", "a.bin", "-m", "b.bin"], "one -m"),
+    (["whisper-server", "-m", "m.bin", "-l"], "-l needs a value"),
+    (["whisper-server", "-m", "m.bin", "-sns=1"], "takes no value"),
+])
+def test_whisper_server_args_off_the_list_are_refused(tmp_path, argv, msg):
+    with pytest.raises(W.ConfigError, match=msg):
+        W.check_whisper_argv(argv)
+    p = tmp_path / "worker.json"                   # ... and validate() says so too: `run`, `check` and the selftest
+    p.write_text(json.dumps({"hub_url": "https://hub.example.org", "whisper_server": argv}))
+    with pytest.raises(W.ConfigError, match=msg):
+        W.validate(W.load_config(p, env={"SIZEUP_STT_WORKER_TOKEN": TOKEN}))
+
+
+def test_whisper_server_runs_english_only():
+    """An install's whisper_server line from before (no -l): the worker adds -l en; one that says it is kept."""
+    assert W.whisper_command(["w", "-m", "m.bin", "--port", "8179"]) == ["w", "-m", "m.bin", "--port", "8179", "-l", "en"]
+    assert W.whisper_command(["w", "-m", "m.bin", "-l", "en"]) == ["w", "-m", "m.bin", "-l", "en"]
+    assert W.whisper_command(["w", "--language=en"]) == ["w", "--language=en"]
 
 
 def test_no_health_inference_while_gaming(tmp_path, hub, whisper):
@@ -1205,6 +1266,7 @@ def test_whisper_server_stopped_after_a_long_game(tmp_path, hub):
     w = W.Worker(cfg, run=no_smi, popen=lambda argv, **kw: procs.append(FakeProc(argv, **kw)) or procs[-1])
     with running(w):
         wait_for(lambda: procs, what="whisper-server started")
+        assert procs[0].argv == ["whisper-server", "-m", "m.bin", "-l", "en"]     # (whisper_command: English only)
         W.Control(cfg.control_path).set(gaming=True)
         wait_for(lambda: procs[0].code == 1, what="stopped after the game went on")
         assert w.whisper_err == "stopped while gaming"
@@ -1361,10 +1423,18 @@ def test_the_readme_pins_this_worker_py():
     import hashlib
     import re
     readme = (WORKER_PY.parent / "README.md").read_text()
-    m = re.search(r"raw\.githubusercontent\.com/actualsecurity/sizeup/([0-9a-f]{40})/tools/stt_worker/worker\.py", readme)
-    assert m, "the README downloads worker.py from a pinned commit"
+    m = re.search(r"raw\.githubusercontent\.com/actualsecurity/sizeup/([0-9a-f]{40})/deploy/stt-worker/worker\.py", readme)
+    assert m, "the README downloads worker.py from a pinned commit, at its path from the move on"
     digest = hashlib.sha256(WORKER_PY.read_bytes()).hexdigest().upper()
     assert digest in readme, f"README: worker.py's SHA256 is now {digest} (pin the commit that has it)"
+    import shutil
+    import subprocess
+    git = shutil.which("git")
+    if git:                                # (a shallow checkout, as CI's, may not have the commit)
+        r = subprocess.run([git, "show", f"{m.group(1)}:deploy/stt-worker/worker.py"], cwd=WORKER_PY.parent,
+                           capture_output=True)
+        if r.returncode == 0:
+            assert hashlib.sha256(r.stdout).hexdigest().upper() == digest, "the pinned commit has another worker.py"
 
 
 def test_the_readme_task_runs_as_the_user_and_can_be_checked():

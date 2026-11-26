@@ -6,7 +6,7 @@
   Asks its questions first (the local LLM, the hub URL, the three secrets), then downloads, checks and registers the
   task without further input.
 
-  - Every download is pinned: URL, size and SHA-256 (the $PinsJson below is tools/stt_worker/pins.json). A file is
+  - Every download is pinned: URL, size and SHA-256 (the $PinsJson below is deploy/stt-worker/pins.json). A file is
     used only after its hash matched; a mismatch deletes it and stops.
   - The secrets are read hidden (Read-Host -AsSecureString) and stored only as user environment variables, as in the
     README. They are never printed, logged or written anywhere else.
@@ -36,7 +36,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-# tools/stt_worker/pins.json, verbatim (tests/test_stt_worker_install.py keeps the two the same)
+# deploy/stt-worker/pins.json, verbatim (tests/test_stt_worker_install.py keeps the two the same)
 $PinsJson = @'
 {
   "_what": "Every download of the GPU STT worker's Windows setup: URL, size and SHA-256. README.md and install.ps1 (its $PinsJson) must say the same (tests/test_stt_worker_install.py).",
@@ -56,9 +56,9 @@ $PinsJson = @'
     },
     "worker_py": {
       "what": "worker.py (first install; it updates itself afterwards)",
-      "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/39c4de4b155d1a03db14168c66dcb57954f0ae12/tools/stt_worker/worker.py",
-      "bytes": 147764,
-      "sha256": "DF31E5B282749F2AEE67C4C0403672133AE6CBDFF4D8068F27BD04F68C9D01A2"
+      "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/fdf677fffde650bfe36cdda8f3ed2a1eb94a4a0d/deploy/stt-worker/worker.py",
+      "bytes": 168506,
+      "sha256": "3BBBF395B84C77CF7EA9C757672C724F42557F9179619782BDA1AA7C46C9735E"
     },
     "llama_zip": {
       "what": "llama.cpp b12359, CUDA 12.4 (llama-server.exe)",
@@ -90,12 +90,13 @@ $PinsJson = @'
 
 # worker.toml (README step 5); relative paths are from the folder worker.toml is in
 $TomlStt = @'
-# written by install.ps1 (tools/stt_worker/README.md, step 5); relative paths are from this folder
+# written by install.ps1 (deploy/stt-worker/README.md, step 5); relative paths are from this folder
 hub_url = "{{HUB_URL}}"
 model = "large-v3-turbo-q5_0"
 # the worker starts whisper-server itself, restarts it when it exits, and knows its pid (its GPU use isn't a game)
 whisper_server = ['whisper\Release\whisper-server.exe', '-m', 'models\ggml-large-v3-turbo-q5_0.bin',
-                  '--host', '127.0.0.1', '--port', '8179', '-t', '4']
+                  '--host', '127.0.0.1', '--port', '8179', '-t', '4',
+                  '-l', 'en', '-sns', '-et', '2.4', '-lpt', '-1.0', '-nth', '0.6']
 '@
 $TomlLlm = @'
 # the local LLM (README "The local LLM"): Qwen3-8B, the default
@@ -113,7 +114,7 @@ $TokenShape = '^sw1\.[a-z0-9][a-z0-9_-]{0,39}\.[A-Za-z0-9_-]+$'
 $CfIdShape = '^[A-Za-z0-9._-]{8,}$'
 $CfSecretShape = '^[A-Za-z0-9._~+/=-]{16,}$'
 $HubShape = '^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$'
-$WhisperArgs = '-m models\ggml-large-v3-turbo-q5_0.bin --host 127.0.0.1 --port 8179 -t 4'
+$WhisperArgs = '-m models\ggml-large-v3-turbo-q5_0.bin --host 127.0.0.1 --port 8179 -t 4 -l en -sns -et 2.4 -lpt -1.0 -nth 0.6'
 $LlamaArgs = '-m models\Qwen3-8B-Q4_K_M.gguf --host 127.0.0.1 --port 8180 -c 4096 -ngl 99 -np 1 --jinja --no-webui --no-slots --reasoning off'
 
 $Pins = $PinsJson | ConvertFrom-Json

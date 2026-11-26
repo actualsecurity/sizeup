@@ -118,6 +118,12 @@ const StationHealth = (() => {
       r.append(sevChip(a.severity), el("b", "hb-title", a.title), el("span", "hb-text", a.text),
         el("span", "hb-when dim", `since ${when(a.since)} · ${longDur(serverNow() - a.since)}`), det);
       if (a.dismiss) r.append(dismissBtn(a));
+      if (a.who && a.who.link) {              // an "SDR gone": its row in Settings > Radios > Receivers, to reassign it
+        const l = el("a", "nav", "Reassign");
+        l.href = a.who.link;
+        l.title = "Settings > Radios > Receivers, this dongle's row";
+        r.append(l);
+      }
       return r;
     });
   }
@@ -150,6 +156,7 @@ const StationHealth = (() => {
       old.title = "They show once the station updates";
       kids.push(old);
     }
+    if ((h.swaps || []).length) kids.push(el("h3", "hl-sub", "New dongles"), swapRows(h.swaps));
     kids.push(el("h3", "hl-sub", "Alerts now"),
       ...(d.alerts.length ? [el("div", "hl-alerts")] : [el("p", "dim small", "None")]));
     if (d.alerts.length) kids[kids.length - 1].append(...alertRows(d.alerts, n, th));
@@ -158,6 +165,8 @@ const StationHealth = (() => {
       for (const x of h.hints) {
         const p = el("p", x.level === "warn" ? "notice" : "notice info", `${x.channel}: ${x.text}`);
         if (x.title) p.title = x.title;   // (#686: why a level wasn't checked)
+        if (x.action && x.action.do === "drop") p.append(" ", swapBtn(x.action.label || "Remove",
+          { missing: x.action.missing, action: "drop" }, `Take ${x.action.missing} out of its antenna group`));
         if (x.link) {                  // a signal shift (#606): the chart at that time
           const a = el("a", "nav", "Chart");
           a.href = x.link;
@@ -351,7 +360,7 @@ const StationHealth = (() => {
         ["Fallbacks", fbn ? Object.entries(fb).filter(([, n]) => n).map(([k, n]) => `${n} ${k.replace("_", " ")}`).join(" · ")
           + (sp.refused_late ? ` · ${sp.refused_late} late refused` : "") : "none", fbn ? "hl-warn" : ""],
       ]));
-      // a GPU worker's self-update (tools/stt_worker/worker.py): the worker.py it runs, against the one the hub wants
+      // a GPU worker's self-update (deploy/stt-worker/worker.py): the worker.py it runs, against the one the hub wants
       const ver = (w) => {
         const u = w.update;
         if (!u || !u.sha256) return "—";
@@ -360,7 +369,15 @@ const StationHealth = (() => {
           [u.commit ? `Commit ${u.commit.slice(0, 12)}` : "", u.state || "", w.update_wanted && !w.update_current
             ? `Hub: ${w.update_wanted.slice(0, 12)}` : "", u.auto === false ? "auto_update off" : ""].filter(Boolean).join("\n")];
       };
-      if ((sp.workers || []).length) kids.push(table(["Worker", "State", "Model", "Version", "Load", "Jobs/h", "Lost", "Last seen"],
+      // a GPU worker's own log (deploy/stt-worker/worker.py LogShip → CloudWatch /sizeup/stt-worker): its last batch
+      const logs = (w) => {
+        const l = w.logs;
+        if (!l) return "";
+        if (l.error) return [`not shipped: ${l.error}`, "hl-warn", `Logs not shipped: ${l.error}. Kept on the PC (worker.log, logspool)`];
+        return l.at ? [`${longDur(serverNow() - l.at)} ago`, "", `Last batch ${when(l.at)} · ${l.lines} lines today · /sizeup/stt-worker`]
+          : ["none yet", "dim"];
+      };
+      if ((sp.workers || []).length) kids.push(table(["Worker", "State", "Model", "Version", "Load", "Jobs/h", "Lost", "Last seen", "Logs"],
         sp.workers.map((w) => {
           const g = w.gpu || {}, l = w.load || {};
           // a GPU worker's GPU; a station's whisper (#639 phase 2): its own clips waiting, its CPU, its pace
@@ -369,7 +386,7 @@ const StationHealth = (() => {
             : g.util_pct !== undefined ? `GPU ${g.util_pct}%` + (g.mem_used_mb !== undefined ? ` · ${g.mem_used_mb}/${g.mem_total_mb} MB` : "") : "";
           const st = [w.state, w.state === "online" ? "hl-ok" : w.state === "offline" || w.state === "cooling" ? "hl-bad" : "dim", l.why || ""];
           return [w.kind === "station" ? `${w.id.replace(/^station:/, "")} (station)` : w.id, st, w.model, ver(w), load,
-            w.jobs_h, w.lost, `${when(w.seen)} · ${longDur(w.seen_s)} ago`];
+            w.jobs_h, w.lost, `${when(w.seen)} · ${longDur(w.seen_s)} ago`, logs(w)];
         }), ""));
       const inf = sp.infer;
       if (inf) {  // the workers' local LLM (sizeup/cloud/infer.py): its own lane after the pre-alert clips; tasks, times, counts only
@@ -530,6 +547,47 @@ const StationHealth = (() => {
     if (window.Help && Help.info) thr.append(" ", Help.info(rules, "Alert rules")); else thr.title = rules;
     kids.push(thr);
     card.replaceChildren(...kids);
+  }
+
+  // A dongle swapped for a new one (sizeup/radio/replace.py): "New dongle <serial> seen — use it for <jobs>?". Use it
+  // moves the gone dongle's jobs (and its place in its antenna group) there; Not now: asked again in 6 h. Several new
+  // ones fit and the pairing can't tell: a Use button per new dongle. POST /api/sdr-replace (admins, audited).
+  function swapRows(swaps) {
+    const box = el("div", "hl-hints");
+    for (const o of swaps) {
+      const jobs = (o.jobs || []).join(", ") || (o.group ? `group ${o.group}` : "its place");
+      const pick = o.pick && o.choices.find((c) => c.serial === o.pick);
+      const p = el("p", "notice", pick ? `New dongle ${pick.name || pick.serial} seen — use it for ${jobs}?` : `SDR ${o.name} gone: new dongle for ${jobs}?`);
+      p.title = `Replaces SDR ${o.name}` + (o.absent_s ? ` (gone ${longDur(o.absent_s)})` : "") + (o.group ? ` in group ${o.group}` : "")
+        + "\n" + o.choices.map((c) => `${c.name && c.name !== c.serial ? `${c.name} (${c.serial})` : c.serial}: ${c.product || "?"}${c.tuner ? `, ${c.tuner}` : ""}`).join("\n");
+      for (const c of pick ? [pick] : o.choices) {
+        p.append(" ", swapBtn(pick ? "Use it" : `Use ${c.name || c.serial}`, { missing: o.missing, new: c.serial },
+          `${jobs} to SDR ${c.name || c.serial}`));
+      }
+      p.append(" ", swapBtn("Not now", { missing: o.missing, action: "not_now" }, "Asked again in 6 h"));
+      box.append(p);
+    }
+    return box;
+  }
+
+  function swapBtn(label, body, title) {
+    const btn = el("button", "", label);
+    btn.type = "button";
+    btn.title = title;
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        const res = await fetch("/api/sdr-replace", { method: "POST", headers: { "Content-Type": "application/json" },
+                                                       body: JSON.stringify(body) });
+        const d = await res.json().catch(() => ({}));
+        btn.title = res.ok ? "Done" : (d.error || `HTTP ${res.status}`);
+        if (res.ok) { btn.textContent = "Done"; poll(); } else {
+          btn.disabled = false;
+          if (window.UI && UI.toast) UI.toast(btn.title, "err");
+        }
+      } catch (e) { btn.title = String(e); btn.disabled = false; }
+    });
+    return btn;
   }
 
   // A station event the hub refused for good, stuck (no more tries) or an alarm delivered too late: the station drops

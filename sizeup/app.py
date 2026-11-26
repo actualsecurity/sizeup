@@ -66,7 +66,7 @@ import numpy as np
 
 from sizeup.api.v1.switches import Switches
 from sizeup.config import P25_JOB, Config, ConfigError, airband_owner, load
-from sizeup import janitor, tz
+from sizeup import janitor, logscrub, tz
 from sizeup.cad import Cad
 from sizeup.cad.alarms import STUCK_WITHIN_S
 from sizeup.cad.api import CadApi
@@ -95,12 +95,14 @@ from sizeup.radio import reception
 from sizeup.radio import systems as p25_systems
 from sizeup.radio import groups as antenna
 from sizeup.radio import usbreset
+from sizeup.radio import replace as swap
 from sizeup.radio.page import Page, PageHold, assemble, decode_tones, page_from_dict, recording_note
 from sizeup.radio.tap import LiveTap
 from sizeup.cad import tonelist
 from sizeup.radio.tones import ToneEvent, TonePlan, base_name
 from sizeup.talkers import talker_prompt
-from sizeup import channels, stt_terms
+from sizeup import channels, stt_quality, stt_terms
+from sizeup import stt_correct
 from sizeup.stt import (CATCHUP, CATCHUP_MAX_CLIP_S, CATCHUP_NOTE, CLASS_NAMES, CONTEXT, CONTEXT_FALLBACK, HIGH, LIVE, LOW,
                         RERUN, SHED, URGENT, Transcriber, WhisperClient, radio_voice, wav_bytes)
 from sizeup.talkgroups import TalkgroupPrefs
@@ -153,6 +155,7 @@ OFF_MODE = "Off"           # the shared dongle released for other programs (size
 SWITCH_PAUSE_S = 1.0       # between stopping one program on the shared dongle and starting the next
 SDR_WATCH_S = 3.0          # [radio] auto_assign: how often the plugged-in dongles are looked at
 SDR_FAILING_RESTARTS = 3   # an auto job that has restarted this often and is down: logged once, left as is
+SEEN_WRITE_S = 600.0       # sdr_seen.json (each dongle's last sight): written this often when nothing else changed
 SDR_SETTLE_S = 60.0        # after startup, Off dongles wait this long for the ones that had jobs (USB attach order)
 GROUP_HOLD_S = 10.0        # antenna groups: a dongle gone (or back) this long before its job moves (or comes back)
 GROUP_RETRY_S = 60.0       # ... a stand-in that didn't start: that dongle isn't tried again for this long
@@ -348,7 +351,7 @@ class WhisperService:
     def __init__(self, binary: str, model: str, port: int, threads: int, beam_size: int = 0,
                  state_path: str | Path | None = None):
         threads = min(int(threads or 0) or whisper_threads(), whisper_threads())   # (start-whisper does the same, #300)
-        self.argv = [binary, "-m", model, "--host", "127.0.0.1", "--port", str(port), "-t", str(threads)]
+        self.argv = [binary, "-m", model, "--host", "127.0.0.1", "--port", str(port), "-l", "en", "-t", str(threads)]
         if beam_size > 1:
             self.argv += ["-bs", str(beam_size)]
         self.port, self.state, self.detail = port, "starting", ""
@@ -444,6 +447,7 @@ class AwsJob:
     recovered: bool = False   # left waiting by a restart (the hub): its fallback waits for the station to reconnect
     catchup: bool = False     # a shed clip caught up (sizeup/sttcatchup.py): quiet (no alerts), a failed try on its row
     vocab_v: str = ""         # the vocabulary its stream used (AwsTranscriber sets it): the transcript's vocab_v
+    requeue: bool = False     # (with rerun) an unclear transcript asked again by the hub itself: no re-run result said
 
 
 @dataclass
@@ -596,6 +600,18 @@ class App:
         self._products_file = self._mode_file.with_name("sdr_products.json") if self._mode_file else None
         self._products: dict[str, str] = self._load_products()
         self._ambiguous: dict[str, str] = {}  # serials two or more plugged-in dongles share now -> why (logged once)
+        # A dongle swapped for a new one (sizeup/radio/replace.py): each serial's last sight (sdr_seen.json: when, its
+        # USB port, the tuner rtl_fm reported), the dongles with jobs gone in this run (monotonic, since), the offers
+        # put off ("Not now": until, monotonic), and the offers made at the last look
+        self._seen_file = self._mode_file.with_name("sdr_seen.json") if self._mode_file else None
+        self._last_seen: dict[str, dict] = self._load_seen()
+        self._seen_flushed = 0.0
+        self._absent: dict[str, float] = {}
+        self._swap_later: dict[str, float] = {}
+        self.swap_offers: list[dict] = []
+        self._swap_said: set[tuple[str, str]] = set()
+        self._swap_lock = threading.RLock()   # replace_offers runs from the status post and from sdr() (two threads)
+        self._swap_fault = ""                 # the last fault in the offers, said once (_swap_state)
         if self.recorder is not None:         # a config.json source naming a shared serial is left out (recorder.py)
             self.recorder.ambiguous_fn = lambda serial: self._ambiguity(serial, sdr_lookup.devices(cfg.rtl_fm, fresh=True))
         if not self.shared:                   # one dongle per channel: its serial is checked before each start too
@@ -618,6 +634,7 @@ class App:
                     if cfg.p25_dir else None)
         # PCFD's own dispatch console: incidents, units, run cards (state/cad.sqlite).
         self.cad = Cad.from_config(cfg, geocoder=self._geocode_text if self.gaz is not None else None, log=log)
+        self.cad.dongle_swaps_source = lambda: self.swap_offers     # a gone dongle's jobs offered to a new one
         if getattr(cfg, "streetview_key_bad", False):   # never the value (static/streetview.js: off)
             log("street view off: SIZEUP_GOOGLE_MAPS_KEY / [streetview] google_key is not a Google API key")
         _mark("cad")
@@ -945,7 +962,7 @@ class App:
                                     context=cfg.atc_context, context_s=cfg.atc_context_s, log=log)
                 log(f"atc: airport pre-alerts from {', '.join(airband)} ({len(self.atc.rules.rules)} rules)")
             except (OSError, ValueError, KeyError) as e:
-                log(f"atc: WARNING the pre-alert rules didn't load ({type(e).__name__}: {e}): no HPN ATC pre-alerts")
+                log(f"atc: WARNING the pre-alert rules didn't load ({type(e).__name__}): no HPN ATC pre-alerts")   # (never {e}: rule text)
         # ... and the ones that build up over several transmissions (#369, sizeup/airport_watch.py): an abnormal
         # go-around followed through its frequency changes (_atc, _atc_view), "alert level N" on 60 Control (the CAD's)
         self.cad.airport_watch.configure(cfg.channels, self._atc_aircraft, cfg.atc_alert_level_incident,
@@ -1011,7 +1028,7 @@ class App:
             from sizeup.geo.pagegeo import locate_page
             return locate_page(self.gaz, d.text, tone_departments).as_geo()
         except Exception as e:
-            log(f"geocode error for {d.location!r}: {type(e).__name__}: {e}")
+            log(f"geocode error ({len(d.location or '')} characters): {type(e).__name__}")     # (never the address)
             return None
 
     def _geocode_text(self, q: str) -> list[dict]:
@@ -1020,7 +1037,7 @@ class App:
             return [{k: getattr(m, k) for k in ("label", "lat", "lon", "kind", "municipality", "precision")}
                     | {"confidence": round(float(m.confidence), 2)} | self._geocode_parts(m) for m in self.gaz.candidates(q)[:20]]
         except Exception as e:
-            log(f"geocode error for {q!r}: {type(e).__name__}: {e}")
+            log(f"geocode error ({len(q or '')} characters): {type(e).__name__}")   # (never what was typed: an address)
             return []
 
     @staticmethod
@@ -1096,6 +1113,8 @@ class App:
                  rerun_result=getattr(page, "rerun_result", ""),
                  model=getattr(page, "model", ""), stt=getattr(page, "stt", ""),
                  read_twice=page.read_twice, vocab_v=getattr(page, "vocab_v", "") or "")
+        if getattr(page, "quality", ""):                 # unclear words (sizeup/stt_quality.py), kept apart
+            d.update(quality=page.quality, unclear_text=getattr(page, "unclear_text", ""))  # type: ignore[attr-defined]
         if getattr(page, "alt_model", ""):
             d.update(alt_text=getattr(page, "alt_text", ""), alt_model=page.alt_model)  # type: ignore[attr-defined]
         for k in ("keyup", "radio_id", "unit"):          # a unit's key-up cut from a page (radio/page.py PageHold)
@@ -1635,6 +1654,7 @@ class App:
                                      "talkgroup": None, "unit": getattr(page, "unit", "") or ("60 Control" if page.tones else ""),
                                      "rig": "", "radio_id": getattr(page, "radio_id", ""),
                                      "text": page.raw, "status": page.status, "model": getattr(page, "model", ""),
+                                     "quality": getattr(page, "quality", ""), "unclear_text": getattr(page, "unclear_text", ""),
                                      "tones": [{"a_hz": round(t.a_hz, 1), "b_hz": round(t.b_hz, 1) if t.b_hz else None,
                                                 "names": list(t.names), "ours": self.paging.is_ours(t.names)}
                                                | ({} if any(t is m for m in own) else {"other_page": True})
@@ -1855,8 +1875,14 @@ class App:
         for r in rows:
             r["tier_set"] = r["tier"] is not None
             if r["tier"] is None:
-                r["tier"] = tiers.derived(r["record"], self.channel_pref(r["key"])["transcribe"],
-                                          r["encrypted"])
+                tx = bool(self.channel_pref(r["key"])["transcribe"])
+                r["tier"] = tiers.derived(r["record"], tx, r["encrypted"])
+                # the switches beside the tier (Settings > Radios): the county's Transcribe is its channel choice and
+                # it has no Alerts (None: its pre-alerts are the intel packs', tiers.COUNTY_ALERTS)
+                r["transcribe"], r["alerts"] = tx, None
+            else:
+                sw = tiers.switches(r["tier"])
+                r["transcribe"], r["alerts"] = sw["transcribe"], sw["alerts"]
         return rows
 
     def p25_systems_state(self) -> list[dict]:
@@ -2052,11 +2078,13 @@ class App:
         self._transcribed_one(item)
         wait = (self._aws_wait.pop(getattr(item, "id", ""), None)
                 if self._aws_wait and not isinstance(item, Rerun) else None)
-        if wait is not None and getattr(item, "status", "") in ("done", "no_speech"):
+        if wait is not None and getattr(item, "status", "") in ("done", "no_speech", stt_quality.UNCLEAR):
             self._aws_alt(item, *wait)          # "both": the local text is in; Amazon Transcribe's next
 
     def _transcribed_one(self, item) -> None:
         if isinstance(item, Traffic):
+            # any engine's words checked first (sizeup/stt_quality.py): a loop or noise is "unclear", its text ""
+            item.raw, item.status, _q = self._screen(item, getattr(item, "raw", ""), item.status)
             item.text = getattr(item, "raw", "")
             # attach: the station's talkgroup choice when this came from one (hub); pairs: P25 talkers
             attach = item.__dict__.pop("attach", None)
@@ -2079,28 +2107,34 @@ class App:
                 del item.raw_audio
             # which model wrote this text (the station's, when the hub replays it)
             item.model = getattr(item, "model", "") or Path(self.cfg.stt_model).name  # type: ignore[attr-defined]
+            # its channel's terms put back (#879): beside the raw text before anything stores or reads it
+            self._corr_put(item, self._corr_of(traffic_key(item), item.text))
             self._emit("traffic", dict(item.as_dict(), attach=attach, pairs=pairs), item.id)
             self.store.on_traffic(item, attach=attach)
             self._to_cad(item)
             if not getattr(item, "system", ""):      # another system's traffic (#409) raises none of our alarms
-                self._alarm(item)
+                self._alarm(item, getattr(item, "unclear_text", None) if item.status == stt_quality.UNCLEAR else None)
             self._atc(item)
-            if item.status != "no_speech" and other:
-                log(f"{item.source}: transmission {item.id} ({item.status})")     # (#419: its words never in a log)
-            elif item.status != "no_speech":
-                log(f"{item.source}: {'[' + item.unit + '] ' if item.unit else ''}{item.text or '(' + item.status + ')'}")
+            if item.status == stt_quality.UNCLEAR:      # (a late call's old words: never asked again, #747)
+                self._unclear(item, traffic_key(item), quiet=bool(getattr(item, "late", False)))
+            if item.status != "no_speech":         # (its words never in a log: CloudWatch, #419)
+                log(f"{item.source}: transmission {item.id} ({item.status}, {logscrub.said(item.text)})"
+                    + (f" · unit {item.unit}" if item.unit and not other else ""))
             return
         if isinstance(item, Rerun):
             return self._rerun_done(item)
         page: Page = item
         page.model = getattr(page, "model", "") or Path(self.cfg.stt_model).name  # type: ignore[attr-defined]
+        page.raw, page.status, _q = self._screen(page, page.raw, page.status)    # (never parsed when unclear)
         d = self._dispatch(page.raw)
         page.dispatch = d.as_dict() if d else None  # type: ignore[attr-defined]
         self._save_page(page)
         self._page_to_cad(page)                     # its text in the log (before an event links it)
         self._emit("page_text", self._page_doc(page))
-        log(f"{page.label} {page.kind}: {page.raw or '(' + page.status + ')'}"
+        log(f"{page.label} {page.kind} {page.id}: {page.status}, {logscrub.said(page.raw)}"     # (never its words)
             + {True: " [read twice]", False: " [not read twice]"}.get(page.read_twice, ""))
+        if page.status == stt_quality.UNCLEAR:
+            self._unclear(page, page.label)
         if d is None:
             return
         # Ours by this page's own tones (#183): the group its message answers, never a page's before it
@@ -2131,10 +2165,10 @@ class App:
         name one of ours (IncidentStore.on_page). Returns the incident, or None."""
         inc = self.store.on_page(page.id, depts, d, at=page.start)
         if inc:
-            where = inc.geo["label"] if inc.geo else (inc.location or "location not found")
-            if inc.geo and inc.geo.get("confirmed") is False:
-                where = f"{inc.location or where} (location unconfirmed: {inc.geo.get('why') or 'not sure'}; best {where})"
-            log(f"INCIDENT {inc.incident_type} · {where} · {', '.join(inc.departments)}")
+            # (never its type, its address or its words in a log: an EMS type is a medical detail)
+            log(f"INCIDENT {inc.id} · {inc.category or 'call'} · "
+                f"{('location unconfirmed' if inc.geo.get('confirmed') is False else 'located') if inc.geo else 'no location'}"
+                f" · {', '.join(inc.departments)}")
             try:
                 ev = self.cad.from_monitor(inc)
                 if ev and tones_half is not None:       # its tones came as a transmission of their own
@@ -2267,6 +2301,8 @@ class App:
             self.cad.record_traffic({"id": t.id, "start": t.start, "end": t.end, "source": t.source,
                                      "talkgroup": t.talkgroup, "unit": t.unit, "rig": t.rig, "radio_id": t.radio_id,
                                      "text": t.text, "status": t.status, "model": getattr(t, "model", ""),
+                                     # unclear words (sizeup/stt_quality.py): shown dimmed, never the text
+                                     "quality": getattr(t, "quality", ""), "unclear_text": getattr(t, "unclear_text", ""),
                                      "id_note": getattr(t, "id_note", ""),
                                      # the emergency button (#128), its raw call record, kept by its window
                                      "emergency": bool(getattr(t, "emergency", False)),
@@ -2274,6 +2310,8 @@ class App:
                                      # (#747) from while sizeup was down: logged, never told to what alerts
                                      "late": bool(getattr(t, "late", False)),
                                      "vocab_v": getattr(t, "vocab_v", "") or "",     # the term list that biased it
+                                     # (#879) its channel's terms put back, beside the raw text (_corr_put)
+                                     **{k: str(getattr(t, k, "") or "") for k in stt_correct.NO_CORR},
                                      "cut": getattr(t, "cut", "") or "",     # (#819) cut at a mid-call grant
                                      # #409: the P25 system it was heard on ("": the county's, or FM) and its tier
                                      **self._row_source(t)},
@@ -2792,9 +2830,12 @@ class App:
 
     def _set_alt(self, cid: str, text: str, model: str) -> None:
         """The alternative transcript ("both": the local model's next to AWS's), the text left as it is."""
-        alt = {"text": text, "model": model}
         with self._lock:
             page = next((p for p in self.pages if p.id == cid), None)
+        item = page if page is not None else next(
+            (x for x in list(self.store.loose) + [x for i in self.store.incidents for x in i.traffic] if x.id == cid), None)
+        alt = self._screen_alt(item, {"text": text, "model": model})
+        text, model = alt["text"], alt["model"]
         if page is not None:
             page.alt_text, page.alt_model = text, model  # type: ignore[attr-defined]
             self._save_page(page)
@@ -2805,9 +2846,57 @@ class App:
             log(f"CAD: could not update the communications log: {type(e).__name__}: {e}")
         self._emit("alt_text", {"id": cid, **alt})
 
+    # -- unclear transcripts (sizeup/stt_quality.py) -----------------------------------------------------------------
+
+    @staticmethod
+    def _clip_seconds(item) -> float | None:
+        """The clip's length for the words-a-second check: a transmission's, a page's voice (after its tones)."""
+        try:
+            s = float(item.end) - float(item.start) - float(getattr(item, "voice_offset_s", 0.0) or 0.0)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return s if s > 0 else None
+
+    def _screen(self, item, text: str, status: str, language: str = "") -> tuple[str, str, dict]:
+        """Any engine's words on the CAD of record (a station forwarding to a hub leaves it to the hub, which sees every
+        engine's words): (text, status, {}) as they stand, or ("", "unclear", {quality, unclear_text}) for a loop, more
+        words than the clip holds or whisper's stock phrase on noise (sizeup/stt_quality.py). The words are kept on the
+        item apart from its text (shown dimmed, on hover), so nothing that reads the text acts on them: intel and its
+        model, the pre-alerts, page parsing, incident matching, search. New words take the old flag off."""
+        if item is not None and status != stt_quality.UNCLEAR:
+            for k in ("quality", "unclear_text"):
+                vars(item).pop(k, None)
+        if status == stt_quality.UNCLEAR and item is not None:      # (a page or row read again: as it was)
+            return text, status, {"quality": str(getattr(item, "quality", "") or ""),
+                                  "unclear_text": str(getattr(item, "unclear_text", "") or "")}
+        if status != "done" or not text or self.forwarding():
+            return text, status, {}
+        why = stt_quality.assess(text, self._clip_seconds(item) if item is not None else None, language)
+        if not why:
+            return text, status, {}
+        if item is not None:
+            item.quality, item.unclear_text = why, text  # type: ignore[attr-defined]
+        return "", stt_quality.UNCLEAR, {"quality": why, "unclear_text": text}
+
+    def _screen_alt(self, item, alt: dict | None) -> dict | None:
+        """The other engine's words ("both") through the same check: unclear ones are no alternative (the intel packs
+        read it too), the model says why."""
+        if alt is None or self.forwarding() or not str(alt.get("text") or ""):
+            return alt
+        why = stt_quality.assess(str(alt["text"]), self._clip_seconds(item) if item is not None else None)
+        if not why:
+            return alt
+        return {**alt, "text": ""}            # (its model kept as it is: an engine's name, sttfix keys on it)
+
+    def _unclear(self, item, key: str, quiet: bool = False) -> None:
+        """An unclear transcript on the CAD of record: said in the log (which engine, why; never its words). The hub asks
+        another engine once (HubApp._unclear)."""
+        log(f"speech-to-text {getattr(item, 'id', '')}: {stt_quality.label(getattr(item, 'quality', '')).lower()} "
+            f"from {getattr(item, 'model', '') or 'unknown'}")
+
     def _retext(self, cid: str, text: str, status: str, confidence: float | None, model: str,
                 alt: dict | None = None, why: str = "re-run", quiet: bool = False, vocab_v: str = "",
-                prompted: bool = False, late: bool = False) -> bool:
+                prompted: bool = False, late: bool = False, language: str = "") -> bool:
         """New text for a page or transmission already on screen (a re-run here, or one the station
         sent the hub, or Amazon Transcribe's), the old text kept in its history. True = the text changed.
         alt {text, model}: the other engine's transcript, kept to compare ("both"). quiet: a shed clip caught up
@@ -2818,10 +2907,26 @@ class App:
         call from while sizeup was down (#747; the row's own t.late says so too): no pre-alert either (no ATC, and
         Comms.retext late: only the per-incident radio log), but its words still go to the alarms (a mayday that only
         AWS heard alarms, labelled late; the same transmission's alarm is updated, never raised twice); "late" on the
-        retext event."""
+        retext event. language: the engine's detected language, when it said (sizeup/stt_quality.py)."""
         changed = False
         with self._lock:
             page = next((p for p in self.pages if p.id == cid), None)
+        item = page if page is not None else next(
+            (x for x in list(self.store.loose) + [x for i in self.store.incidents for x in i.traffic] if x.id == cid), None)
+        had = item is not None and getattr(item, "status", "") == "done" and bool(
+            getattr(item, "raw" if page is not None else "text", ""))
+        text, status, unclear = self._screen(item, text, status, language)    # (sizeup/stt_quality.py)
+        if unclear and had:                  # a re-run (or a late engine) that looped never blanks clean words: they
+            for k in ("quality", "unclear_text"):      # stay; only its run is kept (stt_runs, "unclear")
+                vars(item).pop(k, None)
+            log(f"{why} {cid}: {stt_quality.label(unclear['quality']).lower()} from {model or 'unknown'}: "
+                "the text it had stays")
+            return False
+        alt = self._screen_alt(item, alt)
+        # its channel's terms put back (#879), before the row is written; a page: never (its own parser reads it)
+        corr = None if page is not None else self._corr_of(self._corr_key(cid, item), text)
+        if isinstance(item, Traffic):
+            self._corr_put(item, corr)
         if page is not None:
             if page.raw != text and (page.raw or page.status not in ("pending", "remote")):
                 hist = list(getattr(page, "history", None) or [])
@@ -2832,7 +2937,7 @@ class App:
             page.rerun_at, page.model, page.vocab_v = time.time(), model, vocab_v  # type: ignore[attr-defined]
             if alt is not None:
                 page.alt_text, page.alt_model = str(alt.get("text") or ""), str(alt.get("model") or "")  # type: ignore[attr-defined]
-            page.status = "done" if text else "no_speech"
+            page.status = "done" if text else stt_quality.UNCLEAR if unclear else "no_speech"
             d = self._dispatch(text)
             page.dispatch = d.as_dict() if d else None  # type: ignore[attr-defined]
             self._save_page(page)
@@ -2844,22 +2949,62 @@ class App:
                   if x.id == cid), None)
         late = late or bool(getattr(t, "late", False))
         try:
-            self.cad.comms.retext(cid, text, status, model, alt, notify=not quiet, vocab_v=vocab_v, late=late)
+            self.cad.comms.retext(cid, text, status, model, alt, notify=not quiet, vocab_v=vocab_v, late=late,
+                                  quality=unclear.get("quality", ""), unclear_text=unclear.get("unclear_text", ""),
+                                  corr=stt_correct.columns(corr))
         except Exception as e:  # the CAD must never stop the monitor
             log(f"CAD: could not update the communications log: {type(e).__name__}: {e}")
-        if t is not None and text and not quiet:
-            self._alarm(t, text)                       # the words came later (Amazon Transcribe, a re-run)
-            if not late:
+        if t is not None and (text or unclear) and not quiet:
+            # the words came later (Amazon Transcribe, a re-run); unclear ones still reach the alarms (a looped
+            # "mayday" is never dropped), nothing else
+            self._alarm(t, text or unclear["unclear_text"])
+            if not late and text:
                 self._atc(t, text)
         if changed:
-            # (another P25 system's words are never in a log, #419)
-            log(f"{why} {cid}: " + ("(text changed)" if self.clip_is_context(cid) else text or "(no speech)"))
+            # (no transcript's words are ever in a log: CloudWatch; #419 masked only another P25 system's)
+            log(f"{why} {cid}: text changed ({logscrub.said(text)}{', unclear' if unclear and not text else ''}, "
+                f"{model or '?'})")
         self._emit("retext", {"id": cid, "text": text, "status": status, "confidence": confidence, "model": model,
                               **({"stt_prompt_time": True} if prompted else {}),    # (whisper's prompt had its time, #727)
                               **({"alt": alt} if alt is not None else {}), **({"catchup": True} if quiet else {}),
                               **({"vocab_v": vocab_v} if vocab_v else {}), **({"late": True} if late else {})})
+        if unclear and item is not None:
+            self._unclear(item, traffic_key(item) if isinstance(item, Traffic) else str(getattr(item, "label", "")),
+                          quiet=quiet or late)
         return changed
 
+
+    # -- post-ASR vocabulary correction (#879, sizeup/stt_correct.py) ---------------------------------------
+    stt_correct = None
+
+    def _corr_of(self, key: str, text: str):
+        """The text of record's correction on its channel (a stt_correct.Result; v PENDING: its list's matcher not built
+        yet), None: off there, no list, no text. Never builds a matcher (Corrector.warm does, on the lists' thread)."""
+        c = self.stt_correct
+        if c is None or not text:
+            return None
+        return c.correct(text, key)
+
+    def _corr_key(self, cid: str, item) -> str:
+        """A transmission's channel key: its own, else its radio log row's (a row no longer held here)."""
+        if isinstance(item, Traffic):
+            return traffic_key(item)
+        if self.stt_correct is None:
+            return ""
+        try:
+            r = self.cad.store.one("SELECT channel, talkgroup, system FROM radio_traffic WHERE id = ?", (cid,))
+            return stt_correct.row_key(dict(r)) if r is not None else ""
+        except Exception:  # noqa: BLE001 - no key: no correction
+            return ""
+
+    def _corr_put(self, item, res) -> None:
+        """The correction kept on the transmission (corr_text, corr_rules, corr_v), what _to_cad writes beside the raw
+        text; the one before cleared (a new text). Nothing when this process corrects nothing (a station)."""
+        if self.stt_correct is None and not getattr(item, "corr_v", ""):
+            return
+        cols = stt_correct.columns(res)
+        for k in ("corr_text", "corr_rules", "corr_v"):      # (spelled out: tests/test_contracts_events.py reads them)
+            setattr(item, k, cols[k])
 
     # -- per-channel speech-to-text (Settings > Radios, sizeup/channels.py) --------------------------------
 
@@ -3019,14 +3164,14 @@ class App:
     def _has_text(self, cid: str, item=None) -> bool:
         """This clip has its transcript already (a page read, a row with text or "no speech"): a saved entry for it is
         stale (whisper finished it while the station stopped)."""
-        if item is not None and getattr(item, "status", "") in ("done", "no_speech") and (
-                getattr(item, "raw", "") or getattr(item, "status", "") == "no_speech"):
+        if item is not None and getattr(item, "status", "") in ("done", "no_speech", stt_quality.UNCLEAR) and (
+                getattr(item, "raw", "") or getattr(item, "status", "") != "done"):
             return True
         try:
             r = self.cad.store.one("SELECT status FROM radio_traffic WHERE id = ?", (cid,))
         except Exception:  # noqa: BLE001 - no log here: not known
             return False
-        return bool(r) and r.get("status") in ("done", "no_speech")
+        return bool(r) and r.get("status") in ("done", "no_speech", stt_quality.UNCLEAR)
 
     def _stt_resume(self) -> int:
         """Starting: the clips a stop saved (_stt_handoff) queued again at their own class, each with its saved
@@ -3278,7 +3423,7 @@ class App:
             try:
                 r.tick()
             except Exception as e:  # noqa: BLE001 - the aircraft layer goes on
-                log(f"atc vocabulary: {type(e).__name__}: {e}")
+                log(f"atc vocabulary: {type(e).__name__}")   # (never {e}: it can quote a term)
 
     def _intel_listen(self, intel):
         """The pre-alert pushes' "Listen" link (sizeup/intel/listen.py): the transmissions around it, stitched, behind a
@@ -3384,6 +3529,7 @@ class App:
         channel's own vocabulary) one Amazon Transcribe vocabulary, the own phrases first, made by the leader, used on
         those channels once READY; off, any made before are deleted (term_cleanup, once this task leads)."""
         self.stt_terms = None
+        self.stt_correct = None
         self.term_vocabs = None
         self.term_cleanup = None
         if self.aws is not None:                  # every AWS transcript says which vocabulary its stream used
@@ -3403,6 +3549,10 @@ class App:
         if files is None:
             return
         self.stt_terms = stt_terms.TermStore(files, log=log, on_read=self._terms_read)
+        # post-ASR vocabulary correction (#879, sizeup/stt_correct.py): the text of record corrected before its radio
+        # log row is written (_corr_put), each engine's run records its own (HubApp._vocab_fix)
+        self.stt_correct = stt_correct.Corrector(lambda: self.stt_terms, self._own_for_key,
+                                                 self.cfg.stt_correct_channels, self.cfg.stt_correct_towns, log=log)
         if self.cfg.stt_terms_aws and self.aws is not None:
             self.term_vocabs = tv
             self.aws.term_vocabulary = self._term_vocab_for
@@ -3432,6 +3582,8 @@ class App:
             self.term_vocabs.sync(store.sets())
         if changed:
             self.stt_terms_check()
+        if self.stt_correct is not None:            # (each list's matcher built here, never on a reader's request)
+            self.stt_correct.warm(self.cfg.stt_correct_channels)
 
     def stt_terms_check(self) -> None:
         """The hub sends the station the lists' top terms when its copy differs (HubApp)."""
@@ -3476,25 +3628,21 @@ class App:
 
     def _own_for_key(self, key: str) -> str | None:
         """Which list a channel key takes ("South 2", "HPN Tower", "tg:307", "p25:mrrs:9211"): a talkgroup's service from
-        its group where it is known here; a county incident talkgroup (307, 333) is fire dispatch."""
+        its group where it is known here; a county incident talkgroup (307, 333) is fire dispatch
+        (stt_terms.own_for_channel: tools/stt_correct_eval.py takes the same rule)."""
         key = str(key or "")
-        kind = self._kind.get(key, "")
-        service = ""
+        group, listed = None, ""
         got = sources.parse(key) if channels.is_tg(key) else None
         if got is not None:
             system, tg = got
             if system == sources.COUNTY:
                 group = (self.tg.info.get(tg) or {}).get("group") or ""
-                service = sources.service(group) if group else ("fire" if tg in self.cfg.p25_incident_talkgroups else "")
             else:
                 rt = getattr(self, "systems", {}).get(system)
                 info = (rt.system.talkgroups.get(tg) or {}) if rt is not None else {}
-                service = str(info.get("service") or "")
-            key = sources.p25(system, tg)
-        elif kind:
-            key = sources.fm(key, kind)                  # (an admin's service choice is kept under fm: / air:)
-            service = sources.service(kind=kind)
-        return stt_terms.own_for(key, service, kind)
+                listed = str(info.get("service") or "")
+        return stt_terms.own_for_channel(key, self._kind.get(key, ""), group, listed,
+                                         self.cfg.p25_incident_talkgroups)
 
     def _own_vocab(self, channel: str) -> str:
         """The channel's own AWS vocabulary (whether READY or not): airband sizeup-atc, a profiled police source sizeup-pd,
@@ -3601,6 +3749,8 @@ class App:
         if job.rerun:
             changed = self._retext(job.id, text, status, conf, channels_model(), why="AWS Transcribe re-run",
                                    quiet=job.catchup, vocab_v=job.vocab_v)
+            if job.requeue:
+                return None                    # (nobody asked: no result on the row)
             return self._rerun_finish(job.id, "changed" if changed else "same", channels_model())
         if job.kind == "page" and job.alt is None:
             page = job.page
@@ -3663,8 +3813,7 @@ class App:
         if getattr(item, "status", "") in ("error", "skipped") and job.alt is None and (not job.rerun or job.catchup):
             log(f"aws transcribe: {job.kind} {job.id}: a late answer, and the fallback had none: it is the text")
             return self._aws_done(job, text, conf)
-        log(f"aws transcribe: {job.kind} {job.id}: a late answer, kept as the alternative"
-            + ("" if self.clip_is_context(job.id) else f": {text}"))
+        log(f"aws transcribe: {job.kind} {job.id}: a late answer, kept as the alternative ({logscrub.said(text)})")
         self._set_alt(job.id, text, f"{channels_model()} (late)")
 
     def _aws_changed(self) -> None:
@@ -5092,6 +5241,372 @@ class App:
                         "unowned": [j for j in g.jobs if j not in owns and j not in g.parked], "conflicts": conf})
         return out
 
+    # -- a dongle swapped for a new one (sizeup/radio/replace.py) ----------------------------------------------------
+
+    def _load_seen(self) -> dict[str, dict]:
+        try:
+            d = json.loads(self._seen_file.read_text()) if self._seen_file else {}
+        except (OSError, ValueError):
+            d = {}
+        return {str(k): v for k, v in d.items() if isinstance(v, dict)} if isinstance(d, dict) else {}
+
+    def _note_seen(self, devs: list[tuple[int, str, str]], ports: dict[str, str] | None = None) -> None:
+        """Each dongle plugged in now (its serial on one dongle): seen now, on its USB port, with the tuner rtl_fm
+        reported on it; a serial never seen before also gets "first" (when it first appeared: auto-replace takes only
+        a dongle that appeared after the gone one was last seen, never an old spare). sdr_seen.json is written when one
+        of those changes, else every SEEN_WRITE_S."""
+        now = time.time()
+        tuners = {sd: r.tuner for r in self.receivers
+                  if (sd := getattr(r.device, "serial", None)) and getattr(r, "tuner", "")}
+        ports = usbreset.ports() if ports is None else ports
+        dup = sdr_lookup.duplicates(devs)
+        with self._swap_lock:
+            changed = False
+            for _i, p, sd in devs:
+                if not sd or sd in dup:
+                    continue
+                was = self._last_seen.get(sd)
+                row = dict(was or {}, at=round(now, 1))
+                if was is None:
+                    row["first"] = round(now, 1)
+                if p:
+                    row["product"] = p
+                if ports.get(sd):
+                    row["port"] = ports[sd]
+                if t := swap.tuner_name(tuners.get(sd, "")):
+                    row["tuner"] = t
+                changed = changed or {k: v for k, v in row.items() if k != "at"} != \
+                    {k: v for k, v in (was or {}).items() if k != "at"}
+                self._last_seen[sd] = row
+            if self._seen_file is None or not (changed or now - self._seen_flushed >= SEEN_WRITE_S):
+                return
+            self._seen_flushed = now
+            text = json.dumps(self._last_seen, indent=1, sort_keys=True)
+        try:
+            tmp = self._seen_file.with_name(f".{self._seen_file.name}.{os.getpid()}.{threading.get_ident()}")
+            tmp.write_text(text)
+            os.replace(tmp, self._seen_file)
+        except OSError:
+            pass
+
+    def _swap_caps(self, sd: str, product: str = "") -> dict:
+        """A dongle's {"caps", "port", "bus"} for the pairing, from what is known of it now or at its last sight."""
+        was = self._last_seen.get(sd) or {}
+        port = str(was.get("port") or "")
+        return {"serial": sd, "caps": swap.caps(product or self._products.get(sd) or str(was.get("product") or ""),
+                                                str(was.get("tuner") or "")),
+                "port": port, "bus": port.split("-", 1)[0] if port else ""}
+
+    def _job_needs(self, job: str) -> dict:
+        """What a job needs of a dongle (swap.needs): its frequencies and the sample rate it takes."""
+        if job in self._sys_jobs:
+            rt, k = self._sys_jobs[job]
+            src = next((x for x in rt.system.sources if x.index == k), None)
+            return swap.needs([src.center / 1e6] if src else [], src.rate if src else 0.0)
+        if job == P25_MODE:
+            try:
+                srcs = json.loads((Path(self.cfg.p25_recorder_dir) / "config.json").read_text()).get("sources") or []
+                x = srcs[0] if srcs and isinstance(srcs[0], dict) else {}
+                return swap.needs([float(x["center"]) / 1e6] if x.get("center") else [], float(x.get("rate") or 0.0))
+            except (OSError, ValueError, TypeError, KeyError):
+                return swap.needs()
+        c = next((c for c in self.cfg.channels if c.label == job), None)
+        if c is None:
+            return swap.needs()
+        fs = [c.mhz] + [a[0] for a in c.also]
+        span = (max(fs) - min(fs)) * 1e6 if len(fs) > 1 and self.cfg.airband_multichannel else 0.0
+        return swap.needs(fs, span * 1.25 if span else 0.0)
+
+    def _critical_job(self, job: str) -> bool:
+        """Auto-replace's jobs (Settings, off by default): the county's trunk-recorder and paging, nothing else."""
+        return job == P25_MODE or self._kind.get(job) == "paging"
+
+    def _gone_jobs(self) -> dict[str, tuple[str, str]]:
+        """The dongles that have a job of their own or are in an antenna group: {serial: (own job, group name)}."""
+        out = {sd: (self._own_of(sd), "") for sd in set(self.assign) | set(self._own)
+               if self._own_of(sd) != OFF_MODE}
+        for g in self.groups:
+            for sd in g.sdrs:
+                out[sd] = (self._own_of(sd), g.name)
+        return {sd: v for sd, v in out.items() if not self._sdr_ignored(sd)}
+
+    def missing_rows(self) -> list[dict]:
+        """sdr()["missing"]: every dongle with a job or in a group that isn't plugged in, as replace_offers() last
+        looked: {serial, name, jobs, group, absent_s (this run), last_seen (wall clock, None: never seen)}."""
+        mono = time.monotonic()
+        rows = []
+        for sd, (job, g) in sorted(self._gone_jobs().items()):
+            with self._swap_lock:
+                since = self._absent.get(sd)
+                at = (self._last_seen.get(sd) or {}).get("at")
+            if since is None:
+                continue
+            rows.append({"serial": sd, "name": self.sdr_name(sd), "jobs": [job] if job != OFF_MODE else [], "group": g,
+                         "absent_s": round(mono - since),
+                         "last_seen": at if isinstance(at, (int, float)) and not isinstance(at, bool) else None})
+        return rows
+
+    def _new_free(self, sd: str, devs, lent) -> bool:
+        """A dongle plugged in that a gone one's jobs may be offered to: no job, in no group, not switched Off by a
+        person (handed to another app, or parked), not another app's, not out for no audio, not lent, one serial."""
+        return (self.assign.get(sd, OFF_MODE) == OFF_MODE and sd not in self._own
+                and antenna.of_sdr(self.groups, sd) is None and self.set_by.get(sd) != "person"
+                and not claims.other(sd) and sd not in self._noaudio and not self.reception.holds(sd)
+                and not (lent and lent[0] == sd) and not self._ambiguity(sd, devs))
+
+    def replace_offers(self, devs=None) -> list[dict]:
+        """sdr()["replace"]: each dongle with a job (or in an antenna group) gone swap.MISSING_S, with the new dongles
+        that fit its jobs (swap.pair): {missing, name, jobs, group, absent_s, pick (the new one the pairing decided, or
+        "": ask), choices: [{serial, name, product, tuner}], only (exactly one fits), critical (the county's or
+        paging), auto (the hub's auto-replace may move it: _auto_ok), why: {new serial: why it doesn't fit}}. Never one
+        put off with Not now, never one whose job already runs on another dongle as that dongle's own (auto-assign,
+        or a person, gave it a replacement: nothing is left to ask)."""
+        if not self.shared:
+            return []
+        devs = sdr_lookup.devices(self.cfg.rtl_fm) if devs is None else devs
+        with self._swap_lock:
+            ports = usbreset.ports()
+            self._note_seen(devs, ports)
+            mono = time.monotonic()
+            here = {s for _i, _p, s in devs if s}
+            gone = self._gone_jobs()
+            for sd in [s for s in self._absent if s in here or s not in gone]:
+                self._absent.pop(sd, None)
+            for sd in gone:
+                if sd not in here:
+                    self._absent.setdefault(sd, mono)
+            products = {s: p for _i, p, s in devs if s}
+            lent = self.reception.lent()
+            new = [self._swap_caps(s, products.get(s, "")) for s in self._plugged()
+                   if self._new_free(s, devs, lent)]
+            # every gone dongle with a job, however long gone, Not now included: auto-replace's "fits no other"
+            gone_jobs = {sd: job for sd, (job, _g) in gone.items() if sd in self._absent and job != OFF_MODE}
+            missing = []
+            for sd, (job, g) in sorted(gone.items()):
+                if mono - self._absent.get(sd, mono) < swap.MISSING_S or self._swap_later.get(sd, 0.0) > mono:
+                    continue
+                if job == OFF_MODE and not g:
+                    continue
+                if job != OFF_MODE and self._job_taken(job, sd, here):
+                    continue                     # its job is another dongle's own now: no question left
+                missing.append(dict(self._swap_caps(sd), job=job, group=g,
+                                    needs=[self._job_needs(job)] if job != OFF_MODE else []))
+            offers = swap.pair(missing, new) if missing and new else []
+            by = {m["serial"]: m for m in missing}
+            names = {n["serial"]: n for n in new}
+            out = []
+            for o in offers:
+                m = by[o["missing"]]
+                out.append({"missing": m["serial"], "name": self.sdr_name(m["serial"]),
+                            "jobs": [m["job"]] if m["job"] != OFF_MODE else [], "group": m["group"],
+                            "absent_s": round(mono - self._absent.get(m["serial"], mono)), "pick": o["pick"],
+                            "only": o["only"], "critical": m["job"] != OFF_MODE and self._critical_job(m["job"]),
+                            "auto": self._auto_ok(m, o["choices"], names, gone_jobs, ports, here),
+                            "choices": [{"serial": n, "name": self.sdr_name(n), "product": names[n]["caps"]["product"],
+                                         "tuner": names[n]["caps"]["tuner"]} for n in o["choices"]],
+                            "why": o["why"]})
+                for n in o["choices"]:
+                    if (m["serial"], n) not in self._swap_said:
+                        self._swap_said.add((m["serial"], n))
+                        log(f"sdr: new SDR {self._sdr_tag(n)} fits {self._sdr_tag(m['serial'])}'s "
+                            f"{m['job'] if m['job'] != OFF_MODE else 'place in ' + m['group']} (gone "
+                            f"{mono - self._absent.get(m['serial'], mono):.0f} s): offered, never moved by itself")
+            self.swap_offers = out
+            return out
+
+    def _swap_state(self, devs) -> dict:
+        """sdr()'s "replace" and "missing". A fault in them is logged once and leaves both empty: sdr() is in every
+        status post (Link.status), which must never stop over this."""
+        try:
+            out = {"replace": self.replace_offers(devs), "missing": self.missing_rows()}
+            self._swap_fault = ""
+            return out
+        except Exception as e:  # noqa: BLE001 - the talkers and pages go up regardless
+            why = f"{type(e).__name__}: {e}"
+            if why != self._swap_fault:
+                self._swap_fault = why
+                log(f"sdr: dongle swap offers left out: {why}")
+            return {"replace": [], "missing": []}
+
+    def _job_taken(self, job: str, sd: str, here: set[str]) -> bool:
+        """`job` is another plugged-in dongle's own (auto-assign gave it, or a person picked it): not a group's
+        stand-in, which only covers for the gone one."""
+        return any(o != sd and o in here and m == job and o not in self._own for o, m in list(self.assign.items()))
+
+    def _auto_ok(self, m: dict, choices: list[str], new: dict[str, dict], gone_jobs: dict[str, str],
+                 ports: dict[str, str], here: set[str]) -> bool:
+        """The hub's auto-replace (Settings, off by default) may move the gone dongle `m`'s job by itself only when
+        every one of these holds, else a person decides: the job is the county's or paging; exactly one new dongle
+        fits it, and that one fits no other gone dongle with a job (however long gone, Not now included); it is on
+        exactly the USB port the gone one last used (no ports known, as on macOS: never); it first appeared after the
+        gone one was last seen (an old idle spare never); the job runs on no dongle now (no stand-in, no replacement
+        auto-assign gave); and, when both tuners are known, the same tuner."""
+        job, sd = m["job"], m["serial"]
+        if job == OFF_MODE or not self._critical_job(job) or len(choices) != 1:
+            return False
+        n = choices[0]
+        caps = (new.get(n) or {}).get("caps") or {}
+        if any(o != sd and swap.fits(caps, self._job_needs(j)) == "" for o, j in gone_jobs.items()):
+            return False
+        old = self._last_seen.get(sd) or {}
+        if not old.get("port") or ports.get(n) != old["port"]:
+            return False
+        first, last = (self._last_seen.get(n) or {}).get("first"), old.get("at")
+        if not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in (first, last)) or first <= last:
+            return False
+        if self._program_on(job) not in (None, sd) or \
+                any(o != sd and o in here and j == job for o, j in list(self.assign.items())):
+            return False
+        a = m.get("caps") or {}
+        return not (a.get("known") and caps.get("known") and a.get("tuner") != caps.get("tuner"))
+
+    def replace_sdr(self, missing: str, new: str = "", action: str = "use", by: str = "person") -> str | None:
+        """POST /api/sdr-replace {missing, new?, action} (admins; the hub sends it here as a job, and its auto-replace
+        with by "auto"): action "use": the gone dongle's job (and its place in its antenna group) goes to the new one,
+        which must be one replace_offers() offers it now; "not_now": its offer isn't made again for swap.NOT_NOW_S;
+        "drop": a gone dongle taken out of its antenna group. None, or why not."""
+        if not self.shared:
+            return "each channel has its own dongle: nothing to replace"
+        missing, new, action = str(missing or "").strip(), str(new or "").strip(), str(action or "use")
+        by = "auto" if by == "auto" else "person"
+        if action == "not_now":
+            self._swap_later[missing] = time.monotonic() + swap.NOT_NOW_S
+            log(f"sdr: SDR {self._sdr_tag(missing)}'s new dongle: not now (asked again in "
+                f"{swap.NOT_NOW_S / 3600:.0f} h)")
+            return None
+        if action == "drop":
+            return self._drop_gone(missing)
+        if action != "use":
+            return "action: use, not_now or drop"
+        with self._mode_lock:
+            offer = next((o for o in self.replace_offers() if o["missing"] == missing), None)
+            if offer is None:
+                return f"SDR {self.sdr_name(missing)}: no new dongle offered for it now"
+            if new not in [c["serial"] for c in offer["choices"]]:
+                return f"SDR {self.sdr_name(new)} doesn't fit SDR {self.sdr_name(missing)}'s jobs (or isn't free)"
+            if by == "auto" and not (offer.get("auto") and [c["serial"] for c in offer["choices"]] == [new]):
+                return f"SDR {self.sdr_name(missing)}: not one to replace by itself (a person decides)"
+            job = self._own_of(missing)
+            g = antenna.of_sdr(self.groups, missing)
+            if g is not None:
+                err = self._replace_in_group(g, missing, new, job, by)
+            else:
+                had = (self.assign.get(missing, OFF_MODE), self.set_by.get(missing))
+                err = self.set_mode(job, new, by=by, confirm=True)
+                if err is None:
+                    self._forget_gone(missing)
+                    self._save_modes()
+                elif self.assign.get(missing, OFF_MODE) != had[0]:
+                    # (set_mode puts the gone one Off before the new one starts: never the job on no dongle)
+                    self.assign[missing] = had[0]
+                    if had[1] is not None:
+                        self.set_by[missing] = had[1]
+                    self._save_modes()
+            if err is None:
+                with self._swap_lock:
+                    self._absent.pop(missing, None)
+        log(f"sdr: SDR {self._sdr_tag(missing)} replaced by SDR {self._sdr_tag(new)} ({by}): "
+            + (job if job != OFF_MODE else "no job") + (f", group {g.name}" if g is not None else "")
+            + (f": {err}" if err else ""))
+        return err
+
+    def _replace_in_group(self, g, missing: str, new: str, job: str, by: str) -> str | None:
+        """Use it for a grouped dongle (under _mode_lock): the new serial in the gone one's place, its job started
+        there; the groups file is written only once that worked. Anything that fails puts everything back as it was
+        (the group's plan runs its jobs on the dongles it has, a stand-in included)."""
+        was = (self.groups, dict(self.assign), dict(self._own), dict(self.set_by),
+               {id(d): (d, dict(d)) for d in (self._gseen, self._gusable, self._gflap, self._gfail)})
+        with self._noaudio_lock:
+            noaudio = self._noaudio.get(missing)
+        ran = {m: self._program_on(m) for m in self.modes if m != OFF_MODE}   # each job's dongle before
+
+        def back(why: str) -> str:
+            # first every program that moved on the way stops (a stand-in's own job started where the county's ran:
+            # two programs on one dongle once the plan puts the county's back), then the records, then the plan
+            for m, was_on in ran.items():
+                now_on = self._program_on(m)
+                if now_on is not None and now_on != was_on:
+                    self._stop_mode(m, f"Use it for SDR {self.sdr_name(missing)} undone", now_on)
+            self.groups = was[0]
+            for live, saved in ((self.assign, was[1]), (self._own, was[2]), (self.set_by, was[3])):
+                live.clear()
+                live.update(saved)
+            for d, saved in was[4].values():
+                d.clear()
+                d.update(saved)
+            if noaudio is not None:
+                with self._noaudio_lock:
+                    self._noaudio[missing] = noaudio
+            self._save_modes()
+            self._groups_reconcile()
+            return why
+
+        gs = [dataclasses.replace(x, sdrs=tuple(new if s == missing else s for s in x.sdrs)) if x is g else x
+              for x in self.groups]
+        self.groups = gs
+        self._forget_gone(missing)
+        if job != OFF_MODE:
+            err = self._set_group_mode(antenna.of_sdr(gs, new), job, new, by)
+            if err is None and self._program_on(job) != new:
+                err = f"{job} didn't start on SDR {self.sdr_name(new)}"
+            if err is not None:
+                return back(err)
+        else:
+            self._save_modes()
+            self._groups_reconcile()
+        if self._groups_file is not None:
+            try:
+                antenna.save(self._groups_file, gs)
+            except OSError as e:
+                return back(f"couldn't keep the groups: {e}")
+        if job != OFF_MODE:
+            self.reception.switched(new, job)
+        return None
+
+    def _forget_gone(self, sd: str) -> None:
+        """A gone dongle replaced or taken out of its group: no job, no stand-in, nothing of the group's left on it."""
+        cur = self.assign.get(sd, OFF_MODE)
+        if cur != OFF_MODE and self._program_on(cur) == sd:
+            self._stop_mode(cur, f"SDR {self.sdr_name(sd)} replaced", sd)
+        self._own.pop(sd, None)
+        if sd in self._listed:
+            self.assign[sd] = OFF_MODE          # (listed in [radio] sdrs: its row stays, Off)
+        else:
+            self.assign.pop(sd, None)
+        self.set_by.pop(sd, None)
+        for d in (self._gseen, self._gusable, self._gflap, self._gfail):
+            d.pop(sd, None)
+        with self._noaudio_lock:
+            self._noaudio.pop(sd, None)          # (a gone serial's "no audio" ends with it)
+        self._swap_said = {x for x in self._swap_said if x[0] != sd}
+
+    def _drop_gone(self, sd: str) -> str | None:
+        """Health's "missing 1 d: remove from group?": a gone dongle out of its antenna group (its job with it)."""
+        with self._mode_lock:
+            g = antenna.of_sdr(self.groups, sd)
+            if g is None:
+                return f"SDR {self.sdr_name(sd)} is in no antenna group"
+            if sd in {s for _i, _p, s in sdr_lookup.devices(self.cfg.rtl_fm)}:
+                return f"SDR {self.sdr_name(sd)} is plugged in: change its group in Receivers"
+            if len(g.sdrs) == 1:
+                return f"SDR {self.sdr_name(sd)} is {g.name}'s only dongle: delete the group in Receivers"
+            gs = [dataclasses.replace(x, sdrs=tuple(s for s in x.sdrs if s != sd)) if x is g else x for x in self.groups]
+            if self._groups_file is not None:
+                try:
+                    antenna.save(self._groups_file, gs)
+                except OSError as e:
+                    return f"couldn't keep the groups: {e}"
+            job = self._own_of(sd)
+            self.groups = gs
+            self._forget_gone(sd)
+            with self._swap_lock:
+                self._absent.pop(sd, None)
+            self._save_modes()
+            self._groups_reconcile()
+        log(f"sdr: SDR {self._sdr_tag(sd)} taken out of antenna group {g.name} (gone)"
+            + (f": {job} has no dongle of its own there now" if job != OFF_MODE else ""))
+        return None
+
     def _start_watch(self) -> None:
         """The sdr-watch thread, once: auto-assign's, and the antenna groups' (also with auto_assign off)."""
         if not self._watching:
@@ -5370,17 +5885,29 @@ class App:
         return None
 
     def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None,
-                      tier: str | None = None, system: str = "") -> str | None:
+                      tier: str | None = None, system: str = "", transcribe: bool | None = None,
+                      alerts: bool | None = None) -> str | None:
         """POST /api/talkgroup: record = keep its calls; main = main list + attach to our incident. Another system's
-        talkgroup (#409: `system`, "" = the county's): tier = alert | text | record | off | activity."""
+        talkgroup (#409: `system`, "" = the county's): tier = alert | text | record | off | activity, or the switches
+        transcribe / alerts (with record), written as the tier they make (tiers.from_switches). The county's
+        Transcribe is its channel choice (/api/cad/settings/channels) and it has no Alerts: refused here."""
         if not self.p25:
             return "no P25 configured"
         qualified = system == self.tg.county             # sent as the county's source ("p25:westchester:<n>"): no doubt
         system = "" if system == self.tg.county else str(system or "")
         if system and not self.tg.known(int(tg), system):
             return f"no talkgroup {tg} on {system}"
+        if tier is not None and (transcribe is not None or alerts is not None):
+            return tiers.BOTH
         if tier is not None:
             return self.set_talkgroup_tier(tg, tier, system)
+        if transcribe is not None or alerts is not None:
+            if not system:
+                return (tiers.COUNTY_ALERTS if alerts is not None
+                        else "the county's Transcribe is its channel choice: /api/cad/settings/channels")
+            t, why = tiers.from_switches(self.tg.tier(int(tg), system), bool(self.tg.info[(system, int(tg))].get(
+                "encrypted")), record, transcribe, alerts)
+            return why or self.set_talkgroup_tier(tg, t, system)
         if not system and not qualified and (owners := self.tg.elsewhere(int(tg))):
             # a bare number is the county's: this one is another system's talkgroup (its Main / Record would have
             # landed on a county talkgroup that doesn't exist, an "Unknown" card): never written
@@ -5431,6 +5958,8 @@ class App:
                           **self._group_row(sd)}
                          for sd in rows],
                 "groups": self.groups_state(),       # antenna groups: [] when there are none
+                # a dongle swapped for a new one: the new dongles that fit a gone one's jobs, and every gone dongle
+                **self._swap_state(devs),
                 "no_park": [m for m in self.modes if m != OFF_MODE and not self._parkable(m)],   # (#637) the editor
                 "groups_problem": self._groups_problem}   # the groups file dropped (unreadable): "" when fine
 
@@ -6070,7 +6599,7 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
                        role=cfg.cloud_role, roads=app.roads, gis=app.gis,
                        trains=app.trains, weather=app.weather, station_health=getattr(app, "health", None),
                        aircraft=app.aircraft, roadwork=app.roadwork, set_adsb=app.set_adsb_receiver,
-                       set_groups=app.set_antenna_groups,
+                       set_groups=app.set_antenna_groups, replace_sdr=app.replace_sdr,
                        vessels=app.vessels,
                        airband_ab=app.airband_ab if cfg.cloud_role != "hub" else None,
                        reception=(app.reception_post, app.reception_sample, app.reception_state),

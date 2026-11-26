@@ -88,7 +88,8 @@ _TUPLE = re.compile(r"\(\s*(['\"])(?:\\.|(?!\1).)*\1\s*,\s*(['\"])(?:\\.|(?!\2).
 _QUERY = re.compile(r"(?i)([?&](?:" + _KEY + r"|p|pw|pin|pass|code|key|x-amz-[a-z-]+)=)[^&\s#\"']+")
 _AWS_KEY_ID = re.compile(r"\b(?:AKIA|ASIA|AROA|AIDA|AGPA|ANPA|ANVA|AIPA)[A-Z0-9]{16}\b")
 _JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
-_SZ1 = re.compile(r"\b(sz1\.[a-z0-9][a-z0-9_-]{0,39}\.)[A-Za-z0-9_-]{16,}")   # a station token (sizeup/cloud/stations.py): the id stays
+_SZ1 = re.compile(r"\b(s[zw]1\.[a-z0-9][a-z0-9_-]{0,39}\.)[A-Za-z0-9_-]{16,}")   # a station token (sizeup/cloud/stations.py) or a
+# GPU worker's (sw1, sizeup/cloud/sttworkers.py): the id stays
 # 32+ characters of a token alphabet with upper case, lower case and a digit: a secret's shape (a git sha, a uuid or a
 # hex digest is lower case only and stays)
 _LONG = re.compile(r"(?<![A-Za-z0-9/+_=-])[A-Za-z0-9/+_=-]{32,}(?![A-Za-z0-9/+_=-])")
@@ -121,6 +122,14 @@ def _forms(v: str) -> set[str]:
            base64.b64encode(b).decode().rstrip("="), b.hex(), b.hex().upper()}
     out |= _b64_aligned(b)
     return {f for f in out if f}
+
+
+def said(text: str | None) -> str:
+    """What a log line may say of private words (a transcript, a page, a prompt, a term list, a dispatch's or an alarm's
+    text): how many words, never the words. Logs go to CloudWatch (the hub's stdout to /ecs/sizeup-hub, the station's
+    journal to /sizeup/station); the words stay in the hub's database, behind sign-in."""
+    n = len(str(text or "").split())
+    return f"{n} word{'' if n == 1 else 's'}" if n else "no words"
 
 
 def secret(*values: str, short: bool = False) -> None:

@@ -636,6 +636,7 @@ Settings > Station > Health (`static/health.js`), top to bottom. A row with noth
 
 | Row | Shows | Look here when |
 |---|---|---|
+| New dongles | "New dongle *serial* seen — use it for *jobs*?": Use it, Not now ([A dongle swapped for a new one](#a-dongle-swapped-for-a-new-one)) | a dongle was replaced |
 | Alerts now | each alert that is on: severity, since when, where, pushed or muted | anything is red |
 | Hints | a channel quiet for longer than usual, a squelch opening on noise, context clips shed, the police budget used up | never pushed: read with the Channels row |
 | Incident sources | each source's tier, state (ok, backing off, failing, stale), reason, last report, which one is the acting primary; each source's lead over paging; reports a feed no longer lists | the console pill says "Paging primary" |
@@ -667,6 +668,38 @@ hour, then "Hub errors back to normal" once it has been at or under its threshol
 in `hub.sqlite` (meta "errwatch"), so a redeploy doesn't push a running fault again. Settings → System → **Hub error
 alerts** (admins, the hub): on / off and the two numbers; Settings → Station → Health: **Hub errors**, the rate and
 the top signatures with their last message (admins only). The access log (`http ...` lines) is not counted.
+
+### A dongle swapped for a new one
+
+New dongles (new serials) put in for old ones leave the jobs on the old serials: nothing moves them by itself
+(2026-11-25: hours without coverage). The station now says so (`sizeup/radio/replace.py`, `App.replace_offers`):
+a dongle with a job, or in an antenna group, gone 60 s, and a new dongle plugged in with no job, in no group, not
+switched Off by a person, not another app's (the shared claims), not out for no audio, that **fits** the gone one's
+jobs: each frequency in its tuner's range (R820T / R828D / E4000 / FC0012 / FC0013 / FC2580: the tuner rtl_fm reported
+on it, else its USB product, else taken as an R820T), HF only with direct sampling (Blog V3/V4), the sample rate the
+job takes. Several gone and several new: paired by the same tuner, then the same product, then the USB port (or bus)
+the gone one was on (`sdr_seen.json`); when that can't tell, each new dongle that fits is offered and a person picks.
+
+- **Health** (New dongles) and **the console** (under the radio, like the new radio IDs): "New dongle *serial* seen —
+  use it for Fire/EMS 15?". **Use it** (admins, `POST /api/sdr-replace`, in their activity) moves the gone dongle's
+  job there, and its place in its antenna group (replaced, never added beside it). **Not now**: asked again in 6 h.
+- **"SDR *x* gone"** names its job, says when a new dongle fits, and links to the dongle's row in Settings > Radios >
+  Receivers (the push too). When the dongle leaves the station's config (Use it, a group saved without it) the alert
+  clears as "SDR *x* removed from config (jobs now on *y*)", never "Recovered".
+- A group's dongle missing for a day: a Health hint "*serial* missing 1 d: remove from group?" with **Remove**.
+- **No question left**: a gone dongle whose job already runs on another dongle as that dongle's own (auto-assign gave
+  it a replacement, or a person picked it) is not offered. A group's stand-in only covers: its gone dongle is offered.
+- **Use it** that fails (the new dongle doesn't start the job) puts everything back: the job stays the gone dongle's,
+  and an antenna group and its file are only changed once the job runs on the new dongle.
+- **Auto-replace** (Settings > Radios > Receivers, *New dongles*, off by default): 60 s after the old one went, the
+  hub moves it (`sizeup/cloud/dongleswap.py`), audits it ("auto-replace", Radios) and pushes "Auto-replaced SDR *x*"
+  to the status topic, only when the station marks the offer `auto` (`App._auto_ok`), which needs all of:
+  Fire/EMS 15 or paging; exactly one new dongle fits, and it fits no other gone dongle with a job (however long gone,
+  Not now included); it is on exactly the USB port the gone one last used (no ports known, as on macOS: never; the
+  port is a path, not the dongle: a hub moved or renumbered can put another new dongle on the old path, so this rule
+  is only as good as the ports staying put); it first appeared after the gone one was last seen (`sdr_seen.json`
+  `first`: an old idle spare never); the job runs on no dongle now (no stand-in, no auto-assigned replacement); the
+  same tuner when both are known. The station checks it again before it moves anything. Anything less is asked.
 
 ### The alert and status topics (ntfy)
 
@@ -1282,6 +1315,25 @@ them).
 - An event's own layer set (a dispatcher's change on its map) stays the event's, for everyone who opens it.
 - All-in-one, or a hub without Access: nobody to keep them for; the browser keeps them, as before.
 
+### Live audio on every view: the live player and Listening
+
+Live radio follows the dispatcher around the console (`static/live-player.js`): **Listen** in the header (or on the
+Radio view) turns it on with one click (the browser's autoplay rule), and a strip under every view (Overview, Incident,
+Radio, Search, Settings) shows what plays: service, channel, talker, elapsed, how many wait, play / pause, skip
+(`]`), mute (`M`), volume, *Our calls only*, *Mute police*, **Listening** and *Go to* (its row on the Radio view).
+The page never reloads between views, so a clip is never restarted. /monitor keeps its own **Sound**.
+
+- **What plays** is each person's own (`PUT /api/me/prefs/listen`, validated in `sizeup/cad/prefs.py`): a level
+  (*Priority*, *Normal*, *Off*) per target, the most specific first: a channel or talkgroup (also from each row of the
+  Radio rail), a frequency, *Our calls* (dispatch, paging, firegrounds), a system, a service. A new person: Our calls
+  Priority, the rest Off. Volume, mute and on/off are the device's own.
+- **Priority** plays first and is never dropped; over a Normal one it interrupts (the Normal one resumes after, unless
+  too old), ducks it or waits, as chosen. **Normal** ones queue oldest first and are dropped once older than *Max age*
+  (60 s) or when 15 wait. An emergency on a channel you listen to plays as Priority. Key-ups never play.
+- **Load**: no timer of its own. When the state push's `comms_rev` moves, one
+  `GET /api/cad/comms?view=all&type=radio&changed=<cursor>` (what changed since; the hub's #419 gate decides what this
+  person may hear), only while it is on. A clip played by hand holds it until that clip ends.
+
 ## Config
 
 Station (optional: the station page's Settings does the same; see `deploy/station/README.md`):
@@ -1546,7 +1598,7 @@ clip waits for one only as long as its class allows. After that the clip goes th
   - Switches: the pool's On (Settings > Station > STT workers) turns the lane off too (`available()` false, no claims). Each GPU worker has an "LLM jobs" switch there, on by default and audited; off, it gets no prompts (a job it holds goes back to the queue). Only a GPU worker's own token (`sw1`) reaches `/api/station/stt/infer/*`: anything else (a station's whisper in the pool) gets 403 and never sees a prompt.
   - Futures are resolved on the lane's own result thread, never on a worker's request thread or under a lock; a job is answered at its deadline (the lane wakes for the earliest one). A done-callback must not log the answer.
   - `available()` and `submit()` never wait: they read what the lane last worked out (set on every worker request, switch, lease change and tick, under a lock that never does I/O). The switches are read from hub.sqlite outside the lane's lock (the tick at most once a second, a worker new to the lane, and at once on an admin's change), and a claim asks the STT pool before taking the lane's lock.
-  - The worker side (`tools/stt_worker/worker.py`, `llm_url`): llama.cpp's `llama-server` on 127.0.0.1, its GGUF checked against a pinned SHA-256, a random API key per start, constrained output (`response_format: json_schema`); a pre-alert clip, gaming or a pause aborts a generation and hands the job back; gaming stops llama-server after 60 s. The model chosen: Qwen3-8B Q4_K_M, thinking off (the comparison: `tools/stt_worker/llm_eval/`).
+  - The worker side (`deploy/stt-worker/worker.py`, `llm_url`): llama.cpp's `llama-server` on 127.0.0.1, its GGUF checked against a pinned SHA-256, a random API key per start, constrained output (`response_format: json_schema`); a pre-alert clip, gaming or a pause aborts a generation and hands the job back; gaming stops llama-server after 60 s. The model chosen: Qwen3-8B Q4_K_M, thinking off (the comparison: `tools/stt_worker/llm_eval/`).
   - Privacy: prompts and answers exist only in memory on their way to the worker and back. They are never logged, never in Health, `stt_runs` or a database. Health ("GPU workers: LLM") shows each worker's STT and LLM models, and per task the jobs an hour, p50 / p95, token counts and the failures by why.
 - **Cloudflare:** each worker needs a Cloudflare Access service token. The recommended setup is a Cloudflare Access application of its own, scoped to `/api/station/stt/*`, so that token reaches nothing of the station's. This is an operator step.
 - **Every transcript is kept:** the hub appends each one to `stt_runs`, from every engine (the GPU worker, AWS, the station's whisper).
@@ -3078,6 +3130,16 @@ A talkgroup of another system has a tier, not Record / Main / Transcribe (`sizeu
 
 - The default is the file's `Tier` column. With none, a talkgroup is `record` (no STT cost) and an encrypted one is
   `activity`. Settings > Radios > Channels changes it per talkgroup.
+- Settings > Radios > Channels shows it as the same switches as every other talkgroup: Record, Transcribe, Alerts
+  (`alert`), Main (another system's: never, shown disabled). A switch is written as the tier it makes
+  (`tiers.from_switches`): Alerts on turns on Transcribe and Record, Record off turns the others off. The page's Record
+  on is `record` only (it sends `{"record": true, "transcribe": false}`), so one tap never turns on Transcribe or
+  Alerts. `record` alone (the API, a whole section's switch) is the file's tier if that records, else `record`. An
+  encrypted talkgroup has only "Activity only" (`activity` / `off`). `POST /api/talkgroup` takes `transcribe` /
+  `alerts` instead of `tier` (both in one request: 400, "send tier or switches, not both"), and the state's talkgroup
+  rows carry `transcribe` and `alerts` beside `tier`. The county's talkgroups keep Record / Main / Transcribe; their
+  `alerts` is null (the switch has no knob, disabled): their pre-alerts are the intel packs' (scoped by service and
+  source), not a per-talkgroup choice.
 - An encrypted talkgroup is only ever `activity` or `off`. Nothing of it is recorded or decoded. Its key-ups are
   counted per minute with the radio IDs (`radio_activity`), from the control channel's grants.
 - Neither tier is ever ahead of the pages, Fire/EMS 15, the firegrounds, the airband, a Main talkgroup or a
@@ -3925,6 +3987,12 @@ The whole of it is in **[docs/station-logs.md](station-logs.md)**: the path, the
 | Settings | Settings > Station > Logs (section `station_logs`, audited as System): on / off, the least level, units, retention (7 days to a year), and whether the adapter's own lines are shipped (off by default) |
 | Off | `SIZEUP_LOG_SHIP=off` in the station's `station.env`, or the Settings switch |
 
+The GPU STT workers' own `worker.log` goes the same way: `deploy/stt-worker/worker.py` LogShip (scrubbed, gzipped,
+spooled on the PC, deleted once accepted) → `POST /api/station/stt/logs` (the worker token) → `sizeup/cloud/cwlogs.py`
+WorkerLogs → log group `/sizeup/stt-worker`, a stream per worker id, the stations' retention. The hub makes the group
+on first use; the task role needs the `stt-worker-logs` policy (sizeup-aws `31-stt-worker-logs.sh`, step 31; [deploy/stt-worker/README.md](../deploy/stt-worker/README.md#logs-cloudwatch)),
+and until it has it Health shows `not shipped: permission` and the workers keep their batches.
+
 ## Station metrics: signal over time
 
 So the squelch and the gain of each channel can be tuned from weeks of numbers instead of one log line (a rewire that
@@ -4014,7 +4082,7 @@ Beyond the three files:
 | The attachments bucket (`SIZEUP_ATTACHMENTS_BUCKET`) | [incident attachments](#incident-attachments-323). Versioned, Object Lock |
 | EFS at `/data/dvr` | the camera DVR's 12 h ([Shared storage](#shared-storage-12-h-of-our-response-area-322)) |
 | The task's own disk | the standby's copies (`/data/standby`), the leader's check copies (`/data/.replica-check`), `dispatch-audio/`, `audio-cache/`, the map caches: gone with the task |
-| CloudWatch Logs | `/ecs/sizeup-hub` (the hub's own log), `/sizeup/station` ([Station logs](#station-logs-cloudwatch)) |
+| CloudWatch Logs | `/ecs/sizeup-hub` (the hub's own log), `/sizeup/station` ([Station logs](#station-logs-cloudwatch)), `/sizeup/stt-worker` (the GPU workers') |
 
 The hub has no `captures/`. Dispatch WAVs are also cached in `dispatch-audio/` on the task's disk; after a
 redeploy they're served from `audio.sqlite` (or its S3 bucket).

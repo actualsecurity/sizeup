@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from sizeup import polly, sourcekeys, tiers
+from sizeup import polly, radionames, sourcekeys, tiers
 from sizeup.cad import airport, commonplaces, dispatcher, eta, export, feedtypes, mapview, radiofolders, runcards
 from sizeup.cad.activity import Activity
 from sizeup.cad.prefs import Prefs
@@ -66,7 +66,8 @@ AUDIO_NAME = re.compile(r"[0-9a-f]{20}")
 COMMS_CACHE_S, COMMS_CACHE_N = 10.0, 32     # GET /api/cad/comms: an answer reused this long, at most this many kept (#284)
 # GET /api/cad/comms: any of these asks for a page of a view (#415, Cad._comms_page), none: Main and Other as before
 COMMS_PAGE_PARAMS = ("view", "system", "group", "source", "service", "tier", "dept", "safety", "mute", "before", "changed", "at")
-COMMS_UNSENT = ("call_id", "turn", "updated_at")   # radio_traffic columns the Radio view never reads (#284: smaller answer)
+# radio_traffic columns the Radio view never reads (#284: smaller answer); corr_*: sent as fixed_text / fixes (#879)
+COMMS_UNSENT = ("call_id", "turn", "updated_at", "corr_text", "corr_rules", "corr_v")
 FIRE_KINDS = ("chief", "engine", "ladder", "tower", "rescue", "utility", "marine")
 PREVIEW_KEEP_S = 24 * 3600
 RETAG_DAYS = 30            # a source's service changed: its rows this recent re-tagged (Cad.retag_services)
@@ -325,6 +326,10 @@ class Cad:
         self.sources.on_page_swept = self._page_swept       # ... and enriches it as a page that joined does
         # FG1 radio IDs nobody has named yet (#163): "Radio 1234 (MDC) on FG1: who is this?" on the console.
         self.newids = NewIds(self)
+        # A dongle swapped for a new one (sizeup/radio/replace.py): the app sets where the offers are read (the station's
+        # sdr state); the console asks "New SDR <serial>: use it for <jobs>?" (static/dongle-swaps.js)
+        self.dongle_swaps_source: Callable[[], list] | None = None
+        self.dongle_auto_replace = False      # Settings: dongle_swap/auto_critical (sizeup/cloud/dongleswap.py)
         # The emergency button and a mayday heard on our fire channels (sizeup/cad/alarms.py, #128): the app feeds it
         # transmissions on the CAD of record; every console and wall board shows them until acknowledged.
         self.alarms = Alarms(self, lambda m: self.log(m))
@@ -377,6 +382,7 @@ class Cad:
         from sizeup.intel.engine import IntelEngine
         self.intel = IntelEngine(settings=lambda: {k: self.settings.section(k) for k in ("intel", "intel_packs", "intel_rules")},
                                  store=self.store, clock=clock, log=log, tz=TZ)
+        self.intel.talkers.radios = self.radios          # who keyed up: Settings > Radios > Radio IDs' labels (#844)
         from sizeup.intel.infer import Inference           # the model behind the rules: off unless Settings turn it on
         self.intel.infer = Inference(settings=lambda: self.intel.policy.cfg, store=self.store, clock=clock, log=log, tz=TZ,
                                      worker=True)            # its calls on the "infer" thread, never the engine's
@@ -533,10 +539,13 @@ class Cad:
                 # the Radio page's folders (#607): only their rev ("" the default); the rail asks its sources again when
                 # it moves (the folders themselves come with them, GET /api/cad/comms/sources)
                 "radio_folders": radiofolders.rev(self.radio_folders),
+                # one name per source (sizeup/radionames.py): only its rev ("" none); every page asks the names again
+                "radio_names": radionames.rev(),
                 # the admins' service per source: only their rev ("" none); both pages ask again when it moves
                 "radio_services": services_rev(self.radio_services),
                 # the county talkgroups an incident may be moved to ("+ channel", sizeup/cad/opchannel.py)
-                "op_channels": [{"tg": tg, "name": n} for tg, n in sorted(self.opchan.names().items())],
+                "op_channels": [{"tg": tg, "name": radionames.name({"talkgroup": tg, "channel": n})}
+                                for tg, n in sorted(self.opchan.names().items())],
             })
         st = self._state[1]
         now = self.clock()
@@ -548,7 +557,7 @@ class Cad:
                     talking=self._talking(), paging=self.paging(), cloud=self.cloud(), prealert=self.prealert_state(now),
                     airport_alerts=self.airport_alerts_state(now), intel=self.intel_state(now),
                     status_hints=self.status_hints(), oos_notices=self.oos_notices(), alarms=self.alarms_state(now), radio_ids=self.radio_ids(now),
-                    sources=self.sources_state(now), trains_rev=self._trains_rev())
+                    dongle_swaps=self.dongle_swaps(), sources=self.sources_state(now), trains_rev=self._trains_rev())
 
     def _trains_rev(self) -> int | None:
         try:
@@ -668,6 +677,17 @@ class Cad:
         except Exception as e:  # noqa: BLE001
             self.log(f"CAD: new radio IDs: {type(e).__name__}: {e}")
             return []
+
+    def dongle_swaps(self) -> list[dict]:
+        """The new dongles offered for gone ones (sizeup/radio/replace.py), for the console's question; a fault never
+        breaks the console."""
+        try:
+            rows = self.dongle_swaps_source() if self.dongle_swaps_source is not None else []
+        except Exception as e:  # noqa: BLE001
+            self.log(f"CAD: dongle swaps: {type(e).__name__}: {e}")
+            return []
+        return [{k: o.get(k) for k in ("missing", "name", "jobs", "group", "pick", "choices")}
+                for o in (rows if isinstance(rows, list) else []) if isinstance(o, dict)][:8]
 
     def name_radio(self, body: dict) -> dict:
         """POST /api/cad/radio-id {system, radio_id, unit? | label? | ignore?, operator}: who a new FG1 radio is."""
@@ -2364,6 +2384,16 @@ class Cad:
             return None
         return self.retag_services()
 
+    def radio_names(self) -> dict:
+        """GET /api/cad/radio-names: the names, shorts, system labels and frequencies every label on the page is made from
+        (sizeup/radionames.py), as this reader may know them."""
+        try:
+            radionames.use(systems={"analog": "Analog", "airband": "Airband", **{str(k): str(v) for k, v in self.source_systems().items()}},
+                           freqs=self.source_freqs())
+        except Exception:  # noqa: BLE001 - a hover's detail, never in the way of the names
+            pass
+        return radionames.for_viewer(bool(self.comms._sees_context()), hidden_labels=self.context_labels())
+
     def context_labels(self) -> list[str]:
         """The other P25 systems' labels ("Metro"): a heading named so is not shown to a reader who may not see them."""
         try:
@@ -2579,7 +2609,7 @@ class Cad:
                 try:
                     got = self.detail_source(m) or {}
                 except Exception as e:              # the suggestion as it was, without them
-                    self.log(f"CAD: location detail failed for {m.get('label')!r} ({type(e).__name__}: {e})")
+                    self.log(f"CAD: location detail failed ({kind}: {type(e).__name__})")     # (never the address)
                     got = {}
                 if len(self._details) > 500:
                     self._details.clear()
@@ -3035,8 +3065,8 @@ class Cad:
             return old["id"]
         via = "60 CONTROL" if "60 CONTROL" in self.lists.received_codes else ""
         iid = self.store.create_incident(**f, received_via=via, source="60 Control page", source_ref=ref, status="queued")
-        self.log(f"CAD: from 60 Control: {self.lists.type_label(f['type'], f['subtype']) or 'type not set'} at "
-                 f"{f['address'] or '(no location)'}")
+        self.log(f"CAD: from 60 Control: event {iid} queued ({'a location' if f['address'] else 'no location'})")   # (never its
+        # type or address: logs go to CloudWatch, and an EMS type is a medical detail)
         self.comms.link_pages(iid, data.get("pages") or [])   # its page plays from the event (#64)
         self._prealert_match(self.store.incident(iid))
         return iid

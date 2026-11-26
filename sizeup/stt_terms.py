@@ -110,6 +110,29 @@ def own_for(key: str = "", service: str = "", kind: str = "") -> str | None:
     return BY_SERVICE.get(str(service or "").lower())
 
 
+def own_for_channel(key: str, kind: str = "", group: str | None = None, listed: str = "",
+                    incident_tgs=()) -> str | None:
+    """The list a channel key takes ("South 2", "HPN Tower", "tg:307", "p25:mrrs:9211"): App._own_for_key's rule, also
+    tools/stt_correct_eval.py's. A county talkgroup by its group's service (group: the talkgroups file's; none known:
+    fire for a county incident talkgroup); another system's talkgroup by its listed service; an FM channel by its kind
+    (the channel's in the config)."""
+    from sizeup import sourcekeys
+    key, kind = str(key or ""), str(kind or "")
+    service = ""
+    got = sourcekeys.parse(key) if key.startswith(("tg:", "p25:")) else None
+    if got is not None:
+        system, tg = got
+        if system == sourcekeys.COUNTY:
+            service = sourcekeys.service(group) if group else ("fire" if tg in incident_tgs else "")
+        else:
+            service = str(listed or "")
+        key = sourcekeys.p25(system, tg)
+    elif kind:
+        key = sourcekeys.fm(key, kind)                  # (an admin's service choice is kept under fm: / air:)
+        service = sourcekeys.service(kind=kind)
+    return own_for(key, service, kind)
+
+
 # -- the lists ---------------------------------------------------------------------------------------------------------
 
 _ONES = {w: i for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen "
@@ -174,6 +197,25 @@ def parse(text: str) -> list[str]:
             if len(out) >= MAX_TERMS:
                 break
     return out
+
+
+def sections(text: str) -> dict[str, str]:
+    """Each term's section in a term file: {term_key: the "#" line above it, without the "#"} ("streets: <town>, ..."
+    is where sizeup/stt_correct.py reads a street's town); "" for a term before any section."""
+    out: dict[str, str] = {}
+    head = ""
+    for line in text.splitlines():
+        t = " ".join(unicodedata.normalize("NFC", line).split())
+        if t.startswith("#"):
+            head = t.lstrip("#").strip()[:200]
+        elif t and len(t) <= MAX_TERM_CHARS and term_key(t):
+            out.setdefault(term_key(t), head)
+    return out
+
+
+def sections_version(secs: dict[str, dict[str, str]]) -> str:
+    """The version of every list's sections ({list: {term_key: section}}): a header changed alone moves it."""
+    return version(f"{n}\t{k}\t{h}" for n in sorted(secs) for k, h in sorted(secs[n].items())) if secs else ""
 
 
 def merge(own: list[str], shared: list[str], share: float = PLACES_SHARE) -> list[str]:
@@ -385,6 +427,10 @@ class TermStore:
         self._lock = threading.Lock()
         self._lists: dict[str, tuple[str, list[str]]] = {}      # name -> (its tag, its terms)
         self._sets: dict[str, TermSet] = {}
+        self._secs: dict[str, dict[str, str]] = {}              # name -> its terms' sections (sections()), as read
+        self._secs_used: dict[str, dict[str, str]] = {}         # ... of the lists in use
+        self._secs_v = ""                                       # their version (a header changed alone moves it)
+        self._secs_pending = ""
         self.v = ""                                             # every set's version together: "" for none
         self._pending = ""                                      # a change read once, not used yet
         self.read_at: float | None = None
@@ -398,11 +444,16 @@ class TermStore:
     def sets(self) -> dict[str, TermSet]:
         return dict(self._sets)
 
+    def sections(self) -> dict[str, dict[str, str]]:
+        """{list name: {term_key: its section}} of the lists in use (sizeup/stt_correct.py: a street's town)."""
+        return dict(self._secs_used)
+
     def refresh(self) -> bool:
         """Read every list again (unchanged ones answer 304). True: a set changed."""
         errors = []
         with self._lock:
             lists = dict(self._lists)
+            secs = dict(self._secs)
         for name in NAMES:
             tag = lists.get(name, ("", []))[0]
             try:
@@ -412,9 +463,11 @@ class TermStore:
                 continue
             if status == 404:
                 lists.pop(name, None)
+                secs.pop(name, None)
             elif status == 200:
                 try:
-                    lists[name] = (new_tag, parse(data.decode("utf-8")))
+                    text = data.decode("utf-8")
+                    lists[name], secs[name] = (new_tag, parse(text)), sections(text)
                 except UnicodeDecodeError:
                     errors.append(f"{name}: not UTF-8")
         sets = build_sets({n: t for n, (_tag, t) in lists.items()})
@@ -423,9 +476,17 @@ class TermStore:
             first = self.read_at is None
             changed = v != (self.v or "-") and (first or v == self._pending)
             settling = v != (self.v or "-") and not changed
-            self._lists, self._pending = lists, (v if settling else "")
+            self._lists, self._secs, self._pending = lists, secs, (v if settling else "")
             if changed:
                 self._sets, self.v = sets, ("" if v == "-" else v)
+            # the sections (sizeup/stt_correct.py: a street's town) with their sets, or alone once a read SETTLE_S
+            # later finds the same headers (a header changed alone: no set changes)
+            sv = sections_version(secs)
+            if sv != self._secs_v and (first or changed or (not settling and sv == self._secs_pending)):
+                self._secs_used, self._secs_v, self._secs_pending = secs, sv, ""
+            elif sv != self._secs_v:
+                settling = settling or sv != self._secs_pending
+                self._secs_pending = sv
             self.read_at, self.error = self.clock(), "; ".join(errors)
         if settling:
             self.log(f"speech-to-text terms: a change at {self.files.where()}: used once it is the same "
@@ -452,7 +513,7 @@ class TermStore:
 
     @property
     def settling(self) -> bool:
-        return bool(self._pending)
+        return bool(self._pending or self._secs_pending)
 
     def payload(self, n: int = PUSH_TERMS) -> dict:
         """What the hub sends the station (set_stt_terms): each set's top n terms and its version."""

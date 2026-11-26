@@ -18,7 +18,7 @@ Nothing listens.
                                                  self-update runs it on a new file before switching to it)
 
 The token comes from SIZEUP_STT_WORKER_TOKEN (preferred) and is never logged or printed. Setup:
-tools/stt_worker/README.md."""
+deploy/stt-worker/README.md."""
 
 from __future__ import annotations
 
@@ -58,6 +58,14 @@ MAX_CLAIM_WAIT_S = 25
 HEARTBEAT_TIMEOUT_S = 4.0                 # a slow answer mustn't hold the next heartbeat past the hub's 12 s
 MAX_HEARTBEAT_S = 5                       # the hub takes back a silent worker's leases after 12 s
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
+# whisper-server's decode, sent with every /inference: whisper.cpp b5454 takes each as a request field (server.cpp
+# get_req_parameters), so they hold whatever an install's whisper_server line says. English only (no language
+# detection: a short noisy clip came out in another language), non-speech tokens suppressed, and the temperature
+# fallback's thresholds (a looping or unsure decode is tried again warmer; no speech: nothing)
+WHISPER_FIELDS = (("language", "en"), ("suppress_nst", "true"), ("entropy_thold", "2.4"), ("logprob_thold", "-1.0"),
+                  ("no_speech_thold", "0.6"))
+TEMPERATURE_INC = "0.2"                    # a full decode: fallback at 0.2, 0.4 ... 1.0 (up to 5 more passes)
+FAST_TEMPERATURE_INC = "0.4"               # a pre-alert (fast) one: at 0.4 and 0.8 only (up to 2 more, its lease short)
 LONG_CLASSES = {"RERUN", "LOW", "CATCHUP"}  # long leases: gaming hands these back at once
 ENV = {"hub_url": "SIZEUP_STT_HUB_URL", "token": "SIZEUP_STT_WORKER_TOKEN",
        "cf_client_id": "SIZEUP_STT_CF_CLIENT_ID", "cf_client_secret": "SIZEUP_STT_CF_CLIENT_SECRET"}
@@ -120,6 +128,7 @@ class Config:
     llm_fail_max: int = 3                  # failed generations in a row: no LLM until its health check passes again
     llm_no_think: bool = True              # chat_template_kwargs enable_thinking false (Qwen3; others ignore it)
     auto_update: bool = True               # self-update to the version the hub names (a commit on main + its hash)
+    log_ship: bool = True                  # worker.log's lines to the hub too (CloudWatch /sizeup/stt-worker): LogShip
     base_dir: str = dataclasses.field(default="", repr=False)  # the config file's folder (not a key)
 
     @property
@@ -247,6 +256,8 @@ def validate(cfg: Config) -> None:
     if _bad_host(cfg.whisper_server):
         # whisper-server answers any web page (CORS *): on the network, any site could use the GPU
         raise ConfigError("whisper_server: --host must be 127.0.0.1 (whisper-server must not listen on the network)")
+    if cfg.whisper_server:
+        check_whisper_argv(cfg.whisper_server)
     if cfg.llm_url or cfg.llm_server:
         u = urlsplit(cfg.llm_url)
         if u.scheme != "http" or u.hostname not in LOOPBACK or not u.port:
@@ -281,20 +292,7 @@ def check_llm_argv(argv: list) -> None:
     argv = [str(a) for a in argv]
     if not argv:
         raise ConfigError("llm_server: llama-server's command line")
-    models, i = 0, 1
-    while i < len(argv):
-        name, eq, _value = argv[i].partition("=")
-        if name not in LLM_ARGS:
-            raise ConfigError(f"llm_server: {argv[i][:40]} not allowed (allowed: {', '.join(sorted(LLM_ARGS))})")
-        if LLM_ARGS[name] and not eq:
-            if i + 1 >= len(argv):
-                raise ConfigError(f"llm_server: {name} needs a value")
-            i += 1
-        elif eq and not LLM_ARGS[name]:
-            raise ConfigError(f"llm_server: {name} takes no value")
-        models += name in ("-m", "--model")
-        i += 1
-    if models != 1:
+    if _check_argv("llm_server", argv, LLM_ARGS) != 1:
         raise ConfigError("llm_server: exactly one -m <the GGUF file>")
     if _bad_host(argv):
         raise ConfigError("llm_server: --host must be 127.0.0.1 (llama-server must not listen on the network)")
@@ -309,6 +307,54 @@ def llm_command(argv: list) -> list:
     for flag in ("--no-slots", "--no-webui"):
         if flag not in names:
             argv.append(flag)
+    return argv
+
+
+# whisper-server's options the worker lets through in whisper_server (name: takes a value), and nothing else: one local
+# model, loopback only, English only, the decode's thresholds, VAD with a local model; no -nf (no temperature fallback:
+# a weak clip's loops kept), no -dl / translate / diarize, no public path, no ffmpeg converter, no other request path
+WHISPER_ARGS = {"-m": True, "--model": True, "--host": True, "--port": True, "-t": True, "--threads": True,
+                "-l": True, "--language": True, "-sns": False, "--suppress-nst": False, "-et": True,
+                "--entropy-thold": True, "-lpt": True, "--logprob-thold": True, "-nth": True, "--no-speech-thold": True,
+                "-mc": True, "--max-context": True, "--vad": False, "-vm": True, "--vad-model": True, "-vt": True,
+                "--vad-threshold": True}
+
+
+def _check_argv(what: str, argv: list, allowed: dict) -> int:
+    """argv: a program, then only `allowed` options (as "-x v" or "--x=v"). The number of -m / --model; ConfigError
+    otherwise."""
+    models, i = 0, 1
+    while i < len(argv):
+        name, eq, _value = argv[i].partition("=")
+        if name not in allowed:
+            raise ConfigError(f"{what}: {argv[i][:40]} not allowed (allowed: {', '.join(sorted(allowed))})")
+        if allowed[name] and not eq:
+            if i + 1 >= len(argv):
+                raise ConfigError(f"{what}: {name} needs a value")
+            i += 1
+        elif eq and not allowed[name]:
+            raise ConfigError(f"{what}: {name} takes no value")
+        models += name in ("-m", "--model")
+        i += 1
+    return models
+
+
+def check_whisper_argv(argv: list) -> None:
+    """whisper_server: a program, then only WHISPER_ARGS, at most one -m, and a language only if it is en. ConfigError
+    otherwise (--host loopback only: validate's _bad_host)."""
+    argv = [str(a) for a in argv]
+    if _check_argv("whisper_server", argv, WHISPER_ARGS) > 1:
+        raise ConfigError("whisper_server: one -m <the model file>")
+    lang = _arg(argv, ("-l", "--language"))
+    if lang is not None and lang != "en":
+        raise ConfigError(f"whisper_server: -l {lang[:20]}: English only (-l en)")
+
+
+def whisper_command(argv: list) -> list:
+    """whisper_server as the worker runs it: -l en when it names no language (each request says language=en too)."""
+    argv = [str(a) for a in argv]
+    if _arg(argv, ("-l", "--language")) is None:
+        argv += ["-l", "en"]
     return argv
 
 
@@ -584,10 +630,12 @@ class Hub:
         return u.path + (f"?{u.query}" if u.query else "")
 
     def request(self, method: str, path: str, body: dict | None = None, timeout: float | None = None,
-                raw: bool = False):
-        """A JSON object in and out (raw: the body's bytes). HubError on anything but a 2xx JSON object."""
-        data = dumps(body) if body is not None else None
-        headers = dict(self._headers, **({"Content-Type": "application/json"} if data is not None else {}))
+                raw: bool = False, data: bytes | None = None, extra: dict | None = None):
+        """A JSON object in and out (raw: the body's bytes). data: a body already encoded (JSON, with extra headers
+        such as Content-Encoding: gzip). HubError on anything but a 2xx JSON object."""
+        data = dumps(body) if body is not None else data
+        headers = dict(self._headers, **({"Content-Type": "application/json"} if data is not None else {}),
+                       **(extra or {}))
         full = path if path.startswith(self.prefix + "/") and self.prefix else self.prefix + path
         for attempt in (0, 1):             # a kept-alive connection the far end closed: one quiet retry
             if self.interrupted:
@@ -719,10 +767,11 @@ class WhisperCall:
 
 
 class Whisper:
-    """whisper.cpp's whisper-server, called exactly as the station's WhisperClient does (sizeup/stt.py): a multipart
-    POST to /inference with response_format=verbose_json, temperature=0.0, the prompt, temperature_inc=0.0 for a
-    fast (greedy, no fallback) job, and the WAV as file=tx.wav. The hub's WAV is already padded and processed: it goes
-    as it is."""
+    """whisper.cpp's whisper-server, called as the station's WhisperClient does (sizeup/stt.py): a multipart POST to
+    /inference with response_format=verbose_json, temperature=0.0, WHISPER_FIELDS (language=en ...), the prompt (the
+    hub sends none for the airband), temperature_inc TEMPERATURE_INC, or FAST_TEMPERATURE_INC for a fast (pre-alert)
+    job: a capped fallback, never none (a greedy pass alone kept a weak clip's loops), and the WAV as file=tx.wav. The
+    hub's WAV is already padded and processed: it goes as it is."""
 
     def __init__(self, url: str, timeout_s: float = 60.0):
         self.url, self.timeout_s = url, timeout_s
@@ -732,11 +781,10 @@ class Whisper:
 
     def call(self, wav: bytes, prompt: str = "", fast: bool = False, timeout: float | None = None) -> WhisperCall:
         boundary = uuid.uuid4().hex
-        fields = [("response_format", "verbose_json"), ("temperature", "0.0")]
+        fields = [("response_format", "verbose_json"), ("temperature", "0.0"), *WHISPER_FIELDS,
+                  ("temperature_inc", FAST_TEMPERATURE_INC if fast else TEMPERATURE_INC)]
         if prompt:
             fields.append(("prompt", prompt))
-        if fast:
-            fields.append(("temperature_inc", "0.0"))
         parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
                  for name, value in fields]
         parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="tx.wav"\r\n'
@@ -1329,7 +1377,12 @@ def parse_tasklist(out: str) -> set:
 
 UPDATE_REPO = "actualsecurity/sizeup"      # never the hub's to choose: nor the branch, the file, the hosts
 UPDATE_BRANCH = "main"
-UPDATE_FILE = "tools/stt_worker/worker.py"
+UPDATE_FILE = "deploy/stt-worker/worker.py"     # where this file is on main
+UPDATE_FILE_BEFORE = "tools/stt_worker/worker.py"  # where it was before it moved to deploy/: a commit from before the
+                                                   # move has it only there (a pin to an older version); one from the
+                                                   # move on has both (tools/stt_worker/worker.py a byte-identical
+                                                   # copy, for the workers that know only that path) until it goes
+UPDATE_FILES = (UPDATE_FILE, UPDATE_FILE_BEFORE)   # tried in this order; the next one only when GitHub says 404
 GITHUB_API = "api.github.com"
 GITHUB_RAW = "raw.githubusercontent.com"
 UPDATE_MAX_BYTES = 2_000_000               # worker.py is ~0.13 MB
@@ -1438,10 +1491,15 @@ def check_on_main(commit: str, fetch: Callable = https_get, now: float | None = 
 
 def download_worker(commit: str, sha: str, fetch: Callable = https_get, now: float | None = None) -> bytes:
     """worker.py at that commit, from raw.githubusercontent.com: at most UPDATE_MAX_BYTES, and exactly the hash the
-    hub named. UpdateError otherwise (final when the answer itself is wrong)."""
-    status, headers, body = fetch(GITHUB_RAW, f"/{UPDATE_REPO}/{commit}/{UPDATE_FILE}", UPDATE_MAX_BYTES)
-    if status == 404:
-        raise UpdateError(f"no {UPDATE_FILE} at {commit[:12]}", final=True)
+    hub named. UpdateError otherwise (final when the answer itself is wrong). UPDATE_FILE first; UPDATE_FILE_BEFORE
+    only when GitHub has no UPDATE_FILE at that commit (404: a commit from before the move). Never another path for a
+    file that is there but wrong (its hash, its size) or for GitHub out of reach."""
+    for path in UPDATE_FILES:
+        status, headers, body = fetch(GITHUB_RAW, f"/{UPDATE_REPO}/{commit}/{path}", UPDATE_MAX_BYTES)
+        if status != 404:
+            break
+    else:
+        raise UpdateError(f"no worker.py at {commit[:12]}", final=True)
     if status != 200:
         raise UpdateError(f"GitHub said {status}", retry_s=github_wait(status, headers, time.time() if now is None else now))
     if len(body) > UPDATE_MAX_BYTES:
@@ -1873,6 +1931,289 @@ class Updater:
         return True
 
 
+# --- the worker's own log to the hub, then CloudWatch (/sizeup/stt-worker) ----------------------------------------
+
+LOGS_PATH = f"{API}/logs"
+LOG_BATCH_S = 60.0                         # a batch at most this often ...
+LOG_BATCH_LINES = 1000                     # ... or as soon as this many lines wait ...
+LOG_BATCH_BYTES = 200_000                  # ... or this many bytes (uncompressed; the hub takes 1 MB gzipped)
+LOG_MEM_LINES = 5000                       # waiting in memory at most (the spool unwritable): the oldest dropped first
+LOG_LINE_MAX = 2000                        # a longer line is cut (after the scrub: a secret is never half kept)
+LOG_SPOOL_MAX_BYTES = 5_000_000            # logspool/ on disk at most (gzipped: days of an ordinary worker's log) ...
+LOG_SPOOL_MAX_FILES = 500                  # ... and this many batches: the oldest deleted first
+LOG_SEND_A_TURN = 20                       # batches sent in one go, at most
+LOG_RETRY_S = (30.0, 60.0, 120.0, 300.0, 600.0)   # the hub unreachable / 5xx: waits in a row, then the last one
+LOG_NOT_THERE_S = 3600.0                   # a hub without the route (404, one from before it): asked again this often
+LOG_REJECT = (400, 413, 415, 422)          # with reason LOG_REJECTED (the hub's logs sink itself said so): the hub will
+LOG_REJECTED = "logs_rejected"             # never take this batch: deleted (counted), never sent again. Any other 4xx
+                                           # (a hub from before the route parses the gzip as JSON: 400): kept, later
+LOG_UNREADABLE_MAX = 5                     # a spool file that can't be read this many times in a row: deleted
+LOG_LEVELS = {"DEBUG": "debug", "INFO": "info", "WARNING": "warning", "ERROR": "error", "CRITICAL": "error"}
+
+# defence in depth: worker.log never holds a credential (Redact replaces the known values; nothing logs a header), and
+# these shapes are redacted from every line before it is spooled; the hub scrubs again (sizeup/logscrub.py)
+_SCRUB = (
+    (re.compile(r"\b(s[wz]1\.[a-z0-9][a-z0-9_-]{0,39}\.)[A-Za-z0-9_-]+"), r"\1[redacted]"),   # a worker / station token
+    (re.compile(r"(?i)\b(bearer|basic|digest)(\s+)[^\s,;'\"]+"), r"\1\2[redacted]"),
+    (re.compile(r"(?i)((?:cf-access-client-(?:id|secret)|cf_authorization|authorization|x-api-key|api[_-]?key|"
+                r"client[_-]?secret|secret|token|password|passwd|pwd)[\"']?\s*[:=]\s*[\"']?)[^\s,;'\"}\]]+"),
+     r"\1[redacted]"),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"), "[redacted]"),     # a JWT
+    (re.compile(r"\b[0-9a-f]{32}\.access\b"), "[redacted]"),            # a Cloudflare service token's client id
+    (re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{48,}(?![0-9A-Fa-f])"), "[redacted]"),   # its secret (64 hex); the
+    # worker logs hashes and commits cut to 12
+    (re.compile(r"(?i)-----BEGIN [A-Z ]*PRIVATE KEY-----.*"), "[redacted]"),
+)
+# 32+ characters of a token alphabet with upper case, lower case and a digit: a secret's shape
+_LONG = re.compile(r"(?<![A-Za-z0-9/+_=-])[A-Za-z0-9/+_=-]{32,}(?![A-Za-z0-9/+_=-])")
+
+
+def scrub_line(text: str, known: list[str] | tuple = ()) -> str:
+    """A log line as it may leave the PC: every known secret (the token, its secret part, the Cloudflare secret) and
+    every token-like string redacted, then cut to LOG_LINE_MAX."""
+    for s in known:
+        if s and s in text:
+            text = text.replace(s, "[redacted]")
+    for rx, to in _SCRUB:
+        text = rx.sub(to, text)
+    text = _LONG.sub(lambda m: "[redacted]" if re.search(r"[a-z]", m.group()) and re.search(r"[A-Z]", m.group())
+                     and re.search(r"[0-9]", m.group()) else m.group(), text)
+    return text if len(text) <= LOG_LINE_MAX else text[:LOG_LINE_MAX] + " [cut]"
+
+
+class LogShip(logging.Handler):
+    """worker.log's lines to the hub (POST /api/station/stt/logs, the worker token and the Cloudflare service token,
+    gzipped), which writes them to CloudWatch Logs (/sizeup/stt-worker, a stream per worker). The same records as
+    worker.log and only those: this logger's, INFO and up (whisper-server's and llama-server's output have loggers
+    of their own that never reach it), so never a transcript, a prompt, an LLM answer or a token; scrub_line on top.
+
+        take     emit(): formatted (its traceback too), scrubbed, kept in memory (LOG_MEM_LINES at most): never blocks
+                 the thread that logs, never raises
+        spool    a batch every LOG_BATCH_S, or at LOG_BATCH_LINES / LOG_BATCH_BYTES, as one gzipped JSON file in
+                 <state_dir>/logspool (LOG_SPOOL_MAX_BYTES / LOG_SPOOL_MAX_FILES at most, the oldest deleted first,
+                 counted); also at the worker's stop, so a restart (a self-update) sends it
+        send     its own thread and hub connection, the oldest batch first: {v, worker, batch, lines: [[ms, level,
+                 msg]]}. Deleted once the hub answers accepted; kept and sent again otherwise: the hub not set up
+                 ("not configured", its retry_s), unreachable or 5xx (LOG_RETRY_S), refused (unauthorized_retry_s),
+                 a hub without the route (LOG_NOT_THERE_S). A 400 / 413 / 415 / 422: deleted, counted, never resent
+        off      log_ship = false in worker.toml: nothing kept, nothing sent (worker.log as before)"""
+
+    def __init__(self, cfg: Config, hub: "Hub | None" = None, clock: Callable[[], float] = time.monotonic,
+                 wall: Callable[[], float] = time.time):
+        super().__init__(logging.INFO)
+        self.setFormatter(logging.Formatter("%(message)s"))
+        self.cfg, self.clock, self.wall = cfg, clock, wall
+        self.known = sorted(set(cfg.secrets()), key=len, reverse=True)
+        self.hub = hub if hub is not None else Hub(cfg.hub_url, cfg.token, cfg.cf_client_id, cfg.cf_client_secret,
+                                                   timeout=20.0)
+        self.dir = Path(cfg.state_dir) / "logspool"
+        self._mu = threading.Lock()
+        self._spool_mu = threading.Lock()           # one spool at a time (the log thread's and the stop's)
+        self._unreadable = 0
+        self._buf: list[list] = []                  # [ms, level, msg]
+        self._buf_bytes = 0
+        self._spooled_at = clock()
+        self._seq = 0
+        self.next_send = 0.0
+        self.fails = 0
+        self.dropped = 0                            # lines or batches lost to a cap (counted, never silent)
+        self.rejected = 0
+        self.sent_lines = 0
+        self.last_ok: float | None = None           # wall time of the last batch the hub accepted
+        self.state = "starting"
+        self._said = ""
+
+    # -- take (any thread)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            line = scrub_line(self.format(record), self.known)
+            row = [int(record.created * 1000), LOG_LEVELS.get(record.levelname, "info"), line]
+            with self._mu:
+                self._buf.append(row)
+                self._buf_bytes += len(line) + 24
+                while len(self._buf) > LOG_MEM_LINES:
+                    old = self._buf.pop(0)
+                    self._buf_bytes -= len(old[2]) + 24
+                    self.dropped += 1
+        except Exception:  # noqa: BLE001 - logging must never fail the worker (nor print to a console it hasn't)
+            pass
+
+    def due(self) -> bool:
+        with self._mu:
+            n, size = len(self._buf), self._buf_bytes
+        return bool(n) and (n >= LOG_BATCH_LINES or size >= LOG_BATCH_BYTES
+                            or self.clock() - self._spooled_at >= LOG_BATCH_S)
+
+    # -- spool (the shipper's thread; and the worker's stop)
+
+    def _files(self) -> list[Path]:
+        try:
+            return sorted(p for p in self.dir.glob("*.json.gz") if p.is_file())
+        except OSError:
+            return []
+
+    def spool(self) -> bool:
+        """What waits in memory to one batch file per LOG_BATCH_LINES. False (kept in memory) when it can't be written."""
+        with self._spool_mu:
+            return self._spool()
+
+    def _spool(self) -> bool:
+        self._spooled_at = self.clock()
+        while True:
+            with self._mu:
+                rows, size = [], 0
+                for r in self._buf:
+                    if rows and (len(rows) >= LOG_BATCH_LINES or size + len(r[2]) + 24 > LOG_BATCH_BYTES):
+                        break
+                    rows.append(r)
+                    size += len(r[2]) + 24
+            if not rows:
+                return True
+            files = self._files()           # (named in order: after what an earlier start left)
+            self._seq = max([self._seq] + [int(p.name.split(".")[0]) for p in files if p.name.split(".")[0].isdigit()]) + 1
+            doc = {"v": 1, "worker": self.cfg.worker_id, "batch": f"{int(self.wall())}-{self._seq}-{secrets.token_hex(3)}",
+                   "lines": rows}
+            data = gzip_bytes(json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            try:
+                self.dir.mkdir(parents=True, exist_ok=True)
+                write_file(self.dir / f"{self._seq:012d}.json.gz", data)
+            except OSError as e:
+                if self._said != "spool":
+                    self._said = "spool"
+                    log.warning("logs: can't write %s (%s): kept in memory", self.dir.name, e.strerror or e)
+                return False
+            with self._mu:
+                del self._buf[:len(rows)]
+                self._buf_bytes = sum(len(r[2]) + 24 for r in self._buf)
+            self._cap()
+
+    def _cap(self) -> None:
+        files = self._files()
+        sizes = []
+        for p in files:
+            try:
+                sizes.append(p.stat().st_size)
+            except OSError:
+                sizes.append(0)
+        total = sum(sizes)
+        while files and (total > LOG_SPOOL_MAX_BYTES or len(files) > LOG_SPOOL_MAX_FILES):
+            p, n = files.pop(0), sizes.pop(0)
+            try:
+                p.unlink()
+            except OSError:
+                break
+            total -= n
+            self.dropped += 1
+
+    # -- send (the shipper's thread)
+
+    def send(self) -> str:
+        """The oldest batches to the hub, while it accepts them. What happened, in words (for the tests and status)."""
+        if self.clock() < self.next_send:
+            return "waiting"
+        for _ in range(LOG_SEND_A_TURN):
+            files = self._files()
+            if not files:
+                return "empty"
+            p = files[0]
+            try:
+                data = p.read_bytes()
+                self._unreadable = 0
+            except OSError as e:
+                self._unreadable += 1
+                if self._unreadable >= LOG_UNREADABLE_MAX:          # (never one file in the way of all the others)
+                    self._unlink(p)
+                    self._unreadable = 0
+                    self.dropped += 1
+                    self._say(f"dropped {p.name}: can't read it ({e.strerror or e})", logging.WARNING)
+                    continue
+                return self._wait(LOG_RETRY_S[0], f"can't read {p.name}")
+            try:
+                ans = self.hub.request("POST", LOGS_PATH, data=data, extra={"Content-Encoding": "gzip"})
+            except HubError as e:
+                self.hub.close()
+                if e.status in LOG_REJECT and e.reason == LOG_REJECTED:
+                    self._unlink(p)
+                    self.rejected += 1
+                    self._say(f"rejected: hub said {e.status}", logging.WARNING)
+                    continue
+                if e.status == 404 or 400 <= e.status < 500 and e.status not in (401, 403, 429):
+                    # a hub without the route: 404, or 400 from one from before it (it reads the gzip as JSON)
+                    return self._wait(LOG_NOT_THERE_S, "the hub doesn't take logs yet")
+                if e.refused:
+                    return self._wait(self.cfg.unauthorized_retry_s, f"refused ({e.reason or e.status})")
+                self.fails += 1
+                wait = LOG_RETRY_S[min(self.fails - 1, len(LOG_RETRY_S) - 1)]
+                if e.retry_after is not None:
+                    wait = min(max(e.retry_after, LOG_RETRY_S[0]), LOG_RETRY_S[-1])
+                return self._wait(wait, "hub unreachable" if not e.status else f"hub said {e.status}")
+            if ans.get("accepted") is True:
+                self._unlink(p)
+                self.fails = 0
+                self.last_ok = self.wall()
+                self.sent_lines += int(_num(ans.get("n")) or 0)
+                self.state = "ok"
+                self._said = ""
+                continue
+            why = " ".join(str(ans.get("reason") or "not accepted").split())[:120]
+            retry = _num(ans.get("retry_s"))
+            return self._wait(min(max(retry or 600.0, LOG_RETRY_S[0]), 6 * 3600.0), why)
+        return "more"
+
+    def _unlink(self, p: Path) -> None:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+    def _wait(self, seconds: float, why: str) -> str:
+        self.next_send = self.clock() + seconds
+        self.state = f"not shipped: {why}"
+        self._say(f"not shipped ({why}): kept on this PC, trying again in {seconds / 60:.0f} min", logging.INFO)
+        return why
+
+    def _say(self, what: str, level: int) -> None:
+        if self._said != what:                      # said once (each line said is itself a line to ship)
+            self._said = what
+            log.log(level, "logs: %s", what)
+
+    def step(self) -> None:
+        if self.due():
+            self.spool()
+        self.send()
+
+    def loop(self, stopped: Callable[[], bool], wait: Callable[[float], object]) -> None:
+        """The shipper's thread: never in the way of the clips (its own connection; a bug only logged)."""
+        while not stopped():
+            try:
+                self.step()
+            except Exception:  # noqa: BLE001
+                log.exception("logs: unexpected error (carrying on)")
+                self.next_send = self.clock() + LOG_RETRY_S[-1]
+            wait(1.0)
+
+    def close_spool(self) -> None:
+        """At the stop: what is left in memory to disk (the next start sends it)."""
+        try:
+            self.spool()
+        except Exception:  # noqa: BLE001
+            pass
+        self.hub.close()
+
+    def stats(self) -> dict:
+        files = self._files()
+        with self._mu:
+            waiting = len(self._buf)
+        return {"state": self.state, "last_ok": self.last_ok, "batches": len(files), "waiting": waiting,
+                "dropped": self.dropped, "rejected": self.rejected}
+
+
+def gzip_bytes(data: bytes) -> bytes:
+    import gzip
+    return gzip.compress(data, compresslevel=6, mtime=0)
+
+
 # --- the worker ----------------------------------------------------------------------------------------------------
 
 class Worker:
@@ -1882,8 +2223,11 @@ class Worker:
 
     def __init__(self, cfg: Config, run: Callable[[list], str] = run_cmd, clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], object] | None = None, popen: Callable = subprocess.Popen,
-                 fullscreen: Callable[[], str] = windows_fullscreen, updater: Updater | None = None):
+                 fullscreen: Callable[[], str] = windows_fullscreen, updater: Updater | None = None,
+                 logship: LogShip | None = None):
+        """logship: the log shipper `run` made (its handler on the log since the start); its thread runs here."""
         self.cfg, self.run_cmd, self.clock = cfg, run, clock
+        self.logship = logship
         self._stop = threading.Event()
         self.sleep = sleep if sleep is not None else self._stop.wait     # backoff and refused waits (tests record them)
         self._wake = threading.Event()
@@ -1891,7 +2235,7 @@ class Worker:
         self.control = Control(cfg.control_path)
         self.whisper = Whisper(cfg.whisper_url, cfg.whisper_timeout_s)
         self.proc = WhisperProcess(cfg.whisper_server, Path(cfg.state_dir) / "whisper-server.log", popen, clock,
-                                   cfg.base_dir) if cfg.whisper_server else None
+                                   cfg.base_dir, command=whisper_command) if cfg.whisper_server else None
         self.gpu = GpuMonitor(cfg, run, clock, busy=self._busy, ours=self._our_pids, fullscreen=fullscreen)
         self.hub = Hub(cfg.hub_url, cfg.token, cfg.cf_client_id, cfg.cf_client_secret)
         self.hb_hub = Hub(cfg.hub_url, cfg.token, cfg.cf_client_id, cfg.cf_client_secret)
@@ -2287,6 +2631,8 @@ class Worker:
                "pool_on": self.pool_on, "model": self.cfg.model, "gpu": self.gpu.info, "jobs": dict(self.counts),
                "last_job_at": self.last_job_at, "started": self.started_at, "updated": time.time(),
                "version": VERSION, "update": self.updater.report()}
+        if self.logship is not None:
+            doc["logs"] = self.logship.stats()
         if self.llm is not None:
             doc["llm"] = {"model": self.cfg.llm_model, "state": "ok" if self.llm_ok else self.llm_err,
                           "jobs": dict(self.llm_counts)}
@@ -2361,6 +2707,8 @@ class Worker:
                  "llama-server": Path(str(self.cfg.llm_server[0])).name if self.cfg.llm_server else ""}
         self.children.reap_leftovers(progs)        # what a worker that died left running (no job object elsewhere)
         loops = [(self._heartbeat_loop, "heartbeat"), (self._monitor_loop, "monitor"), (self._update_loop, "update")]
+        if self.logship is not None:
+            loops.append((lambda: self.logship.loop(lambda: self.stopped, self._stop.wait), "logs"))
         if self.llm_verified is None:
             loops.append((self.verify_llm, "llm-verify"))
         if self.llm is not None:
@@ -2772,6 +3120,8 @@ class Worker:
         self.hb_hub.close()
         self.llm_hub.close()
         log.info("stopped")
+        if self.logship is not None:
+            self.logship.close_spool()             # (what is left: sent by the next start)
 
 
 # --- the CLI -------------------------------------------------------------------------------------------------------
@@ -2808,6 +3158,14 @@ def _status_text(cfg: Config, now: float | None = None) -> str:
         if isinstance(up, dict):
             lines.append(f"update: {up.get('state')}; running {str(up.get('sha256') or '?')[:12]}"
                          + (f" (commit {str(up.get('commit'))[:12]})" if up.get("commit") else ""))
+        lg = st.get("logs")
+        if isinstance(lg, dict):
+            last = lg.get("last_ok")
+            lines.append(f"logs: {lg.get('state')}"
+                         + (f", last shipped {time.strftime('%Y-%m-%d %H:%M', time.localtime(last))}"
+                            if isinstance(last, (int, float)) else ", none shipped yet")
+                         + f"; {lg.get('batches', 0)} batch(es) waiting"
+                         + (f", {lg['dropped']} dropped" if lg.get("dropped") else ""))
     return "\n".join(lines)
 
 
@@ -2951,8 +3309,15 @@ def main(argv: list | None = None) -> int:
             lock = InstanceLock(test.state_dir)
             if not lock.acquire():
                 raise RuntimeError("the lock in a scratch folder")
+            ship = LogShip(test) if test.log_ship else None
+            if ship is not None:
+                log.addHandler(ship)
             Updater(test).boot()
-            Worker(test, updater=Updater(test))._state_body()
+            Worker(test, updater=Updater(test), logship=ship)._state_body()
+            if ship is not None:
+                log.info("selftest")
+                if not ship.spool():                   # (a batch written to the scratch spool: nothing sent)
+                    raise RuntimeError("the log spool in a scratch folder")
             lock.release()
             for h in list(log.handlers):
                 log.removeHandler(h)
@@ -2970,11 +3335,17 @@ def main(argv: list | None = None) -> int:
             log.error("another worker (pid %s) is running on %s: not starting a second one", lock.holder(),
                       cfg.state_dir)
             return 3
+        ship = None
+        if cfg.log_ship:                   # from the first line on: the update's own (a rollback's why) shipped too
+            ship = LogShip(cfg)
+            log.addHandler(ship)
         updater = Updater(cfg, config_path=config_path)
         if updater.boot():                 # a new file that never reached the hub: the old one is back; it starts next
+            if ship is not None:
+                ship.close_spool()
             lock.release()
             return UPDATE_EXIT
-        worker = Worker(cfg, updater=updater)
+        worker = Worker(cfg, updater=updater, logship=ship)
 
         def _term(signum, frame):
             raise KeyboardInterrupt
