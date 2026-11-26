@@ -26,6 +26,8 @@
   .hl-card .hl-sub { margin: var(--s-4) 0 var(--s-2); font-size: var(--fs-sm); line-height: var(--lh-sm); color: var(--dim); font-weight: 700; }
   .hl-card .card-head .chip { margin-inline-start: var(--s-2); }
   .hl-alerts, .hl-hints { display: grid; gap: var(--s-1); }
+  /* the workers' LLM, the admin's: its model and who gives way on VRAM, beside its status (health.js llmSetting) */
+  .hl-llm-set { display: flex; align-items: center; gap: var(--s-1); flex-wrap: wrap; margin-block: var(--s-1); }
   .hl-table td { vertical-align: top; }
   .hl-ok { color: var(--ok-text); }
   .hl-bad { color: var(--err); font-weight: 600; }

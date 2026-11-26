@@ -22,6 +22,7 @@ docs/
 deploy/station/
 deploy/stt-worker/*
 !deploy/stt-worker/worker.py
+!deploy/stt-worker/models.json
 deploy/trunk-recorder/*
 !deploy/trunk-recorder/talkgroups.csv
 !deploy/trunk-recorder/systems

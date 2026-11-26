@@ -324,6 +324,12 @@
   .tg-shortlbl { --c: var(--text-2); flex: none; }
   /* a source's service (radio_services): a small select beside the pencil */
   .tg-svc { flex: none; inline-size: auto; max-inline-size: 8.5rem; font-size: var(--fs-xs); padding-block: 0; }
+  /* a channel's speech model on the GPU workers (sizeup/sttmodels.py): beside the Engine, the hub's admins only */
+  .tg-mod { flex: none; inline-size: auto; max-inline-size: 14rem; }
+  /* Settings > Station > Speech models (sttworkers.js): a channel's context and call signs */
+  .stt-models td :is(input, select) { inline-size: 100%; min-inline-size: 6rem; }
+  .stt-models table + table { margin-block-start: var(--s-4); }
+  .stt-models { margin-block-start: var(--s-5); padding-block-start: var(--s-3); border-block-start: var(--bw) solid var(--line); }
   .tg-rows { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(25rem, 100%), 1fr)); gap: var(--s-1) var(--s-2); }
   .tg-row {
     display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "id sw" "info sw"; align-items: center; column-gap: var(--s-2);

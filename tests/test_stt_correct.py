@@ -651,6 +651,7 @@ def test_the_measure_picks_each_channels_list_as_the_hub_does():
     kinds = {"Paging A": "paging", "Fireground A": "traffic", "Tower A": "airband"}
     hub = SimpleNamespace(tg=SimpleNamespace(info=info), _kind=kinds, systems={},
                           cfg=SimpleNamespace(p25_incident_talkgroups=frozenset({307, 333})))
+    hub._key_service = lambda k: App._key_service(hub, k)
     cfg = SimpleNamespace(channels=[SimpleNamespace(label=k, kind=v) for k, v in kinds.items()], p25_tg_info=info,
                           p25_incident_talkgroups=frozenset({307, 333}))
     keys = ["tg:307", "tg:303", "tg:401", "tg:402", "tg:333", "tg:999", "p25:westchester:303", "Paging A",

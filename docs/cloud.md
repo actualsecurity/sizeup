@@ -1794,6 +1794,64 @@ flag. It shows "Transcribing on the station (whisper)", and the text fills the s
 - **Volume:** one more event per whisper clip (about 7–10k a day), each a `retext` of about 350 bytes with no audio.
   The audio moves to the event at the close.
 
+### Per-channel speech models (#639)
+
+Each channel has its own speech-to-text model on the GPU workers (`sizeup/sttmodels.py`; the catalog is
+`deploy/stt-worker/models.json` `stt_models`, the worker side is `deploy/stt-worker/README.md`, Speech models).
+
+- **Which model:** Settings > Radios > Channels, per channel; else today's large-v3-turbo q5_0 on every channel. The
+  live model never changes by itself: an admin switches a channel once the evidence is there (challenger scores).
+  Settings recommends by service (fire, EMS and police: Qwen3-ASR-1.7B; airband: the ATC whisper, large-v3-turbo with
+  the US ATC LoRA), and the workers load a model only once a channel uses it (or trials it as a challenger).
+- **Which models a worker runs:** every hello and state answer names the catalog (the hub's build commit and
+  `models.json`'s SHA-256) and the models wanted, fire's first, then police, airband, then challengers. The worker loads
+  them in that order while they fit its VRAM.
+- **Routing:** a clip names its channel's model. A worker that has it loaded and is free takes it first; another
+  worker waits at most `MODEL_DEFER_S` (1 s) for it, then takes it on its own model. The classes stay strict, so a fire
+  clip never waits behind a model preference. Without any worker the clip goes the way it always did (AWS, then the
+  station's whisper). The run records the model asked for (`want`) and the one that wrote the text (`model`).
+- **Context, built on the hub as the station builds it:** whisper's prompt (`App._prompt_v`), and for a llama-asr model
+  a ranked list of at most 12 spoken forms: who keyed up by name, the channel's call signs (Settings: "908",
+  "Headquarters": a dispatch console's), the aircraft near the field at the clip's time (none for a clip older than 2
+  min; only to a model that takes a list: an airband whisper model never gets a prompt, its context switch on or not),
+  then the channel's top terms. Names that identify one unit only: fire/EMS units as said ("Engine 63", on by default
+  for an entry with a unit), aliases as said ("77 Alpha 4"); another P25 system's radio (MRRS: agencies' and roles'
+  labels, officers swap radios) only with its "use as hint" switch turned on by an admin (Settings > Radios > Radio
+  IDs: a dispatch console's exact name), off by default; never a range's label, an agency or a role; never a raw
+  radio ID. Another P25 system's clip gives only its
+  radios' exact names (its talker text can hold a range's label). The station's own whisper prompt uses the same rules
+  on its own radio registry: the hint switches and MRRS names set on the hub reach only what the hub builds. The hub's `[stt] talker_prompt` is `ids`
+  (never `ids+time` until every station runs #736). Context is on or off per model (the ATC whisper's is off by
+  default: a prompt raised its repetition loops) and per channel (an A/B). A run keeps its context's hash, length
+  and form (`prompt_v`, `prompt_n`, `ctx`), never the content.
+- **AWS:** Amazon Transcribe streaming takes no prompt and no per-request phrases: only a custom vocabulary (or a
+  vocabulary filter) by name per stream, made ahead of time (minutes to build, a few per account). sizeup already gives
+  each channel its own (sizeup-pcfd, sizeup-pd, sizeup-atc and the term lists'). Per-clip names, call signs and
+  aircraft can't reach it.
+- **Context read back:** every phrase of the text a context item, and 3 or more of them, or 2 that are too few words
+  for a long clip (8 s or more, under 0.3 a second: a 15 s clip "read" as two names). A real call-up of two names ("60 Control, Engine
+  63" in 2 s) is kept (`sttmodels.context_echo`).
+- **The workers' LLM (Settings > Station > Health, beside its status):** the hub names it (`stt_models.llm`, an
+  `llm_models` id of `models.json`; today's Qwen3-8B by default). Its VRAM priority (`llm_priority`: "yield", speech
+  first; "keep", the LLM first) has one source per worker: the worker's own per-worker hub setting (#968's config doc),
+  else the hub-wide default an admin set here (`stt_models.llm_priority`, never sent unless set), else worker.toml's
+  ("yield"). The worker downloads, checks and swaps the model; its state ("unavailable: gave its VRAM to the speech
+  models") shows in the GPU workers' LLM table. Audited as System.
+- **A champion change** (Settings' model "settings", a promote, an automatic rollback) goes through
+  `HubApp.stt_champion_change` BEFORE it applies (the same request, ms before it is stored). It is kept in hub.sqlite
+  (table `stt_champion`, replicated with the rest), said in the hub's log (the channel key, model ids and how many
+  listeners heard it), and passed to each listener in `stt_champion_hooks`. Intel reads it with
+  `HubApp.champion_changes(since=None, until=None, channel=None)`: `[{at, channel, old, new, why}]`, `at` epoch
+  seconds when it took effect, `channel` the radio log's source key (`radio_traffic.source`: `p25:<system>:<tg>`,
+  `fm:<label>`, `air:<label>`; `HubApp.channel_source(key)` maps a hub key to it), `why` one of `settings`, `promote`,
+  `rollback`. Kept at least 90 days, and each channel's last 20 whatever their age. Model ids, keys and reasons only.
+- **Logs:** no text, prompt or context in a log line on these paths: an error says its type only
+  (`tests/test_no_words_in_logs.py`).
+- **Discarded:** a repetition loop (`sizeup/stt_quality.py`, `repeated`), or a llama-asr model's context read back as the text, is kept as a run (role
+  `discarded`) and the clip goes to the next engine (a catch-up clip: a failed try). Never an urgent clip's text (a
+  page, the firegrounds: a "mayday" said again and again is real). A clip the worker finds near-silent isn't decoded
+  (no speech).
+
 ## Phone pre-alert (Tapout)
 
 > "can we bake in the ntfy.sh feed from tapout into this? lets receive that feed as a possible

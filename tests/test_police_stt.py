@@ -216,6 +216,10 @@ class _PromptApp:
     _terms_for_item = App._terms_for_item
     _stt_profile = staticmethod(App._stt_profile)
     _profile_prompt = App._profile_prompt
+    _talker_names = App._talker_names
+    _talker_hints = App._talker_hints
+    _extra_prompt = App._extra_prompt
+    _hub_time = staticmethod(App._hub_time)
 
     def __init__(self):
         self._kind = {}

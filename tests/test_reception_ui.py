@@ -35,7 +35,7 @@ def text(name):
 
 def test_only_settings_mounts_the_card_and_the_station_page_has_none():
     st = text("settings.js")
-    assert "RadioControls.mount(rc, { reception: true, tab: S.rtab, names: S_RC_NAMES, services: S_RC_SERVICES, main: S_RC_MAIN })" in st
+    assert "RadioControls.mount(rc, { reception: true, tab: S.rtab, names: S_RC_NAMES, services: S_RC_SERVICES, main: S_RC_MAIN," in st
     assert re.search(r'RadioControls\.mount\(\$\("#radio-controls"\)\);', text("station.js"))   # no reception option
     assert "reception" not in re.search(r"RadioControls\.mount\([^)]*\)", text("station.js")).group(0)
     rc = text("radio-controls.js")

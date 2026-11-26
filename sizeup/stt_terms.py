@@ -113,9 +113,16 @@ def own_for(key: str = "", service: str = "", kind: str = "") -> str | None:
 def own_for_channel(key: str, kind: str = "", group: str | None = None, listed: str = "",
                     incident_tgs=()) -> str | None:
     """The list a channel key takes ("South 2", "HPN Tower", "tg:307", "p25:mrrs:9211"): App._own_for_key's rule, also
-    tools/stt_correct_eval.py's. A county talkgroup by its group's service (group: the talkgroups file's; none known:
-    fire for a county incident talkgroup); another system's talkgroup by its listed service; an FM channel by its kind
-    (the channel's in the config)."""
+    tools/stt_correct_eval.py's (key_service)."""
+    key, service, kind = key_service(key, kind, group, listed, incident_tgs)
+    return own_for(key, service, kind)
+
+
+def key_service(key: str, kind: str = "", group: str | None = None, listed: str = "",
+                incident_tgs=()) -> tuple[str, str, str]:
+    """A channel key's (qualified source key, service, kind). A county talkgroup by its group's service (group: the
+    talkgroups file's; none known: fire for a county incident talkgroup); another system's talkgroup by its listed
+    service; an FM channel by its kind (the channel's in the config)."""
     from sizeup import sourcekeys
     key, kind = str(key or ""), str(kind or "")
     service = ""
@@ -130,7 +137,7 @@ def own_for_channel(key: str, kind: str = "", group: str | None = None, listed: 
     elif kind:
         key = sourcekeys.fm(key, kind)                  # (an admin's service choice is kept under fm: / air:)
         service = sourcekeys.service(kind=kind)
-    return own_for(key, service, kind)
+    return key, service, kind
 
 
 # -- the lists ---------------------------------------------------------------------------------------------------------

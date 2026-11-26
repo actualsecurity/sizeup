@@ -363,6 +363,38 @@ class Registry:
                 out.append(n)
         return ", ".join(out) or fallback
 
+    @staticmethod
+    def hint_on(row: dict | None) -> bool:
+        """A radio's own entry gives its name as speech-to-text context (Settings > Radios > Radio IDs, "use as hint").
+        Another P25 system's (MRRS: agencies' and roles' labels, officers swap radios) only with its switch on, an
+        admin's choice for a dispatch console ("908", "Headquarters"); never by default. One of ours: its switch, else on
+        when the entry names a unit (a fire/EMS unit: "E63")."""
+        if row is None:
+            return False
+        h = row.get("hint")
+        if row.get("system") in OTHER_P25:
+            return h == 1
+        return bool(h) if h is not None else bool(row.get("unit"))
+
+    def hints(self, system: str, radio_ids) -> tuple[list[str], list[str]]:
+        """For a clip's speech-to-text context (sizeup/talkers.py hint_names): (named, blocked). named: another P25
+        system's exact per-ID names with the hint switched on by an admin ("908", "Headquarters": a dispatch console;
+        never by default, never a range's label, never "unknown MRRS radio"); blocked: the unit codes, aliases and IDs of
+        radios whose hint is off (another system's: unless switched on)."""
+        named: list[str] = []
+        blocked: list[str] = []
+        for rid in [str(r).strip() for r in (radio_ids.split(",") if isinstance(radio_ids, str) else radio_ids or ())]:
+            if not rid:
+                continue
+            row = self.get(system, rid.upper() if system == "mdc" else rid)
+            if row is None:
+                continue
+            if not self.hint_on(dict(row, system=system)) and (system in OTHER_P25 or row.get("hint") is not None):
+                blocked += [x for x in (row.get("unit"), row.get("alias"), row.get("label"), rid) if x]
+            elif system in OTHER_P25 and row.get("label") and row["label"] not in named:
+                named.append(row["label"])
+        return named, blocked
+
     def rig_mdc(self, ids: list[str]) -> str:
         out: list[str] = []
         for i in ids:
@@ -503,24 +535,34 @@ class Registry:
             if body["source"] not in SOURCES:
                 raise RadioError(f"source: one of {', '.join(SOURCES)}")
             f["source"] = body["source"]
+        if "hint" in body:                     # its name as speech-to-text context (hints()): on, off, or the default
+            h = body["hint"]
+            if h is not None and not isinstance(h, bool):
+                raise RadioError("hint: true, false or null (the default)")
+            f["hint"] = None if h is None else int(h)
         now = self.clock()
         old = self.get(system, rid)
+        edits = any(k != "hint" for k in f)     # (the hint switch alone is no edit: what is heard still names its unit)
         with self.store.tx() as db:
             if old is None:
                 f.setdefault("source", "confirmed" if f.get("unit") or (system in OTHER_P25 and f.get("label"))
                              else "heard")
-                db.execute("INSERT INTO radios (system, radio_id, unit, label, source, notes, edited, updated_at) "
-                           "VALUES (?, ?, ?, ?, ?, ?, 1, ?)", (system, rid, f.get("unit", ""), f.get("label", ""),
-                                                             f["source"], f.get("notes", ""), now))
+                db.execute("INSERT INTO radios (system, radio_id, unit, label, source, notes, edited, updated_at, hint) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (system, rid, f.get("unit", ""), f.get("label", ""),
+                                                                f["source"], f.get("notes", ""), int(edits), now,
+                                                                f.get("hint")))
                 audit(db, now, operator, "radios", f"{system}:{rid}", "", self._describe(dict(f, unit=f.get("unit", ""))))
             else:
-                ch = {k: v for k, v in f.items() if old[k] != v}
+                ch = {k: v for k, v in f.items() if old.get(k) != v}
                 if not ch:
                     return old
-                db.execute(f"UPDATE radios SET {', '.join(f'{k} = ?' for k in ch)}, edited = 1, updated_at = ? "
+                db.execute(f"UPDATE radios SET {', '.join(f'{k} = ?' for k in ch)}, "
+                           f"edited = {'1' if any(k != 'hint' for k in ch) else 'edited'}, updated_at = ? "
                            "WHERE system = ? AND radio_id = ?", (*ch.values(), now, system, rid))
+                said = lambda k, v: ({None: "default", 1: "on", 0: "off"}.get(v, str(v)) if k == "hint"  # noqa: E731
+                                     else str(v or ""))
                 for k, v in ch.items():
-                    audit(db, now, operator, "radios", f"{system}:{rid}/{k}", str(old[k] or ""), str(v or ""))
+                    audit(db, now, operator, "radios", f"{system}:{rid}/{k}", said(k, old.get(k)), said(k, v))
         self._reload_one((system, rid))
         self.rev += 1
         return self.get(system, rid)
@@ -616,7 +658,8 @@ class Registry:
 
     @staticmethod
     def _describe(f: dict) -> str:
-        return " · ".join(x for x in (f.get("unit") or "no unit", f.get("label", ""), f.get("source", "")) if x)
+        hint = {0: "no hint", 1: "hint"}.get(f.get("hint"), "")        # (its speech-to-text switch, when set)
+        return " · ".join(x for x in (f.get("unit") or "no unit", f.get("label", ""), f.get("source", ""), hint) if x)
 
     def log(self, limit: int = 100) -> list[dict]:
         return audit_log(self.store, "radios", limit)

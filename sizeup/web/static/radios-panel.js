@@ -8,6 +8,9 @@
 //   Another P25 system's radios (MRRS, data.other_systems) are another agency's: never on a rig, named by a label
 //   (an agency or role) or a range of IDs (data.ranges; an ID's own label wins); each heard one may carry a "likely
 //   agency" hint (data.hints: the talkgroup it's heard on most), accepted into its label with one click, never applied.
+//   Hint (radios.hint, #639 models): a radio's name in the speech-to-text context or not; null the default (radios.py
+//   hint_on: on for one of ours with a unit; another P25 system's only when an admin switches it on). The switch shows the effective state; a click sets the other one, or the
+//   default again when that is what the default says.
 "use strict";
 
 window.RadiosPanel = (() => {
@@ -131,7 +134,7 @@ window.RadiosPanel = (() => {
     tr.append(td(el("span", "", r.system.toUpperCase())), td(el("b", "", r.radio_id)),
               td(named ? el("span", "dim", "—") : unit), td(label), td(src),
               td(el("span", "dim", r.alias || "")), td(el("span", "dim small", fmt(r.last_heard))),
-              td(el("span", "dim small", r.last_channel || "")), td(notes));
+              td(el("span", "dim small", r.last_channel || "")), td(notes), el("td"));
     const act = el("td", "rp-act");
     act.append(save, cancel, del);
     tr.append(act);
@@ -163,11 +166,39 @@ window.RadiosPanel = (() => {
       if (i === 6 && r.heard) c.title = `Heard ${r.heard}× (at most once a minute counted)`;
       tr.append(c);
     });
+    tr.append(hintCell(r));
     const act = el("td", "rp-act");
     act.append(confirmB, edit);
     tr.append(act);
     if (r.edited) tr.title = "Edited: never overwritten by what is heard";
     return tr;
+  }
+
+  // Its name as speech-to-text context (radios.py hint_on / hints): on, off; null the default (a rig or its own label)
+  function hintCell(r) {
+    const td = el("td", "rp-hint");
+    const dflt = other(r.system) ? false : !!r.unit, on = r.hint === null || r.hint === undefined ? dflt : !!r.hint;
+    const b = el("button", "sw");
+    b.type = "button";
+    b.setAttribute("role", "switch");
+    b.setAttribute("aria-checked", String(on));
+    b.setAttribute("aria-label", "Hint");
+    b.classList.toggle("on", on);
+    b.append(el("i", "knob"));
+    b.title = `Hint ${on ? "on" : "off"}${r.hint === null || r.hint === undefined ? " (default)" : ""}: its name `
+      + `${on ? "in" : "never in"} the speech-to-text context\nDefault: `
+      + (other(r.system) ? "off (on: a dispatch console's exact name only)\nA range's label is never a hint"
+         : "on with a unit") + "\nNever its ID";
+    b.addEventListener("click", async () => {
+      const next = !on;
+      try {
+        await post("/api/cad/radios", { system: r.system, radio_id: r.radio_id,
+                                        hint: next === dflt && !other(r.system) ? null : next });
+        await load();
+      } catch (e) { p.error = e.message; render(); }
+    });
+    td.append(b);
+    return td;
   }
 
   // An unnamed radio of another system: its range's label (dim), else the likely agency (a hint: Use takes it)
@@ -364,7 +395,11 @@ window.RadiosPanel = (() => {
     const table = el("table", "evtable rp-table");
     const head = el("thead");
     const hr = el("tr");
-    for (const h of ["Sys", "Radio ID", "Rig", "Label", "Source", "Alias (P25)", "Last heard", "Heard on", "Notes", ""]) hr.append(el("th", "", h));
+    for (const h of ["Sys", "Radio ID", "Rig", "Label", "Source", "Alias (P25)", "Last heard", "Heard on", "Notes", "Hint", ""]) {
+      const th = el("th", "", h);
+      if (h === "Hint") th.title = "Its name in the speech-to-text context";
+      hr.append(th);
+    }
     head.append(hr);
     const body = el("tbody");
     table.append(head, body);
@@ -395,13 +430,13 @@ window.RadiosPanel = (() => {
     if (!list.length) {
       const tr = el("tr");
       const td = el("td", "dim", "None");
-      td.colSpan = 10;
+      td.colSpan = 11;
       tr.append(td);
       body.append(tr);
     } else if (list.length > shownRows.length) {
       const tr = el("tr");
       const td = el("td", "dim", `${list.length - shownRows.length} more: filter`);
-      td.colSpan = 10;
+      td.colSpan = 11;
       tr.append(td);
       body.append(tr);
     }

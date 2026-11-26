@@ -20,7 +20,7 @@ import pytest
 from sizeup.cad import dispatcher
 from sizeup.cad.service import Cad, Settings
 from sizeup.radio.fm import RATE, Channel, Segment
-from sizeup.stt import CATCHUP, URGENT
+from sizeup.stt import CATCHUP, LIVE, URGENT
 from tests.fake_transcribe import FakeTranscribe
 from tests.log_sentinel import Captured, assert_no_sensitive
 from tests.test_app import tone, voice, wait
@@ -238,4 +238,58 @@ def test_a_late_aws_answer_kept_as_the_alternative(tmp_path, logs):
     app.store.on_traffic(t)
     app._aws_late(AwsJob("traffic", "fg1-late", "FG1"), f"{MARK} on location", 0.8)
     assert "a late answer, kept as the alternative" in logs.text()
+    logs.check()
+
+
+def test_the_models_context_routing_and_discard_paths(tmp_path, logs):
+    """A channel's model and context (its call signs, a dispatch console's name: sizeup/sttmodels.py), the route, and a
+    GPU worker's text discarded (its context read back, a repetition loop): none of the words, the context or the call
+    signs in a log line, and a failure building the context says its type only."""
+    from sizeup import sttmodels
+    from tests.test_channels import AWS_TEXT
+    from tests.test_cloud import call
+    from tests.test_stt_engine_select import _set
+    qwen = "qwen3-asr-1.7b-q8_0"
+    fake = FakeTranscribe(phrases={500: AWS_TEXT})
+    hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
+    calls = [f"{MARK} Base", f"{MARK} Two", f"{MARK} Three"]
+
+    class ModelWorker(FakeWorker):
+        def post(self, path, body):
+            if path.endswith("/claim"):
+                body = dict(body, models=["large-v3-turbo-q5_0", qwen])
+            return call(self.url + path, "POST", body, token=self.token)
+
+    w = None
+    try:
+        _set(hub, "FG1", "auto")
+        hub.app.stt_choices.set("FG1", {"callsigns": calls, "model": qwen})
+        hub.app._pool_class = lambda item, key: LIVE      # (an urgent clip's words are never discarded: a live one's)
+        token = hub.app.hub.workers.add("gpu-1")
+        # the model reads its context back (three of the call signs): discarded, AWS writes the text
+        w = ModelWorker(hub.url, token, text=", ".join(calls) + ".").start()
+        w.extra = {"context": "list"}
+        assert wait(lambda: hub.app.sttpool.ready_forced(URGENT)[0], 5)
+        send(hub, pending_event("FG1-31"))
+        assert wait(lambda: row(hub, "FG1-31").get("text") == AWS_TEXT + ".", 30), row(hub, "FG1-31")
+        assert wait(lambda: any(r["role"] == "discarded" for r in hub.app.stt_runs.of("FG1-31")), 5)
+        # a repetition loop with the marker in it: discarded too
+        w.text = " ".join([f"Engine {MARK}"] * 8)
+        send(hub, pending_event("FG1-32", seq=2))
+        assert wait(lambda: row(hub, "FG1-32").get("text") == AWS_TEXT + ".", 30), row(hub, "FG1-32")
+        # the context can't be built (its error carries words): the type only, the clip goes on without it
+        real = hub.app.stt_choices.callsigns
+        hub.app.stt_choices.callsigns = lambda key: (_ for _ in ()).throw(ValueError(f"{MARK} Base"))
+        w.text, w.extra = f"Engine 61 {MARK} on location", {}
+        send(hub, pending_event("FG1-33", seq=3))
+        assert wait(lambda: row(hub, "FG1-33").get("text") == w.text, 30), row(hub, "FG1-33")
+        hub.app.stt_choices.callsigns = real
+        seen = logs.text()
+        assert "its context read back" in seen and "a repetition loop" in seen and "ValueError" in seen
+        assert sttmodels.context_echo(", ".join(calls), calls)
+    finally:
+        if w is not None:
+            w.close()
+        hub.close()
+        fake.close()
     logs.check()

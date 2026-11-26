@@ -22,11 +22,14 @@ own Access application scoped to /api/station/stt/*, so a worker's service token
 token_revoked); 409 {error} for a lease that is gone.
 
     POST /api/station/stt/hello                   {worker?, version, model, gpu?, state} -> {ok, worker, poll_s, classes, pool_on}
-    POST /api/station/stt/state                   {state: online|gaming|paused, model, gpu, version, keep_awake?}
-                                                  -> {ok, pool_on}
-    POST /api/station/stt/claim                   {wait <= 25, state, model} -> {job: {lease, id, kind, channel, class,
-                                                  prompt, seconds, lease_s, cap_at, fast, audio} | null}; fast: one
-                                                  greedy pass (temperature_inc 0), the short-lease classes
+    POST /api/station/stt/state                   {state: online|gaming|paused, model, gpu, version, keep_awake?,
+                                                  models?} -> {ok, pool_on, stt_models?}
+    POST /api/station/stt/claim                   {wait <= 25, state, model, models?} -> {job: {lease, id, kind, channel,
+                                                  class, prompt, seconds, lease_s, cap_at, fast, audio, model?,
+                                                  context?, plain?} | null}; fast: one greedy pass (temperature_inc 0),
+                                                  the short-lease classes; models: the ones it has loaded (a job for one
+                                                  goes to it first); model: the one the clip's channel uses, context: a
+                                                  llama-asr model's list, plain: the models its context is off for
     GET  /api/station/stt/jobs/<lease>/audio      audio/wav: 16 kHz mono 16-bit, padded, as whisper-server takes it
     POST /api/station/stt/jobs/<lease>/extend     {} -> {ok, lease_s, cap_at}
     POST /api/station/stt/jobs/<lease>/complete   {text, segments: [{start, end, text, words: [{word, start, end,
@@ -43,6 +46,11 @@ leases at most, and a pre-alert job only when it holds none.
 The LLM lane (sizeup/cloud/infer.py): a worker serving a local LLM says so in every request's models {stt, llm,
 llm_version} and claims JSON classification jobs at /api/station/stt/infer/* with the same token; never while it holds
 a pre-alert lease, and never counted in the STT leases above.
+
+The speech models (sizeup/sttmodels.py, deploy/stt-worker/models.json): a GPU worker's hello and state answers carry
+stt_models {catalog: {commit, sha256}, want: [ids]}: the catalog in this hub's build and the models the channels use,
+most important first. Its heartbeat's models carry stt_loaded (the catalog's that answer) and stt_state; a result says
+which model wrote it, its context form (prompt | list | none) and gate "quiet" when the clip was too quiet to decode.
 
 The self-update (deploy/stt-worker/worker.py Updater): a GPU worker that sends self_update {sha256, commit, auto, state,
 bad} in its hello and state (its capability: a worker without it is never told) gets worker_update {mode, commit,
@@ -580,13 +588,18 @@ def clean_result(raw: dict) -> dict:
     return {"text": " ".join(text.split())[:TEXT_MAX], "segments": clean_segs, "words": words,
             "model": str(raw.get("model") or "")[:80],
             "language": str(raw.get("language") or "")[:16] if isinstance(raw.get("language"), str) else "",
-            "timing": {k: _num(timing.get(k)) for k in ("fetch_ms", "infer_ms") if _num(timing.get(k)) is not None}}
+            "timing": {k: _num(timing.get(k)) for k in ("fetch_ms", "infer_ms") if _num(timing.get(k)) is not None},
+            # the worker's silence gate (no decode: no speech) and the context it decoded with (prompt | list | none)
+            "gate": "quiet" if raw.get("gate") == "quiet" else "",
+            "context": raw.get("context") if raw.get("context") in ("prompt", "list", "none") else ""}
 
 
 class WorkerApi:
     """Hub.handle's /api/station/stt/ routes. may_write(): this task is the leader (a standby hands out nothing)."""
 
     infer = None    # the LLM lane (sizeup/cloud/infer.py Lane), set by the hub: /api/station/stt/infer/* and models
+    stt_models = None   # () -> {catalog: {commit, sha256}, want: [ids]}: the speech models a GPU worker should run
+                        # (sizeup/sttmodels.py; set by the hub), in its hello and state answers; None: none named
     logs = None     # the workers' logs (sizeup/cloud/cwlogs.py WorkerLogs), set by the hub: /api/station/stt/logs
 
     def __init__(self, registry: WorkerRegistry, pool: sttpool.Pool, may_write: Callable[[], bool] = lambda: True,
@@ -684,21 +697,38 @@ class WorkerApi:
             # the self-update: a GPU worker that says its version is told the one it should run (never a station's)
             su = clean_self_update(d.get("self_update")) if gpu else None
             told = {"worker_update": self.wanted(wid)} if su is not None else {}
+            if gpu and self.stt_models is not None and path in (API + "hello", API + "state"):
+                try:
+                    word = self.stt_models()
+                except Exception as e:  # noqa: BLE001 - no models named is still an answer
+                    word = None
+                    self.log(f"stt workers: the speech models' word: {type(e).__name__}")
+                if word:
+                    told["stt_models"] = word
+            ms = d.get("models") if isinstance(d.get("models"), dict) else {}
+            loaded = ms.get("stt_loaded") if isinstance(ms.get("stt_loaded"), list) else None
+            stt_state = ms.get("stt_state") if isinstance(ms.get("stt_state"), dict) else None
+            if loaded is not None and model and state == "online":
+                loaded = [model] + [m for m in loaded if m != model]     # (its whisper_server's answers while online)
             # keep_awake {on, held} and a clean stop's reason "shutdown": Health's "keeps PC awake" / "(asleep?)"
             ka = clean_keep_awake(d.get("keep_awake")) if gpu else None
             why = d.get("reason") if isinstance(d.get("reason"), str) else ""
             if path == API + "hello":
                 self.pool.seen(wid, state, model, d.get("gpu"), d.get("version") if isinstance(d.get("version"), str) else None,
-                               kind=kind, load=load, update=su, keep_awake=ka, reason=why)
+                               kind=kind, load=load, update=su, keep_awake=ka, reason=why, models=loaded,
+                               stt_state=stt_state)
                 return _json(200, {"ok": True, "worker": wid, "poll_s": POLL_S, "pool_on": self._pool_on(),
                                    "classes": [sttpool.class_key(c) for c in sttpool.CLASSES], **told})
             if path == API + "state":
                 self.pool.seen(wid, state, model, d.get("gpu"), d.get("version") if isinstance(d.get("version"), str) else None,
-                               kind=kind, load=load, update=su, keep_awake=ka, reason=why)
+                               kind=kind, load=load, update=su, keep_awake=ka, reason=why, models=loaded,
+                               stt_state=stt_state)
                 return _json(200, {"ok": True, "pool_on": self._pool_on(), **told})
             if path == API + "claim":
                 wait = _num(d.get("wait")) or 0.0
-                job = self.pool.claim(wid, wait, state, model, kind=kind, load=load)
+                cm = d.get("models")
+                cm = [m for m in cm[:16] if isinstance(m, str)] if isinstance(cm, list) else None
+                job = self.pool.claim(wid, wait, state, model, kind=kind, load=load, models=cm)
                 return _json(200, {"job": job.public() if job is not None else None})
             m = LEASE_PATH.fullmatch(path)
             if m is None or m.group(2) == "audio":

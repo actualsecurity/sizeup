@@ -40,7 +40,17 @@ CREATE TABLE IF NOT EXISTS station_wait (id TEXT PRIMARY KEY, at REAL NOT NULL, 
                                          flagged INTEGER NOT NULL DEFAULT 0);
 -- ... and a fill (retext) that came before its transmission (a quarantined event sent again later): kept until it does
 CREATE TABLE IF NOT EXISTS early_fill (id TEXT PRIMARY KEY, at REAL NOT NULL, doc TEXT NOT NULL);
+-- (#868) every speech-to-text champion change, what intel reads to split its replays and before/after metrics
+-- (HubApp.champion_changes): channel is the radio log's source key (radio_traffic.source: p25:<system>:<tg>,
+-- fm:<label>, air:<label>), key the hub's own channel key (FG1, tg:307); model ids and the reason only, never words
+CREATE TABLE IF NOT EXISTS stt_champion (id INTEGER PRIMARY KEY AUTOINCREMENT, at REAL NOT NULL, channel TEXT NOT NULL,
+                                         key TEXT NOT NULL, old TEXT NOT NULL, new TEXT NOT NULL, why TEXT NOT NULL,
+                                         by TEXT NOT NULL DEFAULT '', prealert INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS stt_champion_at ON stt_champion (at);
+CREATE INDEX IF NOT EXISTS stt_champion_channel ON stt_champion (channel, at);
 """
+CHAMPION_KEEP_S = 90 * 86400.0   # (#868) champion changes kept this long at least ...
+CHAMPION_KEEP_N = 20             # ... and a channel's last this many whatever their age (one long unchanged keeps its own)
 WAIT_KEEP_S = 86400.0       # (#927) a station_wait row this old is forgotten (its row says "transcription failed" by then)
 EARLY_KEEP_S = 6 * 3600.0   # ... an early fill this old is dropped (its transmission never came)
 EARLY_MAX = 2000            # ... and at most this many are kept (the oldest go)
@@ -123,6 +133,39 @@ class MonitorDb:
         with self._lock:
             self.db.execute("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                             (key, value))
+
+    # -- (#868) speech-to-text champion changes ----------------------------------------------------------------------
+
+    def champion_add(self, at: float, channel: str, key: str, old: str, new: str, why: str, by: str = "",
+                     prealert: bool = False) -> None:
+        """One champion change (model ids, the channel's keys, the reason: never words); older ones trimmed (prune)."""
+        with self._lock:
+            self.db.execute("INSERT INTO stt_champion (at, channel, key, old, new, why, by, prealert) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            (float(at), str(channel)[:80], str(key)[:60], str(old or "")[:48], str(new or "")[:48],
+                             str(why)[:20], str(by or "")[:60], int(bool(prealert))))
+            self._champion_prune(float(at))
+
+    def _champion_prune(self, now: float) -> None:
+        """(lock held) Only rows older than CHAMPION_KEEP_S that aren't among their channel's last CHAMPION_KEEP_N."""
+        self.db.execute("DELETE FROM stt_champion WHERE at < ? AND id NOT IN (SELECT id FROM (SELECT id, ROW_NUMBER() "
+                        "OVER (PARTITION BY channel ORDER BY at DESC, id DESC) AS n FROM stt_champion) WHERE n <= ?)",
+                        (now - CHAMPION_KEEP_S, CHAMPION_KEEP_N))
+
+    def champion_changes(self, since: float | None = None, until: float | None = None,
+                         channel: str | None = None) -> list[dict]:
+        """The champion changes, oldest first: {at, channel, key, old, new, why, by, prealert}; since/until on at."""
+        q, args = "SELECT at, channel, key, old, new, why, by, prealert FROM stt_champion WHERE 1 = 1", []
+        if since is not None:
+            q, args = q + " AND at >= ?", [*args, float(since)]
+        if until is not None:
+            q, args = q + " AND at <= ?", [*args, float(until)]
+        if channel is not None:
+            q, args = q + " AND channel = ?", [*args, str(channel)]
+        with self._lock:
+            rows = self.db.execute(q + " ORDER BY at, id", args).fetchall()
+        return [{"at": r[0], "channel": r[1], "key": r[2], "old": r[3], "new": r[4], "why": r[5], "by": r[6],
+                 "prealert": bool(r[7])} for r in rows]
 
     # -- (#927) transmissions waiting for their station's text, and fills that came first --------------------------
 

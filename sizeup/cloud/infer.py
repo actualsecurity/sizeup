@@ -196,6 +196,8 @@ class Worker:
     stt: str = ""
     llm: str = ""
     llm_version: str = ""
+    llm_state: str = ""                     # its LLM's state ("ok", "unavailable: gave its VRAM to the speech models")
+    llm_id: str = ""                        # the llm_models id it runs ("" worker.toml's)
     seen: float = 0.0
     polling: int = 0
     lease: str = ""
@@ -375,7 +377,11 @@ class Lane:
                     w.llm_version = ""
                 if isinstance(models.get("llm_version"), str) and w.llm:
                     w.llm_version = models["llm_version"][:64]
-                w.had_llm = w.had_llm or bool(w.llm)
+                if isinstance(models.get("llm_state"), str):
+                    w.llm_state = models["llm_state"][:80]
+                if isinstance(models.get("llm_id"), str):
+                    w.llm_id = models["llm_id"][:48]
+                w.had_llm = w.had_llm or bool(w.llm) or bool(w.llm_state)
             if w.lease and (w.state != "online" or not w.llm):
                 job = self._leases.get(w.lease)
                 if job is not None:
@@ -692,6 +698,7 @@ class Lane:
             workers = [{"id": w.id, "state": ("offline" if now - w.seen >= OFFLINE_S and w.polling <= 0
                                               else "cooling" if w.state == "online" and now < w.cool_until else w.state),
                         "stt": w.stt, "llm": w.llm, "llm_version": w.llm_version, "busy": bool(w.lease),
+                        "llm_state": w.llm_state, "llm_id": w.llm_id,
                         "llm_on": self._worker_on(w.id),
                         "jobs_h": sum(1 for x in hour if x[2] == w.id),
                         "fails_h": sum(1 for x in hour if x[2] == w.id and x[3] != "ok")}
