@@ -1,0 +1,9 @@
+{
+  "jobs": [
+    {
+      "id": "0123456789abcdef",
+      "type": "call",
+      "args": {"fn": "replace_sdr", "args": ["00000102", "", "not_now", "person"]}
+    }
+  ]
+}
