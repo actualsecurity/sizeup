@@ -1668,7 +1668,7 @@ class Cad:
 
     def shutdown(self, wait_s: float = 5.0) -> None:
         """Done with this CAD (a test's teardown, --init-state, a tool): the workers that write to the store stopped and
-        joined (each up to wait_s), then the store's connection closed, so no thread is left using it as it closes.
+        joined (each step up to wait_s), then the store's connection closed, so no thread is left using it as it closes.
         Again: nothing. (Not close(): that one closes an incident.)"""
         if self._shut:
             return

@@ -16,6 +16,7 @@ No radios, no network. Every talkgroup, name and number here is invented, or alr
 from __future__ import annotations
 
 import json
+import threading
 import time
 
 import pytest
@@ -265,20 +266,23 @@ def test_shutdown_stops_a_retag_between_batches_joins_it_and_keeps_its_mark(tmp_
     for i in range(6):
         cad.record_traffic(p25_row(f"b-{i}", clock.t - 60 - i, PD, "mrrs", "transit"))
     batches = []
+    second = threading.Event()               # the re-tag is before its second batch
     real = type(cad.comms).retag
 
     def slow(self, s, v, since, batch=1, pause=0.0, stop=None):
         def stop_after_a_batch():
             batches.append(1)
             if len(batches) == 2:
-                time.sleep(0.2)                  # the second batch: shutdown() comes now
+                second.set()
+                end = time.monotonic() + 5       # held here until shutdown() says stop (5 s at most)
+                while not (stop is not None and stop()) and time.monotonic() < end:
+                    time.sleep(0.005)
             return stop is not None and stop()
         return real(self, s, v, since, 1, 0.0, stop_after_a_batch)
     monkeypatch.setattr(type(cad.comms), "retag", slow)
     post(cad, action="set", key=MINE, service="fire")
     t = cad.retag_thread
-    while len(batches) < 2:
-        time.sleep(0.01)
+    assert second.wait(5), f"the re-tag never reached its second batch in 5 s (batches {len(batches)}, alive {t.is_alive()})"
     cad.shutdown(wait_s=5)
     assert not t.is_alive() and len(batches) == 2                # stopped before its second batch, joined
     assert cad.retag_services() is None                          # shut: nothing new starts
