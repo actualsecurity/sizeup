@@ -306,6 +306,10 @@ def every_job_the_hub_makes(lv, st, wire, tmp_path, monkeypatch) -> dict[str, tu
     assert [(r["kind"], r["state"]) for r in ob.summary()["rows"]] == [("alarm", "held")]
     # the hub's pool takes a clip back from the station's whisper (#927): one whose text went up long ago, so "sent"
     one("stt_withdraw", lambda: app.stt_withdraw_station([tid]))
+    # ... and after a new sizeup process on the station, which of the clips still waiting it has (#927): "sent"
+    app.mdb.wait_add(tid, time.time())
+    one("stt_held", app._station_held_check)
+    app.mdb.wait_drop([tid])
     return out
 
 
@@ -313,7 +317,7 @@ FORMS = ("catch_up", "retranscribe", "retranscribe-all", "retranscribe-as-alt", 
          "set_mode-confirmed", "set_talkgroup", "set_talkgroup-tier", "set_talkgroup_group", "emergency_all_clear",
          "set_adsb_receiver", "set_antenna_groups", "set_antenna_groups-confirmed", "replace_sdr", "sources_poll_now",
          "reception_post", "reception_sample_b64", "set_stt_alert_keys", "set_stt_terms", "set_channel_prefs", "tts",
-         "sources_reset", "quarantine_dismiss", "stt_withdraw")
+         "sources_reset", "quarantine_dismiss", "stt_withdraw", "stt_held")
 
 
 def scrub(doc, tmp=""):
@@ -404,6 +408,7 @@ def test_the_recorded_jobs_and_results_are_what_the_hub_and_the_station_send_now
     assert r["quarantine_dismiss"]["result"] == 1
     assert r["stt_withdraw"]["result"] == {"withdrawn": [], "running": [], "sent": [got["stt_withdraw"][0]["args"]["args"][0][0]],
                                            "unknown": []}               # (its text went up long ago)
+    assert r["stt_held"]["result"] == {"held": [], "sent": [got["stt_held"][0]["args"]["args"][0][0]], "unknown": []}
     # the hub puts the channels' result in the status it has (and the station's next status says the same)
     assert wait(lambda: live.hub.app.hub.status["channels"] == r["set_channel_prefs"]["result"], 20)
 
@@ -496,7 +501,7 @@ def test_the_functions_and_their_argument_names_are_the_codes():
     the signatures: every parameter, in order; the list is closed at the last one; `minItems` is the number of
     parameters without a default."""
     defs = c.load(JOBS)["$defs"]
-    assert defs["call"]["properties"]["fn"]["x-known"] == list(station_mod.CALLS) and len(station_mod.CALLS) == 18
+    assert defs["call"]["properties"]["fn"]["x-known"] == list(station_mod.CALLS) and len(station_mod.CALLS) == 19
     assert [b["if"]["properties"]["fn"]["const"] for b in defs["call"]["allOf"]] == list(station_mod.CALLS)
     assert {k for k in defs if k.startswith("call.")} == {f"call.{fn}" for fn in station_mod.CALLS}
     results = c.load(RESULT)["$defs"]

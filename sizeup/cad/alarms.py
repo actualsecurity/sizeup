@@ -74,6 +74,9 @@ KEYWORDS = ("mayday", "may day may day", "emergency traffic", "firefighter down"
 OTHER = ("notice", "alarm", "off")         # the emergency button on a talkgroup that isn't ours, by someone not ours
 MAX_KEYWORDS, MAX_PHRASE_CHARS, MAX_PHRASE_WORDS, MAX_CHANNELS = 50, 60, 8, 20
 MAX_AGE_S = 30 * 60                        # a transmission that ended longer ago than this raises nothing
+# (#927) words that came long after air (a station's fill: its whisper behind, the station cut off): an alarm labelled
+# late up to MAX_AGE_S and LATE_FILL_SLACK more (#773's margin), past it a late notice (on the screens, never pushed)
+LATE_FILL_SLACK = 1.1
 REPEAT_S = 120                             # the same radio's button again on the same channel, its alarm still open:
                                            # the same alarm (radios repeat the emergency burst, key after key)
 NOTICE_S = 15 * 60                         # a notice nobody acknowledged drops off after this
@@ -710,11 +713,14 @@ class Alarms:
             if cur is None:
                 if not emergency and not heard:
                     return None
-                if now - end > MAX_AGE_S:
+                old = now - end > MAX_AGE_S * (LATE_FILL_SLACK if t.get("late_fill") else 1.0)
+                if old and not t.get("late_fill"):
                     self.log(f"alarms: {tid} on {t.get('source')}: {'emergency button' if emergency else ', '.join(heard)} "
                              f"{(now - end) / 60:.0f} min after it ended: too old to raise now (logged only)")
                     return None
                 level = "alarm" if heard or fire or self._ours(rig) else cfg["other"]
+                if old and level != "off":
+                    level = "notice"                    # (#927: its words came too late to push: on the screens only)
                 if level == "off":
                     self.log(f"alarms: emergency button on {t.get('source')} (radio {t.get('radio_id') or '?'}): "
                              "not our channel or rig, notices off")

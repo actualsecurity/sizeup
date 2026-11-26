@@ -1680,11 +1680,18 @@ flag. It shows "Transcribing on the station (whisper)", and the text fills the s
   alarms. A fill that comes before its transmission (that event held back and sent again later) is kept
   (`early_fill`, 6 h) and applied when the transmission comes. A copy still "Transcribing" that is sent again never
   blanks a row that has its text.
-- **Never stuck, never flagged early:** a row is marked shed (`skipped`, so the catch-up runs it from the hub's clip)
-  only on evidence: the station's machine rebooted since the row came (its `boot_id`, #795), the station has been
-  offline over 10 min, or the row is older than whisper ever keeps a clip waiting (`MAX_WAIT_S`, 3 h) + 15 min.
-  Behind a long backlog it stays "Transcribing". Its text still fills it if it comes. A clip saved at a stop keeps
-  `landed` in `stt-queue.json`, so after the restart its text is a fill too.
+- **Never stuck, never shed early:** a row is marked shed (`skipped`, so the catch-up runs it from the hub's clip)
+  only on evidence that its text isn't coming. When sizeup on the station starts again (a new `proc` in its state
+  post: a crash, a kill, an update, a reboot), the hub asks the new process which waiting clips it still has
+  (`stt_held`, again 2 min later) and sheds the ones it doesn't know. The backstop, for an older station too: a row
+  older than whisper ever keeps a clip waiting (`MAX_WAIT_S`, 3 h) + 15 min. A station that is only offline is never
+  shed: its queue lives on and its fills come when it is back. Its text still fills a shed row if it comes. A clip
+  saved at a stop keeps `landed` in `stt-queue.json`, so after the restart its text is a fill too, and the new
+  process says it holds it. The station refuses a catch-up of a clip still waiting for its first text.
+- **Late words still alarm:** a fill whose row has a text already (another engine's, the catch-up's) is a run, not
+  the text, but its words still reach the alarms (deduped by id). Words that come over 2 min after air alarm labelled
+  late ("raised N min late", at the transmission's own time); past the alarms' age (30 min + 10 %) they are a notice,
+  never pushed.
 - **Writes:** a loose row at its close is written to the station's `incidents.json` with its fill, and the station
   coalesces those writes (at most one each 1.5 s). The radio log's rules that need no words (a fireground's links)
   run at the close.

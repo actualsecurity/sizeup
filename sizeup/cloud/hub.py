@@ -154,13 +154,15 @@ CATCHUP_STATUS_S = 30.0  # shed clips caught up: the station's whisper judged id
 POOL_CAP = "stt_pool"    # the hub takes clips a station hands to the pool (#639 phase 2: transcript_pending "pool")
 POOL_AUDIO_WAIT_S = 10.0  # a pool job's audio: the station's STT input waited for this long before the listening clip
 CATCHUP_REFUSED_S = 600.0  # ... and a station that refuses the call (an older build) isn't asked again for this long
-# (#927) a transmission the station sent at its close with no text yet is flagged (shed: the catch-up can run it from
-# the hub's clip) only on evidence that its text isn't coming: the station rebooted since (its boot_id), it has been
-# offline this long, or the row is older than whisper ever keeps a clip waiting (stt.MAX_WAIT_S) + STATION_GRACE_S.
-# Otherwise it stays "Transcribing" however long whisper is behind (a live class waits up to 3 h). Its text still
-# fills it if it comes.
-STATION_OFFLINE_S = 600.0
+# (#927) a transmission the station sent at its close with no text yet is shed (the catch-up can run it from the hub's
+# clip) only on evidence that its text isn't coming: sizeup on the station started again (a new `proc` in its state
+# post: a crash, a kill, an update, a reboot) and the new process says it doesn't have the clip (stt_held "unknown");
+# or, the backstop (an older station without the call), the row is older than whisper ever keeps a clip waiting
+# (stt.MAX_WAIT_S) + STATION_GRACE_S. Never for being offline: a station cut off keeps its queue, and its fills come
+# when it is back. Otherwise it stays "Transcribing" however long whisper is behind. Its text still fills it if it comes.
 STATION_GRACE_S = 900.0
+RESTART_RECHECK_S = 120.0   # ... the new process asked again this long after (the old one's events still in its outbox)
+LATE_FILL_S = 120.0         # (#927) a fill this long after its transmission ended: its alarm is labelled late (#753)
 STATION_ENGINES = (STATION_WHISPER, STATION_AWS)   # a station retext's engine (stt_runs), as it says
 JOB_PATH = re.compile(r"/api/station/jobs/([0-9a-f]{16})")
 # Every route Hub.handle serves, each behind _principal (tests/test_station_identity.py fails on one not listed here)
@@ -347,6 +349,7 @@ class Hub:
         self.talkgroups: list[dict] = []
         self.skew = 0.0                          # hub clock - station clock (s)
         self.boot_id = ""                        # the station's machine boot, as its last state post said (#795, #927)
+        self.proc = ""                           # its sizeup process (#927: a new one = sizeup started again)
         self.errors, self.last_error = 0, ""
         self._lock = threading.Lock()
         self._ingest = threading.Lock()
@@ -722,6 +725,10 @@ class Hub:
             self.skew = now - float(d["at"])     # (never NaN: wire.loads reads a bare NaN as None)
         if isinstance(d.get("boot_id"), str) and d["boot_id"]:
             self.boot_id = d["boot_id"][:64]     # (#927: a reboot since a transmission came is the sweep's evidence)
+        proc = d.get("proc")
+        restarted = isinstance(proc, str) and bool(proc) and bool(self.proc) and proc[:64] != self.proc
+        if isinstance(proc, str) and proc:
+            self.proc = proc[:64]
         if isinstance(d.get("status"), dict):
             st = dict(d["status"])
             if sid:
@@ -741,6 +748,8 @@ class Hub:
                 self.app.reception_seen(st.get("reception"))     # (#410) a reception test that ended: logged, once
             except Exception as e:  # noqa: BLE001 - a log row, never in the way of the station's report
                 self.log(f"hub: reception test not logged: {type(e).__name__}: {e}")
+        if restarted and hasattr(self.app, "station_restarted"):    # (#927) after its status: the caps of the
+            self.app.station_restarted()                               # process that started now
         if isinstance(talking, list):
             self.live.update(talking, now, paging if isinstance(paging, list) else None)
         # caps: what this hub knows (#409's other P25 systems; each clip's STT input, sizeup/cloud/sttinput.py)
@@ -1440,9 +1449,12 @@ class HubApp(App):
         tid = self._id(d)
         if any(t.id == tid for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]):
             return
-        if d.get("transcript_pending") == "station" and self.cad.store.one(
-                "SELECT 1 AS x FROM radio_traffic WHERE id = ?", (tid,)) is not None:
-            return          # (#927) sent again after it left memory (1000 newer rows): the log has it, filled or not
+        if d.get("transcript_pending") == "station":
+            r = self.cad.store.one("SELECT status, text FROM radio_traffic WHERE id = ?", (tid,))
+            if r is not None:   # (#927) sent again after it left memory (1000 newer rows): the log has it, filled or not
+                if r["status"] in ("pending", "remote") and not (r["text"] or "").strip():
+                    self.mdb.wait_add(tid, time.time(), self.hub.boot_id)   # (a takeover: hub.sqlite behind cad.sqlite)
+                return
         if audio:
             self.audio.put(tid, audio, "clip", at=float(d.get("end") or time.time()), **_where(d))
         # with the station's extras (raw, confidence, model, attach, pairs, ...): plain names only
@@ -1505,12 +1517,26 @@ class HubApp(App):
                 return
         have_text = str((t.text if t is not None else row["text"]) or "").strip()
         have_status = t.status if t is not None else str(row["status"] or "")
-        waiting = (self.mdb.is_waiting(pid) and not have_text
-                   and have_status in ("pending", "remote", "skipped", "error"))
+        have_model = str((getattr(t, "model", "") if t is not None else row["model"]) or "")
+        # waiting for it: station_wait says so, or (a takeover: hub.sqlite behind cad.sqlite) the log's row is still
+        # "Transcribing on the station" with no text
+        waiting = not have_text and ((self.mdb.is_waiting(pid) and have_status in ("pending", "remote", "skipped", "error"))
+                                     or (have_status in ("pending", "remote")
+                                         and have_model.startswith(WHISPER_FALLBACK_STATION)))
+        end = getattr(t, "end", None) if t is not None else row["end"]
+        clip_end = self._hub_time(end)
+        late_fill = clip_end is not None and time.time() - clip_end > LATE_FILL_S     # (its words long after air)
         if d.get("authoritative") is False or not waiting:
             if status in LANDED:
                 self._stt_ran(pid, self._engine_of(d), model, text, status, conf, key=key, item=t, role="late",
                               vocab_v=vocab_v)
+            if text and status == "done":       # a late fill always reaches the alarms (a mayday; they dedupe by id)
+                tr = t if t is not None else self._traffic_of_row(row)
+                tr.late_fill = late_fill                      # type: ignore[attr-defined]
+                try:
+                    self._alarm(tr, text)
+                finally:
+                    tr.__dict__.pop("late_fill", None)
             self.hub.log(f"hub: the station's text for {pid}: "
                          + ("withdrawn from its whisper" if d.get("authoritative") is False else "another engine's first")
                          + ": kept as a run, not the text")
@@ -1530,7 +1556,12 @@ class HubApp(App):
             return
         self._prompt_time(pid, d)                            # (#727: whisper's prompt had the clip's own time)
         late = bool(d.get("late")) or bool(getattr(t, "late", False))
-        self._retext(pid, text, status, conf, model, why="speech-to-text", vocab_v=vocab_v, late=late)
+        t.late_fill = late_fill                               # type: ignore[attr-defined]  (the alarm: labelled late)
+        try:
+            self._retext(pid, text, status, conf, model, why="speech-to-text", vocab_v=vocab_v, late=late)
+        finally:
+            if held:
+                t.__dict__.pop("late_fill", None)
         if not held:                                         # (by its id: the alarm's words and ATC from the row)
             now = self.cad.store.one("SELECT text, status, unclear_text FROM radio_traffic WHERE id = ?", (pid,)) or {}
             words = str(now.get("text") or "") or (str(now.get("unclear_text") or "")
@@ -1546,17 +1577,6 @@ class HubApp(App):
                           wait_s=d.get("stt_wait_s"), run_s=d.get("stt_run_s"), vocab_v=vocab_v)
         if (d.get("stt") == "both" or getattr(t, "stt", "") == "both") and t.status in LANDED:
             self._aws_from_clip(t, self.audio.get(pid), key, both=True)
-
-    @staticmethod
-    def _traffic_of_row(r: dict) -> Traffic:
-        """A transmission as the radio log has it (#927: one no longer in memory), for its alarm and ATC."""
-        t = Traffic(str(r["id"]), str(r.get("channel") or ""), float(r.get("start") or 0.0), float(r.get("end") or 0.0),
-                    str(r.get("text") or ""), status=str(r.get("status") or ""), unit=str(r.get("talker") or ""),
-                    talkgroup=r.get("talkgroup"), rig=str(r.get("rig") or ""), radio_id=str(r.get("radio_id") or ""))
-        t.emergency = bool(r.get("emergency"))                # type: ignore[attr-defined]
-        if sourcekeys.other_p25(r):
-            t.system = str(r.get("system") or "")             # type: ignore[attr-defined]
-        return t
 
     # -- Amazon Transcribe here, for the station's clips --------------------------------------------------
 
@@ -1838,23 +1858,12 @@ class HubApp(App):
     def _flag_waiting(self, now: float) -> int:
         """A page waiting for the station's own whisper (not AWS) PENDING_FLAG_S after the hub got it: flagged. A
         transmission the station sent at its close (#927, hub.sqlite station_wait: in memory or not) whose text isn't
-        coming by the evidence (STATION_OFFLINE_S): marked shed, so the catch-up runs it from the clip here. Either
-        one's text still fills it when it comes."""
+        coming by the backstop (STATION_GRACE_S; a restarted station's own word: _station_held_check): marked shed, so
+        the catch-up runs it from the clip here. Either one's text still fills it when it comes."""
         n = 0
-        rows = self.mdb.waiting()
-        if rows:
-            hub = self.hub
-            offline = not hub.connected() and now - (hub.last_seen or hub.started) >= STATION_OFFLINE_S
-            for tid, at, boot in rows:
-                if boot and hub.boot_id and boot != hub.boot_id:
-                    why = "the station stopped (it rebooted since)"
-                elif offline:
-                    why = f"the station stopped (offline over {STATION_OFFLINE_S / 60:.0f} min)"
-                elif now - at > MAX_WAIT_S + STATION_GRACE_S:
-                    why = f"no text from the station in {(MAX_WAIT_S + STATION_GRACE_S) / 3600:.2f} h"
-                else:
-                    continue                        # (whisper behind, however long: still "Transcribing")
-                n += self._station_gave_up(tid, why)
+        for tid, at, _boot in self.mdb.waiting():
+            if now - at > MAX_WAIT_S + STATION_GRACE_S:       # (the backstop: whisper never keeps one waiting so long)
+                n += self._station_gave_up(tid, f"no text from the station in {(MAX_WAIT_S + STATION_GRACE_S) / 3600:.2f} h")
         self.mdb.wait_prune(now)
         with self._lock:
             waiting = [p for p in self.pages if p.status == "pending" and getattr(p, "stt", "") not in ("aws", "pool")]
@@ -2864,6 +2873,41 @@ class HubApp(App):
         for cid in ids:
             self._rerun_finish(cid, f"failed: {err or 'the station has no recording to re-run'}")
         self.sync()
+
+    def station_restarted(self) -> None:
+        """(#927) sizeup on the station started again (a new proc_id): which of the transmissions waiting for its text it
+        still has is asked now and again RESTART_RECHECK_S later, in the background (never on the state post's
+        thread). A station without the call (an older one): the sweep's evidence as ever."""
+        def run() -> None:
+            for wait_s in (0.0, RESTART_RECHECK_S):
+                if wait_s and self._stopping.wait(wait_s):
+                    return
+                try:
+                    self._station_held_check()
+                except Exception as e:  # noqa: BLE001 - the sweep's evidence still holds
+                    self.hub.log(f"speech-to-text: after the station's restart: {type(e).__name__}: {e}")
+        threading.Thread(target=run, name="hub-station-held", daemon=True).start()
+
+    def _station_held_check(self) -> int:
+        """The transmissions still waiting for the station's text that its process doesn't have (lost with a crash or a
+        kill: no stt-queue.json): shed now, the catch-up's. Held or sent: left as they are. How many shed."""
+        if not self._may_write_audio() or "stt_held" not in self.hub.station_caps():
+            return 0
+        ids = [r[0] for r in self.mdb.waiting()]
+        n = 0
+        for k in range(0, len(ids), 500):
+            chunk = ids[k:k + 500]
+            try:
+                got = self.hub.remote("stt_held", chunk)
+            except (StationOffline, RuntimeError) as e:
+                self.hub.log(f"speech-to-text: after the station's restart: what it still has not asked ({str(e)[:120]})")
+                return n
+            lost = [x for x in (got.get("unknown") if isinstance(got, dict) else None) or [] if x in set(chunk)]
+            for tid in lost:
+                n += self._station_gave_up(tid, "the station stopped (sizeup started again without it)")
+        if n:
+            self.hub.log(f"speech-to-text: the station started again without {n} waiting clip(s): marked shed")
+        return n
 
     def stt_withdraw_station(self, ids: list[str]) -> dict | None:
         """(#927) The station's whisper skips these clips (its "stt_withdraw" call): the pool has them now. For the

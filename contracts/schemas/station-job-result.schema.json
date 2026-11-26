@@ -212,6 +212,19 @@
         "unknown": {"type": "array", "items": {"type": "string"}, "description": "The station doesn't know it: never sent at its close, or from before the station's restart."}
       }
     },
+    "result.stt_held": {
+      "title": "Which clips the new process has",
+      "description": "App.stt_held's answer (#927): each id it was sent in one of three lists.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["held", "sent", "unknown"],
+      "additionalProperties": true,
+      "properties": {
+        "held": {"type": "array", "items": {"type": "string"}, "description": "Still waiting for whisper here (saved at the stop and queued again): its text comes as ever."},
+        "sent": {"type": "array", "items": {"type": "string"}, "description": "Its text went up already or is about to."},
+        "unknown": {"type": "array", "items": {"type": "string"}, "description": "This process doesn't have it (lost with a crash or a kill): the hub marks it shed, the catch-up runs it."}
+      }
+    },
     "result.sources_reset": {
       "type": "string",
       "description": "What was asked of each source, for people: `<source>: reset asked (runs before its next poll)`; the hub keeps 300 characters."

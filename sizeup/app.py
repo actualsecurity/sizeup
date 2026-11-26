@@ -1987,7 +1987,9 @@ class App:
              "rig": t.rig, "radio_id": t.radio_id, "text": t.text if text is None else text,
              "emergency": bool(getattr(t, "emergency", False)), "via": getattr(t, "emergency_via", ""),
              "alarm_key": getattr(t, "alarm_key", ""), "stuck": getattr(t, "flag_stuck", ""),
-             "late": bool(getattr(t, "late", False))}
+             "late": bool(getattr(t, "late", False) or getattr(t, "late_fill", False))}
+        if getattr(t, "late_fill", False):
+            d["late_fill"] = True       # (#927: words that came long after air: labelled late; too old, a notice)
         d["unit"] = ", ".join(x.removesuffix(" EMERGENCY") for x in (t.unit or "").split(", ") if x)
         try:
             self.cad.alarms.on_traffic(d)
@@ -2306,6 +2308,19 @@ class App:
         if out["withdrawn"] or out["running"]:
             log(f"speech-to-text: the hub's pool took {len(out['withdrawn'])} waiting clip(s)"
                 + (f", {len(out['running'])} already on whisper (its text a run only)" if out["running"] else ""))
+        return out
+
+    def stt_held(self, ids) -> dict:
+        """(station; the hub's call, #927, read only) After this process started again: which of these clips, sent at
+        their close, it still has for whisper (saved at the stop and queued again, or new): held; whose text went up
+        (or is about to): sent; and the ones it doesn't know (lost with a crash): unknown, the hub marks them shed at
+        once. Nothing is withdrawn. -> {held, sent, unknown}."""
+        if not isinstance(ids, list) or len(ids) > WITHDRAW_MAX or not all(isinstance(x, str) for x in ids):
+            raise ValueError(f"ids: a list of clip ids (at most {WITHDRAW_MAX})")
+        out: dict[str, list[str]] = {"held": [], "sent": [], "unknown": []}
+        with self._landed_lock:
+            for cid in dict.fromkeys(ids):
+                out["held" if cid in self._landed else "sent" if cid in self._sent else "unknown"].append(cid)
         return out
 
     def _page_incident(self, page: Page, depts: list[str], d, tones_half: Page | None = None):
@@ -2706,6 +2721,9 @@ class App:
                 if cid in self._rerun_ids:                 # here already (the last batch's, or a person's re-run)
                     out["queued"].append(cid)
                     continue
+            if cid in self._landed:                        # (#927) still in whisper's queue for its first text: never twice
+                out["refused"][cid] = "still waiting for whisper here (its text comes as ever)"
+                continue
             t, key = self._find(cid)
             if t is not None and not isinstance(t, Traffic):
                 continue                                   # (pages are never shed)
@@ -3042,6 +3060,17 @@ class App:
         log(f"speech-to-text {getattr(item, 'id', '')}: {stt_quality.label(getattr(item, 'quality', '')).lower()} "
             f"from {getattr(item, 'model', '') or 'unknown'}")
 
+    @staticmethod
+    def _traffic_of_row(r: dict) -> Traffic:
+        """A transmission as the radio log has it (#927: one no longer in memory), for its alarm and ATC."""
+        t = Traffic(str(r["id"]), str(r.get("channel") or ""), float(r.get("start") or 0.0), float(r.get("end") or 0.0),
+                    str(r.get("text") or ""), status=str(r.get("status") or ""), unit=str(r.get("talker") or ""),
+                    talkgroup=r.get("talkgroup"), rig=str(r.get("rig") or ""), radio_id=str(r.get("radio_id") or ""))
+        t.emergency = bool(r.get("emergency"))                # type: ignore[attr-defined]
+        if sources.other_p25(r):
+            t.system = str(r.get("system") or "")             # type: ignore[attr-defined]
+        return t
+
     def _retext(self, cid: str, text: str, status: str, confidence: float | None, model: str,
                 alt: dict | None = None, why: str = "re-run", quiet: bool = False, vocab_v: str = "",
                 prompted: bool = False, late: bool = False, language: str = "") -> bool:
@@ -3118,6 +3147,11 @@ class App:
                               **({"stt_prompt_time": True} if prompted else {}),    # (whisper's prompt had its time, #727)
                               **({"alt": alt} if alt is not None else {}), **({"catchup": True} if quiet else {}),
                               **({"vocab_v": vocab_v} if vocab_v else {}), **({"late": True} if late else {})})
+        if unclear and item is None and not quiet:     # (#927: a row no longer in memory, re-asked by its id)
+            r = self.cad.store.one("SELECT * FROM radio_traffic WHERE id = ?", (cid,))
+            if r is not None:
+                item = self._traffic_of_row(r)
+                item.quality, item.model = unclear.get("quality", ""), model    # type: ignore[attr-defined]
         if unclear and item is not None:
             self._unclear(item, traffic_key(item) if isinstance(item, Traffic) else str(getattr(item, "label", "")),
                           quiet=quiet or late)
@@ -6562,6 +6596,7 @@ class App:
         self.cad.radiolog.stop()
         self.cad.addrs.stop()
         self.stop_layers()
+        self.store.flush()                     # (#927: a fill whisper finished while it stopped, on disk too)
 
     def _stt_handoff(self, wait_s: float = STOP_URGENT_S, mark_s: float = STOP_MARK_S) -> dict:
         """Stopping (an update's restart, a reboot): the whisper queue (sizeup/stt.py) lives in memory only, so a clip

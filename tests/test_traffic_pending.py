@@ -420,22 +420,13 @@ def test_a_row_waiting_behind_a_two_hour_backlog_stays_transcribing(hub, made, m
     assert (row(hub, tid)["status"], row(hub, tid)["text"]) == ("done", SAID)
 
 
-@pytest.mark.parametrize("how", ["reboot", "offline", "too old"])
-def test_a_row_whose_station_rebooted_is_shed_for_the_catch_up_and_its_text_still_fills_it(hub, made, monkeypatch, how):
+def test_a_row_older_than_whisper_ever_waits_is_shed_for_the_catch_up_and_its_text_still_fills_it(hub, made, monkeypatch):
     from sizeup.stt import MAX_WAIT_S
     st = made({3: SAID})
     evidence(hub, monkeypatch)
     tid = fm(st, time.time() - 30)
     st.flush(hub)
-    later = time.time() + 60
-    if how == "reboot":
-        hub.app.hub.boot_id = "boot-b"                              # (#795: the station's machine came up again)
-    elif how == "offline":
-        monkeypatch.setattr(hub.app.hub, "connected", lambda: False)
-        hub.app.hub.last_seen = time.time()
-        later = time.time() + hub_mod.STATION_OFFLINE_S + 1
-    else:
-        later = time.time() + MAX_WAIT_S + hub_mod.STATION_GRACE_S + 1
+    later = time.time() + MAX_WAIT_S + hub_mod.STATION_GRACE_S + 1
     assert hub.app._flag_waiting(later) == 1
     r = row(hub, tid)
     assert r["status"] == "skipped" and SHED in r["model"] and r["text"] == ""
@@ -445,6 +436,154 @@ def test_a_row_whose_station_rebooted_is_shed_for_the_catch_up_and_its_text_stil
     assert wait(lambda: st.kinds(tid) == ["traffic", "retext"], 15)
     st.flush(hub)
     assert (row(hub, tid)["status"], row(hub, tid)["text"]) == ("done", SAID) and not hub.app.mdb.is_waiting(tid)
+
+
+def test_a_station_offline_over_ten_minutes_is_never_shed_and_its_mayday_alarms_once_labelled_late(hub, made, monkeypatch):
+    from tests.test_p25_replay import Push
+    push = hub.app.cad.alarms.notifier = Push()
+    st = made({3: MAYDAY})
+    tid = fm(st, time.time() - 11 * 60)                             # (its fill comes 11 min after: the link was down)
+    st.flush(hub)
+    monkeypatch.setattr(hub.app.hub, "connected", lambda: False)
+    hub.app.hub.last_seen = time.time() - 11 * 60
+    assert hub.app._flag_waiting(time.time()) == 0 and row(hub, tid)["status"] == "pending"
+    st.whisper.go.set()
+    assert wait(lambda: st.kinds(tid) == ["traffic", "retext"], 15)
+    st.flush(hub)
+    assert (row(hub, tid)["status"], row(hub, tid)["text"]) == ("done", MAYDAY)
+    assert wait(lambda: len(hub.app.cad.store.q("SELECT * FROM alarms")) == 1, 10)
+    a = hub.app.cad.alarms.get(hub.app.cad.store.q("SELECT id FROM alarms")[0]["id"])
+    assert a["level"] == "alarm" and "min late" in a["what"] and a["at"] == pytest.approx(time.time() - 11 * 60, abs=5)
+    assert wait(lambda: len(push.sent) == 1, 10) and "min late" in push.sent[0][0]
+
+
+def test_a_fill_long_after_air_alarms_labelled_late_and_past_the_alarms_age_is_a_notice_with_no_push(hub, made):
+    from tests.test_p25_replay import Push
+    push = hub.app.cad.alarms.notifier = Push()
+    st = made({3: MAYDAY, 4: MAYDAY})
+    a = fm(st, time.time() - 5 * 60, 3.0)                           # 5 min late
+    b = fm(st, time.time() - 3 * 3600, 4.0)                         # 3 h late
+    st.flush(hub)
+    st.whisper.go.set()
+    assert wait(lambda: st.kinds(a) == ["traffic", "retext"] and st.kinds(b) == ["traffic", "retext"], 15)
+    st.flush(hub)
+    rows = lambda: {r["traffic_id"]: r for r in hub.app.cad.store.q("SELECT * FROM alarms")}    # noqa: E731
+    assert wait(lambda: set(rows()) == {a, b}, 10)
+    first, second = (hub.app.cad.alarms.get(rows()[x]["id"]) for x in (a, b))
+    assert first["level"] == "alarm" and "raised 5 min late" in first["what"]
+    assert second["level"] == "notice" and "min late" in second["what"]
+    time.sleep(0.5)
+    assert len(push.sent) == 1 and "raised 5 min late" in push.sent[0][0]      # (the notice: never pushed)
+
+
+def test_a_fill_for_a_row_this_hub_shed_still_reaches_the_alarms(hub, made, monkeypatch):
+    from sizeup.stt import MAX_WAIT_S
+    st = made({3: MAYDAY})
+    tid = fm(st, time.time() - 60)
+    st.flush(hub)
+    assert hub.app._flag_waiting(time.time() + MAX_WAIT_S + hub_mod.STATION_GRACE_S + 1) == 1
+    hub.app._retext(tid, "Engine 5 on location", "done", 0.9, "m.bin", why="catch-up", quiet=True)   # (its text first)
+    st.whisper.go.set()
+    assert wait(lambda: st.kinds(tid) == ["traffic", "retext"], 15)
+    st.flush(hub)
+    assert row(hub, tid)["text"] == "Engine 5 on location"            # (the text that came first stays)
+    assert wait(lambda: len(hub.app.cad.store.q("SELECT * FROM alarms")) == 1, 10)   # (but its mayday alarms)
+
+
+def restarted(hub: HubRun, monkeypatch, held) -> list:
+    """The hub hears a new sizeup process on the station (its state post's `proc`): what it asks it."""
+    asked = []
+    monkeypatch.setattr(hub.app.hub, "connected", lambda: True)
+    monkeypatch.setattr(hub.app.hub, "remote", lambda fn, *a, **k: (asked.append((fn, a)) or held(a[0]))
+                        if fn == "stt_held" else {})
+    monkeypatch.setattr(hub_mod, "RESTART_RECHECK_S", 3600.0)
+    for proc in ("proc-a", "proc-b"):
+        hub.app.hub._state(json.dumps({"at": time.time(), "proc": proc,
+                                       "status": {"id": "t", "caps": ["stt_withdraw", "stt_held"]}}).encode())
+    return asked
+
+
+def test_a_station_process_that_restarted_without_its_queue_has_its_rows_shed_at_once(hub, made, monkeypatch):
+    st = made({3: SAID})
+    tid = fm(st, time.time() - 30)
+    st.flush(hub)
+    asked = restarted(hub, monkeypatch, lambda ids: {"held": [], "sent": [], "unknown": list(ids)})
+    assert wait(lambda: row(hub, tid)["status"] == "skipped", 10)
+    assert asked == [("stt_held", ([tid],))] and SHED in row(hub, tid)["model"]
+
+
+def test_a_station_process_that_restarted_with_its_queue_keeps_its_rows_waiting(hub, made, monkeypatch):
+    st = made({3: SAID})
+    tid = fm(st, time.time() - 30)
+    st.flush(hub)
+    asked = restarted(hub, monkeypatch, lambda ids: {"held": list(ids), "sent": [], "unknown": []})
+    assert wait(lambda: asked == [("stt_held", ([tid],))], 10)
+    time.sleep(0.3)
+    assert row(hub, tid)["status"] == "pending" and hub.app.mdb.is_waiting(tid)
+
+
+def test_an_older_station_without_the_call_keeps_its_rows_waiting_after_a_restart(hub, made, monkeypatch):
+    st = made({3: SAID})
+    tid = fm(st, time.time() - 30)
+    st.flush(hub)
+    asked = []
+    monkeypatch.setattr(hub.app.hub, "connected", lambda: True)
+    monkeypatch.setattr(hub.app.hub, "remote", lambda fn, *a, **k: asked.append(fn) if fn == "stt_held" else {})
+    for proc in ("proc-a", "proc-b"):
+        hub.app.hub._state(json.dumps({"at": time.time(), "proc": proc, "status": {"id": "t"}}).encode())
+    time.sleep(0.3)
+    assert asked == [] and row(hub, tid)["status"] == "pending"
+
+
+def test_the_station_says_which_clips_it_still_holds_and_withdraws_nothing(made):
+    st = made({3: SAID, 4: "Ladder 2 on location"})
+    a = fm(st, time.time() - 60, 3.0)
+    assert wait(lambda: st.whisper.asked == [3], 10)
+    b = fm(st, time.time() - 50, 4.0)
+    assert st.app.stt_held([a, b, "FG1-1"]) == {"held": [a, b], "sent": [], "unknown": ["FG1-1"]}
+    st.whisper.go.set()
+    assert wait(lambda: st.kinds(b) == ["traffic", "retext"], 15)    # (still transcribed: nothing withdrawn)
+    assert st.app.stt_held([a, b]) == {"held": [], "sent": [a, b], "unknown": []}
+
+
+def test_the_station_refuses_a_catch_up_of_a_clip_still_waiting_for_its_first_text(made):
+    st = made({3: SAID})
+    tid = fm(st, time.time() - 30)
+    got = st.app.catch_up([{"id": tid, "key": "FG1", "source": "FG1", "unit": "", "start": time.time() - 30}])
+    assert tid not in got["queued"] and "waiting for whisper" in got["refused"].get(tid, got.get("hold") or "x")
+
+
+def test_a_replayed_event_at_the_close_after_a_takeover_still_takes_its_fill(hub, made):
+    from sizeup.incidents import Traffic
+    st = made({3: SAID})
+    tid = fm(st, time.time() - 30)
+    st.flush(hub)
+    hub.app.mdb.wait_drop([tid])                                    # (hub.sqlite behind cad.sqlite: a takeover)
+    for k in range(1000):
+        hub.app.store.loose.append(Traffic(f"FG1-{k}", "FG1", 1.0 + k, 2.0 + k, "", status="done"))
+    st.post(hub, "traffic", st.sent[0][1], st.sent[0][2])           # (replayed)
+    assert hub.app.mdb.is_waiting(tid)
+    hub.app.mdb.wait_drop([tid])                                    # (and even without it: the log's own row says so)
+    st.whisper.go.set()
+    assert wait(lambda: st.kinds(tid) == ["traffic", "retext"], 15)
+    st.flush(hub)
+    assert (row(hub, tid)["text"], row(hub, tid)["status"]) == (SAID, "done")
+
+
+def test_an_unclear_fill_for_a_row_no_longer_in_memory_is_asked_again(hub, made, monkeypatch):
+    from sizeup.incidents import Traffic
+    st = made({3: "engine engine engine engine engine engine engine engine engine engine engine engine engine engine "
+                   "engine engine engine engine engine engine engine engine engine engine engine engine engine engine"})
+    tid = fm(st, time.time() - 30)
+    st.flush(hub)
+    for k in range(1000):
+        hub.app.store.loose.append(Traffic(f"FG1-{k}", "FG1", 1.0 + k, 2.0 + k, "", status="done"))
+    asked = []
+    monkeypatch.setattr(hub.app, "_unclear", lambda item, key, quiet=False: asked.append((item.id, key, quiet)))
+    st.whisper.go.set()
+    assert wait(lambda: st.kinds(tid) == ["traffic", "retext"], 15)
+    st.flush(hub)
+    assert row(hub, tid)["status"] == "unclear" and asked == [(tid, "FG1", False)]
 
 
 def test_a_fill_for_a_row_no_longer_in_memory_fills_the_radio_log_and_alarms_on_a_mayday(hub, made):
