@@ -43,6 +43,8 @@ def make_zip(files: dict, links: tuple = ()) -> bytes:
 WHISPER_ZIP = make_zip({"Release/whisper-server.exe": b"whisper b6000", "Release/ggml.dll": b"ggml"})
 LLAMA_ZIP = make_zip({"llama-server.exe": b"llama b13000", "ggml-cuda.dll": b"cuda kernels"})
 CUDART_ZIP = make_zip({"cudart64_12.dll": b"cuda runtime"})
+TEST_GGUF = b"GGUF a made-up tiny test model"
+TEST_URL = "https://huggingface.co/ggml-org/models-moved/resolve/" + "c" * 40 + "/tinyllamas/test.gguf"
 
 
 def pin(repo: str, build: str, name: str, data: bytes) -> dict:
@@ -61,10 +63,12 @@ def pins(monkeypatch):
                             pin("llama.cpp", "b13000", "cudart-test.zip", CUDART_ZIP))),
     }
     monkeypatch.setattr(W, "RUNTIMES", rts)
+    monkeypatch.setattr(W, "RUNTIME_TEST_MODEL", {"url": TEST_URL, "bytes": len(TEST_GGUF), "sha256": sha(TEST_GGUF)})
     monkeypatch.setattr(W, "UPDATE_QUIET_S", 0.0)
     monkeypatch.setattr(W, "RUNTIME_TEST_S", 3.0)
-    return {z["url"]: data for rt in rts.values() for z, data in zip(
+    blobs = {z["url"]: data for rt in rts.values() for z, data in zip(
         rt["zips"], (WHISPER_ZIP,) if rt["exe"].endswith("whisper-server.exe") else (LLAMA_ZIP, CUDART_ZIP))}
+    return {**blobs, TEST_URL: TEST_GGUF}
 
 
 def fake_download(blobs: dict, offsets: list | None = None, calls: list | None = None):
@@ -290,10 +294,10 @@ class Procs(list):
 def worker(tmp_path, hub, whisper, pins, **kw):
     base = install(tmp_path)
     port = whisper.url.split(":")[2].split("/")[0]
-    kw = {"whisper_server": ["whisper/Release/whisper-server.exe", "-m", "m.bin", "--port", port], **kw}
-    cfg = make_cfg(tmp_path, hub, whisper, base_dir=str(base), llm_url="http://127.0.0.1:18180", llm_model="test-llm",
-                   llm_model_sha256="0" * 64,
-                   llm_server=["llama/llama-server.exe", "-m", "q.gguf", "--port", "18180"], **kw)
+    kw = {"whisper_server": ["whisper/Release/whisper-server.exe", "-m", "m.bin", "--port", port],
+          "llm_url": "http://127.0.0.1:18180", "llm_model": "test-llm", "llm_model_sha256": "0" * 64,
+          "llm_server": ["llama/llama-server.exe", "-m", "q.gguf", "--port", "18180"], **kw}
+    cfg = make_cfg(tmp_path, hub, whisper, base_dir=str(base), **kw)
     procs = Procs()
     w = W.Worker(cfg, run=no_smi, popen=procs)
     w.runtimes = W.Runtimes(cfg, run=version_of, download=fake_download(pins), windows=True)
@@ -303,8 +307,11 @@ def worker(tmp_path, hub, whisper, pins, **kw):
             proc.program = w.runtimes.program
     w.stt_models.program = w.runtimes.program
     w.llm_verified = True
-    w.llm.status = lambda: 200
-    w.llm.check = lambda: ({"ok": True}, 5, 1)
+    if w.llm is not None:
+        w.llm.status = lambda: 200
+        w.llm.check = lambda: ({"ok": True}, 5, 1)
+    w.probes = []                                                          # (_llama_probe: its own test, below)
+    w._llama_probe = lambda exe, end: (w.probes.append(exe), ("", False))[1]
     return w, procs
 
 
@@ -529,21 +536,25 @@ def test_an_error_mid_switch_rolls_back_and_counts(tmp_path, hub, whisper, pins)
 
 
 def test_never_switched_untested(tmp_path, hub, whisper, pins):
-    w, procs = worker(tmp_path, hub, whisper, pins)
-    w.llm_verified = False                                                 # llama-server couldn't start to be tested
-    w.stt_models.llm_room_ok = True
-    assert w.runtimes_step()                                               # whisper: tested, kept
-    assert not w.runtimes_step()
-    assert w.runtimes.status["llama"] == "b13000 ready, waiting: the LLM's model not checked yet"
-    w.llm_verified = True
-    w.stt_models.llm_room_ok = False
-    w.stt_models.make_plan = lambda gpu: []                               # (the speech models keep its room)
-    assert not w.runtimes_step()
-    assert w.runtimes.status["llama"].endswith("waiting: the LLM gave its VRAM to the speech models")
-    assert w.runtimes.active("llama") == ""
-    own, _ = worker(tmp_path / "own", hub, whisper, pins, whisper_server=["/opt/whisper-server", "--port", "1"],
-                    whisper_bin="whisper/Release/whisper-server.exe")
-    assert own.untestable("whisper") == "no whisper_server to test it with"
+    """llama.cpp has its own test model: switched and tested whatever the LLM does (the README's llama_bin-only
+    config, a 12 GB card whose LLM gave its room, a GGUF whose hash failed). whisper.cpp needs worker.toml's own
+    whisper_server: without it, nothing is downloaded."""
+    w, procs = worker(tmp_path, hub, whisper, pins, whisper_server=[], llm_server=[], llm_url="",
+                      llama_bin="llama/llama-server.exe", whisper_bin="whisper/Release/whisper-server.exe")
+    w.proc = None
+    assert w.llm_proc is None
+    assert w.runtimes_step()                                               # llama: its probe, kept
+    assert w.probes == [str(Path(w.cfg.base_dir) / "runtimes" / "llama" / "b13000" / "llama-server.exe")]
+    assert w.runtimes.status["whisper"] == "b6000: not downloaded: no whisper_server to test it with"
+    assert not (Path(w.cfg.base_dir) / "runtimes" / "whisper").exists()
+    w2, _ = worker(tmp_path / "b", hub, whisper, pins, whisper_server=[])
+    w2.proc = None
+    w2.llm_verified = False                                                # (its GGUF's hash failed)
+    assert w2.runtimes_step() and w2.runtimes.active("llama") == "b13000"
+    w3, _ = worker(tmp_path / "c", hub, whisper, pins, whisper_server=[])
+    w3.proc = None
+    w3.stt_models.llm_room_ok = False                                      # (the LLM gave its room)
+    assert w3.runtimes_step() and w3.runtimes.active("llama") == "b13000"
 
 
 def test_the_running_builds_folder_is_never_unpacked_over(tmp_path, pins):
@@ -577,3 +588,209 @@ def test_an_llm_job_taken_as_a_switch_begins_is_released(tmp_path, hub, whisper,
     w.switching = "llama"
     w.do_infer({"lease": "a" * 16, "id": "j", "task": "t", "messages": [], "schema": {}})
     assert released == ["paused"] and w.llm_job is None
+
+
+# --- second review (#871): gaming rollbacks, its own llama test, catalog models, rename, whisper's own process,
+# --- the one idle-switch lock ---------------------------------------------------------------------------------------
+
+def test_a_rollback_while_gaming_only_stops_the_servers(tmp_path, hub, whisper, pins):
+    """A game that starts mid-test: the build before made active again, its servers only stopped (no ~6 GB loaded
+    into the game's VRAM); the monitors start them once the PC is free."""
+    w, procs = worker(tmp_path, hub, whisper, pins, whisper_server=[])
+    w.proc = None
+
+    def status():
+        w.control.set(gaming=True)
+        return 503                                                         # (still loading when the game starts)
+    w.llm.status = status
+    assert not w.runtimes_step()
+    assert w.runtimes.active("llama") == "" and w.runtimes.status["llama"].startswith("rolled back: gaming")
+    assert len(procs) == 1 and "b13000" in procs[0].argv[0] and procs[0].returncode is not None   # stopped, none new
+    assert not w.llm_proc.running()
+    doc = json.loads((Path(w.cfg.state_dir) / "runtimes.json").read_text())
+    assert doc["llama"]["fails"]["b13000"] == 0                            # not counted
+    wv, wprocs = worker(tmp_path / "w", hub, whisper, pins, llm_server=[], llm_url="")
+    wv.whisper.alive = lambda: (wv.control.set(gaming=True), False)[1]
+    assert not wv.runtimes_step()
+    assert len(wprocs) == 1 and "b6000" in wprocs[0].argv[0] and not wv.proc.running()
+
+
+def test_the_llama_probe_runs_its_test_model_on_its_own_port_and_stops(tmp_path, hub, whisper, pins, monkeypatch):
+    cfg = rt_cfg(tmp_path)
+    r = runtimes(cfg, pins)
+    r.step(stop=lambda: False)
+    assert r.test_model_ready()
+    procs = Procs()
+    w = W.Worker(make_cfg(tmp_path, hub, whisper, base_dir=cfg.base_dir), run=no_smi, popen=procs)
+    w.runtimes = r
+    monkeypatch.setattr(W, "MODEL_PORT_FIRST", 18291)
+    asked = []
+    monkeypatch.setattr(W.Llm, "status", lambda self: (asked.append((self.port, bool(self.key))), 200)[1])
+    monkeypatch.setattr(W.Llm, "tiny", lambda self: None)
+    exe = str(r.exe("llama", "b13000"))
+    assert w._llama_probe(exe, w.clock() + 3) == ("", False)
+    (p,) = procs
+    assert p.argv[:3] == [exe, "-m", str(r.test_model())] and p.argv[p.argv.index("--port") + 1] == "18291"
+    assert p.argv[p.argv.index("--host") + 1] == "127.0.0.1" and "--api-key" not in p.argv
+    assert asked[0] == (18291, True) and p.returncode is not None         # its own key; stopped after
+    monkeypatch.setattr(W.Llm, "tiny", lambda self: (_ for _ in ()).throw(W.LlmError("llama-server said 500")))
+    assert w._llama_probe(exe, w.clock() + 3) == ("its test model: llama-server said 500", False)
+    r.test_model().unlink()
+    assert w._llama_probe(exe, w.clock() + 3) == ("its test model isn't there", False)
+
+
+def catalog_worker(tmp_path, hub, whisper, pins, monkeypatch, **kw):
+    from tests.test_stt_worker_models import two_models
+    cat = tmp_path / "models.json"
+    cat.write_text(json.dumps(two_models()))
+    w, procs = worker(tmp_path, hub, whisper, pins, catalog_file=str(cat), models_dir=str(tmp_path / "models"),
+                      vram_budget_mb=20000, **kw)
+    m = w.stt_models
+    for e in m.catalog.values():
+        for f in e["files"].values():
+            m.path_of(f).parent.mkdir(parents=True, exist_ok=True)
+            m.path_of(f).write_bytes({sha(b): b for b in (b"asr", b"mm", b"atc")}[f["sha256"]])
+    monkeypatch.setattr(W, "MODEL_PORT_FIRST", 18391)
+    m.want = ["atc-test"]
+    return w, procs
+
+
+def test_the_runtime_test_decodes_on_one_catalog_model_of_its_kind(tmp_path, hub, whisper, pins, monkeypatch):
+    w, procs = catalog_worker(tmp_path, hub, whisper, pins, monkeypatch, llm_server=[], llm_url="")
+    tests = []
+    monkeypatch.setattr(W.ModelServer, "alive", lambda self: self.proc is not None and self.proc.running())
+    monkeypatch.setattr(W.ModelServer, "test", lambda self: tests.append(self.id))
+    assert w.runtimes_step()
+    probe = [p for p in procs if "-m" in p.argv and "ggml-atc.bin" in p.argv[p.argv.index("-m") + 1]]
+    assert tests == ["atc-test"] and len(probe) == 1 and "b6000" in probe[0].argv[0]
+    assert probe[0].returncode is not None and "atc-test" not in w.stt_models.servers   # stopped: the plan starts it
+
+
+def test_a_catalog_model_failing_on_the_new_build_rolls_the_build_back_never_its_hash(tmp_path, hub, whisper, pins,
+                                                                                      monkeypatch):
+    w, procs = catalog_worker(tmp_path, hub, whisper, pins, monkeypatch, llm_server=[], llm_url="")
+
+    def fail(self):
+        raise W.WhisperError("whisper-server said 500")
+    monkeypatch.setattr(W.ModelServer, "alive", lambda self: self.proc is not None and self.proc.running())
+    monkeypatch.setattr(W.ModelServer, "test", fail)
+    assert not w.runtimes_step()                                           # its test: the catalog model fails
+    m = w.stt_models
+    e = m.catalog["atc-test"]
+    assert w.runtimes.active("whisper") == "" and w.runtimes.status["whisper"].startswith("rolled back: atc-test")
+    assert not m.bad(e["sha256"]) and not m._fails
+    # probation: a build kept, then a model of its kind fails to load on it: the build goes back, not the model
+    monkeypatch.setattr(W.ModelServer, "test", lambda self: None)
+    w.runtimes._change("whisper", lambda r: r.pop("next", None))
+    assert w.runtimes_step() and w.runtimes.on_probation("whisper")
+    s = W.ModelServer(e, m.paths(e), 18399, None, 5)
+    s.kind = "whisper-ggml"
+    m.failed_load(s, exited=False)
+    assert not m._fails and m.status["atc-test"] == "failed: its runtime (rolled back)"
+    w.runtimes_step()
+    assert w.runtimes.active("whisper") == "" and not w.runtimes.on_probation("whisper")
+    doc = json.loads((Path(w.cfg.state_dir) / "runtimes.json").read_text())
+    assert doc["whisper"]["fails"]["b6000"] == 1 and not m.bad(e["sha256"])   # (its pass in between reset it)
+    m.failed_load(s, exited=False)                                         # off probation: the model's own failure
+    assert m._fails == {e["sha256"]: 1}
+
+
+def test_a_refused_rename_is_tried_again_without_unpacking_again(tmp_path, pins, monkeypatch):
+    cfg = rt_cfg(tmp_path, llm_server=[], llm_url="")
+    r = runtimes(cfg, pins)
+    unzips = []
+    real = W.unzip_checked
+    monkeypatch.setattr(W, "unzip_checked", lambda z, d, *a: (unzips.append(z), real(z, d, *a))[1])
+    tries = {"n": 0}
+
+    def rename(src, dst):
+        tries["n"] += 1
+        if tries["n"] <= 3:
+            raise PermissionError("a virus scan holds it")
+        W.os.replace(src, dst)
+    r.rename, r.sleep = rename, lambda s: None
+    assert r.step(stop=lambda: False) == "whisper"                         # three refusals, then the rename
+    assert tries["n"] == 4 and len(unzips) == 1
+    shutil_dir = Path(cfg.base_dir) / "runtimes" / "whisper" / "b6000"
+    import shutil
+    shutil.rmtree(shutil_dir)
+    monkeypatch.setattr(W, "RUNTIME_RENAME_S", 0.0)
+    tries["n"], unzips[:] = -100, []                                       # refused past its time: kept for later
+    r.download = fake_download(pins)
+    r.step(stop=lambda: False)
+    assert r.status["whisper"].startswith("b6000: unpack failed") and len(unzips) == 1
+    assert (Path(cfg.base_dir) / "runtimes" / "whisper" / ".b6000.unpacking" / W.RUNTIME_MARK).is_file()
+    tries["n"] = 10
+    r._change("whisper", lambda x: x.pop("next", None))
+    assert r.step(stop=lambda: False) == "whisper" and len(unzips) == 1   # renamed now, never unpacked again
+
+
+def test_the_whisper_test_needs_its_own_process_on_its_port(tmp_path, hub, whisper, pins, monkeypatch):
+    w, procs = worker(tmp_path, hub, whisper, pins, llm_server=[], llm_url="")
+
+    def dead(argv, **kw):
+        p = FakeProc(argv)
+        p.returncode = 1                                                   # exited at once: another program answers
+        procs.append(p)
+        return p
+    w.proc.popen = dead
+    assert not w.runtimes_step()
+    assert w.runtimes.status["whisper"].startswith("rolled back: whisper-server exited")
+    w.proc.popen = procs
+    monkeypatch.setattr(W, "port_owner", lambda port, run=None: 31337)   # another program's pid on its port
+    w.runtimes._change("whisper", lambda r: r.pop("next", None))
+    assert not w.runtimes_step()
+    assert w.runtimes.status["whisper"].startswith("rolled back: another program answers on whisper")
+
+
+def test_one_idle_switch_lock_for_every_switch(tmp_path, hub, whisper, pins):
+    import threading
+    w, procs = worker(tmp_path, hub, whisper, pins)
+    inside, leave = threading.Event(), threading.Event()
+
+    def hold():
+        with w.idle_switch("hub config"):
+            inside.set()
+            leave.wait(5)
+    t = threading.Thread(target=hold)
+    t.start()
+    assert inside.wait(5) and w.state() == ("paused", "updating")
+    assert not w.runtimes_step() and w.runtimes.status["whisper"] == "b6000 ready, waiting: hub config under way"
+    swapped = []
+    w.updater.swap = lambda: swapped.append(1) or True
+    assert not w.drain_and_swap() and swapped == [] and not w.draining   # the self-update too: not now
+    with pytest.raises(W.NotIdle, match="hub config under way"):
+        with w.idle_switch("the LLM's model", scope="llm"):
+            pass
+    leave.set()
+    t.join(5)
+    assert w.state()[1] != "updating" and w.switching == "" and procs == []
+    w.job = {"lease": "x"}                                                 # a clip in hand: the LLM's switch goes on
+    with w.idle_switch("the LLM's model", scope="llm", drain_s=0.2):
+        assert w.llm_switching and not w.switching and w.state()[1] != "updating" and not w.llm_ok
+    with pytest.raises(W.NotIdle, match="busy"):
+        with w.idle_switch("x", drain_s=0.2):
+            pass
+    w.job = None
+    with pytest.raises(W.NotIdle, match="gaming"):
+        w.control.set(gaming=True)
+        with w.idle_switch("x", drain_s=0.2):
+            pass
+
+
+def test_a_failing_rollback_restart_releases_the_lock(tmp_path, hub, whisper, pins):
+    w, procs = worker(tmp_path, hub, whisper, pins, whisper_server=[])
+    w.proc = None
+    w.runtimes.run = lambda argv: "version: 12359 (b1b770d9)\n"           # its test fails ...
+    calls = {"n": 0}
+    real = w._restart_runtime
+
+    def restart(rt, start=True):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("the build before won't start")                  # ... and so does the rollback's restart
+        return real(rt, start)
+    w._restart_runtime = restart
+    assert not w.runtimes_step()
+    assert w.runtimes.active("llama") == "" and w.switching == "" and w._switch_mx.acquire(blocking=False)
+    w._switch_mx.release()
