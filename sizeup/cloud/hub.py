@@ -2367,12 +2367,15 @@ class HubApp(App):
         if not build or not ch.digest or not ch.catalog:
             return word
         services: dict = {}
+        off_gpu: set = set()
         for key in ch.settings():
             try:
                 services[key] = self._key_service(key)[1]
+                if self._hub_engine(key) in (sttroute.PIN_AWS, "local", "both"):
+                    off_gpu.add(key)              # (its model never decodes live on a GPU: not resident)
             except Exception:  # noqa: BLE001 - a channel the hub can't place: after the rest
                 services[key] = ""
-        want = ch.want(services)
+        want = ch.want(services, off_gpu)
         self.sttpool.resident = frozenset(want)   # (#869: a challenger never on a model live traffic decodes on)
         tries = ch.tries(services, want)          # (#869: the challengers, on demand only: never resident)
         now = time.time()

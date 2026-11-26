@@ -506,3 +506,11 @@ def test_a_champion_change_tells_intel_first_and_is_kept(tmp_path):
         assert len(seen) == 1
     finally:
         hub.close()
+
+
+def test_a_channel_that_never_decodes_on_a_gpu_live_has_no_resident_model():
+    c = choices()
+    c.set("tg:307", {"model": QWEN})
+    c.set("HPN Tower", {"model": ATC})
+    assert c.want({"tg:307": "fire", "HPN Tower": "air"}, off_gpu={"HPN Tower"}) == [QWEN]   # (pinned AWS: no VRAM)
+    assert c.want({"tg:307": "fire"}, off_gpu={"HPN Tower"}) == [QWEN]
