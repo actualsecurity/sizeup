@@ -64,7 +64,7 @@ window.IntelCard = (() => {
       + (e.suppressed ? `\nNot pushed: ${e.suppressed}` : e.pushed_at ? `\nPushed ${deps.time(e.pushed_at)} · ${delivered(e, deps.time)}` : "");
     head.append(el("b", "aa-title", [e.pack_label, e.label, e.town].filter(Boolean).join(" · ")), conf);
     li.append(head);
-    const loc = el("div", "aa-loc" + (e.confirmed ? "" : " approx"), where(e));
+    const loc = el("div", "aa-loc" + (e.confirmed || e.precision === "town" ? "" : " approx"), where(e));     // (a town: no "?")
     if (e.precision === "town") loc.title = "No place heard: the town of who said it (Settings > Radios)";
     else if (!e.confirmed && e.place) loc.title = ["Unconfirmed", e.basis, ...(e.alts || []).map((a) => `or ${a.label}`)].filter(Boolean).join("\n");
     li.append(loc);
@@ -153,7 +153,8 @@ window.IntelCard = (() => {
     const items = (s && s.open) || [];
     list.hidden = !items.length;
     const sig = JSON.stringify(items.map((e) => [e.id, e.level, e.what, e.where, e.place, e.confirmed, e.traffic_ids,
-      e.suppressed, e.pushed_at, e.delivery, e.fd_shown, st.busy.has(e.id), st.playing, [...(st.mine.get(e.id) || [])]]));
+      e.suppressed, e.pushed_at, e.delivery, e.fd_shown, e.town, e.precision, (e.talkers || {}).line,    // (a late answer)
+      st.busy.has(e.id), st.playing, [...(st.mine.get(e.id) || [])]]));
     if (list._sig === sig) return;
     list._sig = sig;
     list.replaceChildren(...items.map((e) => card(e, deps, list)));

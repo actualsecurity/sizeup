@@ -4,10 +4,12 @@ They carry no transcript text: an event names its transmissions by id (traffic_i
 label. Replay (tools, the data session's PR 7) reads the same fields the live store keeps.
 
 The talker town (engine.py _talkers): the town of who said it (Settings > Radios labels, sizeup/intel/talkers.py), kept
-beside the heard place, never in it. Event.shown() is the place as shown and pushed: the heard one, else "<Town>
-(talker)" at precision "town" (no point: never drawn exact, never a site). The engine's own place checks (merge, the
-re-push on a place found, our incidents, the FD) read the heard place only, so a heard place always wins and a later
-one replaces the talker town.
+beside the heard place, never in it. One rule says which town an event is in (resolved_town), for the push's title and
+body, the console, the Intel page, Search and the area gate alike: a heard place's town; else, with no place heard,
+the event's own town (a call handed to another town's dispatch: the console that took it), else its talker town.
+shown_place gives the coarse place of an unplaced one: "<Town> (talker)" at precision "town" (no point: never drawn
+exact, never a site). The engine's own place checks (merge, the re-push on a place found, our incidents, the FD) read
+the heard place only, so a heard place always wins and a later one replaces the talker town.
 """
 
 from __future__ import annotations
@@ -131,13 +133,6 @@ class Event:
         self.label_full, self.town, self.confirmed, self.where_score = p.label, p.town, p.confirmed, p.where_score
         self.alts, self.basis = list(p.alts), p.basis
 
-    def shown(self) -> Place:
-        """The place as shown and pushed: the heard one, else the talker town ("<Town> (talker)", precision "town", no
-        point), else none."""
-        if self.precision != "none" or not self.talker_town:
-            return self.place()
-        return Place(TOWN, label=talker_label(self.talker_town), town=self.talker_town, basis=TALKER)
-
     def as_dict(self) -> dict:
         return asdict(self)
 
@@ -164,11 +159,28 @@ def talkers_line(stated: str, stated_town: str, answered: str, answered_town: st
                                   f"answered by: {one(answered, answered_town)}" if answered else "") if x)
 
 
-def shown_place(e: dict) -> dict:
-    """A stored event's place fields as shown (the API's "place", "precision", "town", "basis"): {} when a place was
-    heard or there is no talker town (as stored), else the talker town as Event.shown() has it."""
-    t = e.get("talker_town") or ""
-    if (e.get("precision") or "none") != "none" or not t:
+def _get(e, k: str):
+    return e.get(k) if isinstance(e, dict) else getattr(e, k, None)
+
+
+def heard(e) -> bool:
+    """A place was heard in the words (an Event or a stored row)."""
+    return (_get(e, "precision") or "none") != "none"
+
+
+def resolved_town(e) -> str:
+    """The one town an event is in (an Event or a stored row): its heard place's; else, with no place heard, its own
+    town (a handed-off call's: the console that took it), else its talker town; "" when none."""
+    if heard(e):
+        return _get(e, "town") or ""
+    return _get(e, "town") or _get(e, "talker_town") or ""
+
+
+def shown_place(e) -> dict:
+    """An event's coarse place as shown (the API's "place", "precision", "town", "basis"; an Event or a stored row):
+    {} when a place was heard or no town is known, else "<Town> (talker)" at precision town, no point."""
+    t = resolved_town(e)
+    if heard(e) or not t:
         return {}
     return {"place": talker_label(t), "precision": TOWN, "town": t, "basis": TALKER}
 

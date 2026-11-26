@@ -9,9 +9,9 @@
                                                                (house numbers under 100: never "0 blk"); a number the
                                                                transcript says after a plate / ID / unit / DOB word:
                                                                the street alone (fail closed); none heard: the
-                                                               talker town ("Port Chester (talker)", model.py
-                                                               Event.shown; the title's town too), else "location
-                                                               not heard"
+                                                               coarse place ("Port Chester (talker)", model.py
+                                                               shown_place; the title's town: resolved_town),
+                                                               else "location not heard"
            "14:32 · high · <Agency> PD dispatch"               line 2: the time, the level, who it was heard
                                                                from (heard: the radio's label, Settings > Radios;
                                                                engine.py _heard; only with push_pii on, and never
@@ -44,7 +44,7 @@ import re
 from datetime import datetime
 from urllib.parse import quote
 
-from sizeup.intel.model import talker_label
+from sizeup.intel.model import resolved_town, shown_place
 from sizeup.intel.place import SPACED_PLATE  # noqa: E402  (route labels excepted: "NY 120", "US 1")
 HOUSE = re.compile(r"^\s*(\d+)[A-Za-z]?\s+(.+)$")
 DATE = re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b(?:dob|d\.o\.b|born)\b", re.I)
@@ -67,7 +67,7 @@ def where_text(ev, doubtful: bool = False) -> str:
     """The place as a push says it: the exact address only when confirmed and not doubtful; else street and block, or
     the street alone."""
     if ev.precision == "none":
-        return talker_label(getattr(ev, "talker_town", ""))     # who said it: the coarse place, else none
+        return shown_place(ev).get("place", "")        # no place heard: the coarse place (model.py), else none
     where = _label_body(ev.label_full, ev.town or "")
     m = HOUSE.match(where) if ev.precision in ("address", "block") else None
     if m:
@@ -121,7 +121,7 @@ def compose(ev, pack_label: str, cat: dict, public_url: str = "", tz=None, doubt
     from, as Settings > Radios labels the radio ("" none)."""
     if cat.get("highway"):
         return _highway(ev, pack_label, cat, public_url, tz)
-    town = ev.town or ("" if ev.precision != "none" else getattr(ev, "talker_town", "")) or ""
+    town = resolved_town(ev)                  # the one town (model.py): the heard place's, else the coarse one
     fd = fd_text(getattr(ev, "fd", ""), number, fd_at, tz)
     title = " · ".join(x for x in ("FYI" if getattr(ev, "fd", "") in FYI else "", pack_label, category_label(cat, pack_label, ev.category), town) if x)
     if any(str(r[0]).startswith("model.") for r in ev.rules or [] if r):

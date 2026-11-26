@@ -10,7 +10,7 @@
                                the talker's department's town among the source's towns, or ""
     town_why(...) -> (town, how)   ... and how it was found: "settings" | "name" | "initials" | "" (Settings shows it)
 
-Talker(label, agency, role, console): the label as the department named it (its own entry's, else its range's: the
+Talker(label, agency, role, console, radio): the label as the department named it (its own entry's, else its range's: the
 admin's words, at runtime, never in this repository), split into the agency ("<Town> PD") and the role words after it
 ("officer", "dispatch"); console: a dispatch console, so its transmissions are the dispatcher's (never a tie by talker
 alone; the dispatch cue behind "console_cue": engine.py). A console only when the role starts with a console word
@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 CACHE_MAX = 4096
 CONSOLE_WORDS = frozenset({"dispatch", "dispatcher", "disp", "console", "control", "ctrl"})
@@ -51,6 +51,7 @@ class Talker:
     agency: str = ""
     role: str = ""
     console: bool = False
+    radio: str = ""                    # the radio ID that gave the label (Talkers.of: the first of the row's it names)
 
 
 def parse(label: str) -> Talker:
@@ -132,7 +133,7 @@ class Talkers:
             label = str(reg.name(system, rid) or "").strip()
         except Exception:  # noqa: BLE001 - no label is a row as before
             label = ""
-        t = parse(label) if label else None
+        t = replace(parse(label), radio=rid) if label else None
         with self._lock:
             self.asked += 1
             if self._rev == rev:               # an edit landed meanwhile: never cache an answer from before it

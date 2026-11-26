@@ -472,7 +472,7 @@ class IntelLog:
         # area and the words over them here: never a scan of the whole range
         rows = self._rq(
             "SELECT e.id, e.pack, e.category, e.first_at, e.status, e.mode, e.pushed_at, e.precision, e.lat, e.lon, "
-            "e.radius_m, e.confirmed, e.label_full, e.town, e.traffic_ids FROM intel_events e "
+            "e.radius_m, e.confirmed, e.label_full, e.town, e.talker_town, e.traffic_ids FROM intel_events e "
             "WHERE e.first_at >= :since AND e.first_at < :until ORDER BY e.first_at DESC, e.id DESC LIMIT :scan",
             {"since": since, "until": until, "scan": SEARCH_SCAN + 1})
         capped = len(rows) > SEARCH_SCAN
@@ -547,7 +547,9 @@ class IntelLog:
                         "place": r["label_full"] if r["precision"] != "none" else "", "precision": r["precision"],
                         "confirmed": bool(r["confirmed"]), "town": r["town"],
                         "lat": round(r["lat"], 6) if placed else None, "lon": round(r["lon"], 6) if placed else None,
-                        "radius_m": round(r["radius_m"] or 0), "matched": sorted(matched.get(r["id"], ()))})
+                        "radius_m": round(r["radius_m"] or 0), "matched": sorted(matched.get(r["id"], ())),
+                        # no place heard: "<Town> (talker)" (model.py shown_place), never "unplaced"
+                        **{k: v for k, v in shown_place(r).items() if k != "basis"}})
         return {"events": out, "total": len(rows), "more": more, "limit": SEARCH_MAX,
                 "scanned": scanned, "capped": capped, "since": since,
                 "until": until}

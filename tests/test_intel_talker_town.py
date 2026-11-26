@@ -14,14 +14,15 @@ import threading
 from sizeup.intel import engine as engine_mod
 from sizeup.intel import rules as rules_mod
 from sizeup.intel.events import SqlEvents
-from sizeup.intel.model import Event, initials, shown_place, talkers_line, talkers_of
-from tests.test_intel import engine, row
+from sizeup.intel import push as push_mod
+from sizeup.intel.model import Event, initials, resolved_town, shown_place, talkers_line, talkers_of
+from tests.test_intel import Clock, engine, row
 from tests.test_intel_page import T0, listing, save, site  # noqa: F401  (the fixture)
 
 PC, RYE = "Port Chester", "Rye"         # two of the police pack's dispatch towns (data/intel/police.json, public)
-OFFICER, BLANK, RYE_DISPATCH, PC_DISPATCH, AWAY = "7701", "7702", "7801", "7802", "7703"
+OFFICER, BLANK, RYE_DISPATCH, PC_DISPATCH, AWAY, RYE_OFFICER, BLANK2 = "7701", "7702", "7801", "7802", "7703", "7704", "7705"
 LABELS = {OFFICER: "Sampletown PD officer", RYE_DISPATCH: "Rye PD dispatch", PC_DISPATCH: "Port Chester PD dispatch",
-          AWAY: "Harrison PD officer"}
+          AWAY: "Harrison PD officer", RYE_OFFICER: "Rye PD officer"}
 AGENCY_TOWNS = {"Sampletown PD": PC}
 NO_PLACE = "Car 3, a male with a knife behind the deli"          # a weapons call, no place a gazetteer reads
 AT_CORNER = "Car 3, a male with a knife at Sample St and Test Rd"  # example_locate: an intersection in Rye
@@ -43,8 +44,9 @@ class FakeRadios:
         return []
 
 
-def labelled():
-    e, sink = engine(packs=rules_mod.load_packs(overrides={"intel_packs": {"police": {"agency_towns": AGENCY_TOWNS}}}))
+def labelled(clock=None):
+    e, sink = engine(packs=rules_mod.load_packs(overrides={"intel_packs": {"police": {"agency_towns": AGENCY_TOWNS}}}),
+                     clock=clock)
     e.talkers.radios = FakeRadios()
     return e, sink
 
@@ -65,8 +67,8 @@ def test_an_unlabelled_radio_answered_by_a_labelled_console_takes_the_consoles_t
     ev = the_event(e)
     assert (ev.answered_by, ev.answered_town, ev.talker_town) == ("Rye PD dispatch", RYE, RYE)
     assert ev.precision == "none"                                              # the heard place: still none
-    p = ev.shown()
-    assert (p.label, p.precision, p.town, p.lat) == ("Rye (talker)", "town", RYE, None)
+    assert shown_place(ev) == {"place": "Rye (talker)", "precision": "town", "town": RYE, "basis": "talker"}
+    assert ev.lat is None and resolved_town(ev) == RYE
 
 
 def test_the_answer_comes_first_when_transcribed_out_of_order():
@@ -111,7 +113,7 @@ def test_a_heard_place_beats_the_talker_town():
     e.feed(row("t1", AT_CORNER, 1000, radio_id=OFFICER))       # a PC officer's radio, a corner heard in Rye
     ev = the_event(e)
     assert ev.talker_town == PC and ev.precision == "intersection" and ev.town == RYE
-    assert ev.shown().label == "Sample St & Test Rd, Rye"
+    assert shown_place(ev) == {} and resolved_town(ev) == RYE
     [(_ev, d)] = [x for x in sink.pushes if x[1].would_push]
     assert d.message["title"].endswith(f"· {RYE}") and "(talker)" not in d.message["body"]
 
@@ -119,10 +121,10 @@ def test_a_heard_place_beats_the_talker_town():
 def test_a_later_heard_place_replaces_the_talker_town():
     e, sink = labelled()
     e.feed(row("t1", NO_PLACE, 1000, radio_id=OFFICER))
-    assert the_event(e).shown().precision == "town"
+    assert shown_place(the_event(e))["precision"] == "town"
     e.feed(row("t2", AT_CORNER, 1010, radio_id=OFFICER))
     ev = the_event(e)
-    assert ev.precision == "intersection" and ev.shown().label == "Sample St & Test Rd, Rye"
+    assert ev.precision == "intersection" and shown_place(ev) == {} and resolved_town(ev) == RYE
     # the place found after the first push (the read-back): pushed once more, as when no town was shown at all
     assert [d.message["body"].splitlines()[0] for _e, d in sink.pushes if d.would_push] == [
         "Port Chester (talker)", "Sample St & Test Rd"]
@@ -140,19 +142,28 @@ def test_stater_and_answerer_in_different_towns_the_console_wins_and_the_id_is_f
     assert e.talker_flags() == [{"kind": "talker_split", "id": f"mrrs:{OFFICER}", "towns": [PC, RYE]}]
 
 
-def test_an_id_heard_in_two_towns_is_flagged_once():
-    e, sink = labelled()
-    e.feed(row("t1", NO_PLACE, 1000, radio_id=BLANK))
-    e.feed(row("t2", ANSWER, 1005, radio_id=RYE_DISPATCH))
+def test_an_id_heard_in_two_towns_is_flagged_once_and_ages_out():
+    clock = Clock(1000.0)
+    e, sink = labelled(clock)
+
+    def feed(tid, text, at, radio):
+        clock.t = at + 5                                       # the clock moves with the rows
+        e.feed(row(tid, text, at, radio_id=radio))
+    feed("t1", NO_PLACE, 1000, BLANK)
+    feed("t2", ANSWER, 1005, RYE_DISPATCH)
     assert e.counts()["talkers"] is None                       # one town so far: nothing to say
-    e.feed(row("t3", NO_PLACE, 4000, radio_id=BLANK))          # another call, an hour on: answered by PC
-    e.feed(row("t4", ANSWER, 4004, radio_id=PC_DISPATCH))
-    e.feed(row("t5", NO_PLACE, 7000, radio_id=BLANK))          # ... and again: the same ID, counted once
-    e.feed(row("t6", ANSWER, 7004, radio_id=PC_DISPATCH))
+    feed("t3", NO_PLACE, 4000, BLANK)                          # another call, an hour on: answered by PC
+    feed("t4", ANSWER, 4004, PC_DISPATCH)
+    feed("t5", NO_PLACE, 7000, BLANK)                          # ... and again: the same ID, said once
+    feed("t6", ANSWER, 7004, PC_DISPATCH)
     assert e.counts()["talkers"]["split"] == 1
     assert [f["towns"] for f in e.talker_flags()] == [[PC, RYE]]
-    assert e.talker_flags(7004 + engine_mod.FLAG_S + 1) == []          # a day on: no longer said
-    assert all("talker" not in (d.suppressed or "") for _e, d in sink.pushes)          # a count, never a push
+    assert all("talker" not in (d.suppressed or "") for _e, d in sink.pushes)          # a flag, never a push
+    later = 7004 + engine_mod.FLAG_S + 60                      # over a day on, heard in one town only since
+    feed("t7", NO_PLACE, later, BLANK)
+    feed("t8", ANSWER, later + 4, PC_DISPATCH)
+    assert e.talker_flags() == [] and e.counts()["talkers"] is None
+    assert e._heard_in[f"mrrs:{BLANK}"].keys() == {PC}
 
 
 def test_a_label_off_its_talkgroup_is_flagged():
@@ -250,3 +261,90 @@ def test_an_older_table_gets_the_talker_columns():
     saved = ev.save(Event(pack="police", category="weapons", subject="s", first_at=1.0, last_at=1.0, until=2.0,
                           talker_town=RYE, answered_by="Rye PD dispatch", answered_town=RYE))
     assert ev.get(saved.id).talker_town == RYE and ev.get(saved.id).answered_by == "Rye PD dispatch"
+
+
+# -- the exchange: an answer is the stater's own ---------------------------------------------------------------------
+
+def test_a_console_answering_another_radio_is_not_the_staters_answer():
+    """A Rye officer states a call with no place; another radio keys up; the PC console answers that one."""
+    e, _sink = labelled()
+    e.feed(row("t1", NO_PLACE.replace("Car 3, ", ""), 1000, radio_id=RYE_OFFICER))
+    e.feed(row("t2", "car 5 out with a parked vehicle", 1003, radio_id=BLANK))
+    e.feed(row("t3", "copy car 5", 1006, radio_id=PC_DISPATCH))
+    ev = the_event(e)
+    assert (ev.stated_by, ev.answered_by, ev.talker_town) == ("Rye PD officer", "", RYE)
+    assert e.talker_flags() == []                              # never flagged two-town
+
+
+def test_a_console_naming_another_unit_is_no_answer():
+    e, _sink = labelled()
+    e.feed(row("t1", NO_PLACE, 1000, radio_id=RYE_OFFICER))   # car 3
+    e.feed(row("t2", "car 7 what's your location", 1004, radio_id=PC_DISPATCH))
+    ev = the_event(e)
+    assert ev.answered_by == "" and ev.talker_town == RYE
+
+
+def test_the_right_answer_on_a_busy_talkgroup():
+    e, _sink = labelled()
+    e.feed(row("t0", "car 9 back in service", 990, radio_id=BLANK2))        # other traffic before
+    e.feed(row("t0b", "copy car 9", 994, radio_id=PC_DISPATCH))
+    e.feed(row("t1", NO_PLACE, 1000, radio_id=OFFICER))                     # a PC-labelled radio, car 3
+    e.feed(row("t2", "copy car 3, en route", 1004, radio_id=RYE_DISPATCH))  # its answer: names car 3 (backed)
+    e.feed(row("t3", "car 7 to dispatch", 1008, radio_id=BLANK2))           # other traffic after
+    e.feed(row("t4", "go ahead car 7", 1011, radio_id=PC_DISPATCH))
+    ev = the_event(e)
+    assert (ev.stated_town, ev.answered_by, ev.answered_town, ev.talker_town) == (PC, "Rye PD dispatch", RYE, RYE)
+
+
+def test_a_labelled_stater_keeps_its_town_when_the_answer_is_adjacency_only():
+    e, _sink = labelled()
+    e.feed(row("t1", NO_PLACE, 1000, radio_id=OFFICER))                     # PC-labelled
+    e.feed(row("t2", "standing by", 1003, radio_id=OFFICER))                # the stater again
+    e.feed(row("t3", "copy", 1006, radio_id=RYE_DISPATCH))                  # no unit, no street, not straight after
+    ev = the_event(e)
+    assert (ev.answered_by, ev.talker_town) == ("Rye PD dispatch", PC)
+    assert e.talker_flags() == []                              # an adjacency-only answer never flags
+
+
+def test_the_flag_names_the_radio_that_gave_the_label():
+    e, _sink = labelled()
+    e.feed(row("t1", NO_PLACE, 1000, radio_id=f"{BLANK},{OFFICER}"))       # the second ID is the labelled one
+    e.feed(row("t2", ANSWER, 1004, radio_id=RYE_DISPATCH))
+    assert [f["id"] for f in e.talker_flags()] == [f"mrrs:{OFFICER}"]
+
+
+def test_a_withdrawn_stater_row_is_no_longer_stated_by():
+    e, _sink = labelled()
+    e.feed(row("t1", NO_PLACE, 1000, radio_id=OFFICER))
+    e.feed(row("t2", "copy, male with a knife behind the deli", 1010, radio_id=BLANK))
+    assert the_event(e).stated_by == "Sampletown PD officer"
+    e.feed(row("t1", "", 1000, radio_id=OFFICER))                           # its text gone (a re-ask)
+    ev = the_event(e)
+    assert (ev.stated_by, ev.talker_town) == ("", "")
+
+
+# -- one town (a handed-off call: the console that took it) --------------------------------------------------------------
+
+def test_a_handoff_town_wins_over_the_talker_town_everywhere():
+    """A call handed to another town's dispatch (the event's own town with no place heard) is in that town for the
+    push's title and body, the coarse place and the area gate alike."""
+    e, _sink = labelled()
+    pack = next(p for p in e.packs if p.name == "police")
+    ev = Event(pack="police", category="weapons", source_key="p25:mrrs:9211", town="Rye Brook", talker_town=PC,
+               first_at=1000.0, level="high")
+    assert resolved_town(ev) == "Rye Brook"
+    assert shown_place(ev)["place"] == "Rye Brook (talker)"
+    msg = push_mod.compose(ev, pack.label, pack.category("weapons"))
+    assert msg["title"].endswith("· Rye Brook") and msg["body"].splitlines()[0] == "Rye Brook (talker)"
+    area_pack = next(p for p in e.packs if p.area)
+    gated = Event(pack=area_pack.name, category=next(c for c, d in area_pack.categories.items() if not d.get("safety")),
+                  source_key="p25:mrrs:9999", town="Elsewhere Town", talker_town=list(area_pack.area)[0])
+    assert e._outside(area_pack, gated)                        # the handoff's town, not the talker town
+
+
+def test_search_shows_a_town_only_event_as_its_town(site):  # noqa: F811
+    cad, _clock = site
+    ev = save(cad, talker_town=RYE)
+    d = cad.intel_admin.eventlog.search({})
+    [r] = [x for x in d["events"] if x["id"] == ev.id]
+    assert (r["place"], r["precision"], r["town"]) == ("Rye (talker)", "town", RYE)

@@ -66,15 +66,17 @@ would have. The department's town (rules.py "agency_towns", else the source's to
 prior of step 4 (_town_prior: the row's own talker's town; else the window's consoles' when they all say one town and
 one of them is on this job; else none). The push says who it was heard from by the label (push.compose "heard"). No
 registry, or an unlabelled radio: as before.
-Stated by / answered by (_talkers, on every raise and place, and again when a console's row arrives): the event's first
-row that says its category is its stater; an officer's radio (no console) is answered by the next console transmission
-on the same source within ANSWER_S of it (window_s when shorter) that isn't another job's. Their towns give the event's
-talker town (Event.talker_town): a console stater's own; else the answering console's when it has one (an unlabelled
-radio's, and on a disagreement: the PD consoles are named one by one, the radios by department or range, so the console
-is the stronger signal; both towns are one of the source's, so they can only disagree where several towns share it),
-else the stater's. With no heard place it is the event's coarse place ("<Town> (talker)", precision
-town: Event.shown(), the push, the console, the Intel page) and the area gate's town (_outside); a heard place always
-wins (the engine's place checks read the heard place only). A radio ID heard in two towns (its label's and its
+Stated by / answered by (_talkers, on every raise, place and withdrawal, and again when a console's row arrives): the
+event's first row that says its category is its stater; an officer's radio (no console) is answered by a console only
+in its own exchange (_answer): the first console transmission on the same source within ANSWER_S of it (window_s when
+shorter), with no other radio keyed up in between, naming no unit but the stater's and no other job. Their towns give
+the event's talker town (Event.talker_town): a console stater's own; an unlabelled radio's, the answering console's;
+a labelled radio's own, unless the pairing is backed by more than adjacency (the console names the stater's unit,
+reads back its street or place, or answers it straight after with nothing between): then the console's (the PD
+consoles are named one by one, the radios by department or range). The one town an event is in is model.resolved_town
+(a heard place's; else a handed-off call's, the console that took it; else the talker town): with no heard place it is
+the coarse place ("<Town> (talker)", precision town: model.shown_place, the push, the console, the Intel page, Search)
+and the area gate's town (_outside); a heard place always wins (the engine's place checks read the heard place only). A radio ID heard in two towns (its label's and its
 answers', or two answers'), or labelled for a town its talkgroup doesn't serve, is flagged for a day (talker_flags:
 Settings > Station > Health, talker_row), never pushed.
 
@@ -195,7 +197,7 @@ from sizeup.intel import policy as policy_mod
 from sizeup.intel import push as push_mod
 from sizeup.intel import rules as rules_mod
 from sizeup.intel import talkers as talkers_mod
-from sizeup.intel.model import Decision, Event, Hit, lowest, mode_rank
+from sizeup.intel.model import Decision, Event, Hit, lowest, mode_rank, resolved_town
 from sizeup.intel.policy import Policy, level
 
 TICK_S = 15.0
@@ -357,7 +359,8 @@ class Entry:
     end: float = 0.0                   # when its clip ended (lateness is measured from it)
     label: str = ""                    # its radio as Settings > Radios names it (talkers.py), "" none
     town: str = ""                     # ... that department's town, one of the source's ("" not known)
-    radio: str = ""                    # its radio ID (the first of the row's): the talker flags only (_flag_talker)
+    radio: str = ""                    # its radio ID (the one that gave its label, else the row's first): _answer, the
+                                       # talker flags (_flag_talker)
 
 
 @dataclass
@@ -488,7 +491,7 @@ class IntelEngine:
         self._pruned = self.clock() + PRUNE_FIRST_S - PRUNE_S      # the first prune hours after start (#492 review)
         self._catwords: dict[tuple[str, str], set] = {}
         self._who_of: dict = {}               # unplaced event id -> (talkers, units) of its own transmissions
-        self._heard_in: dict = {}             # "system:radio ID" -> the towns it was heard in (_flag_talker)
+        self._heard_in: dict = {}             # "system:radio ID" -> {town: when last heard in it} (_flag_talker)
         self._flagged: dict = {}              # (kind, "system:radio ID") -> when it was last seen so (_flag_talker)
         self.counters = counters_mod.Counters(self.clock)
         self._summed = self.clock()           # the hourly log line: the first an hour after start
@@ -942,7 +945,7 @@ class IntelEngine:
         end = max(at, float(row.get("end") or at))
         entry = Entry(at, hits, text, who, suppressed, talker, frozenset(units), disp, end=end,
                       label=tk.label if tk else "", town=self._talker_town(pack, key, tk),
-                      radio=str(row.get("radio_id") or "").split(",")[0].strip(),
+                      radio=tk.radio if tk else str(row.get("radio_id") or "").split(",")[0].strip(),
                       late=bool(row.get("late") or row.get("aged")) or self.clock() - end > pack.late_s,
                       read=self.clock())
         # a re-text (#901's correction, a re-ask, a catch-up): the categories its old words said
@@ -1205,6 +1208,11 @@ class IntelEngine:
         thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
         if drop:
             ev.traffic_ids = rest
+        if drop and not rest:
+            for f in TALKER_FIELDS:           # it rested on this row alone: nobody said it any more
+                setattr(ev, f, "")
+        else:
+            self._talkers(pack, ev)           # who said it, without a withdrawn row (a re-text: its new words)
         if got is not None and got[0] >= thr:
             ev.what_score, ev.level = got[0], level(got[0])
             ev.rules = [list(x) for x in sorted({(r.id, r.v, round(float(w), 4)) for _t, r, w in got[1]})]
@@ -1365,7 +1373,8 @@ class IntelEngine:
         named = towns_said(self._texts(pack, ev.source_key, ev.traffic_ids))
         if named:
             return not (named & area)
-        return bool(ev.talker_town) and ev.talker_town.lower() not in area   # (a town said beats who said it)
+        town = resolved_town(ev)              # (a town said beats who said it): a handoff's, else the talker town
+        return bool(town) and town.lower() not in area
 
     def _talkers(self, pack, ev: Event) -> None:
         """Who said it (the module's doc, "Stated by / answered by"): Event.stated_by / stated_town, answered_by /
@@ -1376,29 +1385,46 @@ class IntelEngine:
             return
         says = [e for e in mine if any(r.category == ev.category and w > 0 for r, w in e.hits)]
         st = (says or mine)[0]
-        ans = None if st.dispatcher else self._answer(pack, win, st, ev.category)
-        # the answering console's town when it has one (an unlabelled radio, or a disagreement: the consoles are named
-        # one by one, the radios by department or range, so the console is the stronger signal), else the stater's
-        town = ans.town if ans is not None and ans.town else st.town
+        ans, backed = (None, False) if st.dispatcher else self._answer(pack, win, st, ev.category)
+        # an unlabelled radio: the console that answered it; a labelled one: its own town, unless the pairing is backed
+        # by more than adjacency (then the console: named one by one, the radios by department or range)
+        town = ans.town if ans is not None and ans.town and (backed or not st.town) else st.town
         ev.stated_by, ev.stated_town = st.label, st.town
         ev.answered_by, ev.answered_town = (ans.label, ans.town) if ans is not None else ("", "")
         ev.talker_town = town
         if not st.dispatcher:
-            self._flag_talker(pack, ev, st, ans)
+            self._flag_talker(pack, ev, st, ans if backed else None)     # (an answer only by adjacency: no flag)
 
-    def _answer(self, pack, win: Window, st, cat: str):
-        """The dispatch console's row that answers this officer's row: the next console transmission on the source
-        after it, within ANSWER_S (window_s when shorter), unless its words are another job's (None then)."""
+    def _answer(self, pack, win: Window, st, cat: str) -> tuple:
+        """(the console's row that answers this officer's row, backed), or (None, False): the first console
+        transmission on the source after it, within ANSWER_S (window_s when shorter), in the stater's own exchange: no
+        other radio keyed up in between (only the stater's own rows), naming no unit the stater didn't, and not another
+        job's words. backed: more than adjacency ties them: it names the stater's unit, reads back its street or place,
+        or comes straight after the stater's row with nothing between."""
         span = min(ANSWER_S, pack.window_s)
+        between = False                       # the stater's own rows keyed up between
         for _t, e in win.ordered():
-            if e.at <= st.at or e is st or not e.dispatcher or e.suppressed:
+            if e.at <= st.at or e is st:
                 continue
             if e.at - st.at > span:
-                return None
+                return None, False
+            if not e.dispatcher:
+                if (st.radio and e.radio == st.radio) or (st.talker and e.talker == st.talker and not e.radio):
+                    between = True            # the stater again: still its exchange
+                    continue
+                return None, False            # another radio keyed up: not this exchange's answer
+            if e.suppressed:
+                return None, False
             if any(r.category != cat and r.category in pack.categories and w > 0 for r, w in e.hits):
-                return None                   # the console's next words are another job's
-            return e
-        return None
+                return None, False            # the console's next words are another job's
+            named = frozenset(u for u in e.units if not _unit_placeholder(u))
+            if st.units and named - st.units:
+                return None, False            # it names another unit: another exchange
+            backed = (bool(named & st.units) or bool(street_names(e.text) & street_names(st.text))
+                      or (e.place is not None and st.place is not None and same_place(e.place, st.place))
+                      or not between)
+            return e, backed
+        return None, False
 
     def _flag_talker(self, pack, ev: Event, st, ans) -> None:
         """A radio ID heard in two towns (its label's town and an answer's, or two answers'): talker_split; labelled
@@ -1407,7 +1433,9 @@ class IntelEngine:
         if not st.radio:
             return
         k = f"{ev.system}:{st.radio}"
-        towns = self._heard_in.pop(k, set()) | {t for t in (st.town, ans.town if ans is not None else "") if t}
+        now = self.clock()
+        towns = {t: at for t, at in self._heard_in.pop(k, {}).items() if now - at < FLAG_S}     # {town: last heard}
+        towns.update({t: now for t in (st.town, ans.town if ans is not None else "") if t})
         self._heard_in[k] = towns
         while len(self._heard_in) > TALKER_IDS_MAX:
             self._heard_in.pop(next(iter(self._heard_in)))
@@ -1416,7 +1444,6 @@ class IntelEngine:
         if st.label and own:
             every = sorted({t for p in self.packs for t in [*p.area, *(x for ts in (p.towns or {}).values() for x in ts)]})
             wide = talkers_mod.town_of(talkers_mod.parse(st.label), every, pack.agency_towns)
-        now = self.clock()
         for kind, bad in (("talker_split", len(towns) > 1), ("talker_off_tg", bool(wide) and wide not in own)):
             if bad:
                 self._flagged.pop((kind, k), None)
@@ -1427,7 +1454,7 @@ class IntelEngine:
     def talker_flags(self, now: float | None = None) -> list[dict]:
         """The radio IDs flagged within the last day (Health's hover, admins): [{kind, id, towns}]."""
         now = self.clock() if now is None else now
-        return [{"kind": kind, "id": k, "towns": sorted(self._heard_in.get(k, ()))}
+        return [{"kind": kind, "id": k, "towns": sorted(t for t, at in self._heard_in.get(k, {}).items() if now - at < FLAG_S)}
                 for (kind, k), at in list(self._flagged.items()) if now - at < FLAG_S]
 
     def _answered(self, pack, key: str, at: float, tid: str, changed: list) -> list[Event]:
