@@ -104,7 +104,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
-from sizeup import channels, sourcekeys, stt_terms
+from sizeup import channels, sourcekeys, stt_quality, stt_terms
 from sizeup import tz
 from sizeup import app as app_mod
 from sizeup import fence as fence_mod
@@ -165,6 +165,10 @@ REFUSAL_LOG_S = 3600.0   # a refused station request: logged once per (reason, s
 MISMATCH_LOG_S = 60.0    # ... an id_mismatch this often (a live station locked out: its log says who it says it is)
 TOKEN_ID = re.compile(r"sz1\.([a-z0-9][a-z0-9_-]{0,39})\.")    # the station id a refused own token names (for the log)
 EXTRA = re.compile(r"[a-z][a-z0-9_]{0,30}")      # a transmission's field names, as the station sends them
+
+
+LANDED = ("done", "no_speech", stt_quality.UNCLEAR)    # a transcript is in (unclear: its words kept apart, its text "")
+UNCLEAR_TRIED_MAX = 5000      # clips an unclear transcript was asked again of another engine for, remembered (once each)
 
 
 class StationOffline(RuntimeError):
@@ -1063,6 +1067,8 @@ class HubApp(App):
         self._aws_since: dict[str, float] = {}         # id -> when Amazon Transcribe got it (the sweep's clock)
         self._aws_asked: dict[str, float] = {}         # id -> when the station's whisper was asked instead
         self._aws_late_wait: set[str] = set()          # timed out, not a priority channel: AWS's late answer is the text
+        self._unclear_tried: dict[str, float] = {}     # id -> when its unclear transcript went to another engine (once)
+        self._unclear_lock = threading.Lock()
         self._pending_seen: dict[str, float] = {}      # page id -> when the sweep first saw it waiting for whisper
         self._aws_was_ok: bool | None = None           # AWS could take audio at the last sweep (_aws_resend)
         self._stt_cond = threading.Condition()          # an STT input stored (read_stt_audio's wait_s)
@@ -1354,9 +1360,9 @@ class HubApp(App):
         page.status, page.model = str(d.get("status") or "done"), str(d.get("model") or "")  # type: ignore[attr-defined]
         page.vocab_v = str(d.get("vocab_v") or "")[:80]  # type: ignore[attr-defined]
         self._transcribed(page)
-        if page.status in ("done", "no_speech"):         # the station's whisper's text (#639)
+        if page.status in LANDED:                        # the station's whisper's text (#639)
             self._stt_ran(pid, "station-whisper", page.model, page.raw, page.status, page.confidence, item=page)
-        if str(d.get("stt") or "") == "both" and page.status in ("done", "no_speech"):
+        if str(d.get("stt") or "") == "both" and page.status in LANDED:
             self._aws_from_clip(page, self.audio.get(pid), page.label, both=True)
 
     def _traffic_of(self, d: dict) -> Traffic:
@@ -1407,11 +1413,11 @@ class HubApp(App):
         if d.get("transcript_pending") == "pool":           # a station handed it to the pool (#639 phase 2)
             return self._pool_clip(t, key, audio, d.get("stt_class"))
         self._transcribed(t)
-        if t.status in ("done", "no_speech"):                  # the station's whisper's text, as it came (#639)
+        if t.status in LANDED:                                 # the station's whisper's text, as it came (#639)
             self._stt_ran(t.id, "station-whisper", str(getattr(t, "model", "") or ""), t.text, t.status,
                           getattr(t, "confidence", None), key=key, item=t, wait_s=d.get("stt_wait_s"),
                           run_s=d.get("stt_run_s"))
-        if d.get("stt") == "both" and t.status in ("done", "no_speech"):
+        if d.get("stt") == "both" and t.status in LANDED:
             self._aws_from_clip(t, audio, key, both=True)
 
     # -- Amazon Transcribe here, for the station's clips --------------------------------------------------
@@ -1450,6 +1456,41 @@ class HubApp(App):
             self._aws_since.pop(job.id, None)
             self._aws_asked.pop(job.id, None)
         self.sync()
+
+    def _unclear(self, item, key: str, quiet: bool = False) -> None:
+        """An unclear transcript (sizeup/stt_quality.py): said (App._unclear), then the clip asked ONCE of another engine
+        that can take it now: a whisper's to Amazon Transcribe (its budget allowing), else (or AWS's) to the station's
+        whisper as a re-run. Its answer is checked the same way; still unclear, it stays so. Never for a catch-up or a
+        late call (old words), a "both" channel (AWS is asked already), a standby, or whisper's stock phrase on noise
+        (stt_quality.REQUEUE: only a loop or too many words). AWS's answer is no person's re-run (AwsJob.requeue)."""
+        super()._unclear(item, key, quiet)
+        cid = str(getattr(item, "id", "") or "")
+        if (quiet or not cid or getattr(item, "quality", "") not in stt_quality.REQUEUE or not self._may_write_audio()
+                or self.channel_pref(key)["engine"] == "both"):
+            return                             # (whisper's stock phrase on noise: no speech, nothing to ask again)
+        with self._unclear_lock:
+            if cid in self._unclear_tried:
+                return
+            self._unclear_tried[cid] = time.time()
+            while len(self._unclear_tried) > UNCLEAR_TRIED_MAX:
+                self._unclear_tried.pop(next(iter(self._unclear_tried)))
+        engine = stt_quality.engine_of(str(getattr(item, "model", "") or ""))
+        page = None if isinstance(item, Traffic) else item
+        if engine != "aws" and self.aws is not None:
+            from sizeup.transcribe import is_context
+            ok, why = self.aws.available(key if is_context(key) else None)
+            pcm = self._rerun_pcm(item) if ok else None
+            if pcm is not None:
+                self.aws.submit(key, AwsJob("traffic" if page is None else "page", cid, key, page=page, rerun=True,
+                                            requeue=True), pcm)
+                self.hub.log(f"speech-to-text {cid}: unclear from {engine}: asked of Amazon Transcribe")
+                return
+            self.hub.log(f"speech-to-text {cid}: unclear from {engine}: AWS can't take it "
+                         f"({why if not ok else 'no clip here'})")
+        if engine == "station-whisper":
+            return                             # (no other whisper to ask: it stays unclear)
+        threading.Thread(target=self._rerun_station, args=([cid],), name="hub-unclear-rerun", daemon=True).start()
+        self.hub.log(f"speech-to-text {cid}: unclear from {engine}: asked of the station's whisper")
 
     def _aws_late(self, job, text: str, conf) -> None:
         self._stt_ran(job.id, "aws", channels_model(), text, "done" if text else "no_speech", conf, key=job.channel,
@@ -1494,6 +1535,8 @@ class HubApp(App):
             self._aws_asked[job.id] = time.time()  # (the sweep: no late answer in FALLBACK_WAIT_S -> failed)
             self._aws_late_wait.add(job.id)
             return
+        if job.requeue:                            # an unclear transcript's second try (_unclear): it stays unclear,
+            return self.sync()                     # no re-run result on a row nobody re-ran
         if job.rerun:                              # re-transcribe: the station's whisper instead, said so
             self._rerun_note[job.id] = f"AWS failed ({why[:80]})"
             threading.Thread(target=self._rerun_station, args=([job.id],), name="aws-fallback", daemon=True).start()
@@ -1889,7 +1932,8 @@ class HubApp(App):
             page.vocab_v = vocab_v  # type: ignore[attr-defined]
             self._transcribed(page)
         else:
-            self._retext(job.id, text, status, conf, model, why="pool worker", vocab_v=vocab_v)
+            self._retext(job.id, text, status, conf, model, why="pool worker", vocab_v=vocab_v,
+                         language=str(res.get("language") or ""))
         self._aws_since.pop(job.id, None)
         self._aws_asked.pop(job.id, None)
         self.sync()
@@ -1986,6 +2030,11 @@ class HubApp(App):
         try:
             if item is None:
                 item = self._find(cid)[0]
+            if status == stt_quality.UNCLEAR and not text:      # (the item's text is "": the engine's words, kept apart)
+                text = str(getattr(item, "unclear_text", "") or "")
+            elif status == "done" and text and stt_quality.assess(text, App._clip_seconds(item) if item is not None
+                                                                   else None):
+                status = stt_quality.UNCLEAR                    # (a loop, noise: the run says so, with its engine)
             if not key and item is not None:
                 key = traffic_key(item) if isinstance(item, Traffic) else str(getattr(item, "label", "") or "")
             if clip_end is None and item is not None:

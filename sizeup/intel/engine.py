@@ -164,6 +164,7 @@ import time
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+from sizeup import stt_quality
 from sizeup.intel import counters as counters_mod
 from sizeup.intel import policy as policy_mod
 from sizeup.intel import push as push_mod
@@ -365,6 +366,7 @@ class IntelEngine:
         self.stale = 0                        # rows too old to be a pre-alert (a backfill, a late re-record): skipped
         self._row_q: str | None = None        # ROW_SQL for this database (_row_sql)
         self._late: dict[str, bool] = {}      # traffic ids consider()ed as late (#747)
+        self.unclear = 0                      # unclear transcripts (a loop, noise: sizeup/stt_quality.py): skipped
         self._seen: dict[str, int] = {}
         self.errors = 0
         self.last_error = ""
@@ -725,6 +727,15 @@ class IntelEngine:
             if scoped:
                 self._count(now, "too_old", scoped)
             return []
+        # an unclear transcript (sizeup/stt_quality.py: a repetition loop, more words than the clip holds, whisper's
+        # stock phrase) is never read: the CAD of record stores it with no text, and words that reach here some other
+        # way (a replay, an old row) are checked again; an unclear alternative is left out alike
+        secs = max(0.0, float(row.get("end") or 0.0) - start) if start else None
+        if str(row.get("status") or "") == stt_quality.UNCLEAR or (text and stt_quality.assess(text, secs)):
+            self.unclear += 1
+            return []
+        if row.get("alt_text") and stt_quality.assess(str(row["alt_text"]), secs):
+            row = dict(row, alt_text="")
         sig = hash((text, str(row.get("alt_text") or "")))
         if self._seen.get(tid) == sig:
             if scoped:

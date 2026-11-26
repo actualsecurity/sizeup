@@ -105,7 +105,17 @@ ADDRESS_MAX = 80
 REASON_MAX = 120               # the hub may cut it here, mid-word: shown with an ellipsis, never parsed
 NO_ADDRESS = frozenset({"", "none", "unknown", "n/a", "na", "null"})
 WHYS = ("ok", "no_worker", "gaming", "deadline", "invalid")
-COUNTS = ("asked", *WHYS, "events", "evidence", "capped", "unavailable")
+COUNTS = ("asked", *WHYS, "events", "evidence", "capped", "unavailable", "uncued")
+# What the model's answer alone is worth (a model category shown "high" from one garbled transmission and its context):
+# an event the trigger row doesn't back (_corroborated) is at most ALONE_MAX ("medium": never "high", never pushed), and
+# at most SHORT_MAX ("low") when that row is short (under SHORT_WORDS words or SHORT_S seconds): one odd transmission.
+# A category with "model_cues" (rules.py) is raised only when the trigger says one of them, or CUE_CONTEXT of the
+# context transmissions do (a clear sequence); else the answer is kept, used "uncued", nothing raised.
+ALONE_MAX = 0.6
+SHORT_MAX = 0.45
+SHORT_WORDS = 10
+SHORT_S = 3.0
+CUE_CONTEXT = 2
 SITE_PRECISIONS = ("address", "intersection", "landmark")
 
 SYSTEM = ("You read police radio transcripts (speech-to-text, often misheard) for a fire department that wants an "
@@ -662,8 +672,9 @@ class ModelBacking:
                 hist = list(self.history(p, job["at"]) or [])[:HISTORY_MAX]
             except Exception as e:  # noqa: BLE001 - no history is still a question
                 self.log(f"intel: model: site history: {type(e).__name__}")
-        msgs = messages(cats, {"at": job["at"], "text": job["row"].get("text")}, self.context(job["key"], job["tid"], job["at"]),
-                        hist)
+        ctx = self.context(job["key"], job["tid"], job["at"])
+        msgs = messages(cats, {"at": job["at"], "text": job["row"].get("text")}, ctx, hist)
+        job["context"] = [str(x.get("text") or "") for x in ctx]       # (the category's cues: _cued)
         job.update(categories=list(cats), backend=b.name, sent=self.clock(), deadline=DEADLINE_S)
         now = self.clock()
         with self._lock:
@@ -775,7 +786,12 @@ class ModelBacking:
                 return []
             if near == "other":                # another call while one is open on the source: on the card, no push
                 mode = lowest(mode, "map")
-            if c["infer_pd_corroborate"] and not self._corroborated(entry, cat, job["place"]):
+            if not self._cued(pack, cat, text, job.get("context") or []):
+                rec.update(event_id=None, used="uncued")   # "water rescue" with no word of water in what was said
+                self.count("uncued")
+                return []
+            backed = self._corroborated(entry, cat, job["place"])
+            if c["infer_pd_corroborate"] and not backed:
                 mode = lowest(mode, "map")     # the model's confidence alone is uncalibrated: on the card, no push
             if engine._deferred(pack, cat, {}, key, at, entry):
                 return []                      # one pre-alert per call: the category it defers to has it
@@ -790,6 +806,8 @@ class ModelBacking:
             for w, _r in own:
                 if w < 0:
                     what *= 1.0 + max(-1.0, w)
+            if not backed:                     # the model alone: never "high"; one short transmission: "low"
+                what = min(what, SHORT_MAX if self._short(row, text) else ALONE_MAX)
             contrib = [(tid, r, w) for w, r in own] + [(tid, rule, rule.w)]
             entry.hits = [*entry.hits, (rule, rule.w)]     # a new list: the row's own report has its hits already
             if entry.place is None:
@@ -801,6 +819,32 @@ class ModelBacking:
             rec.update(event_id=ev.id, used="event")
             self.count("events")
             return [ev]
+
+    def _cued(self, pack, cat: str, text: str, context: list[str]) -> bool:
+        """The category's "model_cues" (rules.py; none: any answer) in the trigger's words, or in CUE_CONTEXT of the
+        context transmissions."""
+        src = pack.category(cat).get("model_cues") or []
+        if not src:
+            return True
+        from sizeup.intel import rules as rules_mod
+        k = (pack.name, cat, tuple(src))
+        if k not in self._needs:
+            self._needs[k] = rules_mod._phrases(list(src), f"{pack.name}.{cat}.model_cues")
+
+        def says(t: str) -> bool:
+            ws = rules_mod.words(t)
+            return any(p.found(t, ws) for p in self._needs[k])
+        return says(text) or sum(1 for t in context if t and says(t)) >= CUE_CONTEXT
+
+    @staticmethod
+    def _short(row: dict, text: str) -> bool:
+        """One short transmission: under SHORT_WORDS words, or SHORT_S seconds when its length is known."""
+        from sizeup.intel import rules as rules_mod
+        try:
+            secs = float(row.get("end") or 0.0) - float(row.get("start") or 0.0)
+        except (TypeError, ValueError):
+            secs = 0.0
+        return len(rules_mod.words(text)) < SHORT_WORDS or 0.0 < secs < SHORT_S
 
     @staticmethod
     def _corroborated(entry, cat: str, place) -> bool:
