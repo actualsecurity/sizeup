@@ -3,10 +3,12 @@
 The station works out the offers (App.replace_offers, its sdr state's "replace"); the hub shows them on Health and the
 console and sends a person's answer back as a replace_sdr job (HubApp.replace_sdr). Nothing moves by itself, with one
 exception an admin turns on: Settings > Radios > Receivers, "auto-replace for critical channels" (CAD settings
-dongle_swap/auto_critical, off by default). With it on, an offer for the county's trunk-recorder job (Fire/EMS 15) or
-paging whose fit is unambiguous (exactly one new dongle fits, and it fits no other gone dongle: the station's "only")
-is taken once the old dongle has been gone swap.MISSING_S, and the status topic is told what was done. Every move,
-a person's or this, is audited (settings_audit, Radios) and logged.
+dongle_swap/auto_critical, off by default). With it on, an offer the station marks "auto" is taken once the old
+dongle has been gone swap.MISSING_S, and the status topic is told what was done. "auto" (App._auto_ok) needs all of:
+the county's trunk-recorder job (Fire/EMS 15) or paging; exactly one new dongle fits it and that one fits no other
+gone dongle with a job; it is on the gone one's own USB port and first appeared after the gone one was last seen; the
+job runs on no dongle now; the same tuner when both are known. The station checks it again before it moves anything.
+Every move, a person's or this, is audited (settings_audit, Radios) and logged.
 """
 
 from __future__ import annotations
@@ -51,8 +53,8 @@ class AutoReplace:
         done = []
         for o in self.offers():
             gone, choices = str(o.get("missing") or ""), [c for c in _list(o.get("choices")) if isinstance(c, dict)]
-            if not (o.get("critical") and o.get("only") and len(choices) == 1 and gone):
-                continue                                 # (ambiguous, or not the county's / paging: a person decides)
+            if not (o.get("auto") is True and o.get("critical") and o.get("only") and len(choices) == 1 and gone):
+                continue                     # (the station's every condition not met: App._auto_ok; a person decides)
             absent = o.get("absent_s")
             if not isinstance(absent, (int, float)) or isinstance(absent, bool) or absent < MISSING_S:
                 continue

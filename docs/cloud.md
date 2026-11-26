@@ -662,9 +662,18 @@ the gone one was on (`sdr_seen.json`); when that can't tell, each new dongle tha
   Receivers (the push too). When the dongle leaves the station's config (Use it, a group saved without it) the alert
   clears as "SDR *x* removed from config (jobs now on *y*)", never "Recovered".
 - A group's dongle missing for a day: a Health hint "*serial* missing 1 d: remove from group?" with **Remove**.
-- **Auto-replace** (Settings > Radios > Receivers, *New dongles*, off by default): Fire/EMS 15 and paging only, and
-  only when exactly one new dongle fits; 60 s after the old one went, the hub moves it (`sizeup/cloud/dongleswap.py`),
-  audits it ("auto-replace", Radios) and pushes "Auto-replaced SDR *x*" to the status topic.
+- **No question left**: a gone dongle whose job already runs on another dongle as that dongle's own (auto-assign gave
+  it a replacement, or a person picked it) is not offered. A group's stand-in only covers: its gone dongle is offered.
+- **Use it** that fails (the new dongle doesn't start the job) puts everything back: the job stays the gone dongle's,
+  and an antenna group and its file are only changed once the job runs on the new dongle.
+- **Auto-replace** (Settings > Radios > Receivers, *New dongles*, off by default): 60 s after the old one went, the
+  hub moves it (`sizeup/cloud/dongleswap.py`), audits it ("auto-replace", Radios) and pushes "Auto-replaced SDR *x*"
+  to the status topic, only when the station marks the offer `auto` (`App._auto_ok`), which needs all of:
+  Fire/EMS 15 or paging; exactly one new dongle fits, and it fits no other gone dongle with a job (however long gone,
+  Not now included); it is on exactly the USB port the gone one last used (no ports known, as on macOS: never); it
+  first appeared after the gone one was last seen (`sdr_seen.json` `first`: an old idle spare never); the job runs on
+  no dongle now (no stand-in, no auto-assigned replacement); the same tuner when both are known. The station checks it
+  again before it moves anything. Anything less is asked.
 
 ### The alert and status topics (ntfy)
 

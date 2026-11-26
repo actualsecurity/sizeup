@@ -335,6 +335,12 @@ def _dur(s: float) -> str:
     return f"{s // 3600} h {(s % 3600) // 60} min"
 
 
+def _fit_name(o: dict) -> str:
+    """The new dongle an offer names, by its name (as the card and the console say it): the pick, else the first."""
+    c = next((c for c in o["choices"] if c["serial"] == o.get("pick")), o["choices"][0])
+    return c["name"] or c["serial"]
+
+
 def _swaps(sdr: dict | None, now: float, skew: float = 0.0) -> tuple[list[dict], list[dict]]:
     """A dongle swapped for a new one (sizeup/radio/replace.py): the station's offers, shaped for Health's card
     ("New SDR <serial> seen: use it for <jobs>?"), and a hint per antenna group member gone LONG_GONE_S ("<serial>
@@ -1202,7 +1208,7 @@ class StationHealth:
                                                "text": f"dongle {d['name']} ({d['serial']}) unplugged or not found"
                                                        + (f" · {d['job']} on SDR {on} ({d['group']})" if on else
                                                           f" · {d['job']} not running" if d["job"] != "Off" else "")
-                                                       + (f" · new SDR {fit['pick'] or fit['choices'][0]['name']} fits"
+                                                       + (f" · new SDR {_fit_name(fit)} fits"
                                                           if fit and fit["choices"] else "")})
             elif d["job"] != "Off" and not d["running"] and (d["job"] != P25_JOB or m["processes"]["recorder"] is None):
                 held(f"job:{d['job']}", JOB_GRACE_S, {"severity": "critical", "title": f"{d['job']} not running",

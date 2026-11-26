@@ -608,6 +608,7 @@ class App:
         self._swap_later: dict[str, float] = {}
         self.swap_offers: list[dict] = []
         self._swap_said: set[tuple[str, str]] = set()
+        self._swap_lock = threading.RLock()   # replace_offers runs from the status post and from sdr() (two threads)
         if self.recorder is not None:         # a config.json source naming a shared serial is left out (recorder.py)
             self.recorder.ambiguous_fn = lambda serial: self._ambiguity(serial, sdr_lookup.devices(cfg.rtl_fm, fresh=True))
         if not self.shared:                   # one dongle per channel: its serial is checked before each start too
@@ -5114,34 +5115,41 @@ class App:
             d = {}
         return {str(k): v for k, v in d.items() if isinstance(v, dict)} if isinstance(d, dict) else {}
 
-    def _note_seen(self, devs: list[tuple[int, str, str]]) -> None:
+    def _note_seen(self, devs: list[tuple[int, str, str]], ports: dict[str, str] | None = None) -> None:
         """Each dongle plugged in now (its serial on one dongle): seen now, on its USB port, with the tuner rtl_fm
-        reported on it. sdr_seen.json is written when one of those changes, else every SEEN_WRITE_S."""
+        reported on it; a serial never seen before also gets "first" (when it first appeared: auto-replace takes only
+        a dongle that appeared after the gone one was last seen, never an old spare). sdr_seen.json is written when one
+        of those changes, else every SEEN_WRITE_S."""
         now = time.time()
         tuners = {sd: r.tuner for r in self.receivers
                   if (sd := getattr(r.device, "serial", None)) and getattr(r, "tuner", "")}
-        ports = usbreset.ports()
+        ports = usbreset.ports() if ports is None else ports
         dup = sdr_lookup.duplicates(devs)
-        changed = False
-        for _i, p, sd in devs:
-            if not sd or sd in dup:
-                continue
-            was = self._last_seen.get(sd) or {}
-            row = dict(was, at=round(now, 1))
-            if p:
-                row["product"] = p
-            if ports.get(sd):
-                row["port"] = ports[sd]
-            if t := swap.tuner_name(tuners.get(sd, "")):
-                row["tuner"] = t
-            changed = changed or {k: v for k, v in row.items() if k != "at"} != {k: v for k, v in was.items() if k != "at"}
-            self._last_seen[sd] = row
-        if self._seen_file is None or not (changed or now - self._seen_flushed >= SEEN_WRITE_S):
-            return
-        self._seen_flushed = now
+        with self._swap_lock:
+            changed = False
+            for _i, p, sd in devs:
+                if not sd or sd in dup:
+                    continue
+                was = self._last_seen.get(sd)
+                row = dict(was or {}, at=round(now, 1))
+                if was is None:
+                    row["first"] = round(now, 1)
+                if p:
+                    row["product"] = p
+                if ports.get(sd):
+                    row["port"] = ports[sd]
+                if t := swap.tuner_name(tuners.get(sd, "")):
+                    row["tuner"] = t
+                changed = changed or {k: v for k, v in row.items() if k != "at"} != \
+                    {k: v for k, v in (was or {}).items() if k != "at"}
+                self._last_seen[sd] = row
+            if self._seen_file is None or not (changed or now - self._seen_flushed >= SEEN_WRITE_S):
+                return
+            self._seen_flushed = now
+            text = json.dumps(self._last_seen, indent=1, sort_keys=True)
         try:
             tmp = self._seen_file.with_name(f".{self._seen_file.name}.{os.getpid()}.{threading.get_ident()}")
-            tmp.write_text(json.dumps(self._last_seen, indent=1, sort_keys=True))
+            tmp.write_text(text)
             os.replace(tmp, self._seen_file)
         except OSError:
             pass
@@ -5193,10 +5201,11 @@ class App:
         mono = time.monotonic()
         rows = []
         for sd, (job, g) in sorted(self._gone_jobs().items()):
-            since = self._absent.get(sd)
+            with self._swap_lock:
+                since = self._absent.get(sd)
+                at = (self._last_seen.get(sd) or {}).get("at")
             if since is None:
                 continue
-            at = (self._last_seen.get(sd) or {}).get("at")
             rows.append({"serial": sd, "name": self.sdr_name(sd), "jobs": [job] if job != OFF_MODE else [], "group": g,
                          "absent_s": round(mono - since),
                          "last_seen": at if isinstance(at, (int, float)) and not isinstance(at, bool) else None})
@@ -5213,53 +5222,94 @@ class App:
     def replace_offers(self, devs=None) -> list[dict]:
         """sdr()["replace"]: each dongle with a job (or in an antenna group) gone swap.MISSING_S, with the new dongles
         that fit its jobs (swap.pair): {missing, name, jobs, group, absent_s, pick (the new one the pairing decided, or
-        "": ask), choices: [{serial, name, product, tuner}], only (exactly one fits: what auto-replace may take),
-        critical (the county's or paging), why: {new serial: why it doesn't fit}}. Never one put off with Not now."""
+        "": ask), choices: [{serial, name, product, tuner}], only (exactly one fits), critical (the county's or
+        paging), auto (the hub's auto-replace may move it: _auto_ok), why: {new serial: why it doesn't fit}}. Never one
+        put off with Not now, never one whose job already runs on another dongle as that dongle's own (auto-assign,
+        or a person, gave it a replacement: nothing is left to ask)."""
         if not self.shared:
             return []
         devs = sdr_lookup.devices(self.cfg.rtl_fm) if devs is None else devs
-        self._note_seen(devs)
-        mono = time.monotonic()
-        here = {s for _i, _p, s in devs if s}
-        gone = self._gone_jobs()
-        for sd in [s for s in self._absent if s in here or s not in gone]:
-            del self._absent[sd]
-        for sd in gone:
-            if sd not in here:
-                self._absent.setdefault(sd, mono)
-        products = {s: p for _i, p, s in devs if s}
-        lent = self.reception.lent()
-        new = [self._swap_caps(s, products.get(s, "")) for s in self._plugged()
-               if self._new_free(s, devs, lent)]
-        missing = []
-        for sd, (job, g) in sorted(gone.items()):
-            if mono - self._absent.get(sd, mono) < swap.MISSING_S or self._swap_later.get(sd, 0.0) > mono:
-                continue
-            if job == OFF_MODE and not g:
-                continue
-            missing.append(dict(self._swap_caps(sd), job=job, group=g,
-                                needs=[self._job_needs(job)] if job != OFF_MODE else []))
-        offers = swap.pair(missing, new) if missing and new else []
-        by = {m["serial"]: m for m in missing}
-        names = {n["serial"]: n for n in new}
-        out = []
-        for o in offers:
-            m = by[o["missing"]]
-            out.append({"missing": m["serial"], "name": self.sdr_name(m["serial"]),
-                        "jobs": [m["job"]] if m["job"] != OFF_MODE else [], "group": m["group"],
-                        "absent_s": round(mono - self._absent.get(m["serial"], mono)), "pick": o["pick"], "only": o["only"],
-                        "critical": m["job"] != OFF_MODE and self._critical_job(m["job"]),
-                        "choices": [{"serial": n, "name": self.sdr_name(n), "product": names[n]["caps"]["product"],
-                                     "tuner": names[n]["caps"]["tuner"]} for n in o["choices"]],
-                        "why": o["why"]})
-            for n in o["choices"]:
-                if (m["serial"], n) not in self._swap_said:
-                    self._swap_said.add((m["serial"], n))
-                    log(f"sdr: new SDR {self._sdr_tag(n)} fits {self._sdr_tag(m['serial'])}'s "
-                        f"{m['job'] if m['job'] != OFF_MODE else 'place in ' + m['group']} (gone "
-                        f"{mono - self._absent.get(m['serial'], mono):.0f} s): offered, never moved by itself")
-        self.swap_offers = out
-        return out
+        with self._swap_lock:
+            ports = usbreset.ports()
+            self._note_seen(devs, ports)
+            mono = time.monotonic()
+            here = {s for _i, _p, s in devs if s}
+            gone = self._gone_jobs()
+            for sd in [s for s in self._absent if s in here or s not in gone]:
+                self._absent.pop(sd, None)
+            for sd in gone:
+                if sd not in here:
+                    self._absent.setdefault(sd, mono)
+            products = {s: p for _i, p, s in devs if s}
+            lent = self.reception.lent()
+            new = [self._swap_caps(s, products.get(s, "")) for s in self._plugged()
+                   if self._new_free(s, devs, lent)]
+            # every gone dongle with a job, however long gone, Not now included: auto-replace's "fits no other"
+            gone_jobs = {sd: job for sd, (job, _g) in gone.items() if sd in self._absent and job != OFF_MODE}
+            missing = []
+            for sd, (job, g) in sorted(gone.items()):
+                if mono - self._absent.get(sd, mono) < swap.MISSING_S or self._swap_later.get(sd, 0.0) > mono:
+                    continue
+                if job == OFF_MODE and not g:
+                    continue
+                if job != OFF_MODE and self._job_taken(job, sd, here):
+                    continue                     # its job is another dongle's own now: no question left
+                missing.append(dict(self._swap_caps(sd), job=job, group=g,
+                                    needs=[self._job_needs(job)] if job != OFF_MODE else []))
+            offers = swap.pair(missing, new) if missing and new else []
+            by = {m["serial"]: m for m in missing}
+            names = {n["serial"]: n for n in new}
+            out = []
+            for o in offers:
+                m = by[o["missing"]]
+                out.append({"missing": m["serial"], "name": self.sdr_name(m["serial"]),
+                            "jobs": [m["job"]] if m["job"] != OFF_MODE else [], "group": m["group"],
+                            "absent_s": round(mono - self._absent.get(m["serial"], mono)), "pick": o["pick"],
+                            "only": o["only"], "critical": m["job"] != OFF_MODE and self._critical_job(m["job"]),
+                            "auto": self._auto_ok(m, o["choices"], names, gone_jobs, ports, here),
+                            "choices": [{"serial": n, "name": self.sdr_name(n), "product": names[n]["caps"]["product"],
+                                         "tuner": names[n]["caps"]["tuner"]} for n in o["choices"]],
+                            "why": o["why"]})
+                for n in o["choices"]:
+                    if (m["serial"], n) not in self._swap_said:
+                        self._swap_said.add((m["serial"], n))
+                        log(f"sdr: new SDR {self._sdr_tag(n)} fits {self._sdr_tag(m['serial'])}'s "
+                            f"{m['job'] if m['job'] != OFF_MODE else 'place in ' + m['group']} (gone "
+                            f"{mono - self._absent.get(m['serial'], mono):.0f} s): offered, never moved by itself")
+            self.swap_offers = out
+            return out
+
+    def _job_taken(self, job: str, sd: str, here: set[str]) -> bool:
+        """`job` is another plugged-in dongle's own (auto-assign gave it, or a person picked it): not a group's
+        stand-in, which only covers for the gone one."""
+        return any(o != sd and o in here and m == job and o not in self._own for o, m in list(self.assign.items()))
+
+    def _auto_ok(self, m: dict, choices: list[str], new: dict[str, dict], gone_jobs: dict[str, str],
+                 ports: dict[str, str], here: set[str]) -> bool:
+        """The hub's auto-replace (Settings, off by default) may move the gone dongle `m`'s job by itself only when
+        every one of these holds, else a person decides: the job is the county's or paging; exactly one new dongle
+        fits it, and that one fits no other gone dongle with a job (however long gone, Not now included); it is on
+        exactly the USB port the gone one last used (no ports known, as on macOS: never); it first appeared after the
+        gone one was last seen (an old idle spare never); the job runs on no dongle now (no stand-in, no replacement
+        auto-assign gave); and, when both tuners are known, the same tuner."""
+        job, sd = m["job"], m["serial"]
+        if job == OFF_MODE or not self._critical_job(job) or len(choices) != 1:
+            return False
+        n = choices[0]
+        caps = (new.get(n) or {}).get("caps") or {}
+        if any(o != sd and swap.fits(caps, self._job_needs(j)) == "" for o, j in gone_jobs.items()):
+            return False
+        old = self._last_seen.get(sd) or {}
+        if not old.get("port") or ports.get(n) != old["port"]:
+            return False
+        first, last = (self._last_seen.get(n) or {}).get("first"), old.get("at")
+        if not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in (first, last)) or first <= last:
+            return False
+        if self._program_on(job) not in (None, sd) or \
+                any(o != sd and o in here and j == job for o, j in list(self.assign.items())):
+            return False
+        a = m.get("caps") or {}
+        return not (a.get("known") and caps.get("known") and a.get("tuner") != caps.get("tuner"))
 
     def replace_sdr(self, missing: str, new: str = "", action: str = "use", by: str = "person") -> str | None:
         """POST /api/sdr-replace {missing, new?, action} (admins; the hub sends it here as a job, and its auto-replace
@@ -5285,32 +5335,77 @@ class App:
                 return f"SDR {self.sdr_name(missing)}: no new dongle offered for it now"
             if new not in [c["serial"] for c in offer["choices"]]:
                 return f"SDR {self.sdr_name(new)} doesn't fit SDR {self.sdr_name(missing)}'s jobs (or isn't free)"
+            if by == "auto" and not (offer.get("auto") and [c["serial"] for c in offer["choices"]] == [new]):
+                return f"SDR {self.sdr_name(missing)}: not one to replace by itself (a person decides)"
             job = self._own_of(missing)
             g = antenna.of_sdr(self.groups, missing)
             if g is not None:
-                gs = [dataclasses.replace(x, sdrs=tuple(new if s == missing else s for s in x.sdrs)) if x is g else x
-                      for x in self.groups]
-                if self._groups_file is not None:
-                    try:
-                        antenna.save(self._groups_file, gs)
-                    except OSError as e:
-                        return f"couldn't keep the groups: {e}"
-                self.groups = gs
-                self._forget_gone(missing)
-                err = (self._set_group_mode(antenna.of_sdr(gs, new), job, new, by) if job != OFF_MODE else None)
-                if job == OFF_MODE:
-                    self._save_modes()
-                    self._groups_reconcile()
+                err = self._replace_in_group(g, missing, new, job, by)
             else:
+                had = (self.assign.get(missing, OFF_MODE), self.set_by.get(missing))
                 err = self.set_mode(job, new, by=by, confirm=True)
                 if err is None:
                     self._forget_gone(missing)
                     self._save_modes()
-            self._absent.pop(missing, None)
+                elif self.assign.get(missing, OFF_MODE) != had[0]:
+                    # (set_mode puts the gone one Off before the new one starts: never the job on no dongle)
+                    self.assign[missing] = had[0]
+                    if had[1] is not None:
+                        self.set_by[missing] = had[1]
+                    self._save_modes()
+            if err is None:
+                with self._swap_lock:
+                    self._absent.pop(missing, None)
         log(f"sdr: SDR {self._sdr_tag(missing)} replaced by SDR {self._sdr_tag(new)} ({by}): "
             + (job if job != OFF_MODE else "no job") + (f", group {g.name}" if g is not None else "")
             + (f": {err}" if err else ""))
         return err
+
+    def _replace_in_group(self, g, missing: str, new: str, job: str, by: str) -> str | None:
+        """Use it for a grouped dongle (under _mode_lock): the new serial in the gone one's place, its job started
+        there; the groups file is written only once that worked. Anything that fails puts everything back as it was
+        (the group's plan runs its jobs on the dongles it has, a stand-in included)."""
+        was = (self.groups, dict(self.assign), dict(self._own), dict(self.set_by),
+               {id(d): (d, dict(d)) for d in (self._gseen, self._gusable, self._gflap, self._gfail)})
+        with self._noaudio_lock:
+            noaudio = self._noaudio.get(missing)
+
+        def back(why: str) -> str:
+            self.groups = was[0]
+            for live, saved in ((self.assign, was[1]), (self._own, was[2]), (self.set_by, was[3])):
+                live.clear()
+                live.update(saved)
+            for d, saved in was[4].values():
+                d.clear()
+                d.update(saved)
+            if noaudio is not None:
+                with self._noaudio_lock:
+                    self._noaudio[missing] = noaudio
+            self._save_modes()
+            self._groups_reconcile()
+            return why
+
+        gs = [dataclasses.replace(x, sdrs=tuple(new if s == missing else s for s in x.sdrs)) if x is g else x
+              for x in self.groups]
+        self.groups = gs
+        self._forget_gone(missing)
+        if job != OFF_MODE:
+            err = self._set_group_mode(antenna.of_sdr(gs, new), job, new, by)
+            if err is None and self._program_on(job) != new:
+                err = f"{job} didn't start on SDR {self.sdr_name(new)}"
+            if err is not None:
+                return back(err)
+        else:
+            self._save_modes()
+            self._groups_reconcile()
+        if self._groups_file is not None:
+            try:
+                antenna.save(self._groups_file, gs)
+            except OSError as e:
+                return back(f"couldn't keep the groups: {e}")
+        if job != OFF_MODE:
+            self.reception.switched(new, job)
+        return None
 
     def _forget_gone(self, sd: str) -> None:
         """A gone dongle replaced or taken out of its group: no job, no stand-in, nothing of the group's left on it."""
@@ -5325,6 +5420,8 @@ class App:
         self.set_by.pop(sd, None)
         for d in (self._gseen, self._gusable, self._gflap, self._gfail):
             d.pop(sd, None)
+        with self._noaudio_lock:
+            self._noaudio.pop(sd, None)          # (a gone serial's "no audio" ends with it)
         self._swap_said = {x for x in self._swap_said if x[0] != sd}
 
     def _drop_gone(self, sd: str) -> str | None:
@@ -5346,7 +5443,8 @@ class App:
             job = self._own_of(sd)
             self.groups = gs
             self._forget_gone(sd)
-            self._absent.pop(sd, None)
+            with self._swap_lock:
+                self._absent.pop(sd, None)
             self._save_modes()
             self._groups_reconcile()
         log(f"sdr: SDR {self._sdr_tag(sd)} taken out of antenna group {g.name} (gone)"

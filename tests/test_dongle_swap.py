@@ -8,9 +8,11 @@ in a temp dir. Serials, products and tuners are made up."""
 from __future__ import annotations
 
 import json
+import threading
 
 import pytest
 
+import sizeup.app as appmod
 import sizeup.radio.claims as claims
 from sizeup.cloud.dongleswap import AutoReplace
 from sizeup.config import ChannelCfg
@@ -20,9 +22,11 @@ from tests.test_health import Rig, station_status
 
 
 def gone(app, sd: str, s: float = swap.MISSING_S + 1) -> None:
-    """As if `sd` had been gone `s` seconds (in this run)."""
+    """As if `sd` had been gone `s` seconds (in this run), and last seen then."""
     app.sdr()
     app._absent[sd] -= s
+    if "at" in app._last_seen.get(sd, {}):
+        app._last_seen[sd]["at"] -= s
 
 
 def unplug(plugged, *serials) -> None:
@@ -197,7 +201,7 @@ def test_a_group_member_gone_a_day_is_a_health_hint_with_remove(rig, tmp_path):
     assert app.replace_sdr("m700-a", action="drop") is not None          # plugged in: never from here
 
 
-# -- Health: a gone dongle out of the config isn't "Recovered" -----------------------------------------------------------
+# -- Health: a gone dongle out of the config isn't "Recovered" ---------------------------------------------------------
 
 def test_a_gone_dongle_taken_out_of_the_config_clears_as_removed_never_recovered(rig):
     from sizeup.cloud.health import SETTLE_S
@@ -235,7 +239,7 @@ def test_the_gone_alert_push_links_to_its_row_in_receivers(rig):
     assert "Fire/EMS 15" in m["title"] and "Fire/EMS 15 on SDR V3 #3 (UHF)" in m["body"]
 
 
-# -- the hub: a person's answer, audited; auto-replace --------------------------------------------------------------------
+# -- the hub: a person's answer, audited; auto-replace -----------------------------------------------------------------
 
 def test_use_it_is_an_admins_audited_action(rig, monkeypatch):
     from sizeup.cad.api import CadApi, needs, summarize
@@ -281,45 +285,283 @@ def auto(app, on):
     return AutoReplace(hub, app.cad, n, lambda m: None, public_url="https://hub.example"), hub, n
 
 
-def test_auto_replace_off_moves_nothing(rig):
-    app = swapped(rig)
+@pytest.fixture
+def usb(rig, monkeypatch):
+    """Each dongle's USB port (usbreset.ports, as /sys says on Linux): {serial: port}, of those plugged in now. Edit it
+    to plug a new dongle into a port."""
+    plugged, logs, make = rig
+    ports = {s: f"1-{i + 1}" for i, (_i, _p, s) in enumerate(plugged)}
+    monkeypatch.setattr(appmod.usbreset, "ports",
+                        lambda *a, **k: {s: ports[s] for _i, _p, s in plugged if s in ports})
+    return ports
+
+
+def alone(rig, **kw):
+    """The admin's mapping with no antenna groups (no stand-in: a gone dongle's job runs nowhere), auto-assign off,
+    each dongle's last sight (and port) noted."""
+    plugged, logs, make = rig
+    app = make(**{"sdr_auto_assign": False, **kw}).start()
+    mapped(app)
+    app.sdr()
+    return app
+
+
+def swap_in(rig, usb, old, new, port=None, product="RTL2838UHIDIR"):
+    """`old` unplugged, then `new` plugged in: into `old`'s own port (or `port`)."""
+    plugged, logs, make = rig
+    was = usb[old]
+    unplug(plugged, old)
+    plugged.append((9 + len(plugged), product, new))
+    usb[new] = port or was
+
+
+def test_auto_replace_off_moves_nothing(rig, usb):
+    app = alone(rig)
+    swap_in(rig, usb, "uhf-a", "nw-1")
     gone(app, "uhf-a")
     a, hub, n = auto(app, False)
+    assert app.sdr()["replace"][0]["auto"] is True
     assert a.tick() == [] and hub.calls == [] and app.assign.get("nw-1", "Off") == "Off"
 
 
-def test_auto_replace_on_moves_fire_ems_15_after_60_s_and_says_so(rig):
-    app = swapped(rig)
+def test_auto_replace_moves_the_countys_job_to_a_new_dongle_in_its_port_and_says_so(rig, usb):
+    app = alone(rig)
+    swap_in(rig, usb, "uhf-a", "nw-1")
     a, hub, n = auto(app, True)
     assert a.tick() == []                                                 # gone under 60 s: not yet
     gone(app, "uhf-a")
+    (o,) = app.sdr()["replace"]
+    assert (o["missing"], o["critical"], o["only"], o["auto"]) == ("uhf-a", True, True, True)
     assert a.tick() == [("uhf-a", "nw-1")]
     assert hub.calls == [("replace_sdr", "uhf-a", "nw-1", "use", "auto")]
-    assert app.assign["nw-1"] == P25 and app.set_by["nw-1"] == "auto"
+    assert app.assign["nw-1"] == P25 and app.set_by["nw-1"] == "auto" and on(app, P25) == "nw-1"   # running there
+    assert "uhf-a" not in app.assign
     (m,) = n.msgs
     assert m["title"].startswith("Auto-replaced SDR V3 #1") and "Fire/EMS 15 moved to new SDR nw-1" in m["body"]
     rows = a.cad.store.q("SELECT * FROM settings_audit WHERE key LIKE 'sdr_replace:%'")
     assert [(x["operator"], x["section"], x["new"]) for x in rows] == [("auto-replace", "radios", "SDR nw-1")]
 
 
-def test_auto_replace_never_takes_an_ambiguous_fit(rig):
-    plugged, logs, make = rig
-    app = swapped(rig)
-    plugged.append((7, "RTL2838UHIDIR", "nw-2"))                          # two new ones fit: a person decides
+def test_auto_replace_needs_the_gone_dongles_own_usb_port(rig, usb, monkeypatch):
+    app = alone(rig)
+    swap_in(rig, usb, "uhf-a", "nw-1", port="1-9")                       # another port: a person decides
     gone(app, "uhf-a")
     a, hub, n = auto(app, True)
-    assert len(app.sdr()["replace"][0]["choices"]) == 2
+    (o,) = app.sdr()["replace"]
+    assert o["pick"] == "nw-1" and o["only"] and o["auto"] is False
+    assert a.tick() == [] and hub.calls == []
+    assert app.replace_sdr("uhf-a", "nw-1", "use", "auto") is not None     # the station refuses it too
+    usb["nw-1"] = "1-1"
+    assert app.sdr()["replace"][0]["auto"] is True
+    monkeypatch.setattr(appmod.usbreset, "ports", lambda *a, **k: {})      # no ports known (macOS): never
+    assert app.sdr()["replace"][0]["auto"] is False and a.tick() == []
+
+
+def test_s2_an_old_idle_spare_is_never_auto_replaced_even_in_the_gone_ones_port(rig, usb):
+    plugged, logs, make = rig
+    plugged.append((7, "RTL2838UHIDIR", "idle"))
+    usb["idle"] = "2-1"                                                   # another bus
+    app = alone(rig)
+    app._last_seen["idle"]["first"] -= 3600                               # there for an hour, Off
+    unplug(plugged, "uhf-a")
+    gone(app, "uhf-a")
+    a, hub, n = auto(app, True)
+    (o,) = app.sdr()["replace"]
+    assert [c["serial"] for c in o["choices"]] == ["idle"] and o["only"] and o["auto"] is False
+    assert a.tick() == [] and app.assign.get("idle", "Off") == "Off"
+    usb["idle"] = usb.pop("uhf-a")                                        # moved into the gone one's port: still old
+    assert app.sdr()["replace"][0]["auto"] is False and a.tick() == []
+    assert app.replace_sdr("uhf-a", "idle") is None and on(app, P25) == "idle"       # a person may
+
+
+def test_s1_a_stand_in_already_running_the_job_is_never_auto_replaced(rig, usb):
+    plugged, logs, make = rig
+    app = swapped(rig)                                                    # UHF group: a stand-in runs the county's
+    usb["nw-1"] = usb["uhf-a"]
+    gone(app, "uhf-a")
+    assert on(app, P25) not in (None, "nw-1")
+    a, hub, n = auto(app, True)
+    (o,) = app.sdr()["replace"]
+    assert o["pick"] == "nw-1" and o["only"] and o["auto"] is False      # still asked, never moved by itself
+    assert a.tick() == [] and hub.calls == [] and app.assign.get("nw-1", "Off") == "Off"
+    assert app.replace_sdr("uhf-a", "nw-1", "use", "auto") is not None
+
+
+def test_s3_a_job_auto_assign_already_moved_is_never_offered_or_moved_again(rig, usb):
+    plugged, logs, make = rig
+    plugged.append((7, "RTL2838UHIDIR", "idle"))                          # every job covered: Off by auto
+    app = alone(rig, sdr_auto_assign=True)
+    app._sdr_arrivals()
+    assert app.assign.get("idle", "Off") == "Off"
+    app._last_seen["idle"]["first"] -= 3600
+    swap_in(rig, usb, "uhf-a", "nw-x")
+    app._sdr_arrivals()                                                   # auto-assign: nw-x gets the county's
+    assert app.assign["nw-x"] == P25 and on(app, P25) == "nw-x"
+    gone(app, "uhf-a")
+    a, hub, n = auto(app, True)
+    assert app.sdr()["replace"] == [] and app.cad.dongle_swaps() == []    # nothing left to ask (auto off too)
+    assert a.tick() == [] and app.assign["nw-x"] == P25 and on(app, P25) == "nw-x"
+
+
+def test_s7_a_staggered_double_swap_never_takes_the_other_ones_new_dongle(rig, usb):
+    plugged, logs, make = rig
+    app = alone(rig)
+    unplug(plugged, "uhf-a")
+    gone(app, "uhf-a")                                                    # the county's: gone a while
+    swap_in(rig, usb, "spare-1", "nw-1", port=usb["uhf-a"])               # FG2's swapped just now (its new one, here)
+    a, hub, n = auto(app, True)
+    (o,) = app.sdr()["replace"]                                           # (FG2's under 60 s: not asked yet)
+    assert (o["missing"], o["only"], o["auto"]) == ("uhf-a", True, False)
+    assert a.tick() == [] and app.assign.get("nw-1", "Off") == "Off"
+    gone(app, "spare-1")
+    assert app.replace_sdr("spare-1", "nw-1", "not_now") is None          # put off: still counted
+    (o,) = app.sdr()["replace"]
+    assert o["missing"] == "uhf-a" and o["auto"] is False and a.tick() == []
+
+
+def test_auto_replace_needs_the_same_tuner_when_both_are_known(rig, usb):
+    plugged, logs, make = rig
+    app = alone(rig)
+    swap_in(rig, usb, "uhf-b", "nw-fc", product="NESDR FC2580")          # South 2 (paging) was on a Blog V4 (R828D)
+    gone(app, "uhf-b")
+    (o,) = app.sdr()["replace"]
+    assert (o["missing"], o["critical"], o["only"], o["auto"]) == ("uhf-b", True, True, False)
+    unplug(plugged, "nw-fc")
+    usb.pop("nw-fc")
+    swap_in(rig, usb, "uhf-b", "nw-v4", port="1-2", product="Blog V4")
+    (o,) = app.sdr()["replace"]
+    assert [c["serial"] for c in o["choices"]] == ["nw-v4"] and o["auto"] is True
+
+
+def test_auto_replace_never_takes_an_ambiguous_fit(rig, usb):
+    plugged, logs, make = rig
+    app = alone(rig)
+    swap_in(rig, usb, "uhf-a", "nw-1")
+    plugged.append((8, "RTL2838UHIDIR", "nw-2"))                          # two new ones fit: a person decides
+    usb["nw-2"] = "1-8"
+    gone(app, "uhf-a")
+    a, hub, n = auto(app, True)
+    (o,) = app.sdr()["replace"]
+    assert len(o["choices"]) == 2 and o["auto"] is False
     assert a.tick() == [] and hub.calls == [] and n.msgs == []
 
 
-def test_auto_replace_never_takes_a_job_that_isnt_the_countys_or_paging(rig):
-    plugged, logs, make = rig
-    app = grouped(make, sdr_auto_assign=False)
-    unplug(plugged, "spare-1")                                            # FG2's: a fireground, never by itself
-    plugged.append((6, "RTL2838UHIDIR", "nw-2"))
+def test_auto_replace_never_takes_a_job_that_isnt_the_countys_or_paging(rig, usb):
+    app = alone(rig)
+    swap_in(rig, usb, "spare-1", "nw-2")                                  # FG2's: a fireground, never by itself
     gone(app, "spare-1")
     a, hub, n = auto(app, True)
-    assert app.sdr()["replace"][0]["only"] and a.tick() == [] and hub.calls == []
+    (o,) = app.sdr()["replace"]
+    assert o["only"] and not o["critical"] and o["auto"] is False and a.tick() == [] and hub.calls == []
+
+
+# -- Use it: what runs, what is kept, what goes back on a failure ------------------------------------------------------
+
+def test_use_it_runs_the_job_on_the_new_dongle_and_survives_a_restart(rig, usb, tmp_path, monkeypatch):
+    plugged, logs, make = rig
+    app = swapped(rig)
+    gone(app, "uhf-a")
+    app._noaudio["uhf-a"] = {"since": 0.0, "job": P25, "tries": 0}
+    switched = []
+    real = app.reception.switched
+    monkeypatch.setattr(app.reception, "switched", lambda sd, m: (switched.append((sd, m)), real(sd, m))[1])
+    assert app.replace_sdr("uhf-a", "nw-1") is None
+    assert on(app, P25) == "nw-1" and switched == [("nw-1", P25)] and "uhf-a" not in app._noaudio
+    app.stop()
+    again = make(sdr_auto_assign=False).start()
+    again._sdr_arrivals()
+    assert next(g for g in again.groups if g.name == "UHF").sdrs == ("nw-1", "uhf-b", "uhf-c")
+    assert again.assign["nw-1"] == P25 and on(again, P25) == "nw-1" and "uhf-a" not in again.assign
+    assert again.sdr()["replace"] == [] and again.missing_rows() == []
+
+
+def test_use_it_in_no_group_survives_a_restart(rig, usb):
+    plugged, logs, make = rig
+    app = alone(rig)
+    swap_in(rig, usb, "spare-1", "nw-2")
+    gone(app, "spare-1")
+    assert app.replace_sdr("spare-1", "nw-2") is None and on(app, "FG2") == "nw-2"
+    app.stop()
+    again = make(sdr_auto_assign=False).start()
+    assert again.assign["nw-2"] == "FG2" and on(again, "FG2") == "nw-2" and "spare-1" not in again.assign
+
+
+def test_s9_a_failed_start_in_no_group_puts_the_job_back_on_the_gone_dongle(rig, usb, monkeypatch):
+    plugged, logs, make = rig
+    app = alone(rig)
+    swap_in(rig, usb, "spare-1", "nw-2")
+    gone(app, "spare-1")
+    real = app._start_mode
+    monkeypatch.setattr(app, "_start_mode", lambda m, s: False if s == "nw-2" else real(m, s))
+    assert app.replace_sdr("spare-1", "nw-2") is not None
+    assert app.assign["spare-1"] == "FG2" and app.assign.get("nw-2", "Off") == "Off"     # never on no dongle
+    assert json.loads(app._mode_file.read_text())["spare-1"] == "FG2"
+    assert [o["missing"] for o in app.sdr()["replace"]] == ["spare-1"]   # still asked
+
+
+def test_s8_a_failed_start_in_a_group_keeps_the_group_and_its_file(rig, usb, tmp_path, monkeypatch):
+    plugged, logs, make = rig
+    app = swapped(rig)
+    gone(app, "uhf-a")
+    stand_in = on(app, P25)
+    real = app._start_mode
+    monkeypatch.setattr(app, "_start_mode", lambda m, s: False if s == "nw-1" else real(m, s))
+    assert app.replace_sdr("uhf-a", "nw-1") is not None
+    assert next(g for g in app.groups if g.name == "UHF").sdrs == ("uhf-a", "uhf-b", "uhf-c")
+    assert json.loads((tmp_path / "antenna_groups.json").read_text())["groups"][0]["sdrs"] == UHF_SAVED
+    assert on(app, P25) == stand_in != "nw-1" and app.assign.get("nw-1", "Off") == "Off"
+    assert app._own_of("uhf-a") == P25 and [o["missing"] for o in app.sdr()["replace"]] == ["uhf-a"]
+
+
+UHF_SAVED = ["uhf-a", "uhf-b", "uhf-c"]
+
+
+# -- what is never offered; two threads --------------------------------------------------------------------------------
+
+def test_a_new_serial_on_two_dongles_and_a_lent_dongle_are_never_offered(rig):
+    plugged, logs, make = rig
+    app = swapped(rig)
+    gone(app, "uhf-a")
+    plugged.append((8, "RTL2838UHIDIR", "nw-1"))                          # nw-1 twice: which is which can't be told
+    assert app.sdr()["replace"] == []
+    plugged.pop()
+    app.reception.lent = lambda: ("nw-1", "Off", "")                      # lent to a reception test
+    try:
+        assert app.sdr()["replace"] == []
+    finally:
+        del app.reception.lent
+    assert [o["missing"] for o in app.sdr()["replace"]] == ["uhf-a"]
+
+
+def test_the_offers_are_safe_from_two_threads(rig):
+    app = swapped(rig)
+    gone(app, "uhf-a")
+    errors = []
+
+    def look():
+        try:
+            for _ in range(50):
+                app.replace_offers()
+                app.missing_rows()
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+    ts = [threading.Thread(target=look) for _ in range(4)]
+    for x in ts:
+        x.start()
+    for x in ts:
+        x.join(30)
+    assert errors == [] and [o["missing"] for o in app.replace_offers()] == ["uhf-a"]
+
+
+def test_the_audit_says_the_stations_jobs_and_group_never_the_clients(rig):
+    from sizeup.cad.api import CadApi
+    from sizeup.web.server import swap_audit
+    app = swapped(rig)
+    gone(app, "uhf-a")
+    app.sdr()
+    assert swap_audit(CadApi(app.cad), "uhf-a") == {"jobs": [P25], "group": "UHF"}
+    assert swap_audit(CadApi(app.cad), "nobody") == {"jobs": [], "group": ""}
+    assert swap_audit(None, "uhf-a") == {"jobs": [], "group": ""}
 
 
 def test_the_setting_is_off_by_default_and_audited(rig):

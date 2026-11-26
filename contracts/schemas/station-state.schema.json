@@ -411,7 +411,7 @@
                 "description": "A gone dongle and the new dongles that may take its jobs.",
                 "x-complete": true,
                 "type": "object",
-                "required": ["missing", "name", "jobs", "group", "absent_s", "pick", "only", "critical", "choices", "why"],
+                "required": ["missing", "name", "jobs", "group", "absent_s", "pick", "only", "critical", "auto", "choices", "why"],
                 "additionalProperties": true,
                 "properties": {
                   "missing": {"type": "string", "description": "The gone dongle's serial."},
@@ -422,6 +422,7 @@
                   "pick": {"type": "string", "description": "The new dongle the pairing chose for it; \"\" when a person must pick."},
                   "only": {"type": "boolean", "description": "Exactly one new dongle fits it and that one fits no other gone dongle (what auto-replace needs)."},
                   "critical": {"type": "boolean", "description": "Its job is one auto-replace may move (the county P25 job, paging)."},
+                  "auto": {"type": "boolean", "description": "The hub's auto-replace may move it by itself (App._auto_ok): critical; exactly one new dongle fits and it fits no other gone dongle with a job; on the gone one's USB port; first seen after the gone one; its job running on no dongle; the same tuner when both are known."},
                   "choices": {
                     "type": "array",
                     "description": "The new dongles that fit, best first.",

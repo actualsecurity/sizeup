@@ -510,6 +510,18 @@ def cross_site(headers) -> str | None:
     return None
 
 
+def swap_audit(cad, missing: str) -> dict:
+    """POST /api/sdr-replace's audit: the gone dongle's jobs and antenna group as the station's offer has them (the
+    CAD state's dongle_swaps), never what the client sent. {"jobs": [], "group": ""} when none is offered."""
+    try:
+        rows = cad.cad.dongle_swaps() if cad is not None else []
+    except Exception:  # noqa: BLE001 - the audit never stops the answer
+        rows = []
+    o = next((o for o in rows if isinstance(o, dict) and o.get("missing") == missing), None) or {}
+    jobs = o.get("jobs") if isinstance(o.get("jobs"), list) else []
+    return {"jobs": [str(j)[:40] for j in jobs][:4], "group": str(o.get("group") or "")[:40]}
+
+
 def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | None],
                  close_incident: Callable[[str], bool], set_mode: Callable[[str], str | None] | None = None,
                  set_talkgroup: Callable[..., str | None] | None = None,
@@ -1242,14 +1254,14 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     act = body.get("action", "use")
                     if act == "use" and not body.get("new"):
                         raise ValueError("new: the new dongle's serial")
+                    said = swap_audit(cad, body["missing"])     # (what the station offered, before it goes)
                     err = replace_sdr(body["missing"][:64], body.get("new", "")[:64], act)
                 except (ValueError, TypeError) as e:
                     err = f"bad request: {e}"
                 if err:
                     return self._send(400, json.dumps({"error": err}).encode(), "application/json")
                 if self.who is not None and cad is not None:
-                    cad.did(path, self.who, body, {"jobs": body.get("jobs") if isinstance(body.get("jobs"), list) else [],
-                                                   "group": str(body.get("group") or "")[:40]}, self._client())
+                    cad.did(path, self.who, body, said, self._client())
                 return self._send(200, b'{"ok":true}', "application/json")
             if path == "/api/retranscribe" and retranscribe is not None:
                 # {"ids": ["307-...", ...]} re-runs those; {"all": true} every recording still on disk

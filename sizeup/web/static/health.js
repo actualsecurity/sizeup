@@ -557,12 +557,12 @@ const StationHealth = (() => {
     for (const o of swaps) {
       const jobs = (o.jobs || []).join(", ") || (o.group ? `group ${o.group}` : "its place");
       const pick = o.pick && o.choices.find((c) => c.serial === o.pick);
-      const p = el("p", "notice", pick ? `New dongle ${pick.serial} seen — use it for ${jobs}?` : `SDR ${o.name} gone: new dongle for ${jobs}?`);
+      const p = el("p", "notice", pick ? `New dongle ${pick.name || pick.serial} seen — use it for ${jobs}?` : `SDR ${o.name} gone: new dongle for ${jobs}?`);
       p.title = `Replaces SDR ${o.name}` + (o.absent_s ? ` (gone ${longDur(o.absent_s)})` : "") + (o.group ? ` in group ${o.group}` : "")
-        + "\n" + o.choices.map((c) => `${c.serial}: ${c.product || "?"}${c.tuner ? `, ${c.tuner}` : ""}`).join("\n");
+        + "\n" + o.choices.map((c) => `${c.name && c.name !== c.serial ? `${c.name} (${c.serial})` : c.serial}: ${c.product || "?"}${c.tuner ? `, ${c.tuner}` : ""}`).join("\n");
       for (const c of pick ? [pick] : o.choices) {
-        p.append(" ", swapBtn(pick ? "Use it" : `Use ${c.name || c.serial}`, { missing: o.missing, new: c.serial, jobs: o.jobs, group: o.group },
-          `${jobs} to SDR ${c.serial}`));
+        p.append(" ", swapBtn(pick ? "Use it" : `Use ${c.name || c.serial}`, { missing: o.missing, new: c.serial },
+          `${jobs} to SDR ${c.name || c.serial}`));
       }
       p.append(" ", swapBtn("Not now", { missing: o.missing, action: "not_now" }, "Asked again in 6 h"));
       box.append(p);

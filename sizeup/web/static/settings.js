@@ -540,7 +540,9 @@ function sDongleSwap(d) {
   const v = d.auto_critical;
   const card = sCard(sCardHead("New dongles", v.value ? "auto" : "ask", sHelp("A dongle gone 60 s whose jobs a new, free "
     + "dongle can run (tuner, range, sample rate): Health and the console ask \"Use it?\". Auto: Fire/EMS 15 and paging "
-    + "move by themselves when exactly one new dongle fits; a push says what moved. Audited.")));
+    + "move by themselves only when it is clearly a swap: one new dongle fits, in the old one's USB port, plugged in "
+    + "after it went, the job running nowhere else, the same tuner. Anything less is asked. A push says what moved. "
+    + "Audited.")));
   card.id = "s-dongle-swap";
   const [lab, cb] = sCheck(v.label, v.value, "Off: always asked");
   cb.disabled = !canDo("admin");

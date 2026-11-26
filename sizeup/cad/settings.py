@@ -82,8 +82,8 @@ Reset to default = drop the override (one item, or a whole section).
     station_logs                   key "on" | "level" | "include" | "exclude" | "retention_days": the station's logs into
                                    CloudWatch (sizeup/cloud/cwlogs.py; Settings > Station > Logs, admins)
     dongle_swap                    key "auto_critical" -> true | false (default false): a gone dongle's Fire/EMS 15 or
-                                   paging job moved by itself to the one new dongle that fits (sizeup/cloud/dongleswap.py;
-                                   Settings > Radios > Receivers, admins)
+                                   paging job moved by itself to a new dongle only when the station marks the swap "auto"
+                                   (App._auto_ok; sizeup/cloud/dongleswap.py; Settings > Radios > Receivers, admins)
     hydrant_display                key "assume_c" -> true | false (default true): an untested hydrant drawn as Class C,
                                    always marked assumed ("C*"; #840, sizeup/cad/hydrants.py; Settings > Hydrants, admins)
     reminders                      key "<rule>_on" -> true | false, "<rule>_min" -> minutes (rules: pending, dispatched,
@@ -160,8 +160,10 @@ PAGE_SECTION[ATC_SECTION] = "system"
 HYD_SECTION, HYD_KEYS = "hydrant_display", {"assume_c": "Untested hydrants: assume Class C"}
 PAGE_SECTION[HYD_SECTION] = "system"
 # A dongle swapped for a new one (sizeup/radio/replace.py, sizeup/cloud/dongleswap.py): Settings > Radios > Receivers,
-# audited as Radios. key "auto_critical" -> true: the county's and paging's jobs move by themselves to the one new
-# dongle that fits, 60 s after their dongle went (a push says so). Off by default: a person's "Use it" only.
+# audited as Radios. key "auto_critical" -> true: the county's and paging's jobs move by themselves to a new dongle,
+# 60 s after their dongle went, only when the station marks the swap "auto" (App._auto_ok: one new dongle fits, in the
+# old one's USB port, first seen after it went, the job running nowhere, the same tuner; a push says so). Off by
+# default: a person's "Use it" only.
 SWAP_SECTION, SWAP_KEYS = "dongle_swap", {"auto_critical": "Auto-replace a gone dongle for Fire/EMS 15 and paging"}
 PAGE_SECTION[SWAP_SECTION] = "radios"
 # What flashes when a call or a unit is left too long (sizeup/cad/reminders.py): Settings > Dispatch, audited as Dispatch.

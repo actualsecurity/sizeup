@@ -7,11 +7,19 @@
 "use strict";
 (function () {
   "use strict";
-  const busy = new Set();                  // gone dongles being answered: not offered twice
+  const busy = new Map();                  // gone dongles being answered -> answered at (ms; 0 while in flight)
+  const HOLD_MS = 30000;                   // answered: hidden until the state drops it, or this long at most
   const hasCad = () => typeof cad !== "undefined";
   const board = () => typeof BOARD !== "undefined" && BOARD;
   const mayAnswer = () => !board() && (typeof canDo !== "function" || canDo("admin"));
-  const all = () => ((hasCad() && cad.state && cad.state.dongle_swaps) || []).filter((o) => !busy.has(o.missing));
+  function all() {
+    const rows = (hasCad() && cad.state && cad.state.dongle_swaps) || [];
+    const now = Date.now();
+    for (const [m, at] of [...busy]) {      // answered and gone from the state (or held long enough): asked again later
+      if (at && (!rows.some((o) => o.missing === m) || now - at > HOLD_MS)) busy.delete(m);
+    }
+    return rows.filter((o) => !busy.has(o.missing));
+  }
   let drawn = "";
 
   function el(tag, cls, text) {
@@ -23,13 +31,15 @@
   const jobsOf = (o) => (o.jobs || []).join(", ") || (o.group ? `group ${o.group}` : "its place");
 
   async function answer(o, body, said) {
-    busy.add(o.missing);
+    busy.set(o.missing, 0);
     draw(true);
     try {
       const r = await fetch("/api/sdr-replace", { method: "POST", headers: { "Content-Type": "application/json" },
                                                   body: JSON.stringify(Object.assign({ missing: o.missing }, body)) });
       if (!r.ok) throw new Error(((await r.json().catch(() => ({}))).error) || `refused (${r.status})`);
       if (window.UI && UI.toast) UI.toast(said, "ok");
+      busy.set(o.missing, Date.now());     // (cleared once the state no longer offers it: a later offer is asked)
+      setTimeout(() => draw(true), HOLD_MS + 100);
     } catch (e) {
       busy.delete(o.missing);
       if (window.UI && UI.toast) UI.toast(e.message, "err");
@@ -49,16 +59,16 @@
     const li = el("li", "nid");
     const pick = o.pick && (o.choices || []).find((c) => c.serial === o.pick);
     const head = el("div", "nid-head");
-    const q = el("b", "nid-q", pick ? `New dongle ${pick.serial} seen — use it for ${jobsOf(o)}?` : `SDR ${o.name} gone: new dongle for ${jobsOf(o)}?`);
+    const q = el("b", "nid-q", pick ? `New dongle ${pick.name || pick.serial} seen — use it for ${jobsOf(o)}?` : `SDR ${o.name} gone: new dongle for ${jobsOf(o)}?`);
     q.title = `Replaces SDR ${o.name}` + (o.group ? ` (group ${o.group})` : "") + "\n"
-      + (o.choices || []).map((c) => `${c.serial}: ${c.product || "?"}${c.tuner ? `, ${c.tuner}` : ""}`).join("\n");
+      + (o.choices || []).map((c) => `${c.name && c.name !== c.serial ? `${c.name} (${c.serial})` : c.serial}: ${c.product || "?"}${c.tuner ? `, ${c.tuner}` : ""}`).join("\n");
     head.append(q);
     li.append(head);
     if (!mayAnswer()) return li;
     const form = el("div", "nid-form");
     for (const c of pick ? [pick] : o.choices || []) {
-      form.append(btn(pick ? "Use it" : `Use ${c.name || c.serial}`, "mini primary", `${jobsOf(o)} to SDR ${c.serial}`,
-        () => answer(o, { new: c.serial, jobs: o.jobs, group: o.group }, `${jobsOf(o)} → SDR ${c.name || c.serial}`)));
+      form.append(btn(pick ? "Use it" : `Use ${c.name || c.serial}`, "mini primary", `${jobsOf(o)} to SDR ${c.name || c.serial}`,
+        () => answer(o, { new: c.serial }, `${jobsOf(o)} → SDR ${c.name || c.serial}`)));
     }
     form.append(btn("Not now", "mini quiet", "Asked again in 6 h", () => answer(o, { action: "not_now" }, `SDR ${o.name}: not now`)));
     li.append(form);
