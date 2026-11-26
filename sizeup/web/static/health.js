@@ -24,8 +24,9 @@ const StationHealth = (() => {
     pick.value = set.model;
     const prio = el("select", "sm");
     prio.setAttribute("aria-label", "LLM VRAM priority");
-    prio.title = "Speech first: the LLM gives its VRAM to the speech models that need it. LLM first: a speech model that doesn't fit beside it isn't loaded";
-    prio.append(new Option("Speech first", "yield"), new Option("LLM first", "keep"));
+    prio.title = "All workers' default: each worker's own setting wins over it (else its worker.toml: speech first). "
+      + "Speech first: the LLM gives its VRAM to the speech models that need it. LLM first: a speech model that doesn't fit beside it isn't loaded";
+    prio.append(new Option("Each worker's", ""), new Option("Speech first", "yield"), new Option("LLM first", "keep"));
     prio.value = set.priority;
     const save = async (body) => {
       if (llmBusy) return;
