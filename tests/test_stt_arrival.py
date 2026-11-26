@@ -18,7 +18,7 @@ from sizeup.radio.fm import RATE
 from tests.test_app import voice, wait
 from tests.test_cloud import HubRun, call, hub_cfg
 from tests.test_stt_encode import paused, resume
-from tests.test_stt_input import FakeHub, _event, _item, _transmission, offline_station, stt_rows
+from tests.test_stt_input import FakeHub, _event, _item, _transmission, offline_station, queued, stt_rows
 
 PRE, FIRE, NORMAL, LOW = sttinput.PRE, sttinput.FIRE, sttinput.NORMAL, sttinput.LOW
 
@@ -157,6 +157,118 @@ def _fire_first(st, hub):
     assert ids == [later.id, first.id]
     assert "prio" not in hub.stt_posts[0][0]["items"][0]                          # (the wire is as before)
     assert st.link.stt_stats()["dropped_pre"] == 0
+
+
+class TimedHub(FakeHub):
+    """FakeHub that notes when the events were taken and when each STT post came."""
+
+    def __init__(self, caps):
+        super().__init__(caps)
+        self.events_at, self.stt_at = [], []
+
+    def request(self, method, path, body=None, timeout=None, gzip_body=False, raw_gzip=None):
+        out = super().request(method, path, body, timeout, gzip_body, raw_gzip)
+        if path == "/api/station/events":
+            self.events_at.append(time.monotonic())
+        elif path == "/api/station/stt":
+            self.stt_at.append(time.monotonic())
+        return out
+
+
+def test_the_stt_input_follows_its_event_at_once_not_at_the_lanes_next_look(tmp_path, monkeypatch):
+    """The lane waits while an event is in the outbox; the events' ack wakes it. Before, it looked again only every
+    2 s, so a clip's STT input reached the hub ~2.0 s after its event (production p50 2.0 s for the pre-alert classes)
+    and a GPU worker's audio request waited out the hub's 2 s for it (#678). Its look here is 60 s: only the wake can
+    send it within the test's wait."""
+    from sizeup.cloud import station as station_mod
+    monkeypatch.setattr(station_mod, "STT_LANE_LOOK_S", 60.0)
+    hub = TimedHub(["p25_systems", "stt_input"])
+    st = offline_station(tmp_path, client=hub)
+    try:
+        t = _transmission(st, "FG1-1790000000777", "FG1", voice(1.0, seed=3), True, eng="aws")
+        assert wait(lambda: stt_rows(st, t.id), 10)
+        time.sleep(0.3)                              # the lane is in its wait now (an event in the outbox)
+        assert hub.stt_posts == []
+        hub.down = False
+        assert wait(lambda: hub.stt_at, 20)
+        assert hub.events_at and hub.stt_at[0] >= hub.events_at[0]
+        assert st.link.status(talkgroups=False)["stt_input"]["wake_on_ack"] is True     # (what the hub's waits go by)
+    finally:
+        st.link.stop()
+
+
+
+def test_a_burst_goes_up_pre_alert_first_and_in_its_own_order_within_each_class(tmp_path):
+    """The events' ack wakes the lane (#678) and nothing else about its order changes (#677 / #701): after a backlog,
+    the pre-alert channels' inputs first, then fire traffic, then the rest, each class in the order its inputs were
+    queued. An input never waits for its own event (a whisper clip's traffic event goes only with its text)."""
+    hub = FakeHub(["p25_systems", "stt_input"])           # (down: the events wait, and the STT inputs behind them)
+    st = offline_station(tmp_path, client=hub)
+    try:
+        queued = []
+        for k in range(9):
+            src, eng = (("FG1", "aws"), ("Ops 3", "aws"), ("Ops 3", "local"))[k % 3]
+            t = _transmission(st, f"{src.replace(' ', '')}-17900001{k:05d}", src, voice(0.6, seed=40 + k), True, eng=eng)
+            assert wait(lambda: stt_rows(st, t.id), 10)                    # (queued one after the other: n order)
+            queued.append((t.id, st._stt_lane(t, src)))
+        from sizeup.radio.page import Page
+        page = Page("South2-1790000200000", "South 2", 470.2, 0.0, 6.0, "voice", [], 2.0, None, 20.0)
+        st.link.stt_input(page, voice(0.6, seed=60), PRE)
+        assert wait(lambda: stt_rows(st, page.id), 10)
+        queued.append((page.id, PRE))
+        assert hub.stt_posts == []
+        hub.down = False
+        assert wait(lambda: not st.link.outbox.stt_pending()[0] and hub.stt_posts, 20)
+        got = [it["id"] for body, _gz in hub.stt_posts for it in body["items"]]
+        prio = dict(queued)
+        assert sorted(got) == sorted(prio) and got[0] == page.id                    # the pre-alert first
+        assert [prio[i] for i in got] == sorted((prio[i] for i in got), reverse=True)  # then fire, then the rest
+        for p in (FIRE, NORMAL):                                                       # each class in its own order
+            assert [i for i in got if prio[i] == p] == [i for i, q in queued if q == p]
+    finally:
+        st.link.stop()
+
+
+class StuckWhisper:
+    """whisper-server stand-in that doesn't answer until let go: the station's whisper minutes behind."""
+
+    def __init__(self):
+        self.go = threading.Event()
+
+    def transcribe(self, audio, prompt="", **kw):
+        self.go.wait(30)
+        return "Engine 60 responding", 0.9
+
+
+def test_inputs_go_up_at_once_while_the_stations_whisper_is_stuck(tmp_path):
+    """#678 review: an input never waits for its own event. With whisper stuck (its clips' traffic events go only with
+    their text), their STT inputs still reach the hub at once, none dropped, so the pool can take them at 16 kHz."""
+    hub = FakeHub(["p25_systems", "stt_input"])
+    hub.down = False
+    st = offline_station(tmp_path, client=hub)
+    stuck = StuckWhisper()
+    st.stt.client = stuck
+    try:
+        ids = [_transmission(st, f"FG1-17900003{k:05d}", "FG1", voice(0.6, seed=70 + k), True).id for k in range(3)]
+        got = lambda: {it["id"] for body, _gz in list(hub.stt_posts) for it in body["items"]}   # noqa: E731
+        assert wait(lambda: set(ids) <= got(), 10), got()
+        assert not any(queued(st, "traffic", cid) for cid in ids)                  # (no event yet: whisper is stuck)
+        assert sum(st.link.stt_stats()["dropped"].values()) == 0
+    finally:
+        stuck.go.set()
+        st.link.stop()
+
+
+def test_a_fire_input_is_never_the_one_dropped_for_a_flood_of_context(tmp_path):
+    """#677 under pressure: 1 FIRE input then 200 LOW (a context talkgroup) over the lane's budget: the LOW ones go,
+    the fire one stays and goes first."""
+    ob = Outbox(tmp_path / "o.sqlite", max_audio_bytes=10_000)                 # the lane's budget: 3000
+    ob.add_stt({"id": "FG1-1"}, b"f" * 400, {}, prio=FIRE)
+    for k in range(200):
+        ob.add_stt({"id": f"ctx-{k}"}, b"l" * 400, {}, prio=LOW)
+    rows = ob.stt_batch(max_bytes=1 << 30, max_items=1000)
+    assert rows[0]["data"]["id"] == "FG1-1" and ob.dropped_stt_fire == 0 and ob.dropped_stt > 0
+    assert all(r["prio"] == LOW for r in rows[1:])
 
 
 def test_the_airband_never_costs_a_fireground_clip(tmp_path):

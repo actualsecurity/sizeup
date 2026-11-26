@@ -171,12 +171,16 @@ def main(argv: list[str] | None = None) -> int:
         cmd += ["-d", str(a.d)]
     cmd.append("-")
     ch = Channelizer(a.s, a.offset)
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)          # stderr: ours (the receiver reads it)
+    started: list[subprocess.Popen] = []
 
     def stop(*_):
-        _stop(proc)
+        for p in started:
+            _stop(p)
         sys.exit(0)
+    # Before rtl_sdr starts: a SIGTERM between the two would end this process by default and leave rtl_sdr holding the dongle
     signal.signal(signal.SIGTERM, stop)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)          # stderr: ours (the receiver reads it)
+    started.append(proc)
     out = sys.stdout.buffer
     fd = proc.stdout.fileno()
     chunk = 2 * ch.keep                                            # one block of 8-bit I/Q

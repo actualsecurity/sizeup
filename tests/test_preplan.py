@@ -372,7 +372,7 @@ def test_no_label_note_or_coordinates_in_the_server_log(api):
     c.store.rev += 1
     c.state()                                                          # a failing read never says what it read
     text = "\n".join(map(str, log))
-    assert log and "pre-plan point" in text
+    assert log and "POST /api/cad/preplan" in text                    # the action logged by its route, not its summary
     for s in ("blue door", "4321", "9876", "41.012", "73.654", "Gate code"):
         assert s not in text, s
 

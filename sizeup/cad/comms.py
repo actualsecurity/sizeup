@@ -149,6 +149,8 @@ OLD_CHANGE_TRIGGERS = tuple(f"radio_changes_{t}_{w}" for t, ws in (("t", "ins up
 CHANGES_RETRY_S = 60.0                # a broken change log is tried again after this long
 CHANGES_BUSY_MS = 200                 # the change log waits this long for the database's write lock, no more
 CHANGES_TRIM_EVERY = 500              # the change log is trimmed to CHANGES_KEPT every this many transmissions logged
+LANDED = ("done", "no_speech", "unclear")    # a transcript is in (unclear: sizeup/stt_quality.py, its text "")
+UNCLEAR_MAX = 20000                         # an unclear transcript's words kept, at most (radio_traffic.unclear_text)
 CUTS = ("grant",)    # why a P25 key-up starts where it does when its talker is not the voice channel's (radio_traffic.cut, #819)
 ID_NOTES = ("none", "undecoded", "weak")    # why an FG1 key-up has no radio ID (radio_traffic.id_note, #163)
 RELINK_MAX = 2000                           # a radio just named: at most this many of its unnamed transmissions
@@ -356,10 +358,19 @@ class Comms:
             vocab_v = str(t.get("vocab_v") or "")[:80]
             if vocab_v or have:                 # (its text written again: the version goes with it)
                 db.execute("UPDATE radio_traffic SET vocab_v = ? WHERE id = ?", (vocab_v, tid))
+            # unclear words (sizeup/stt_quality.py: a loop, noise): apart from the text, shown dimmed; a row written
+            # again as unclear without them keeps its own; any other status takes them off
+            if (t.get("status") or "") == "unclear":
+                db.execute("UPDATE radio_traffic SET quality = COALESCE(NULLIF(?, ''), quality), "
+                           "unclear_text = COALESCE(NULLIF(?, ''), unclear_text) WHERE id = ?",
+                           (str(t.get("quality") or "")[:20], str(t.get("unclear_text") or "")[:UNCLEAR_MAX], tid))
+            elif have:
+                db.execute("UPDATE radio_traffic SET quality = '', unclear_text = '' WHERE id = ? AND quality != ''",
+                           (tid,))
             cut = str(t.get("cut") or "")
             if cut in CUTS:                     # (#819) cut at a mid-call grant: its talker is the granted radio
                 db.execute("UPDATE radio_traffic SET cut = ? WHERE id = ?", (cut, tid))
-            if (t.get("status") or "") in ("done", "no_speech"):     # its first transcript landed now (#639)
+            if (t.get("status") or "") in LANDED:     # its first transcript landed now (#639)
                 db.execute("UPDATE radio_traffic SET text_at = ? WHERE id = ? AND text_at IS NULL", (now, tid))
             self.touch(tid)
             linked = db.total_changes
@@ -380,8 +391,9 @@ class Comms:
                 self.store.quiet_for_state()
         late = bool(t.get("late"))
         if other:
-            if (t.get("text") or "").strip() and not late:
-                self._heard_context(tid)            # committed: the intel pre-alerts, never our consumers (on_text)
+            if ((t.get("text") or "").strip() or t.get("status") == "unclear") and not late:
+                self._heard_context(tid)            # committed: the intel pre-alerts, never our consumers (on_text);
+                                                    # (unclear: words it had are withdrawn there, sizeup/stt_quality.py)
             return out
         kind = self._everyones(tid, system)              # each kind trimmed by its own count: never by the other's
         self._logged[kind] += 1
@@ -788,7 +800,8 @@ class Comms:
         return {"unlinked": True, "why": old["why"], "excluded": auto}
 
     def retext(self, tid: str, text: str, status: str, model: str = "", alt: dict | None = None,
-               notify: bool = True, vocab_v: str = "", late: bool = False) -> bool:
+               notify: bool = True, vocab_v: str = "", late: bool = False, quality: str = "",
+               unclear_text: str = "") -> bool:
         """New text for a transmission. alt {text, model}: the other engine's transcript, kept to compare
         ("both": Amazon Transcribe's is the text, whisper's the alternative). Another P25 system's row goes to
         on_context_text only, never to on_text (as in record()). Must not be called with store.lock held: the hooks
@@ -796,15 +809,20 @@ class Comms:
         (sizeup/sttcatchup.py): stored and in the change log like any text, but neither hook is told, so nothing
         that acts on what was just said (status hints, possible incoming, the airport, a dispatch mode's step, the
         context pre-alerts) acts on old words. vocab_v: the term list that biased the new text ("" none or unknown).
-        late (#747: a P25 call from while sizeup was down): on_late_text only (another system's row: neither)."""
+        late (#747: a P25 call from while sizeup was down): on_late_text only (another system's row: neither).
+        quality / unclear_text: an unclear transcript's reason and words (sizeup/stt_quality.py; its text is ""); new
+        words without them clear them."""
         with self.store.tx() as db:
             self.touch(tid)
             if alt is not None:
                 db.execute("UPDATE radio_traffic SET alt_text = ?, alt_model = ? WHERE id = ?",
                            (str(alt.get("text") or ""), str(alt.get("model") or ""), tid))
             n = db.execute("UPDATE radio_traffic SET text = ?, status = ?, model = ?, vocab_v = ?, updated_at = ?, "
-                           "text_at = CASE WHEN text_at IS NULL AND ? IN ('done', 'no_speech') THEN ? ELSE text_at END "
-                           "WHERE id = ?", (text, status, model, str(vocab_v or "")[:80], self.clock(), status,
+                           "quality = ?, unclear_text = ?, "
+                           "text_at = CASE WHEN text_at IS NULL AND ? IN ('done', 'no_speech', 'unclear') THEN ? "
+                           "ELSE text_at END "
+                           "WHERE id = ?", (text, status, model, str(vocab_v or "")[:80], self.clock(),
+                                            str(quality or "")[:20], str(unclear_text or "")[:UNCLEAR_MAX], status,
                                             self.clock(), tid)).rowcount
             row = db.execute("SELECT system, talkgroup FROM radio_traffic WHERE id = ?", (tid,)).fetchone() if n else None
             if n:

@@ -3071,6 +3071,16 @@ A talkgroup of another system has a tier, not Record / Main / Transcribe (`sizeu
 
 - The default is the file's `Tier` column. With none, a talkgroup is `record` (no STT cost) and an encrypted one is
   `activity`. Settings > Radios > Channels changes it per talkgroup.
+- Settings > Radios > Channels shows it as the same switches as every other talkgroup: Record, Transcribe, Alerts
+  (`alert`), Main (another system's: never, shown disabled). A switch is written as the tier it makes
+  (`tiers.from_switches`): Alerts on turns on Transcribe and Record, Record off turns the others off. The page's Record
+  on is `record` only (it sends `{"record": true, "transcribe": false}`), so one tap never turns on Transcribe or
+  Alerts. `record` alone (the API, a whole section's switch) is the file's tier if that records, else `record`. An
+  encrypted talkgroup has only "Activity only" (`activity` / `off`). `POST /api/talkgroup` takes `transcribe` /
+  `alerts` instead of `tier` (both in one request: 400, "send tier or switches, not both"), and the state's talkgroup
+  rows carry `transcribe` and `alerts` beside `tier`. The county's talkgroups keep Record / Main / Transcribe; their
+  `alerts` is null (the switch has no knob, disabled): their pre-alerts are the intel packs' (scoped by service and
+  source), not a per-talkgroup choice.
 - An encrypted talkgroup is only ever `activity` or `off`. Nothing of it is recorded or decoded. Its key-ups are
   counted per minute with the radio IDs (`radio_activity`), from the control channel's grants.
 - Neither tier is ever ahead of the pages, Fire/EMS 15, the firegrounds, the airband, a Main talkgroup or a

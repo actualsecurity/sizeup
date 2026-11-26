@@ -190,6 +190,7 @@
  "tests/test_radio_names_mrrs.py": 2.2,
  "tests/test_radio_nav.py": 0.99,
  "tests/test_radio_state_rev.py": 42.72,
+ "tests/test_radio_switches.py": 10.64,
  "tests/test_radiolog_units.py": 10.98,
  "tests/test_radios.py": 4.24,
  "tests/test_rail_assets.py": 0.99,
