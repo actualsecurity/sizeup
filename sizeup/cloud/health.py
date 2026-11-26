@@ -112,22 +112,32 @@ one still on is pushed again ("Still: ...") every remind_min (180; 0: never), mu
 
 Dispatch coverage (2026-11-24): the county P25 job or the paging channel not running is the one outage that matters
 most, so it is its own alert, "cover:<job>", pushed at URGENT_PRIORITY (ntfy 5, "urgent": the only level a phone may
-let through Do Not Disturb), never at once: only once it has lasted COVER_DOWN_S (5 min: a dongle swap or a restart
-is shorter), then again ("Still: ...") every COVER_REMIND_S (30 min, whatever remind_min), and "All clear: <job> back"
-once it has stayed back COVER_SETTLE_S (2 min; the usual flapping hold once it flaps). While a job's coverage is lost,
-the alerts that are its causes (its dongle's sdr / noaudio / dup, job:<job>, recorder, an antenna group short only of
-lost dispatch jobs) stay on the panel and are not pushed themselves ("covered_by"): one stream of pushes per outage; a
-cause still on once the job runs again (a stand-in took it) is pushed as usual. The P25 job's causes include "P25 trunk
-silent" (trunk-recorder runs, no call or the control channel lost: counted from its since, so pushed when it starts);
-"SDR held by shortfinal" says who to switch it Off in. The station silent ("Station silent" not pushed itself) is
-STATION_COVER, "Fire/EMS 15, South 2 down 5 min: station silent", from its last post, "All clear: station back" after;
-a job still lost when it is back carries on as its own cover:<job> from then (pushed at once). Not counted, its 5 min
-starting again after: the station's update switch (_switch_window(): the updater's phase "switch", services stopping
-and restarting, and UPDATE_GRACE_S after it ended, SWITCH_HOLD_MAX_S at most; never its build or the staged wait, when
-the radios keep running). Its own mute kind ("cover"), for a time only.
+let through Do Not Disturb) once the job has been down COVER_DOWN_S (5 min) IN ALL within the last COVER_WINDOW_S
+(10 min): 5 min straight, or a job flapping or crash-looping (_cover_step()). Then again ("Still: ...") every
+COVER_REMIND_S (30 min, whatever remind_min), and "All clear: <job> back" only once it has run again COVER_SETTLE_S
+(2 min) WITHOUT A BREAK: a short up never ends it. Its causes (its dongle's sdr / noaudio / dup, job:<job>, recorder,
+trunk, an antenna group short only of lost dispatch jobs) are pushed as before until it fires (a dongle swap: "SDR
+gone" at once, no urgent push); from then on they are said by it ("covered_by"), unless it is muted. The P25 job's
+causes include "P25 trunk silent" (trunk-recorder runs, no call or the control channel lost: counted from its since, so
+pushed when it starts); "SDR held by shortfinal" says who to switch it Off in. The station silent is STATION_COVER,
+"Fire/EMS 15, South 2 down 5 min: station silent", counted the same way from its last post, "All clear: station back"
+once it has reported 2 min straight; "Station silent" is its own condition, never pushed by itself (unless "Dispatch
+coverage" is muted). Back from silent, a job already lost before it carries on (pushed at once); one lost only on the
+first posts back ("starting") is given JOB_GRACE_S first. Not counted, its 5 min starting again after: the station's
+update switch (_switch_window(): the updater's phase "switch", services stopping and restarting, and UPDATE_GRACE_S
+after it ended, SWITCH_HOLD_MAX_S at most; never its build or the staged wait, when the radios keep running; the first
+update to a release with phases runs on the old updater, so that one switch isn't known). The counting is kept in
+hub.sqlite (a restart 4 min in still pushes at 5). Its own mute kind ("cover"), for a time only; a "silent" mute mutes
+STATION_COVER too; a "trunk" (or "sdr" ...) mute doesn't mute cover:<job>.
+
+Fire/EMS 15 or a paging channel the station has but nothing runs ("off:<job>"): "South 2 Off (set by person)" once
+(priority 4, no reminders), "(no dongle runs it)" after a swap that left none; set Off by auto: urgent, as our dispatch
+lost.
 
 A push that ntfy didn't take (the Notifier gave up after its retries) is tried again after PUSH_RETRY_S, up to
-PUSH_RETRIES times: before, a lost first push was marked sent, so the next word was the "Still:" 3 h later.
+PUSH_RETRIES times: before, a lost first push was marked sent, so the next word was the "Still:" 3 h later. A first push
+that failed after its alert cleared counts as never made (no "Recovered" for it); a recovery ("All clear",
+"Recovered") ntfy didn't take is tried again the same way.
 
 Flapping (#340), for every alert: one that clears is "settling" for SETTLE_S (15 min; SETTLE_FLAPPING_S, 30 min, once it
 has come back FLAP_N (3) times within FLAP_WINDOW_S (1 h)). Back before it settles, it is the same episode: no second
@@ -196,7 +206,8 @@ CC_SILENT_NOTIFY_S = 300.0  # "no decode rate" pushed only this long after it be
 REMIND_S = 3 * 3600.0       # [alerts] remind_min: a pushed critical alert still on is pushed again this often (#547)
 COVER_DOWN_S = 300.0        # a dispatch job (the county P25 job, a paging channel) not running this long: the urgent push
 COVER_REMIND_S = 1800.0     # ... pushed again this often while it lasts (not remind_min)
-COVER_SETTLE_S = 120.0      # ... "All clear" once back this long (flapping: SETTLE_FLAPPING_S, as every alert)
+COVER_SETTLE_S = 120.0      # ... "All clear" once it has run again this long without a break (a short up never settles it)
+COVER_WINDOW_S = 600.0      # lost: down COVER_DOWN_S in all within the last this long (a flapping or crash-looping job too)
 UPDATE_GRACE_S = 300.0      # the updater's switch (its phase "switch", services restarting) and this long after it ends:
 SWITCH_HOLD_MAX_S = 600.0   # ... no dispatch coverage alert starts in it; the whole hold this long at most from the switch
 STATION_COVER = "cover:station"   # the station silent: all its dispatch jobs, one urgent alert
@@ -234,7 +245,7 @@ MUTE_SECTION = "alert_mutes"    # the CAD settings section of the mutes (sizeup/
 MUTE_KINDS = {"adsb": "ADS-B receiver down", "whisper": "Speech-to-text down", "stt_backlog": "Speech-to-text behind",
               "job": "Channel not running", "sdr": "SDR gone", "noaudio": "SDR no audio", "group": "Antenna group short", "dup": "Duplicate dongle serial",
               "recorder": "trunk-recorder down", "trunk": "P25 trunk silent", "stuck": "Channel stuck open",
-              "cover": "Dispatch coverage lost (urgent)",
+              "cover": "Dispatch coverage lost (urgent)", "off": "Dispatch channel Off",
               "silent": "Station silent", "id_mismatch": "Station rejected (id mismatch)", "behind": "Station behind the hub", "update": "Station update failed",
               "outbox": "Station's events backing up", "rejected": "Station event rejected (critical)",
               "rejected_minor": "Station event rejected (other)",
@@ -245,6 +256,12 @@ MUTE_KINDS = {"adsb": "ADS-B receiver down", "whisper": "Speech-to-text down", "
               "metrics_shift": "Signal shift warnings"}   # #606: Health hints only, never pushed; muted: not shown
 MUTE_TIMED_ONLY = ("silent", "id_mismatch", "trunk", "job", "rejected", "cover")   # critical ones: muted for a time
                                                                                    # only, never until unmuted
+# the mute list's hover (Settings > System > Push notifications > Mute alerts)
+MUTE_HINTS = {"cover": "Fire/EMS 15 or paging lost 5 min: urgent push. Muting its causes (SDR gone, trunk-recorder down, "
+                       "P25 trunk silent ...) doesn't mute it: to silence dispatch-lost pushes, mute this",
+              "trunk": "This alert only: to silence dispatch-lost pushes, mute \"Dispatch coverage\"",
+              "silent": "Also mutes the station's dispatch-lost push (\"station silent\")",
+              "off": "Fire/EMS 15 or paging switched Off: one push (urgent when auto set it Off)"}
 REJECTED_RECENT_S = 24 * 3600.0     # a non-critical event the hub refused: a warning this long after its last refusal
 
 
@@ -674,6 +691,13 @@ class StationHealth:
         self._stt_ok_since: float | None = None      # the whisper backlog under STT_CLEAR_S since (its hysteresis, #300)
         self._clear_at: dict[str, float] = {}        # an alert's real clear time when it clears later than that
         self.settling: dict[str, dict] = {}          # cleared, not yet settled (#340): back before SETTLE_S, one episode
+        # dispatch coverage (cover:<job>, STATION_COVER): {key: {iv: [[down from, to | None]], fired: since | None,
+        # ok: running again since | None, cause, label}}; kept in hub.sqlite (a restart 4 min in still pushes at 5)
+        self._cover: dict[str, dict] = {}
+        self._cover_saved = ""
+        self._judged_prev: bool | None = None      # the last tick judged the station's data (False: it was silent)
+        self._back_at: float | None = None          # when the station's data could be judged again (back, hub start)
+        self._resend: list[dict] = []               # recoveries ntfy didn't take: tried again (PUSH_RETRY_S)
         self.mutes: Callable[[], dict] | None = None   # the mutes' settings section (#340): HubApp sets it
         self.replicas: Callable[[], dict | None] | None = None   # the supervisor's replica checks (sizeup/replicawatch.py)
         self.dvr: Callable[[], dict | None] | None = None        # the camera DVR's recording and parked cameras (#550)
@@ -702,6 +726,8 @@ class StationHealth:
             # held() counting a settling alert again: kept, so a takeover doesn't measure from itself (#340)
             self._first.update({k: float(v) for k, v in (d.get("first") or {}).items()
                                 if k in self.settling and isinstance(v, (int, float))})
+            self._cover = {k: v for k, v in (d.get("cover") or {}).items()
+                           if isinstance(v, dict) and isinstance(v.get("iv"), list)}
         if isinstance(g, dict):
             self.gaps = {str(k): [float(x) for x in v if isinstance(x, (int, float))][-GAPS_MAX:]
                          for k, v in g.items() if isinstance(v, list)}
@@ -718,8 +744,10 @@ class StationHealth:
         try:
             self.db.put("health", json.dumps({"active": self.active, "history": self.history[-HISTORY_MAX:],
                                               "last_push": self.last_push, "settling": self.settling,
-                                              "first": {k: v for k, v in self._first.items() if k in self.settling}},
+                                              "first": {k: v for k, v in self._first.items() if k in self.settling},
+                                              "cover": self._cover},
                                              separators=(",", ":")))
+            self._cover_saved = json.dumps(self._cover, sort_keys=True)
         except Exception as e:  # never in the way of the alerts themselves
             self.log(f"health: can't save the alerts: {type(e).__name__}: {e}")
 
@@ -1151,8 +1179,14 @@ class StationHealth:
         if silent or not m["reported"]:
             if out.get("silent"):
                 out["silent"]["who"] = self._who("silent", m)
-                self._station_cover(m, now, out, since)
+            if silent is not None:
+                self._station_cover(m, now, out, bool(silent), since)
+            self._judged_prev = False
             return out, False
+        if self._judged_prev is False:
+            self._back_at = now                      # back from silent: a job "starting" is given its grace
+        self._judged_prev = True
+        self._station_cover(m, now, out, False, None)
 
         seen: set[str] = set()
 
@@ -1289,21 +1323,29 @@ class StationHealth:
                            "since": now}
         lost = self._coverage(m, rec, out)
         planned = self._planned(m, now)
-        # back from "station silent" with a job still lost: the same outage, counted from then (pushed at once)
-        st_cover = self.active.get(STATION_COVER) or self.settling.get(STATION_COVER)
-        for job, (cause, causes, since) in lost.items():
-            key = f"cover:{job}"
-            if planned and key not in self.active:
-                continue                                 # the update's switch: not counted (its 5 min start after it)
-            if st_cover is not None:
-                since = min(since if since is not None else now, float(st_cover["since"]))
-            held(key, COVER_DOWN_S, {"severity": "critical", "urgent": True, "title": f"{job} down: {cause}",
-                                     "job": job, "cause": cause,
-                                     "text": f"{job} not running: {cause} · our dispatch not heard"}, since=since)
+        fresh = self._back_at is not None and now - self._back_at < JOB_GRACE_S
+        for key in sorted(set(self._cover) | {f"cover:{j}" for j in lost}):
+            if key == STATION_COVER:
+                continue
+            job = key.split(":", 1)[1]
+            cause, causes, since = lost.get(job, ("", [], None))
+            c = self._cover.get(key) or {}
+            going = bool(c.get("iv")) and c["iv"][-1][1] is None
+            down = job in lost and (c.get("fired") is not None or not (
+                planned or (fresh and not going)))     # the switch, or "starting" just back: not counted (yet)
+            c = self._cover_step(key, down, since, now, cause=cause)
+            if c is None:
+                continue
+            cause = c.get("cause") or cause or "not running"
+            out[key] = {"severity": "critical", "urgent": True, "title": f"{job} down: {cause}", "job": job,
+                        "cause": cause, "since": c["fired"],
+                        "text": f"{job} not running: {cause} · our dispatch not heard"
+                                + ("" if job in lost else f" · running again since {_hhmm(c['ok'])}")}
         for job, (_cause, causes, _since) in lost.items():
-            for k in causes:                             # pushed as the job's coverage, not each by itself
+            for k in causes:                             # once cover:<job> is pushed, not pushed each by itself
                 if out.get(k) is not None:
                     out[k]["covered_by"] = f"cover:{job}"
+        self._off_alerts(m, rec, held)
         for k in [k for k in self._first if k not in seen]:
             del self._first[k]                          # not holding any more: its clock starts again
         for k, a in out.items():
@@ -1373,26 +1415,89 @@ class StationHealth:
                 out[g["short"][0]][1].append(f"group:{g['name']}")
         return out
 
-    def _station_cover(self, m: dict, now: float, out: dict, since: float | None) -> None:
+    def _station_cover(self, m: dict, now: float, out: dict, silent: bool, since: float | None) -> None:
         """The station silent: none of our dispatch is heard. One urgent alert for all its dispatch jobs
-        (STATION_COVER, "Fire/EMS 15, South 2 down 5 min: station silent"), from when it went silent (or the end of
-        its update's switch, if later); "Station silent" itself is then pushed as that, not on its own."""
-        out["silent"]["covered_by"] = STATION_COVER
-        w = self._switch_window(m)
-        skew = self.hub.skew or 0.0
+        (STATION_COVER, "Fire/EMS 15, South 2 down 5 min: station silent"), counted like a job's (_cover_step()) from
+        its last post; not during its update's switch (counted from its end). "Station silent" itself is then pushed
+        as that (unless "Dispatch coverage" is muted), never on its own: it is this alert's own condition."""
+        if out.get("silent"):
+            out["silent"]["covered_by"] = STATION_COVER
+        c = self._cover.get(STATION_COVER) or {}
         start = float(since if since is not None else now)
+        w = self._switch_window(m) if silent and c.get("fired") is None else None
+        skew = self.hub.skew or 0.0
         if w is not None and w[1] + skew > start:
-            if w[0] + skew <= now < w[1] + skew and STATION_COVER not in self.active:
-                return                                   # the update's switch: not counted
+            silent = silent and now >= w[1] + skew       # the switch: its silence counted from its end
             start = max(start, w[1] + skew)
-        if now - start < COVER_DOWN_S and STATION_COVER not in self.active:
+        jobs = (self.dispatch_jobs(m) if m["reported"] else []) or list(dict.fromkeys([P25_JOB, *self.paging]))
+        c = self._cover_step(STATION_COVER, silent, start, now, cause="station silent", label=", ".join(jobs))
+        if c is None:
             return
-        jobs = self.dispatch_jobs(m) if m["reported"] else []
-        jobs = jobs or list(dict.fromkeys([P25_JOB, *self.paging]))
-        label = ", ".join(jobs)
+        label = c.get("label") or ", ".join(jobs)
         out[STATION_COVER] = {"severity": "critical", "urgent": True, "title": f"{label} down: station silent",
-                              "job": label, "cause": "station silent", "since": start, "who": self._who("silent", m),
-                              "text": f"{label} not heard: the station is silent · our dispatch not heard"}
+                              "job": label, "cause": "station silent", "since": c["fired"], "who": self._who("silent", m),
+                              "text": f"{label} not heard: the station is silent · our dispatch not heard"
+                                      + ("" if silent else f" · reporting again since {_hhmm(c['ok'])}")}
+
+    def _cover_step(self, key: str, down: bool, since: float | None, now: float, cause: str = "",
+                    label: str = "") -> dict | None:
+        """One tick of a dispatch coverage alert: its down spells in the last COVER_WINDOW_S (one from `since` when
+        the cause says when it began); lost once down COVER_DOWN_S IN ALL within them (5 min straight, or a job
+        flapping or crash-looping); then on until it has run again COVER_SETTLE_S without a break (the cleared time:
+        when it began to). Its state (the alert's) or None (no alert)."""
+        c = self._cover.setdefault(key, {"iv": [], "fired": None, "ok": None})
+        iv = c["iv"]
+        if down:
+            if not iv or iv[-1][1] is not None:
+                iv.append([min(float(since), now) if since is not None else now, None])
+            c["ok"] = None
+            if cause:
+                c["cause"] = cause
+            if label:
+                c["label"] = label
+        else:
+            if iv and iv[-1][1] is None:
+                iv[-1][1] = now
+            if c["ok"] is None:
+                c["ok"] = now
+        cut = now - COVER_WINDOW_S
+        if c["fired"] is None:
+            spent = sum(max(0.0, (e if e is not None else now) - max(b, cut)) for b, e in iv)
+            if spent >= COVER_DOWN_S:
+                c["fired"] = min(b for b, e in iv if (e if e is not None else now) > cut)
+            else:
+                c["iv"] = [x for x in iv if x[1] is None or x[1] > cut]
+                if not c["iv"]:
+                    del self._cover[key]
+                return None
+        elif c["ok"] is not None and now - c["ok"] >= COVER_SETTLE_S:
+            self._clear_at[key] = c["ok"]                # "back at" when it began to run again
+            del self._cover[key]
+            return None
+        c["iv"] = c["iv"][-1:]                           # (lost: only the spell now matters)
+        return c
+
+    def _off_alerts(self, m: dict, rec: dict | None, held: Callable) -> None:
+        """Fire/EMS 15 or a paging channel this station has but nothing runs (no dongle's job, own or group job): "South
+        2 Off (set by person)", one push (priority 4); set Off by auto (a lock, a fallback): urgent, as our dispatch lost.
+        A swap that left the old dongle removed and the new one Off: "(no dongle runs it)"."""
+        if not m["dongles"]:
+            return                                       # one dongle per channel: each channel is always a job
+        have = ([P25_JOB] if rec is not None else []) + sorted(
+            (set(self.paging) | {c["label"] for c in m["channels"] if c.get("kind") == "paging"}) - {P25_JOB})
+        running = set(self.dispatch_jobs(m))
+        for job in [j for j in have if j not in running]:
+            offs = [d for d in m["dongles"] if d["job"] == "Off"]
+            d = next((d for d in offs if d.get("own") == job), None) or (offs[0] if len(offs) == 1 else None)
+            by = str((d or {}).get("set_by") or "")
+            auto = by == "auto"
+            title = f"{job} Off (set by {by})" if by in ("person", "auto") else f"{job} Off (no dongle runs it)"
+            held(f"off:{job}", JOB_GRACE_S, {
+                "severity": "critical", "once": not auto, "title": title,
+                **({"urgent": True, "job": job, "cause": "set Off by auto"} if auto else {}),
+                "text": f"{job}: no dongle runs it" + (f" · SDR {d['name']} Off, set by {by}" if d and by else
+                                                       f" · SDR {d['name']} Off" if d else "")
+                        + " · our dispatch not heard: pick its job in Settings > Radios"})
 
     def _switch_window(self, m: dict) -> tuple[float, float] | None:
         """The station's update switch (station time): (start, end). Live (the updater "updating" in its phase
@@ -1709,7 +1814,7 @@ class StationHealth:
                     a["quiet"] = True                    # the panel only (#410: nothing of ours is affected)
                 else:
                     a.pop("quiet", None)
-                for f in ("urgent", "job", "cause", "covered_by"):   # dispatch coverage: its push; a cause of one
+                for f in ("urgent", "job", "cause", "covered_by", "once"):   # dispatch coverage; a cause of one
                     if c.get(f):
                         a[f] = c[f]
                     elif f != "cause" and f != "job":
@@ -1741,23 +1846,47 @@ class StationHealth:
                     continue                             # not settled yet (or can't tell: the station is silent)
                 self._settle(key, now, mutes)
                 settled = True
-            for a in list(self.active.values()):
-                if a.get("covered_by") or now < float(a.get("retry_at") or 0):
+            # dispatch coverage first: a cause that fired it the same tick is then said by it alone
+            for a in sorted(self.active.values(), key=lambda a: alert_kind(a["key"]) != "cover"):
+                if self._covered(a, mutes) or now < float(a.get("retry_at") or 0):
                     continue                             # a cause of lost dispatch coverage: pushed as that (cover:<job>)
-                if alert_kind(a["key"]) == "cover" and a["key"] != STATION_COVER and STATION_COVER in self.active:
-                    continue                             # the station silent says it for every job
                 if (not a.get("pushed") and (a.get("escalated") or a.get("urgent")
                                              or now - self.last_push.get(a["key"], 0.0) >= self.repeat_s)
-                        and self._notify_ok(a, now) and alert_kind(a["key"]) not in mutes):
+                        and self._notify_ok(a, now) and not self._is_muted(a["key"], mutes)):
                     self._push(a, now)
                 elif self._remind_due(a, now, mutes):
                     self._push(a, now, reminder=True)
+            for r in [r for r in self._resend if now >= r["at"]]:    # a recovery ntfy didn't take: again
+                self._resend.remove(r)
+                self._push(r["a"], now, recovered=True)
             first = {k: v for k, v in self._first.items() if k in self.settling}
-            if changes or settled or first != self._first_saved:
+            if changes or settled or first != self._first_saved or \
+                    json.dumps(self._cover, sort_keys=True) != self._cover_saved:
                 self._first_saved = first
                 self._save()
             self._save_gaps(now)
         return changes
+
+    def _covered(self, a: dict, mutes: dict) -> bool:
+        """A cause of lost dispatch coverage (covered_by) not pushed by itself once its cover:<job> has fired (and isn't
+        muted); never before: until then (a flapping job, the first 5 min) its causes are pushed as before. "Station silent" is the
+        station's cover's own condition: never pushed by itself unless "Dispatch coverage" is muted. Every job's
+        cover is said by the station's while that one (pushed) is on."""
+        cb = a.get("covered_by")
+        if a["key"] == "silent" and cb:
+            return "cover" not in mutes
+        if cb and cb in self.active and not self._is_muted(cb, mutes):
+            return True                                  # (fired: pushed now, before its causes, or already)
+        st = self.active.get(STATION_COVER) or {}
+        silent = (self._cover.get(STATION_COVER) or {}).get("ok") is None      # (not back yet)
+        return alert_kind(a["key"]) == "cover" and a["key"] != STATION_COVER and bool(st.get("pushed")) and silent
+
+    @staticmethod
+    def _is_muted(key: str, mutes: dict) -> bool:
+        """Muted now: its kind (alert_kind()); the station's dispatch coverage also by "Station silent" (a mute set
+        before it was its own alert still holds). "P25 trunk silent" muted doesn't mute cover:Fire/EMS 15: our
+        dispatch lost is muted as "Dispatch coverage" only."""
+        return alert_kind(key) in mutes or (key == STATION_COVER and "silent" in mutes)
 
     def _resume(self, key: str, now: float) -> dict:
         """A settling alert back (#340): active again as the same episode (its since, whether it was pushed), out of
@@ -1776,8 +1905,9 @@ class StationHealth:
         COVER_REMIND_S, whatever remind_min."""
         every = COVER_REMIND_S if a.get("urgent") else max(self.remind_s, self.repeat_s) if self.remind_s > 0 else 0
         return (every > 0 and bool(a.get("pushed")) and a.get("severity") == "critical" and not a.get("quiet")
+                and not (a.get("once") and not a.get("urgent"))
                 and now - self.last_push.get(a["key"], 0.0) >= every
-                and alert_kind(a["key"]) not in mutes)
+                and not self._is_muted(a["key"], mutes))
 
     @staticmethod
     def _escalate(a: dict, c: dict) -> None:
@@ -1798,9 +1928,9 @@ class StationHealth:
         return sum(1 for t in a.get("flaps") or [] if 0 <= at - t < FLAP_WINDOW_S)
 
     def _settle_s(self, a: dict) -> float:
-        if self._flaps(a, float(a["cleared"])) >= FLAP_N:
-            return SETTLE_FLAPPING_S
-        return COVER_SETTLE_S if alert_kind(a["key"]) == "cover" else SETTLE_S
+        if alert_kind(a["key"]) == "cover":
+            return 0.0                                   # (it cleared only after running again COVER_SETTLE_S straight)
+        return SETTLE_FLAPPING_S if self._flaps(a, float(a["cleared"])) >= FLAP_N else SETTLE_S
 
     def _mutes(self, now: float) -> dict[str, float | None]:
         """The alert kinds muted now (#340): {kind: until | None}; none when the settings can't be read."""
@@ -1813,7 +1943,7 @@ class StationHealth:
 
     def muted(self, key: str, now: float | None = None) -> bool:
         """This alert's (or kind's, e.g. "hub_errors") pushes muted now (#340)."""
-        return alert_kind(key) in self._mutes(self.clock() if now is None else now)
+        return self._is_muted(key, self._mutes(self.clock() if now is None else now))
 
     def _log_adsb(self, ad) -> None:
         """The station's ADS-B decoder: why it is down, logged once per change of cause (#262), and when it is back.
@@ -1847,17 +1977,21 @@ class StationHealth:
             told = f", {a['reminders']} reminder(s) sent" if a.get("reminders") else ""
             took = _dur((a.get("cleared") or now) - a["since"])
             if a.get("urgent"):                          # dispatch coverage back: "All clear", high (not urgent)
-                n.send("All clear: station back" if a["key"] == STATION_COVER
-                       else f"All clear: {a.get('job') or a['title']} back",
-                       f"{a.get('job') or a['title']} back at {_hhmm(a.get('cleared'))} after {took}"
-                       + (f" ({a['cause']})" if a.get("cause") else "") + f"{flap}{told}.",
-                       priority=4, tags=("white_check_mark", "sizeup"), click=click, who=who)
-                return
-            n.send(f"Recovered: {a['title']}", f"{a['title']} cleared at {_hhmm(a.get('cleared'))} after "
-                                               f"{took}{flap}{told}.",
-                   priority=3, tags=("white_check_mark", "sizeup"), click=click, who=who)
+                args = ("All clear: station back" if a["key"] == STATION_COVER
+                        else f"All clear: {a.get('job') or a['title']} back",
+                        f"{a.get('job') or a['title']} back at {_hhmm(a.get('cleared'))} after {took}"
+                        + (f" ({a['cause']})" if a.get("cause") else "") + f"{flap}{told}.")
+                kw = dict(priority=4, tags=("white_check_mark", "sizeup"), click=click, who=who)
+            else:
+                args = (f"Recovered: {a['title']}", f"{a['title']} cleared at {_hhmm(a.get('cleared'))} after "
+                                                    f"{took}{flap}{told}.")
+                kw = dict(priority=3, tags=("white_check_mark", "sizeup"), click=click, who=who)
+            if _takes_done(n.send):
+                kw["done"] = lambda out: self._recovery_delivered(a, out)
+            if n.send(*args, **kw) is False:
+                self._recovery_delivered(a, {"ok": False, "error": "not queued"})
             return
-        if alert_kind(a["key"]) in self._mutes(now):     # muted since the tick began: not now
+        if self._is_muted(a["key"], self._mutes(now)):   # muted since the tick began: not now
             return
         prev = self.last_push.get(a["key"])
         a["pushed"] = True
@@ -1884,13 +2018,36 @@ class StationHealth:
             self._delivered(a, {"ok": False, "error": "not queued"}, prev, reminder)
         self._save()
 
-    def _delivered(self, a: dict, out: dict, prev: float | None, reminder: bool) -> None:
-        """A push's outcome (the Notifier's thread): one ntfy didn't take is tried again after PUSH_RETRY_S, at most
-        PUSH_RETRIES times an alert (before, a lost first push counted as sent: the next was "Still:" 3 h later)."""
+    def _recovery_delivered(self, a: dict, out: dict) -> None:
+        """A recovery's ("All clear", "Recovered") outcome: one ntfy didn't take is tried again like a first push."""
         if not isinstance(out, dict) or out.get("ok"):
             return
         with self._lock:
-            if self.active.get(a["key"]) is not a or int(a.get("push_failed") or 0) >= PUSH_RETRIES:
+            n = int(a.get("recover_failed") or 0)
+            if n >= PUSH_RETRIES:
+                return
+            a["recover_failed"] = n + 1
+            self._resend.append({"a": a, "at": self.clock() + PUSH_RETRY_S})
+            self.log(f"health: the recovery of {a['title']} not delivered ({str(out.get('error') or '?')[:80]}): "
+                     f"trying again in {_dur(PUSH_RETRY_S)}")
+
+    def _delivered(self, a: dict, out: dict, prev: float | None, reminder: bool) -> None:
+        """A push's outcome (the Notifier's thread): one ntfy didn't take is tried again after PUSH_RETRY_S, at most
+        PUSH_RETRIES times an alert (before, a lost first push counted as sent: the next was "Still:" 3 h later). One
+        that failed after its alert cleared: never delivered, so no recovery for it either."""
+        if not isinstance(out, dict):
+            return
+        if out.get("ok"):
+            a["delivered"] = True
+            return
+        with self._lock:
+            if self.active.get(a["key"]) is not a:
+                if not reminder and not a.get("delivered"):
+                    a["pushed"] = False                  # (settling or settled: no "Recovered" for a push never made)
+                    a.pop("escalated", None)
+                    self._save()
+                return
+            if int(a.get("push_failed") or 0) >= PUSH_RETRIES:
                 return
             a["push_failed"] = int(a.get("push_failed") or 0) + 1
             a["retry_at"] = self.clock() + PUSH_RETRY_S
@@ -1905,6 +2062,7 @@ class StationHealth:
                     self.last_push[a["key"]] = prev
             self.log(f"health: {a['title']} not delivered ({str(out.get('error') or '?')[:80]}): trying again in "
                      f"{_dur(PUSH_RETRY_S)}")
+            self._save()
 
     def run(self, stop: threading.Event) -> None:
         while not stop.wait(TICK_S):
@@ -1923,8 +2081,8 @@ class StationHealth:
             out = [dict({k: a[k] for k in ("key", "severity", "title", "text", "since")}, who=a.get("who") or {},
                         **({"dismiss": a["dismiss"]} if a.get("dismiss") else {}),
                         flaps=self._flaps(a, now),                                  # back this often in 1 h (#340)
-                        **({"muted": True, "muted_until": mutes[alert_kind(a["key"])]}
-                           if alert_kind(a["key"]) in mutes else {}))
+                        **({"muted": True, "muted_until": mutes.get(alert_kind(a["key"]), mutes.get("silent"))}
+                           if self._is_muted(a["key"], mutes) else {}))
                    for a in self.active.values()]
         return sorted(out, key=lambda a: (a["severity"] != "critical", a["since"]))
 

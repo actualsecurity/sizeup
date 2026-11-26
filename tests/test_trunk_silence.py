@@ -122,7 +122,9 @@ def test_the_whole_trunk_silent_past_the_window_alerts_and_recovers_on_a_call():
     (msg,) = r.n.msgs                                                   # pushed as our dispatch lost (urgent)
     assert msg["title"].startswith("Fire/EMS 15 down 21 min: no P25 call since ") and msg["priority"] == 5
     ch = r.at(22 * 60, p25(22 * 60, {"tg:333": 22 * 60}))              # a call on any talkgroup clears it
-    assert [(k, a["key"]) for k, a in ch] == [("clear", "trunk"), ("clear", "cover:Fire/EMS 15")]
+    assert [(k, a["key"]) for k, a in ch] == [("clear", "trunk")]       # (our dispatch: back 2 min straight first)
+    ch = r.at(22 * 60 + healthmod.COVER_SETTLE_S, p25(22 * 60 + healthmod.COVER_SETTLE_S, {"tg:333": 22 * 60}))
+    assert [(k, a["key"]) for k, a in ch] == [("clear", "cover:Fire/EMS 15")]
     from sizeup.cloud.health import SETTLE_S
     r.at(22 * 60 + SETTLE_S, p25(22 * 60 + SETTLE_S, {"tg:333": 22 * 60 + SETTLE_S}))   # settled (#340)
     assert [m["title"].split(" · ")[0] for m in r.n.msgs[1:]] == ["All clear: Fire/EMS 15 back"]
@@ -293,7 +295,8 @@ def test_reminders_off_muted_or_warnings_are_not_repeated():
     r.at(0, p25(0))
     for dt in range(60, 8 * 3600, 300):
         r.at(dt, p25(0))
-    assert r.n.msgs == []                                                 # muted: nothing, reminders included
+    # dispatch coverage muted: no urgent push; "P25 trunk silent" pushed as before (first, then every remind_min)
+    assert [m["priority"] for m in r.n.msgs] == [4, 4, 4] and r.n.msgs[0]["title"].startswith("P25 trunk silent")
 
 
 def test_the_station_reports_the_control_channel(tmp_path):

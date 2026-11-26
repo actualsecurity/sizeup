@@ -2817,6 +2817,7 @@ function sMutes(m) {
   if (window.Help && Help.info) head.append(Help.info("A muted alert still shows on Settings > Station > Health, not pushed. One pushed before the mute still gets its recovery."));
   const rows = m.kinds.map((k) => {
     const [lab, cb] = sCheck(k.label, k.muted, k.muted ? "Unmute: pushed again" : "Mute: Health only, no push");
+    if (k.hint) lab.title = `${k.hint}. ${lab.title}`;
     const sel = sSelect(k.timed_only ? S_MUTE_FOR.slice(1) : S_MUTE_FOR, "24", null, `${k.label}: mute for`);
     if (k.timed_only) sel.title = "Critical: muted for a time only";
     cb.disabled = sel.disabled = !canDo("admin");

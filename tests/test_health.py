@@ -108,6 +108,7 @@ def test_silent_starts_after_three_minutes_and_is_pushed_as_our_dispatch_lost_at
     """"Station silent" is on Health at 3 min; it is pushed as our dispatch not heard ("cover:station": urgent at 5 min,
     tests/test_dispatch_coverage.py), not on its own; "All clear: station back" once it reports again."""
     from sizeup.cloud.health import COVER_SETTLE_S
+    TICK_ = 5
     r = Rig()
     assert r.at(0, post=False) == [] and r.at(170, post=False) == []      # the hub just started: can't tell yet
     ch = r.at(181, post=False)
@@ -124,8 +125,10 @@ def test_silent_starts_after_three_minutes_and_is_pushed_as_our_dispatch_lost_at
     r.at(305, post=False)
     assert len(r.n.msgs) == 1                                             # once, not every tick
     ch = r.at(310, status=station_status())
-    assert sorted(a["key"] for k, a in ch if k == "clear") == ["cover:station", "silent"] and r.keys() == []
+    assert [a["key"] for k, a in ch if k == "clear"] == ["silent"] and r.keys() == ["cover:station"]
     assert len(r.n.msgs) == 1 and any("health: cleared Station silent" in m for m in r.logs)   # not settled yet (#340)
+    r.at(310 + COVER_SETTLE_S - TICK_, status=station_status())
+    assert len(r.n.msgs) == 1                                             # back 2 min straight first
     r.at(310 + COVER_SETTLE_S, status=station_status())
     assert r.n.msgs[1]["title"].startswith("All clear: station back") and "cleared" not in r.n.msgs[1]["body"]
     assert "Fire/EMS 15 back at " + tz.hhmm(T0 + 310) in r.n.msgs[1]["body"]
@@ -176,6 +179,8 @@ def test_while_silent_nothing_else_starts_or_clears():
     r.at(500, post=False)
     assert r.keys() == ["cover:station", "silent", "stuck:FG1"]
     r.at(510, status=station_status())                                     # back: judged again
+    assert r.keys() == ["cover:station"]                                   # (our dispatch: once back 2 min straight)
+    r.at(640, status=station_status())
     assert r.keys() == []
 
 
