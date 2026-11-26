@@ -3045,7 +3045,7 @@ class App:
         if key in _promoted(self):
             eng = p.get("engine", "local")
             p = dict(p, transcribe=True, engine=channels.PIN_AWS if eng in ("local", "aws") else sttroute.AUTO
-                     if eng == sttroute.AUTO_BG else eng)
+                     if eng in (sttroute.AUTO_BG, sttroute.AUTO_NORM) else eng)
         return channels.effective(p, self.aws_ok(key)[0])
 
     def _stt_way(self, eng: str, key: str) -> str:

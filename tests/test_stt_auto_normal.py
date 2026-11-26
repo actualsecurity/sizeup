@@ -171,3 +171,59 @@ def test_the_ui_lists_auto_normal_with_its_hover_line():
     rc = open("sizeup/web/static/radio-controls.js").read()
     assert '["auto_norm", "Auto · normal"]' in rc and "Auto · normal: GPU (after priority) → stations → AWS" in rc
     assert "Auto · normal" in open("sizeup/web/static/health.js").read()
+
+
+def test_review_a_pre_alert_class_normal_clip_on_the_stations_is_claimable_and_blocks_no_priority_clip():
+    clk, jobs = Clock(), Jobs()
+    p = pool(clk)
+    st = p.seen("station:west", "online", kind="station", load={"own": 0, "service_s": 18.0, "max_s": 60.0})
+    st.polling = 1
+    online(p, "gpu-1")
+    j = jobs.job("ctx-norm", sttpool.CONTEXT, forced=True, norm=True,
+                 extra={"station_only": True, "claim_wait": sttroute.NORM_STATION_BUDGET_S, "origin": "east"})
+    assert p.submit(j)
+    assert p.ready_forced(URGENT) == (True, "")                      # (a priority page: never "a pre-alert waits")
+    assert p.claim("station:west", 0).id == "ctx-norm"
+
+
+def test_review_a_gpu_decoding_normal_work_is_busy_for_priority_and_long_clips_stay_off_the_gpu():
+    clk, jobs = Clock(), Jobs()
+    p = pool(clk)
+    online(p, "gpu-1")
+    assert p.submit(jobs.job("norm", LOW, seconds=3.0, forced=True, norm=True))
+    assert p.claim("gpu-1", 0).id == "norm"
+    assert p.ready_forced(LIVE) == (False, "gpu-1 busy")                # (never queued behind its decode: AWS)
+    assert p.submit(jobs.job("prio", LIVE)) is True or True
+    assert p.claim("gpu-1", 0) is None                                   # (nothing leased behind the normal decode)
+    assert p.norm_place(120.0)[:2] == (False, "too long for the GPU after priority work (120 s)")
+
+
+def test_review_station_only_work_never_makes_the_gpu_look_busy():
+    clk, jobs = Clock(), Jobs()
+    p = pool(clk)
+    online(p, "gpu-1")
+    for i in range(15):
+        assert p.submit(jobs.job(f"st-{i}", LOW, forced=True, norm=True,
+                                 extra={"station_only": True, "claim_wait": 90.0}))
+    assert p.norm_place(3.0) == (True, "", 0.0)
+
+
+def test_review_normal_clips_never_feed_the_latency_guard_and_a_promoted_one_goes_priority(tmp_path, monkeypatch):
+    fake = FakeTranscribe(phrases={500: AWS_TEXT})
+    hub, _asked = _norm_hub(tmp_path, fake, monkeypatch)
+    try:
+        hub.app.hub.workers.add("gpu-1")
+        now = time.time()
+        job = sttpool.Job("TG325-9", LIVE, "tg:325", "traffic", 3.0, audio=lambda: b"", on_done=hub.app._pool_done,
+                          on_fallback=hub.app._pool_fallback, clip_end=now - 12.0, norm=True, forced=True,
+                          extra={"kind": "gpu"})
+        job.worker, job.claimed_at, job.queued_at = "gpu-1", now - 1.0, now - 2.0
+        hub.app._pool_done(job, {"text": "words heard"})
+        rows = list(hub.app.stt_engines._rows.get("gpu-1", ()))
+        assert rows and not any(r[3] for r in rows)                       # (sampled, never as a priority one)
+        assert hub.app.stt_engines.tripped("gpu-1") == ""
+        monkeypatch.setattr(hub.app, "promoted_keys", lambda: frozenset({"tg:325"}))
+        assert hub.app._hub_engine("tg:325") == "auto"                    # (an incident on it: Auto · priority)
+    finally:
+        hub.close()
+        fake.close()

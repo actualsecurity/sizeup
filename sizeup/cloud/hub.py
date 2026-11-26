@@ -1532,7 +1532,7 @@ class HubApp(App):
                     sp = self.aws.spent(CONTEXT_POOL if is_context(key) else "")
                     if float(sp["limit_usd"]) > 0 and float(sp["usd"]) >= UNCLEAR_AWS_SHARE * float(sp["limit_usd"]):
                         ok, why = False, f"re-asks stop at {UNCLEAR_AWS_SHARE:.0%} of the monthly limit"
-                    elif self._hub_engine(key) == sttroute.AUTO_BG and not self._bg_aws_ok(key):
+                    elif self._hub_engine(key) in (sttroute.AUTO_BG, sttroute.AUTO_NORM) and not self._bg_aws_ok(key):
                         ok, why = False, "background: AWS over its background budget"      # (#896)
                 except Exception:  # noqa: BLE001 - no spend known: AWS's own check stands
                     pass
@@ -1855,7 +1855,7 @@ class HubApp(App):
             eng = str(self.channel_pref(key).get("engine") or "local")
         except Exception:  # noqa: BLE001 - a channel the hub can't place: pinned AWS
             return sttroute.PIN_AWS
-        if eng in ("local", sttroute.AUTO_BG) and key in self.promoted_keys():
+        if eng in ("local", sttroute.AUTO_BG, sttroute.AUTO_NORM) and key in self.promoted_keys():
             eng = "aws" if eng == "local" else sttroute.AUTO
         return sttroute.PIN_AWS if eng == "aws" else eng
 
@@ -2214,6 +2214,8 @@ class HubApp(App):
     def _norm_first(self, item, pcm, key: str, cls, origin: str = "", handed: bool = False) -> bool:
         """Auto · normal: a GPU worker when one can start it within NORM_GPU_BUDGET_S (queued after every priority clip,
         before background work: sttpool.rank), else _norm_rest. Always on its way (True)."""
+        if self.sttpool.has(item.id):                # (already on its way: never twice)
+            return True
         self.stt_routes.start(item.id, sttroute.mode_label(sttroute.AUTO_NORM))
         avoid = self._guard_avoid()
         ok, why, _est = self.sttpool.norm_place(len(pcm) / 8000.0, avoid, sttroute.NORM_GPU_BUDGET_S)
@@ -2390,7 +2392,7 @@ class HubApp(App):
                       wait_s=job.claimed_at - job.queued_at if job.claimed_at else None,
                       run_s=done_at - job.claimed_at if job.claimed_at else None,
                       prompt_v=sttruns.prompt_version(job.prompt), cls=job.cls, clip_end=job.clip_end, vocab_v=vocab_v,
-                      bg=job.bg, stt_input=str(getattr(job.audio, "input", "") or ""),
+                      bg=job.bg or job.norm, stt_input=str(getattr(job.audio, "input", "") or ""),
                       language=str(res.get("language") or ""))
 
     def _pool_fallback(self, job: sttpool.Job, why: str) -> None:
@@ -2406,7 +2408,7 @@ class HubApp(App):
             self._rerun_note.pop(job.id, None)
             self.catchup.forget(job.id)
             return
-        if job.worker and job.extra.get("kind") == "gpu" and not job.bg and job.extra.get("fell") in (
+        if job.worker and job.extra.get("kind") == "gpu" and not job.bg and not job.norm and job.extra.get("fell") in (
                 "lease", "error", "released") and not re.search(r"went (gaming|paused)|shutdown|stopping", why):
             self.stt_engines.add(job.worker, None, ok=False, gpu=True,      # (the latency guard's failures: #878)
                                  priority=job.cls in sttruns.TARGET_CLASSES + (LIVE_CLS,))
