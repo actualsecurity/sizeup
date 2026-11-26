@@ -162,8 +162,10 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                incident are recorded (feed_addresses) so a push never carries them (alarms.push_address)
     point      a feed's location is placed as a typed one is (Cad._auto_geo): a highway's marker or exit first, from its
                normalised form (Cad.highway_point: an "@" in front, a town after it, a marker and an exit both: the
-               point the location box shows), else the gazetteer. A later report at another place moves it; an open
-               incident at its ruling report's place with no point gets one on the next report, and once from the
+               point the location box shows), else the gazetteer (its street part: never a place's name or unit),
+               else the common place named at the address ("12 EXAMPLE AVE : @SAMPLE COMPLEX"). A later report at
+               another place moves it; an open incident at its ruling report's place with no point (a highway, or a
+               page's address the gazetteer wasn't sure of) gets one on the next report, and once from the
                start's backfill (backfill_points, after backfill_addresses); never over a person's location or pin. A
                highway left with no point is logged once per incident, with why
     logs       our incident ids and the source's label only: never the feed's ids, types, locations or an exception's text
@@ -2014,20 +2016,50 @@ class Sources:
             f.update(lat=g["lat"], lon=g["lon"], geo_label=g["geo_label"])
             geo = g["geo_label"]
         f["address"] = self.normal(loc, data, geo)
+        f.update(self._named_at(f["address"], loc))
         return f
+
+    @staticmethod
+    def _named_at(address: str, loc: str) -> dict:
+        """A street address with a place's name at it ("12 EXAMPLE AVE : @SAMPLE GREEN COMPLEX SAMPLE_V", stored
+        "12 Example Ave (Sample Green Complex), Sample"): the name kept as the incident's place, the address without
+        it as place_address (the radio log reads both); {} for none, or a name the address doesn't show."""
+        name = location_extras(loc)[1]
+        shown = f"({name})"
+        at = address.lower().find(shown.lower()) if name else -1
+        if at < 0:
+            return {}
+        street = " ".join((address[:at] + address[at + len(shown):]).split()).replace(" ,", ",")
+        return {"place": name, "place_address": street[:200]}
 
     def _point(self, iid: int, loc: str, data: dict | None = None, label: str = "") -> dict:
         """A feed's location's map point {lat, lon, geo_label} (None, None, '' when not found): a place's name
         (common_place) its point, else as a typed location is placed (Cad._auto_geo: a highway's marker or exit from
-        its normalised form first, "@" and a town after it or not). A highway left with no point: said once (why)."""
+        its normalised form first, "@" and a town after it or not; its street part only: never the place's name
+        or unit), else the point of the common place named at the address ("12 EXAMPLE AVE : @SAMPLE
+        COMPLEX": _named_point). A highway left with no point: said once (why)."""
         cp = self._common_fields(loc, data, True)
         if cp is not None:                                   # a place's name: its point or none, never its name's guess
             return {"lat": cp.get("lat"), "lon": cp.get("lon"), "geo_label": cp.get("geo_label") or ""}
         g = {"address": shown_location(loc), "lat": None, "lon": None, "geo_label": ""}
         self.cad._auto_geo(g)
         if g["lat"] is None:
+            g.update(self._named_point(loc, data))
+        if g["lat"] is None:
             self._unplaced(iid, loc, label)
         return {"lat": g["lat"], "lon": g["lon"], "geo_label": g["geo_label"]}
+
+    def _named_point(self, loc: str, data: dict | None = None) -> dict:
+        """The point of the common place a street address names after its "@" ("12 EXAMPLE AVE : @SAMPLE COMPLEX
+        SAMPLE_V"), when the address itself found none: {lat, lon, geo_label}, {} for none (no name, no such common
+        place, or one with no point). Never another town's (common_place)."""
+        m = re.search(r"@\s*([^():;\[\],@]+)", loc or "")
+        if not m or not street_part(loc):
+            return {}
+        cp = self._common_fields("@" + re.split(r"\s+-\s+", m.group(1))[0].strip(), data, True)
+        if not cp or cp.get("lat") is None or cp.get("lon") is None:
+            return {}
+        return {"lat": cp["lat"], "lon": cp["lon"], "geo_label": cp.get("geo_label") or ""}
 
     @staticmethod
     def _here(loc: str, inc: dict) -> bool:
@@ -2036,27 +2068,33 @@ class Sources:
         return bool(at) and (loc.strip().lower() == at.lower() or same_place(loc, at))
 
     def _geo_sources(self) -> tuple:
-        """Which gazetteer and place search a point was looked for with: tried again only when one changed."""
+        """Which gazetteer, place search and place names a point was looked for with: tried again only when one
+        changed (a common place added: _named_point)."""
         cad = self.cad                                       # (never building the place search to ask)
-        return tuple(id(getattr(cad, k, None)) for k in ("geocoder", "place_source", "_place_ix"))
+        try:
+            names = cad.settings.places_rev()
+        except Exception:  # noqa: BLE001 - no place names: as none
+            names = ""
+        return (*(id(getattr(cad, k, None)) for k in ("geocoder", "place_source", "_place_ix")), names)
 
     def _retry_point(self, iid: int, loc: str) -> bool:
-        """Look again for the point of an incident left with none (_apply): only a highway's location (a marker or an
-        exit), and not with the same gazetteer and place search it was looked for with already (each report would)."""
-        if highway(loc) is None:
-            return False
+        """Look again for the point of an incident left with none (_apply): a highway's location (a marker or an exit),
+        or a street address the feed's report is the same place as (a page's location the gazetteer wasn't sure of,
+        and the feed's attach kept that address), but not with the same gazetteer and place search it was looked for
+        with already (each report would)."""
         return self._unplaced_tried.get((iid, loc)) != self._geo_sources()
 
     def _unplaced(self, iid: int, loc: str, label: str = "") -> None:
-        """A feed's highway location (a marker or an exit) that got no map point: said once per incident and location,
-        and why (the incident's id, never the location: "logs")."""
+        """A feed's location that got no map point: not looked for again with the same searches (_retry_point). A
+        highway's (a marker or an exit): said once per incident and location, and why (the incident's id, never the
+        location: "logs")."""
         hw = highway(loc)
         key = (iid, loc)
-        if hw is None:
-            return
         if len(self._unplaced_tried) >= 500:
             self._unplaced_tried.clear()
         self._unplaced_tried[key] = self._geo_sources()     # (_retry_point: not again with the same ones)
+        if hw is None:
+            return
         if key in self._unplaced_said:
             return
         if len(self._unplaced_said) >= 500:
@@ -2323,7 +2361,10 @@ class Sources:
             f.update(named)
         else:
             self.cad._auto_geo(f)                            # placed as before: the feed's street part and known town
+            if f.get("lat") is None:                         # else the common place named at the address
+                f.update(self._named_point(loc, data))
             f.update(address=self.normal(loc, data, f.get("geo_label") or ""), address_raw=loc)
+            f.update(self._named_at(f["address"], loc))      # the name at it kept as the place
         # the remarks keep the feed's whole text (its unit, floor and named place), as they always have
         f["remarks"] = (f"{label} event {ref}: {data['type'] or 'type not given'} at {proper_case(loc) or '(no location)'}"
                         + (f"; units {', '.join(data['units'])}" if data["units"] else ""))[:4000]
@@ -2652,9 +2693,8 @@ class Sources:
                 fields.update(self._location_fields(iid, loc, new, label))
         if (loc and auth and not created and "lat" not in fields and inc["lat"] is None and inc["status"] in OPEN
                 and not {"pin", "location"} & hand and self._retry_point(iid, loc) and self._here(loc, inc)):
-            # an open incident on a highway at this report's place with no map point (a page's location the gazetteer
-            # wasn't sure of, a highway's text the place search once read as nothing): its point now, the address as
-            # it is
+            # an open incident at this report's place with no map point (a page's location the gazetteer wasn't sure
+            # of, a highway's text the place search once read as nothing): its point now, the address as it is
             g = self._point(iid, loc, new, label)
             if g["lat"] is not None:
                 fields.update(g, geo_alts="")                # (a page's unsure readings: the feed's point is sure)

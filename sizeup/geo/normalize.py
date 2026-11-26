@@ -328,6 +328,11 @@ def street_aliases(key: str) -> list[tuple[str, bool, float]]:
     if len(toks) > 2 and toks[-1] in DIRECTIONS:
         variants.append((toks[:-1] + [DIRECTIONS[toks[-1]]], 1.0))
         variants.append((toks[:-1], 0.9))
+    # the direction written in front: a street the data has as "Example Dr W" typed "W Example Dr" / "West Example
+    # Dr" (the county feed's way); a little weaker than the street's own form
+    if len(toks) > 2 and toks[-1] in DIRECTIONS and toks[-2] in TYPE_ABBRS:
+        variants.append(([toks[-1]] + toks[:-1], 0.97))
+        variants.append(([DIRECTIONS[toks[-1]]] + toks[:-1], 0.97))
     for ts, pen in variants:
         typed = bool(ts) and (ts[-1] in TYPE_ABBRS or ts[0] == "i" or
                               (len(ts) > 1 and ts[-2] in TYPE_ABBRS and ts[-1] in DIRECTIONS)

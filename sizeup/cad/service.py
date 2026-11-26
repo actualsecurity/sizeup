@@ -1096,11 +1096,14 @@ class Cad:
         Sample Market"; "@ Sample Market" when the data has no street address), and the place and its street
         address are kept on their own (place, place_address). place given: the address made from it (place_address,
         else what the address says before the "@", else the address typed). An edit of the address alone keeps the place
-        while the address still ends with "@ <place>" (the street address typed in front of it); else the place goes."""
+        while the address still ends with "@ <place>" (the street address typed in front of it), or is as it was (a
+        feed's "12 Example Ave (Sample Complex), Town"); else the place goes."""
         if "place" not in f and ("address" not in f or not (old or {}).get("place")):
             if old is None:                                 # a new event without one
                 f["place"] = f["place_address"] = ""
             return
+        if "place" not in f and f["address"] == old["address"]:
+            return                                          # the address as it was: its place stays
         place = f["place"] if "place" in f else old["place"]
         addr = f.get("address", old["address"] if old else "") or ""
         tail = f"@ {place}"
@@ -1160,8 +1163,9 @@ class Cad:
         # a person set these (#297): a CAD feed only notes its own type / location / pin from now on
         hand = [g for g, ks in (("type", ("type", "subtype")), ("location", ("address", "cross_street", "place")),
                                 ("pin", ("lat", "lon"))) if any(k in f and before[k] != after[k] for k in ks)]
-        if "pin" in hand and "lat" not in body:
-            hand.remove("pin")                       # re-placed from a typed address, not a pin a person put down
+        if "pin" in hand and ("lat" not in body or _bool(body, "geo_suggested")):
+            hand.remove("pin")                       # re-placed from a typed address, or the location box's one sure
+                                                     # reading saved (cad.js suggest): not a pin a person put down
         self.sources.mark_manual(iid, hand, op)
         return after
 
