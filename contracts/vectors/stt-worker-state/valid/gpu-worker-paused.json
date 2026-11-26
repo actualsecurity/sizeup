@@ -10,5 +10,6 @@
     "state": "starting",
     "bad": []
   },
+  "config": {"applied_rev": "44136fa355b3678a", "state": "applied", "rev": "44136fa355b3678a"},
   "reason": "whisper-server: checking"
 }

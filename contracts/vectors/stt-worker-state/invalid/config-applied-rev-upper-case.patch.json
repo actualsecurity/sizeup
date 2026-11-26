@@ -1,0 +1,13 @@
+{
+  "base": "stt-worker-state/valid/gpu-worker-online.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/config",
+      "value": {
+        "applied_rev": "44136FA355B3678A",
+        "state": "applied"
+      }
+    }
+  ]
+}

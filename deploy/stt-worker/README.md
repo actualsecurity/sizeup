@@ -21,9 +21,9 @@ GPU back at once (see [The local LLM](#the-local-llm-optional)).
 In an ordinary (not elevated) PowerShell window, as the user who games on the PC:
 
 ```powershell
-$u = 'https://raw.githubusercontent.com/actualsecurity/sizeup/09f527a7d172173923ded0480b79239b8d6ed9c9/deploy/stt-worker/install.ps1'
+$u = 'https://raw.githubusercontent.com/actualsecurity/sizeup/e703a442c389b091da464b19c7c4c4eb6a1f535f/deploy/stt-worker/install.ps1'
 Invoke-WebRequest $u -UseBasicParsing -OutFile "$env:TEMP\sizeup-stt-install.ps1"
-(Get-FileHash "$env:TEMP\sizeup-stt-install.ps1").Hash -eq '1808D57B5B90E40C62B7B32BB563FDCF6C51C4145B6A9C19787A6E9F85260A9D'   # True
+(Get-FileHash "$env:TEMP\sizeup-stt-install.ps1").Hash -eq '51B52A03C3EDA2F54572B7A5AB8E405E22E0CDEFDFE4E0F2CBB0E88D85BD890C'   # True
 powershell -ExecutionPolicy Bypass -File "$env:TEMP\sizeup-stt-install.ps1"
 ```
 
@@ -200,13 +200,13 @@ http://127.0.0.1:8180`. With it running, `py -3 "$d\worker.py" check` also tries
 
 ### 5. The worker
 
-For the first install, `worker.py` is pinned to a commit (245,409 bytes). Check its hash after the download. From then on it
+For the first install, `worker.py` is pinned to a commit (271,780 bytes). Check its hash after the download. From then on it
 [updates itself](#updating). A worker installed from an older pin (before the self-update) needs this download once
 more to get it.
 
 ```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/b1a190cc27dd0777404f58d71ecd9f9afcc0c2b2/deploy/stt-worker/worker.py -OutFile "$d\worker.py"
-(Get-FileHash "$d\worker.py").Hash -eq '30240EDAECBF54CD0AD6BC86A582D9C41492506189752E1A56F841CB909CA3E8'   # True
+Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/17128f799fc2db40688b2341df8dd17b946cdf63/deploy/stt-worker/worker.py -OutFile "$d\worker.py"
+(Get-FileHash "$d\worker.py").Hash -eq 'AB542D74825CC864936887AA9BA22491B72B75A8C6EEAE2C163664CB0F9EE907'   # True
 notepad "$d\worker.toml"
 ```
 
@@ -709,6 +709,28 @@ rollback) still starts with a newer one's keys; a known key with a bad value sto
 | `llm_priority` | `yield` | the local LLM vs a speech model that doesn't fit beside it: `yield` (the LLM stops for it) or `keep` (the model isn't loaded); the hub's word wins ([Speech models](#speech-models)) |
 | `catalog_file` | | a local `models.json` instead of the hub's (testing only) |
 | `keep_awake` | `true` | Windows: no idle sleep while the worker runs and isn't paused (see [Keeping the PC awake](#keeping-the-pc-awake)); `false`: Windows' own sleep settings. `true` or `false` only |
+| `log_level` | `info` | `worker.log`'s level: `debug`, `info` or `warning` |
+
+### Settings from the hub
+
+An admin can set most of these keys for each worker on the hub (#968); the hub sends them in its answers, and the
+worker applies them without a restart of `worker.py`. For those keys **the hub wins**: the `worker.toml` value is used
+only while the hub sends none (an older hub, or the admin cleared it), and `worker.log` says once when the hub overrides
+a value `worker.toml` sets. The hub never sends, and the worker never takes from it, `hub_url`, the tokens, the paths,
+`whisper_url`, `llm_url`, the model files or the protocol timings.
+
+- The hub's keys: the gaming thresholds, `gpu_poll_s`, `busy_grace_s`, `gaming_stop_whisper_min`, `llm_stop_gaming_s`,
+  the timeouts, checks and fail counts, `keep_awake`, `auto_update`, `log_ship`, `log_level` (at once); `gate_dbfs`,
+  `llm_priority`, `managed_models` and the VRAM keys (with no clip or LLM job in hand); and `whisper_flags` /
+  `llm_flags`: the servers' options after the program, without `-m`, `--host` and `--port`, from the same allow-lists.
+- New flags restart that server while the worker is idle and not gaming (no new jobs meanwhile), then a self-test: it
+  must answer a 1 s decode (whisper-server) or a tiny generation (llama-server). If it doesn't, the worker puts the
+  last good settings back, reports the key that failed (Health: `✗ whisper_flags`) and doesn't try that version again
+  for 30 minutes.
+- The last good settings are kept in `state\hub-config.json` and used from the next start on, before any server starts.
+- `auto_update = false` stops code updates only: the hub's settings still arrive.
+- A hub from before this never sends settings, so a worker keeps the last good ones it has; delete
+  `state\hub-config.json` (then restart the worker) to go back to `worker.toml` alone.
 
 ## Troubleshooting
 

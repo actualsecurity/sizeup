@@ -153,8 +153,10 @@ class Config:
                                            # model isn't loaded, the hub hears it unavailable and the channel keeps its
                                            # champion/route). The hub's stt_models llm_priority, when it sends one, wins
     keep_awake: bool = True                # Windows: no idle sleep while running and not paused by hand (KeepAwake)
+    log_level: str = "info"                # worker.log's: debug, info or warning (LOG_LEVEL_NAMES)
     base_dir: str = dataclasses.field(default="", repr=False)  # the config file's folder (not a key)
     ignored_keys: list = dataclasses.field(default_factory=list, repr=False)  # keys this file doesn't know (not a key)
+    local_keys: list = dataclasses.field(default_factory=list, repr=False)    # keys this file sets (not a key: HubConfig)
 
     @property
     def worker_id(self) -> str:
@@ -218,11 +220,11 @@ def load_config(path: str | os.PathLike | None, env: dict | None = None) -> Conf
         if not isinstance(doc, dict):
             raise ConfigError(f"{p.name}: not a table")
         doc = doc.get("worker", doc)
-    keys = {f.name for f in dataclasses.fields(Config)} - {"base_dir", "ignored_keys"}
+    keys = {f.name for f in dataclasses.fields(Config)} - {"base_dir", "ignored_keys", "local_keys"}
     # a key this file doesn't know is warned of and ignored, never refused: a worker.py rolled back (or not yet
     # updated) still starts with a worker.toml that a newer one's key was added to. A known key's bad value is refused.
     unknown = sorted(str(k)[:40] for k in set(doc) - keys)
-    cfg = Config(base_dir=base, ignored_keys=unknown)
+    cfg = Config(base_dir=base, ignored_keys=unknown, local_keys=sorted(str(k) for k in doc if k in keys))
     for key, value in doc.items():
         if key not in keys:
             continue
@@ -233,6 +235,9 @@ def load_config(path: str | os.PathLike | None, env: dict | None = None) -> Conf
     cfg.llm_priority = str(cfg.llm_priority).strip().lower()
     if cfg.llm_priority not in LLM_PRIORITIES:
         raise ConfigError(f"llm_priority: {cfg.llm_priority[:20]}: one of {', '.join(LLM_PRIORITIES)}")
+    cfg.log_level = str(cfg.log_level).strip().lower()
+    if cfg.log_level not in LOG_LEVEL_NAMES:
+        raise ConfigError(f"log_level: {cfg.log_level[:20]}: one of {', '.join(LOG_LEVEL_NAMES)}")
     for key, var in ENV.items():
         if env.get(var):
             setattr(cfg, key, env[var].strip())
@@ -448,7 +453,7 @@ class Redact(logging.Filter):
 def setup_logging(cfg: Config) -> None:
     """worker.log in state_dir (rotated: 1 MB, 3 old copies), and stderr when there is one (pythonw.exe has none).
     An uncaught exception anywhere is logged there too."""
-    log.setLevel(logging.INFO)
+    log.setLevel(LOG_LEVEL_NAMES.get(cfg.log_level, logging.INFO))
     for f in list(log.filters):
         if isinstance(f, Redact):
             log.removeFilter(f)
@@ -3458,6 +3463,472 @@ def _resolve(prog: str, base: str) -> str:
     return str(Path(base) / prog) if base and not Path(prog).is_absolute() and (Path(base) / prog).exists() else prog
 
 
+# --- the hub's settings (#968): a desired-config document per worker ------------------------------------------------
+# An admin sets this worker's settings on the hub (Settings audit); the hub sends them as config {rev, values} in a hello
+# or state answer when the rev this worker applied (config.applied_rev, in every hello and state: the capability) isn't
+# the hub's. Only HUB_KEYS: worker.toml keeps the bootstrap (hub_url, the token and Cloudflare's, the paths), which the
+# hub never sends and is never taken from it. For a key in HUB_KEYS the hub wins; worker.toml's value (or the default)
+# is the fallback while the hub sends none for it (an older hub, or an admin cleared it), with one warning when the hub
+# overrides a value worker.toml sets. Applied: "now" keys at once; "idle" ones with no clip or LLM call in hand; a
+# server's flags ("whisper", "llm") while idle and not gaming, no new jobs meanwhile, by restarting that server and its
+# self-test (it answers, then a tiny decode or generation). A failed self-test puts the last good values back
+# (state_dir/hub-config.json, also what the next start begins with) and is reported. The hub checks the same rules
+# (sizeup/cloud/workerconfig.py; a test holds the two equal). Values are never logged: only key names.
+HUB_CONFIG_FILE = "hub-config.json"
+HUB_CONFIG_REV = re.compile(r"[0-9a-f]{16}")
+HUB_CONFIG_DRAIN_S = 90.0                  # a restart waits this long at most for the clip / LLM call / claim in hand
+HUB_CONFIG_SELFTEST_S = 180.0              # a restarted server answers its test decode / generation this soon
+HUB_CONFIG_RETRY_S = 1800.0                # a rev that failed (rolled back) is tried again after this
+HUB_CONFIG_MAX_KEYS = 64
+HUB_FLAGS_MAX = 40
+LOG_LEVEL_NAMES = {"debug": logging.DEBUG, "info": logging.INFO, "warning": logging.WARNING}
+SERVER_OWNED = ("-m", "--model", "--host", "--port")   # a server's options the worker owns: never the hub's flags
+# name: (type, low or the words or the server, high, when)
+HUB_KEYS = {
+    "auto_gaming": ("bool", None, None, "now"),
+    "fullscreen_gaming": ("bool", None, None, "now"),
+    "gaming_mem_mb": ("float", 0, 65536, "now"),
+    "gaming_util_pct": ("float", 0, 100, "now"),
+    "gaming_samples": ("int", 1, 60, "now"),
+    "gaming_clear_s": ("float", 0, 3600, "now"),
+    "gpu_poll_s": ("float", 1, 60, "now"),
+    "busy_grace_s": ("float", 0, 60, "now"),
+    "gaming_stop_whisper_min": ("float", 0, 1440, "now"),
+    "llm_stop_gaming_s": ("float", -1, 3600, "now"),
+    "whisper_timeout_s": ("float", 5, 600, "now"),
+    "whisper_check_s": ("float", 1, 600, "now"),
+    "whisper_fail_max": ("int", 1, 100, "now"),
+    "llm_timeout_s": ("float", 5, 600, "now"),
+    "llm_check_s": ("float", 1, 600, "now"),
+    "llm_fail_max": ("int", 1, 100, "now"),
+    "keep_awake": ("bool", None, None, "now"),
+    "auto_update": ("bool", None, None, "now"),
+    "log_ship": ("bool", None, None, "now"),
+    "log_level": ("choice", tuple(LOG_LEVEL_NAMES), None, "now"),
+    "gate_dbfs": ("float", -120, 0, "idle"),
+    "llm_priority": ("choice", LLM_PRIORITIES, None, "idle"),
+    "managed_models": ("bool", None, None, "idle"),
+    "vram_budget_mb": ("float", 0, 262144, "idle"),
+    "vram_reserve_mb": ("float", 0, 65536, "idle"),
+    "llm_vram_mb": ("float", 0, 262144, "idle"),
+    "primary_vram_mb": ("float", 0, 65536, "idle"),
+    "whisper_flags": ("flags", "whisper", None, "whisper"),
+    "llm_flags": ("flags", "llm", None, "llm"),
+}
+HUB_VRAM_KEYS = ("vram_budget_mb", "vram_reserve_mb", "llm_vram_mb", "primary_vram_mb")   # at most the GPU's total
+HUB_SERVERS = {"whisper": ("whisper_server", "proc"), "llm": ("llm_server", "llm_proc")}   # its argv, its process
+
+
+def hub_flags_allowed(server: str) -> dict:
+    """A server's options the hub may set: its allow-list (WHISPER_ARGS, LLM_ARGS) less the ones the worker owns."""
+    return {k: v for k, v in (WHISPER_ARGS if server == "whisper" else LLM_ARGS).items() if k not in SERVER_OWNED}
+
+
+def check_hub_value(key: str, v, gpu_total: float | None = None):
+    """One of the hub's values, checked as the hub checks it: the value, or ConfigError (no value in its text)."""
+    kind, a, b, _when = HUB_KEYS[key]
+    if kind == "bool":
+        if not isinstance(v, bool):
+            raise ConfigError("true or false")
+        return v
+    if kind in ("int", "float"):
+        ok = isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and a <= v <= b
+        if not ok or (kind == "int" and v != int(v)):
+            raise ConfigError(f"{'a whole number' if kind == 'int' else 'a number'} from {a} to {b}")
+        if key in HUB_VRAM_KEYS and gpu_total and v > gpu_total:
+            raise ConfigError(f"more than the GPU's {gpu_total:.0f} MB")
+        return int(v) if kind == "int" else float(v)
+    if kind == "choice":
+        if v not in a:
+            raise ConfigError(f"one of {', '.join(a)}")
+        return v
+    if not isinstance(v, list) or len(v) > HUB_FLAGS_MAX or \
+            not all(isinstance(x, str) and 0 < len(x) <= 200 for x in v):
+        raise ConfigError(f"a list of options (at most {HUB_FLAGS_MAX})")
+    _check_argv(key, ["server", *v], hub_flags_allowed(a))
+    lang = _arg(v, ("-l", "--language")) if a == "whisper" else None
+    if lang is not None and lang != STT_LANGUAGE:
+        raise ConfigError(f"{key}: English only (-l {STT_LANGUAGE})")
+    return list(v)
+
+
+def check_hub_config(values: dict, gpu_total: float | None = None) -> tuple[dict, dict]:
+    """The hub's values: (the good ones, {key: why not}). A key the worker owns (worker.toml) or doesn't know is never
+    taken."""
+    clean, errors = {}, {}
+    local = {f.name for f in dataclasses.fields(Config)}
+    for k, v in list(values.items())[:HUB_CONFIG_MAX_KEYS]:
+        k = str(k)[:40]
+        if k not in HUB_KEYS:
+            errors[k] = "worker.toml only" if k in local else "unknown"
+            continue
+        try:
+            clean[k] = check_hub_value(k, v, gpu_total)
+        except ConfigError as e:
+            errors[k] = str(e)[:120]
+    return clean, errors
+
+
+def _split_server(argv: list, server: str) -> tuple[list, list]:
+    """A server's argv: (its program and the options the worker owns, with their values; the rest, its flags)."""
+    allowed = WHISPER_ARGS if server == "whisper" else LLM_ARGS
+    argv = [str(a) for a in argv]
+    own, rest, i = argv[:1], [], 1
+    while i < len(argv):
+        name, eq, _value = argv[i].partition("=")
+        n = 2 if allowed.get(name) and not eq and i + 1 < len(argv) else 1
+        (own if name in SERVER_OWNED else rest).extend(argv[i:i + n])
+        i += n
+    return own, rest
+
+
+class HubConfig:
+    """This worker's settings from the hub: what it was sent, what is in effect, the last good values (kept in
+    state_dir/hub-config.json and taken at the start, before any server is), and what the hub is told (report)."""
+
+    def __init__(self, cfg: Config, clock: Callable[[], float] = time.monotonic, wall: Callable[[], float] = time.time):
+        self.cfg, self.clock, self.wall = cfg, clock, wall
+        self.path = Path(cfg.state_dir) / HUB_CONFIG_FILE
+        self.local = {k: self._value(k) for k in HUB_KEYS}       # worker.toml's (or the default): the fallback
+        mine = set(getattr(cfg, "local_keys", ()) or ())
+        self.local_set = {k for k in HUB_KEYS if (HUB_SERVERS[HUB_KEYS[k][1]][0] if HUB_KEYS[k][0] == "flags" else k)
+                          in mine and self.local[k] not in ([], "")}
+        self.values: dict = {}             # the hub's values in effect (the last good)
+        self.applied_rev = ""
+        self.rev = ""                      # the last rev the hub sent
+        self.state = "none"                # none | applied | pending | rolled back
+        self.why = ""
+        self.status: dict[str, str] = {}   # key -> ok, pending, invalid, unknown, worker.toml only, failed, rolled
+                                           # back or unused
+        self.errors: dict[str, str] = {}
+        self.offered: tuple[str, dict, dict] | None = None
+        self.failed: dict[str, tuple] = {}  # rev -> (when it failed, the key, why): not tried again before
+                                            # HUB_CONFIG_RETRY_S
+        self._warned: set = set()
+        self._applied: tuple[dict, dict] = ({}, {})   # the statuses and errors of applied_rev (told again on a revert)
+        self._mu = threading.Lock()
+        self._apply = threading.Lock()
+        kept = read_json(self.path)
+        failed = kept.get("failed")
+        if isinstance(failed, dict) and isinstance(failed.get("rev"), str) and isinstance(failed.get("at"), (int, float)):
+            self.failed[failed["rev"]] = (self.clock() - max(0.0, self.wall() - failed["at"]),   # (not again at once)
+                                          str(failed.get("key") or "")[:40], str(failed.get("why") or "")[:120])
+        last = kept.get("last_good")
+        if isinstance(last, dict) and isinstance(last.get("rev"), str) and HUB_CONFIG_REV.fullmatch(last["rev"]) \
+                and isinstance(last.get("values"), dict):
+            clean, errors = check_hub_config(last["values"])
+            for k, v in clean.items():
+                self._set(None, k, v)
+            self.values, self.applied_rev, self.rev, self.state = clean, last["rev"], last["rev"], "applied"
+            self.status = {**{k: "ok" for k in clean}, **self._not_taken(errors)}
+            self.errors = {k: v for k, v in errors.items() if v not in ("unknown", "worker.toml only")}
+            self._applied = (dict(self.status), dict(self.errors))
+            if clean:
+                log.info("hub settings: %s kept from the last start (%s)", last["rev"], ", ".join(sorted(clean)))
+
+    # -- values
+
+    def _value(self, key: str):
+        kind, server = HUB_KEYS[key][0], HUB_KEYS[key][1]
+        if kind == "flags":
+            return _split_server(getattr(self.cfg, HUB_SERVERS[server][0]), server)[1]
+        return getattr(self.cfg, key)
+
+    def current(self, key: str):
+        return self.values.get(key, self.local[key])
+
+    def changes(self, clean: dict) -> dict:
+        """{key: the value it takes} for every key whose value changes: the hub's, or worker.toml's for a key the hub
+        no longer sends."""
+        return {k: clean.get(k, self.local[k]) for k in HUB_KEYS if clean.get(k, self.local[k]) != self.current(k)}
+
+    def _set(self, w: "Worker | None", key: str, v) -> None:
+        """A value in effect: on the config, and on what the worker built from it."""
+        kind, server = HUB_KEYS[key][0], HUB_KEYS[key][1]
+        if kind == "flags":
+            attr, proc_attr = HUB_SERVERS[server]
+            base = getattr(self.cfg, attr)
+            if not base:
+                return                     # no server of the worker's own: nothing to set (status unused)
+            argv = _split_server(base, server)[0] + list(v)
+            setattr(self.cfg, attr, argv)
+            proc = getattr(w, proc_attr, None) if w is not None else None
+            if proc is not None:
+                proc.argv = argv
+            return
+        setattr(self.cfg, key, v)
+        if key == "log_level":
+            log.setLevel(LOG_LEVEL_NAMES[v])
+        if w is None:
+            return
+        if key == "whisper_timeout_s":
+            w.whisper.timeout_s = v
+        elif key == "llm_timeout_s" and w.llm is not None:
+            w.llm.timeout_s = v
+        elif key == "keep_awake":
+            ka = w.keep_awake
+            ka.on = bool(v)                # (first: a heartbeat's want(True) after this is a no-op)
+            if not v:
+                with ka._cv:               # its thread clears the flag
+                    ka._want = False
+                    ka._cv.notify_all()
+        elif key == "managed_models":
+            w.stt_models.enabled = bool(v)
+            if not v:
+                w.stt_models.stop_all("off (hub settings)")
+        elif key == "log_ship":
+            ship = w.logship
+            if v and ship is None:
+                ship = w.logship = LogShip(self.cfg)
+                threading.Thread(target=ship.loop, args=(lambda: w.stopped, w._stop.wait), name="logs",
+                                 daemon=True).start()
+            if ship is not None and v and ship not in log.handlers:
+                log.addHandler(ship)
+            elif ship is not None and not v and ship in log.handlers:
+                log.removeHandler(ship)            # (what is spooled still goes)
+
+    # -- the hub's answer
+
+    def offer(self, ans, w: "Worker | None" = None) -> None:
+        """A hello or state answer: config {rev, values}, or none (the hub has nothing new, or is older). Settings that
+        only take "now" keys are applied here at once; the rest by the config thread (step)."""
+        doc = ans.get("config") if isinstance(ans, dict) else None
+        if not isinstance(doc, dict):
+            return
+        rev, values = doc.get("rev"), doc.get("values")
+        if not isinstance(rev, str) or not HUB_CONFIG_REV.fullmatch(rev) or not isinstance(values, dict):
+            return
+        with self._mu:
+            if rev == self.applied_rev:
+                if self.offered is not None or self.state != "applied":   # the admin went back to what is in effect
+                    self.offered, self.rev, self.state, self.why = None, rev, "applied", ""
+                    self.status, self.errors = dict(self._applied[0]), dict(self._applied[1])
+                return
+            if self.offered is not None and self.offered[0] == rev:
+                return
+            failed = self.failed.get(rev)
+            if failed is not None and self.clock() - failed[0] < HUB_CONFIG_RETRY_S:
+                if self.rev != rev and failed[1]:            # (after a restart: say so again, not "pending")
+                    self.offered, self.rev, self.state, self.why = None, rev, "rolled back", ""
+                    self.status, self.errors = {failed[1]: "failed"}, {failed[1]: f"self-test: {failed[2]}"[:120]}
+                return
+            gpu = (getattr(w, "gpu", None) and w.gpu.info) or {}
+            clean, errors = check_hub_config(values, _num(gpu.get("mem_total_mb")))
+            self.offered, self.rev, self.state, self.why = (rev, clean, errors), rev, "pending", ""
+            self.status = {**{k: "pending" for k in clean}, **self._not_taken(errors)}
+            self.errors = {k: v for k, v in errors.items() if v not in ("unknown", "worker.toml only")}
+        log.info("hub settings: %s received (%d key(s))", rev, len(values))
+        if w is not None and all(HUB_KEYS[k][3] == "now" for k in self.changes(clean)):
+            self.step(w)
+
+    @staticmethod
+    def _not_taken(errors: dict) -> dict:
+        return {k: (v if v in ("unknown", "worker.toml only") else "invalid") for k, v in errors.items()}
+
+    # -- applying (the config thread; "now" keys from offer)
+
+    def loop(self, w: "Worker") -> None:
+        while not w.stopped:
+            try:
+                self.step(w)
+            except Exception:  # noqa: BLE001 - the settings never take the worker down
+                log.exception("hub settings: unexpected error (carrying on)")
+                w._stop.wait(30)
+            w._stop.wait(1.0)
+
+    def busy(self, w: "Worker", idle: bool, restart: list) -> str:
+        """Why the settings can't be applied now ("" when they can)."""
+        if w.draining:
+            return "updating"
+        if not (idle or restart):
+            return ""
+        if w.job is not None or w._inferring:
+            return "a clip"
+        if w.llm_job is not None or w._llm_call is not None:
+            return "an LLM job"
+        if not restart:
+            return ""
+        held = w.held()
+        if held:
+            return held[0]
+        if "llm" in restart and not (w.llm_proc.running() or (w.llm_verified and w.stt_models.llm_room_ok)):
+            return "llama-server not running"           # (its own reasons: the model's check, the VRAM)
+        return ""
+
+    def restarts(self, w: "Worker", changed: dict) -> list:
+        """The servers to restart (and self-test) for these changes: every one the worker runs itself, stopped now or
+        not (a stopped one would start on flags never tested)."""
+        return [server for server, (_attr, proc_attr) in HUB_SERVERS.items()
+                if f"{server}_flags" in changed and getattr(w, proc_attr, None) is not None]
+
+    def step(self, w: "Worker") -> bool:
+        """The settings offered, applied if the worker is free for them. True when they were (or rolled back)."""
+        if not self._apply.acquire(blocking=False):
+            return False                   # (applying on another thread now)
+        try:
+            with self._mu:
+                off = self.offered
+            if off is None:
+                return False
+            rev, clean, errors = off
+            changed = self.changes(clean)
+            restart = self.restarts(w, changed)
+            why = self.busy(w, any(HUB_KEYS[k][3] != "now" for k in changed), restart)
+            if why:
+                self.why = why
+                return False
+            if restart and not self._hold(w):
+                self.why = "updating" if w.draining else "busy"
+                return False
+            try:
+                return self._apply_now(w, rev, clean, errors, changed, restart)
+            finally:
+                if restart:
+                    w.config_hold = False
+                    w._wake.set()
+        finally:
+            self._apply.release()
+
+    def _hold(self, w: "Worker") -> bool:
+        """No new jobs (state paused, "applying settings"); the clip, the LLM call or the claim in hand done first
+        (HUB_CONFIG_DRAIN_S at most). False when they aren't, or a self-update began (tried again later)."""
+        w.config_hold = True
+        w._wake.set()
+        end = self.clock() + HUB_CONFIG_DRAIN_S
+        busy = lambda: (w.job is not None or w.llm_job is not None or w._claiming or w._llm_claiming   # noqa: E731
+                        or w._inferring or w._llm_call is not None)
+        while not w.stopped and self.clock() < end and busy() and not w.draining:
+            w._stop.wait(0.2)
+        if w.stopped or busy() or w.draining:
+            w.config_hold = False
+            w._wake.set()
+            return False
+        return True
+
+    def _apply_now(self, w: "Worker", rev: str, clean: dict, errors: dict, changed: dict, restart: list) -> bool:
+        prev = {k: self.current(k) for k in changed}
+        bad, why, doing = "", "", "?"
+        try:
+            for doing, v in changed.items():
+                self._set(w, doing, v)
+            for server in restart:
+                doing = f"{server}_flags"
+                why = self.selftest(w, server)
+                if why:
+                    bad = doing
+                    break
+        except Exception as e:  # noqa: BLE001 - whatever went wrong: the last good values back
+            log.exception("hub settings: %s: applying %s failed", rev, doing)
+            bad, why = doing, f"error: {type(e).__name__}"
+        if why in ("stopped", "held"):
+            # the worker stopping, or gaming / the LLM's VRAM taken during the self-test: no verdict on this rev; the
+            # last good values back without a restart (the monitors start the servers on them when they may), and it
+            # is tried again later
+            for k, v in prev.items():
+                self._set(w, k, v)
+            if why == "held" and not w.stopped:
+                for server in restart:
+                    getattr(w, HUB_SERVERS[server][1]).stop()
+            self.why = "gaming" if why == "held" else "stopping"
+            return False
+        if bad:
+            for k, v in prev.items():
+                self._set(w, k, v)
+            for server in restart:
+                again = self.selftest(w, server)
+                if again:
+                    log.error("hub settings: %s doesn't answer on the last good settings either: %s", server, again)
+            with self._mu:
+                self.failed[rev] = (self.clock(), bad, why[:120])
+                if not self._newer(rev):
+                    self.offered, self.state, self.why = None, "rolled back", ""
+                    self.status = {**{k: "rolled back" for k in clean}, **self._not_taken(errors), bad: "failed"}
+                    self.errors = {**{k: v for k, v in errors.items() if v not in ("unknown", "worker.toml only")},
+                                   bad: f"self-test: {why}"[:120]}
+            log.warning("hub settings: %s: %s failed its self-test (%s): back to %s", rev, bad, why,
+                        self.applied_rev or "worker.toml's")
+            self._keep({"failed": {"rev": rev, "key": bad, "why": why[:120], "at": self.wall()}})
+            return True
+        for k in sorted(clean):
+            if k in self.local_set and clean[k] != self.local[k] and k not in self._warned:
+                self._warned.add(k)
+                log.warning("worker.toml: %s is set on the hub: worker.toml's value isn't used", k)
+        unused = {f"{s}_flags" for s, (attr, _p) in HUB_SERVERS.items() if not getattr(self.cfg, attr)}
+        with self._mu:
+            status = {**{k: "unused" if k in unused else "ok" for k in clean}, **self._not_taken(errors)}
+            errs = {k: v for k, v in errors.items() if v not in ("unknown", "worker.toml only")}
+            self.values, self.applied_rev, self._applied = dict(clean), rev, (status, errs)
+            if not self._newer(rev):
+                self.offered, self.state, self.why = None, "applied", ""
+                self.status, self.errors = dict(status), dict(errs)
+        if changed or errors:
+            log.info("hub settings: %s applied (%s)%s", rev, ", ".join(sorted(changed)) or "no change",
+                     f"; not taken: {', '.join(sorted(errors))}" if errors else "")
+        self._keep({"last_good": {"rev": rev, "values": clean}})
+        return True
+
+    def _newer(self, rev: str) -> bool:
+        """Another rev came while this one was applied (under _mu): it stays offered, and its state is the one told."""
+        return self.offered is not None and self.offered[0] != rev
+
+    def _keep(self, part: dict) -> None:
+        try:
+            doc = read_json(self.path)
+            doc.update(part)
+            write_json(self.path, doc)
+        except OSError as e:
+            log.warning("hub settings: %s not written: %s", self.path.name, e.strerror or e)
+
+    def selftest(self, w: "Worker", server: str) -> str:
+        """That server restarted on the flags now in effect, then its self-test: it answers, and a tiny decode (1 s of
+        silence) or generation. "" when it passed, else why; "stopped" (the worker stops) or "held" (gaming or a pause
+        began, or the LLM's VRAM went to the speech models): no verdict."""
+        _attr, proc_attr = HUB_SERVERS[server]
+        proc = getattr(w, proc_attr)
+        if server == "whisper":
+            w._whisper_down("restarting (hub settings)")
+        else:
+            w._llm_down("restarting (hub settings)")
+        proc.stop()
+        proc.started = -1e9
+        proc.ensure(False)
+        end, last = self.clock() + HUB_CONFIG_SELFTEST_S, "no answer"
+        while not w.stopped and self.clock() < end:
+            if w.held() is not None or (server == "llm" and not w.stt_models.llm_room_ok):
+                return "held"
+            if not proc.running():
+                return f"{proc.name} exited ({proc.proc.poll()})" if proc.proc is not None else f"{proc.name} didn't start"
+            if server == "whisper":
+                if w.whisper.alive() and w.check_whisper():
+                    return ""
+                last = w.whisper_err or last
+            elif w.llm.status() == 200:
+                try:
+                    if w.llm.check()[0] == {"ok": True}:
+                        w.llm_ok, w.llm_err, w.llm_fails = True, "", 0
+                        return ""
+                    last = "its answer didn't follow the schema"
+                except LlmError as e:
+                    last = str(e)[:80]
+            w._stop.wait(1.0)
+        return "stopped" if w.stopped else f"{proc.name}: {last}"
+
+    def report(self) -> dict:
+        """config in hello and state: the rev applied ("" none), the last one sent, the state, each key's status and
+        why a key wasn't taken (never a value)."""
+        with self._mu:
+            out = {"applied_rev": self.applied_rev, "state": self.state}
+            if self.rev:
+                out["rev"] = self.rev
+            if self.why:
+                out["why"] = self.why[:80]
+            if self.status:
+                out["keys"] = dict(list(self.status.items())[:HUB_CONFIG_MAX_KEYS])
+            if self.errors:
+                out["errors"] = {k: str(v)[:120] for k, v in list(self.errors.items())[:HUB_CONFIG_MAX_KEYS]}
+        return out
+
+
 # --- the worker ----------------------------------------------------------------------------------------------------
 
 class Worker:
@@ -3468,9 +3939,13 @@ class Worker:
     def __init__(self, cfg: Config, run: Callable[[list], str] = run_cmd, clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], object] | None = None, popen: Callable = subprocess.Popen,
                  fullscreen: Callable[[], str] = windows_fullscreen, updater: Updater | None = None,
-                 logship: LogShip | None = None, keep_awake: KeepAwake | None = None):
-        """logship: the log shipper `run` made (its handler on the log since the start); its thread runs here."""
+                 logship: LogShip | None = None, keep_awake: KeepAwake | None = None,
+                 hub_config: HubConfig | None = None):
+        """logship: the log shipper `run` made (its handler on the log since the start); its thread runs here.
+        hub_config: the hub's settings (HubConfig; made here when not given): first, so every server is built on them."""
         self.cfg, self.run_cmd, self.clock = cfg, run, clock
+        self.hub_config = hub_config if hub_config is not None else HubConfig(cfg, clock=clock)
+        self.config_hold = False           # the hub's settings restart a server: no new jobs meanwhile
         self.keep_awake = keep_awake if keep_awake is not None else KeepAwake(cfg.keep_awake)  # (started by run())
         self.logship = logship
         self._stop = threading.Event()
@@ -3555,6 +4030,8 @@ class Worker:
     def state(self) -> tuple[str, str]:
         if self.draining:
             return "paused", "updating"
+        if self.config_hold:
+            return "paused", "applying settings"
         held = self.held()
         if held:
             return held
@@ -3603,7 +4080,7 @@ class Worker:
     def _state_body(self) -> dict:
         state, reason = self.state()
         body = {"state": state, "model": self.cfg.model, "version": VERSION, "models": self.models(),
-                "self_update": self.updater.report()}
+                "self_update": self.updater.report(), "config": self.hub_config.report()}
         if reason:
             body["reason"] = reason
         if self.gpu.info:
@@ -3639,6 +4116,7 @@ class Worker:
         self.updater.confirm()
         self.stt_models.offer(ans)
         self.stt_models.forget_offer(ans)
+        self.hub_config.offer(ans, self)
         if not self.connected:
             classes = ans.get("classes") if isinstance(ans.get("classes"), list) else []
             log.info("hub: connected as %s (%s); classes %s", self.cfg.worker_id, body["state"],
@@ -3651,6 +4129,7 @@ class Worker:
         self.updater.confirm()
         self.stt_models.offer(ans)
         self.stt_models.forget_offer(ans)
+        self.hub_config.offer(ans, self)
         if "pool_on" in ans:
             if self.pool_on is not None and bool(ans["pool_on"]) != self.pool_on:
                 log.info("hub: the pool is %s", "on" if ans["pool_on"] else "off")
@@ -3922,6 +4401,7 @@ class Worker:
                "pool_on": self.pool_on, "model": self.cfg.model, "gpu": self.gpu.info, "jobs": dict(self.counts),
                "last_job_at": self.last_job_at, "started": self.started_at, "updated": time.time(),
                "version": VERSION, "update": self.updater.report(), "keep_awake": self.keep_awake.report(),
+               "config": self.hub_config.report(),
                "models": {**self.stt_models.report(), "catalog": self.stt_models.cat_status,
                           "llm_room": self.stt_models.llm_room_ok}}
         if self.logship is not None:
@@ -3969,6 +4449,8 @@ class Worker:
         """Why the worker can't switch to a new file now ("" when it can): the swap restarts it, and its servers."""
         if not self.connected:
             return "the hub"
+        if self.config_hold:
+            return "applying settings"
         if self.job is not None:
             return "a clip"
         if self.llm_job is not None or self._llm_call is not None:
@@ -4023,7 +4505,7 @@ class Worker:
                 log.warning("llm_model_sha256 isn't set: llama-server's model isn't checked against its pin")
         self.reap_leftovers()                      # what a worker that died left running (no job object elsewhere)
         loops = [(self._heartbeat_loop, "heartbeat"), (self._monitor_loop, "monitor"), (self._update_loop, "update"),
-                 (self._models_loop, "models")]
+                 (self._models_loop, "models"), (lambda: self.hub_config.loop(self), "config")]
         if self.logship is not None:
             loops.append((lambda: self.logship.loop(lambda: self.stopped, self._stop.wait), "logs"))
         if self.llm_verified is None:
@@ -4082,7 +4564,7 @@ class Worker:
         self.hub.interrupted = False
         self._claiming = True
         try:
-            if self.stopped or self.draining:      # (the self-update's drain began after the state was read)
+            if self.stopped or self.draining or self.config_hold:   # (a drain began after the state was read)
                 return
             ans = self.hub.request("POST", f"{API}/claim", {"wait": self.claim_wait, "state": state,
                                                             "model": self.cfg.model, "models": self.loaded()},
@@ -4334,7 +4816,7 @@ class Worker:
         self.llm_hub.interrupted = False
         self._llm_claiming = True
         try:
-            if self.stopped or self.draining:
+            if self.stopped or self.draining or self.config_hold:
                 return
             ans = self.llm_hub.request("POST", f"{API}/infer/claim",
                                        {"wait": self.claim_wait, "state": self.state()[0], "models": self.models()},
@@ -4699,6 +5181,7 @@ def main(argv: list | None = None) -> int:
             log.error("another worker (pid %s) is running on %s: not starting a second one", lock.holder(),
                       cfg.state_dir)
             return 3
+        hub_config = HubConfig(cfg)        # the hub's last good settings, before anything is built on the config
         ship = None
         if cfg.log_ship:                   # from the first line on: the update's own (a rollback's why) shipped too
             ship = LogShip(cfg)
@@ -4709,7 +5192,7 @@ def main(argv: list | None = None) -> int:
                 ship.close_spool()
             lock.release()
             return UPDATE_EXIT
-        worker = Worker(cfg, updater=updater, logship=ship)
+        worker = Worker(cfg, updater=updater, logship=ship, hub_config=hub_config)
 
         def _term(signum, frame):
             raise KeyboardInterrupt

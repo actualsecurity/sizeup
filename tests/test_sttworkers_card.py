@@ -24,6 +24,9 @@ from tests.test_stations_card import Access, browser_page
 SHOTS = os.environ.get("SIZEUP_SHOTS", "")
 RUNS = "4f1c9e2a7b3d8c6e0a5f2b9d1c7e3a8f6b0d4c2e9a1f7b3c5d8e0a2f4b6c9d1e"     # made-up worker.py hashes
 WANTED = "c4d1e8a07b2f9e3d6a5c1b0f8e7d2a9c3b6f5e4d1a0c9b8e7f6d5c4b3a2e1f0d"
+REV = "35bd305b272cee4a"      # a made-up rev of the hub's settings (#968)
+CONFIG = {"label": f"{REV[:7]} ✓", "tone": "ok", "rev": REV, "applied_rev": REV, "state": "applied",
+          "title": f"Hub {REV[:7]} · applied {REV[:7]}\ngate_dbfs = -50.0\nwhisper_flags = -t 6"}
 UPDATE = {"update": {"sha256": RUNS, "commit": "", "auto": True, "state": f"staged {WANTED[:12]}, waiting: gaming",
                      "bad": []}, "update_wanted": WANTED, "update_current": False}
 
@@ -39,16 +42,24 @@ class FakeHealth:
                 "workers": [{"id": "gpu-1", "state": "online", "model": "ggml-large-v3-turbo-q5_0.bin",
                              "gpu": {"util_pct": 31, "mem_used_mb": 1650, "mem_total_mb": 12288}, "jobs_h": 412,
                              "lost": 1, "seen": now - 2, "seen_s": 2, "keep_awake": {"on": True, "held": True},
-                             **UPDATE},
+                             **UPDATE, "config_view": CONFIG},
                             {"id": "gpu-2", "state": "offline", "model": "ggml-large-v3-turbo-q5_0.bin", "gpu": {},
                              "jobs_h": 0, "lost": 0, "seen": now - 600, "seen_s": 600, "asleep": True,
-                             "keep_awake": {"on": True, "held": True}},
+                             "keep_awake": {"on": True, "held": True},
+                             "config_view": {"label": "pending", "tone": "dim", "rev": REV, "applied_rev": "",
+                                             "state": "pending", "title": f"Hub {REV[:7]} · applied none\n"
+                                                                          "Waiting: a clip"}},
                             {"id": "gpu-3", "state": "offline", "model": "ggml-large-v3-turbo-q5_0.bin", "gpu": {},
                              "jobs_h": 0, "lost": 0, "seen": now - 900, "seen_s": 900, "asleep": False,
                              "keep_awake": {"on": False, "held": False}},
                             {"id": "gpu-4", "state": "online", "model": "ggml-large-v3-turbo-q5_0.bin", "gpu": {},
                              "jobs_h": 3, "lost": 0, "seen": now - 1, "seen_s": 1,
-                             "keep_awake": {"on": True, "held": False, "why": "refused by Windows"}},
+                             "keep_awake": {"on": True, "held": False, "why": "refused by Windows"},
+                             "config_view": {"label": "✗ whisper_flags", "tone": "warn", "rev": REV,
+                                             "applied_rev": "44136fa355b3678a", "state": "rolled back",
+                                             "title": f"Hub {REV[:7]} · applied 44136fa\nRolled back to 44136fa\n"
+                                                      "whisper_flags = -t 99 · failed: self-test: whisper-server "
+                                                      "exited (1)"}},
                             {"id": "station:st-north", "kind": "station", "state": "paused", "model": "small.en-q5_1",
                              "load": {"own": 6, "cpu_pct": 91.0, "service_s": 14.2, "why": "its own clips first"},
                              "gpu": {}, "jobs_h": 38, "lost": 0, "seen": now - 1, "seen_s": 1},
@@ -142,6 +153,38 @@ def test_health_shows_the_gpu_workers_and_the_latency_by_channel(site):
             Path(SHOTS).mkdir(parents=True, exist_ok=True)
             pg.screenshot(path=str(Path(SHOTS) / "health-gpu-workers.png"),
                           clip={"x": box["x"] - 8, "y": box["y"] - 8, "width": 980, "height": 470})
+        assert pg.errors == []
+    finally:
+        browser.close()
+        pw.stop()
+
+
+def test_health_shows_each_gpu_workers_settings_from_the_hub(site):
+    """#968: the Config column: the rev applied ✓, pending, or ✗ the key not taken; the rest in the hover. A station's
+    whisper has none, and a worker from before says none: "—"."""
+    pw, browser, pg = browser_page(site, CASEY)
+    try:
+        pg.goto(site.base + "/cad#settings/station/health")
+        pg.get_by_text("GPU workers (hub)").wait_for()
+        panel = pg.locator("#s-station-health")
+        heads = panel.locator("table", has=pg.locator("th", has_text="Config")).locator("th").all_inner_texts()
+        assert [h.lower() for h in heads[:5]] == ["worker", "state", "model", "version", "config"]   # (shown in capitals)
+        rows = {r: panel.locator("tr", has=pg.locator("td", has_text=r)).first
+                for r in ("gpu-1", "gpu-2", "gpu-3", "gpu-4", "st-north (station)")}
+        ok = rows["gpu-1"].locator("td.hl-ok", has_text=f"{REV[:7]} ✓")
+        assert ok.is_visible() and "gate_dbfs = -50.0" in ok.get_attribute("title")
+        assert rows["gpu-2"].locator("td.dim", has_text="pending").is_visible()
+        bad = rows["gpu-4"].locator("td.hl-warn", has_text="✗ whisper_flags")
+        assert bad.is_visible() and "self-test: whisper-server exited (1)" in bad.get_attribute("title")
+        assert rows["gpu-3"].locator("td").nth(4).inner_text() == "—"
+        assert rows["st-north (station)"].locator("td").nth(4).inner_text() == "—"
+        if SHOTS:
+            head = panel.get_by_text("GPU workers (hub)")
+            pg.evaluate("el => el.scrollIntoView({block: 'start'})", head.element_handle())
+            box = head.bounding_box()
+            Path(SHOTS).mkdir(parents=True, exist_ok=True)
+            pg.screenshot(path=str(Path(SHOTS) / "health-gpu-workers-config.png"),
+                          clip={"x": box["x"] - 8, "y": box["y"] - 8, "width": 1100, "height": 470})
         assert pg.errors == []
     finally:
         browser.close()

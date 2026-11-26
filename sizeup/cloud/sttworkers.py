@@ -59,6 +59,11 @@ hello and state. Health shows "keeps PC awake" while held, and a worker gone sil
 "(asleep?)" when its last word said keep_awake off or not held, or its heartbeats just stopped while online (no pause,
 gaming or clean stop first: sttpool.Pool.asleep). A hub from before ignores the key.
 
+Its settings from the hub (#968, sizeup/cloud/workerconfig.py): an admin's desired config per GPU worker (hub.sqlite
+meta "stt_config", audited; action config below). A GPU worker that sends config {applied_rev, ...} in its hello and
+state (its capability) gets config {rev, values} in the answer while its applied_rev isn't the hub's; Health shows
+"<rev> ✓", "pending" or "✗ <key>".
+
 Its log (deploy/stt-worker/worker.py LogShip): POST /api/station/stt/logs, gzipped {v, worker, batch, lines: [[ms,
 level, msg]]} -> {ok, accepted, n | retry_s, reason}; a GPU worker's own token only. Into CloudWatch Logs
 /sizeup/stt-worker, a stream per worker (sizeup/cloud/cwlogs.py WorkerLogs).
@@ -79,6 +84,7 @@ from pathlib import Path
 from typing import Callable
 
 from sizeup import sttpool
+from sizeup.cloud import workerconfig
 
 PREFIX = "sw1"
 ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}")
@@ -203,6 +209,8 @@ class WorkerRegistry:
         self._any: tuple[float, bool] = (0.0, False)     # (read at, any active worker): read at most once a second
         self._lock = threading.Lock()
         self.listeners: list[Callable[[], None]] = []    # called after an admin changes a switch (the LLM lane)
+        self.gpu_total: Callable[[str], float | None] = lambda wid: None   # a worker's GPU memory (MB) as it said last
+        self._config_lock = threading.Lock()
 
     def _q(self, sql: str, params=()) -> list[tuple]:
         try:
@@ -364,6 +372,33 @@ class WorkerRegistry:
         self.mdb.put(META_UPDATE, json.dumps(saved, sort_keys=True))
         return old, new
 
+    # -- each GPU worker's settings from the hub (#968, sizeup/cloud/workerconfig.py) -------------------------------
+
+    def config_of(self, wid: str) -> dict:
+        """{rev, values}: what this worker is sent (no values set: {} and its rev)."""
+        return workerconfig.desired(workerconfig.saved(self.mdb).get(wid, {}))
+
+    def set_config(self, wid, sets) -> tuple[dict, dict]:
+        """An admin's set {key: value | None (worker.toml's)} on this worker's values: (old values, new values).
+        WorkerError naming the key for a value the worker wouldn't take; nothing changed then."""
+        wid = self._id(wid)
+        if self.row(wid) is None:
+            raise WorkerError(f"no worker {wid}")
+        total = self.gpu_total(wid)
+        with self._config_lock:                # (two admins at once: neither change lost)
+            saved = workerconfig.saved(self.mdb)
+            old = saved.get(wid, {})
+            try:
+                new = workerconfig.changes(old, sets, total)
+            except workerconfig.ConfigValueError as e:
+                raise WorkerError(str(e)) from None
+            if new:
+                saved[wid] = new
+            else:
+                saved.pop(wid, None)
+            self.mdb.put(workerconfig.META, json.dumps(saved, sort_keys=True))
+        return old, new
+
     def _switched(self) -> None:
         for fn in list(self.listeners):
             try:
@@ -479,14 +514,16 @@ class WorkerRegistry:
                         "rotated": r["rotated"], "revoked": r["revoked"], "last_used": self.last_used(r["id"], r),
                         "grace_until": r["prev_until"] if (r["prev_until"] or 0) > now else None,
                         "llm_on": self.llm_on(r["id"]), "update_mode": self.update_of(r["id"]),
+                        "config": self.config_of(r["id"]),
                         **((live or (lambda _w: {}))(r["id"]))})
         return {"at": now, "workers": out, "pool": self.pool_settings(), "active": self.any(),
-                "grace_s": ROTATE_GRACE_S}
+                "grace_s": ROTATE_GRACE_S, "config_keys": workerconfig.schema()}
 
     def act(self, body: dict, by: str = "", note: Callable[[str, object, object], None] | None = None,
             on_revoke: Callable[[str], None] | None = None) -> dict:
         """POST /api/cad/stt-workers {action: add {id, name?} | rename {id, name} | rotate {id} | revoke {id} |
-        llm {id, on} | pool {on?, classes?}}. The answer of add / rotate carries the token: the only time it exists outside the
+        llm {id, on} | config {id, set: {key: value | null}} | pool {on?, classes?}}. The answer of add / rotate carries
+        the token: the only time it exists outside the
         worker. note(key, old, new): the Settings audit (never a token)."""
         a = str(body.get("action") or "")
         note = note or (lambda k, o, n: None)
@@ -508,6 +545,13 @@ class WorkerRegistry:
                 said = lambda s: s["mode"] if s["mode"] != "pin" else f"pin {s['commit'][:12]} ({s['sha256'][:12]})"
                 note(f"stt workers/{wid}/update", said(old), said(new))
             return {"ok": True, "id": wid, "update_mode": new}
+        if a == "config":                              # a GPU worker's settings from the hub (#968): a line per key
+            wid = self._id(body.get("id"))
+            old, new = self.set_config(wid, body.get("set"))
+            for k in sorted(set(old) | set(new)):
+                if old.get(k) != new.get(k) or (k in old) != (k in new):
+                    note(f"stt workers/{wid}/config/{k}", workerconfig.said(old.get(k)), workerconfig.said(new.get(k)))
+            return {"ok": True, "id": wid, "config": workerconfig.desired(new)}
         if a == "rotate":
             wid = self._id(body.get("id"))
             was = self.row(wid)
@@ -537,7 +581,7 @@ class WorkerRegistry:
                 if was != now_:
                     note(f"stt workers/pool/station {sid}", "on" if was else "off", "on" if now_ else "off")
             return {"ok": True, "pool": new}
-        raise WorkerError("action: add, rename, rotate, revoke, llm, update or pool")
+        raise WorkerError("action: add, rename, rotate, revoke, llm, update, config or pool")
 
 
 def _json(code: int, obj) -> tuple[int, bytes, str]:
@@ -601,6 +645,7 @@ class WorkerApi:
         self.src_fast = src_fast
         self._said: dict[tuple[str, str], float] = {}
         self.build = worker_build() if build is None else build
+        self.config_seen: dict[str, dict] = {}     # a GPU worker's last config report (workerconfig.clean_report)
 
     def wanted(self, wid: str) -> dict:
         """The version this GPU worker should run: worker_update in its hello and state answers."""
@@ -610,6 +655,12 @@ class WorkerApi:
         if s["mode"] == "pin":
             return {"mode": "pin", "commit": s["commit"], "sha256": s["sha256"], "url": worker_url(s["commit"])}
         return {"mode": "auto", **self.build}
+
+    def config_view(self, wid: str) -> dict:
+        """Health's and Settings' view of a GPU worker's settings: {config_view: workerconfig.view} ({} when it says
+        none)."""
+        v = workerconfig.view(self.reg.config_of(wid), self.config_seen.get(wid))
+        return {"config_view": v} if v else {}
 
     def _pool_on(self) -> bool:
         return bool(self.reg.pool_settings()["on"]) and (self.reg.any() or self.reg.stations_on())
@@ -684,6 +735,14 @@ class WorkerApi:
             # the self-update: a GPU worker that says its version is told the one it should run (never a station's)
             su = clean_self_update(d.get("self_update")) if gpu else None
             told = {"worker_update": self.wanted(wid)} if su is not None else {}
+            # its settings (#968): a GPU worker that says config is sent the hub's while it hasn't applied them
+            cr = workerconfig.clean_report(d.get("config")) if gpu else None
+            if cr is not None and path in (API + "hello", API + "state"):
+                self.config_seen[wid] = cr
+                want = self.reg.config_of(wid)
+                # (also while it waits to apply another rev: the admin went back to the one it has, #968 review)
+                if cr["applied_rev"] != want["rev"] or (cr["state"] == "pending" and cr["rev"] not in ("", want["rev"])):
+                    told["config"] = want
             # keep_awake {on, held} and a clean stop's reason "shutdown": Health's "keeps PC awake" / "(asleep?)"
             ka = clean_keep_awake(d.get("keep_awake")) if gpu else None
             why = d.get("reason") if isinstance(d.get("reason"), str) else ""
