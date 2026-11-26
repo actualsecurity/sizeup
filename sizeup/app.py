@@ -2888,7 +2888,15 @@ class App:
             page = next((p for p in self.pages if p.id == cid), None)
         item = page if page is not None else next(
             (x for x in list(self.store.loose) + [x for i in self.store.incidents for x in i.traffic] if x.id == cid), None)
+        had = item is not None and getattr(item, "status", "") == "done" and bool(
+            getattr(item, "raw" if page is not None else "text", ""))
         text, status, unclear = self._screen(item, text, status, language)    # (sizeup/stt_quality.py)
+        if unclear and had:                  # a re-run (or a late engine) that looped never blanks clean words: they
+            for k in ("quality", "unclear_text"):      # stay; only its run is kept (stt_runs, "unclear")
+                vars(item).pop(k, None)
+            log(f"{why} {cid}: {stt_quality.label(unclear['quality']).lower()} from {model or 'unknown'}: "
+                "the text it had stays")
+            return False
         alt = self._screen_alt(item, alt)
         if page is not None:
             if page.raw != text and (page.raw or page.status not in ("pending", "remote")):
