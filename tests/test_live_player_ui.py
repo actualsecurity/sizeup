@@ -76,7 +76,13 @@ class Air:
             route.fulfill(status=200, body=json.dumps(self.prefs), content_type="application/json")
 
 
-SOURCES = {"rev": "s1", "now": 0, "live": [], "folders": None, "services": {}, "sources": [
+# the department's views as the tree brings them (sizeup/cad/radioviews.py SEED: none set), Our calls renamed
+SEED = [{"id": "ours", "name": "PCFD Primary", "mark": "F", "color": "", "filter": {"ours": True}},
+        {"id": "police", "name": "Police", "mark": "P", "color": "", "filter": {"services": ["police"]}},
+        {"id": "transit", "name": "Transit", "mark": "T", "color": "", "filter": {"services": ["transit"]}},
+        {"id": "all", "name": "All", "mark": "∗", "color": "", "filter": {}}]
+SOURCES = {"rev": "s1", "now": 0, "live": [], "folders": None, "services": {},
+           "views": {"rev": "v1", "custom": True, "views": SEED}, "sources": [
     {"key": "fm:FG1", "system": "analog", "system_label": "Analog", "group": "Analog", "name": "FG1", "service": "fire",
      "tier": "", "ours": True, "mutable": False, "last": 0, "counts": [], "mhz": 154.1},
     {"key": "p25:westchester:1111", "system": "westchester", "system_label": "County", "group": "Fire", "name": "Fire Dispatch",
@@ -206,9 +212,9 @@ def test_listening_choices_go_to_the_hub_and_come_back(browser, site):  # noqa: 
     pg = open_console(browser, site, air)
     listen_on(pg)
     pg.click("#lp-set")
-    wait(pg, "() => document.querySelector('#lp-panel [data-target=\"svc:police\"]')")
+    wait(pg, "() => document.querySelector('#lp-panel [data-target=\"view:police\"]')")
     assert pg.input_value("#lp-maxage") == "90"                    # the hub's copy, not the defaults
-    pg.select_option('#lp-panel [data-target="svc:police"]', "normal")
+    pg.select_option('#lp-panel [data-target="view:police"]', "normal")
     pg.click('#lp-panel [data-mode="duck"]')
     pg.click("#lp-ours")                                           # a quick toggle
     deadline = time.time() + 6
@@ -216,8 +222,9 @@ def test_listening_choices_go_to_the_hub_and_come_back(browser, site):  # noqa: 
         pg.wait_for_timeout(200)
     ns, body = air.puts[-1]
     assert ns == "listen"
-    assert body == {"rules": {"ours": "priority", "sys:metro": "normal", "svc:police": "normal"}, "mode": "duck",
-                    "max_age": 90, "ours_only": True, "mute_police": False}
+    # (the rule from before the views, "ours", moved to the Our calls view's)
+    assert body == {"rules": {"view:ours": "priority", "sys:metro": "normal", "view:police": "normal"}, "mode": "duck",
+                    "max_age": 90, "ours_only": True}
     assert len(air.puts) <= 2                                      # a burst of clicks: one write (two at most)
     if SHOTS:
         pg.screenshot(path=f"{SHOTS}/live-player-listening.png")
@@ -266,4 +273,40 @@ def test_keys_mute_and_skip(browser, site):  # noqa: F811
     assert pg.get_attribute("#lp-mute", "aria-pressed") == "false"
     pg.click("#lp-off")
     assert not pg.is_visible("#lp") and pg.get_attribute("#lp-on", "aria-pressed") == "false"
+    assert not pg.errors, pg.errors
+
+
+def test_listening_is_the_rails_views_and_a_rename_follows_at_once(browser, site):  # noqa: F811
+    """Listening's groups are the person's Radio views (names, badges, order); the quick toggle is the Our calls view's
+    (by its id, named as it is now); its hover lists the Main channels with where to change them. No Mute police, and
+    no Listen on the Radio view (the header's is the one)."""
+    air = Air()
+    air.prefs = {"signed_in": True, "id": 7, "prefs": {}}
+    pg = open_console(browser, site, air)
+    listen_on(pg)
+    wait(pg, "() => document.querySelector('#lp-ours').textContent === 'PCFD Primary only'")
+    assert not pg.query_selector("#lp-police") and not pg.query_selector("#rv-live")
+    tip = pg.get_attribute("#lp-ours", "title")
+    assert "Main: FG1, Fire Dispatch" in tip and "Settings › Radios › Views" in tip and "Settings › Radios › Channels" in tip
+    pg.click("#lp-set")
+    wait(pg, "() => document.querySelector('#lp-panel [data-target=\"view:ours\"]')")
+    names = pg.eval_on_selector_all("#lp-panel .lp-rule .trunc", "ns => ns.map((n) => n.textContent)")
+    # the rail's views: Transit has no channel in this tree, so neither the rail nor Listening shows it
+    assert names[:3] == ["PCFD Primary", "Police", "All"] and "Transit" not in names
+    assert not pg.query_selector('#lp-panel [data-target^="svc:"]')                # no hard-coded service groups
+    assert pg.get_attribute('#lp-panel a[href="#settings/radios/channels"]', "title").startswith("Which channels are Main")
+    if SHOTS:
+        pg.screenshot(path=f"{SHOTS}/our-calls-listening.png")
+    # renamed in the rail's editor (or Settings > Radios > Views): Listening and the toggle follow, its level kept
+    pg.evaluate("""() => RadioViews.setShared({ rev: "v2", custom: true, views: RadioViews.every().map((v) =>
+                     v.id === "ours" ? { ...v, name: "Engine Co" } : v) })""")
+    wait(pg, "() => document.querySelector('#lp-ours').textContent === 'Engine Co only'")
+    wait(pg, "() => [...document.querySelectorAll('#lp-panel .lp-rule .trunc')].some((n) => n.textContent === 'Engine Co')")
+    assert pg.input_value('#lp-panel [data-target="view:ours"]') == "priority"
+    # a view hidden by this person: off the list; one with a level still decides, so it stays, dimmed, to change
+    pg.evaluate("() => RadioViews.setMine({ ...RadioViews.mine(), hidden: ['all'] })")
+    wait(pg, "() => !document.querySelector('#lp-panel [data-target=\"view:all\"]')")
+    pg.select_option('#lp-panel [data-target="view:police"]', "normal")
+    pg.evaluate("() => RadioViews.setMine({ ...RadioViews.mine(), hidden: ['all', 'police'] })")
+    wait(pg, "() => [...document.querySelectorAll('#lp-panel .lp-hid .trunc')].some((n) => n.textContent === 'Police (hidden)')")
     assert not pg.errors, pg.errors

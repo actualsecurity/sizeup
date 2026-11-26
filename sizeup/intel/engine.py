@@ -13,8 +13,9 @@
                    False: no thread, no leader or fence checks: feed() and tick() are called directly (replay, tests)
 
     engine.feed(row)      one radio_traffic row {id (str), start, end, source, system, service, dept, tier, talkgroup,
-                          channel, talker, rig, radio_id, text, alt_text, model}: synchronous
-    engine.consider(tid)  live: queue the id (never waits on rules or the gazetteer); the thread loads the row, feed()s it
+                          channel, talker, rig, radio_id, text, alt_text, model, status, late}: synchronous
+    engine.consider(tid)  live: queue the id (never waits on rules or the gazetteer); the thread loads the row (its
+                          corrected text when there is one, #901's corr_text; its #747 late flag), feed()s it
     engine.tick(now)      expires events past their until, sends a due digest, forgets old windows
     engine.ruleset_hash()
     engine.counts(now)    what it did with what it was handed, per pack (sizeup/intel/counters.py): Settings > System >
@@ -141,7 +142,19 @@ How a row becomes an event, per pack whose scope it is in:
      speech-to-text's operating-channel promotion, App.promoted_keys, so the follow-ups aren't shed as context).
      A push can only be as early as the transcript: a row is read when its text lands (consider), so speech-to-text's
      queue (sizeup/stt.py: another system's "text" talkgroups wait in the LOW class) is the delay before a push, never
-     the engine. A row transcribed after newer rows of its source is still read (Window.prune keeps it).
+     the engine. Air-time order (FIFO): speech-to-text runs on several engines, so a source's transcripts can arrive
+     out of air-time order, and a row's text can change later (a correction, an "unclear" re-ask, a catch-up). A row
+     is read with the rows that AIRED within window_s of it (Window.around; a source's rows are kept max_age_min +
+     window_s by air time, and as long again after they were read), whenever it arrives; a new event's first_at is its
+     first row's air time. A row read over its pack's late_s after its clip ended, older than max_age_min, or #747's
+     (radio_traffic.late) is LATE (Entry.late): context and corroboration, never a push's origin, never asked of the
+     model. An event is pushed a first time only while its newest row read in time ended within late_s, and those rows
+     reach the threshold on their own (_fresh); else it is recorded at log ("late"). A late row, or a
+     re-text of a row already in the event, never pushes it again. A re-text replaces the row's hits in place; one
+     that no longer says an event's category scores that event again without it (_unsupport). A row whose text
+     goes empty or "unclear" is withdrawn (_withdraw): its hits, its window entry and its model context go, and an
+     event that rested on it alone is noted "source withdrawn" (ended if never pushed; a push is never undone). A
+     disregard, a de-escalation or a re-open is undone only by a row that aired after it.
      The address lookup (step 4) runs only for a row that could carry a category to the threshold with the window's
      hits (a cue or a damper alone never makes an event, so it never pays for the gazetteer), and, for a pack with an
      area, only in those towns.
@@ -159,6 +172,7 @@ import json
 import math
 import re
 import queue
+import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
@@ -202,6 +216,11 @@ FD_OPEN_S = 12 * 3600.0                # an open incident counts this long after
 PLACED = ("address", "intersection", "block", "landmark")     # a place a crew can drive to ("place": true categories)
 RELEASE_S = 300.0                      # an "unplaced" hold: a read-back this soon after the call-out places it, and a
                                        # place found later than this updates the event at log ("placed_late"), unpushed
+LATE_S = RELEASE_S                     # air-time order (FIFO): the default of a pack's late_s (rules.Pack.late_s; the
+                                       # police pack's 300 s is speech-to-text's HIGH shed, highway's 600 s its CONTEXT
+                                       # one): a row read longer than that after its clip ENDED is late (Entry.late)
+WITHDRAWN = "source withdrawn"         # the note on an event whose only support was a row withdrawn since (_unsupport)
+IGNORE_S = 24 * 3600.0                 # a row older than this (or max_age_min if longer) is never read at all
 # a read-back of a held call: the address and these words only ("copy, that's going to be 40 Example Place"; "the
 # house is 40 Example Place"; "40 Example Place, the caller's house"). The building's nouns are read-back filler; any
 # other content word ("suspicious", "vehicle", "also ... when you clear") makes the row another job's.
@@ -222,11 +241,67 @@ STOP_WORDS = {"from", "with", "that", "this", "the", "and", "into", "front", "ne
 QUEUE_MAX = 5000
 WHO_MAX = 500                          # unplaced events whose talkers and units are kept past the window
 SEEN_MAX = 20000                       # traffic ids remembered with their text (the same text again: skipped)
-ROW_SQL = ("SELECT id, start, end, source, system, service, dept, tier, talkgroup, channel, talker, rig, radio_id, text, "
-           "alt_text, model, status FROM radio_traffic WHERE id = ?")
+ROW_SQL = ("SELECT id, start, end, source, system, service, dept, tier, talkgroup, channel, talker, rig, radio_id, {text}, "
+           "alt_text, model, status{extra} FROM radio_traffic WHERE id = ?")
+# the post-ASR correction (#901: radio_traffic.corr_text, made before the row commits) is the text intel scores, never
+# the raw one beside it; a database without the column (before #901) reads the text as transcribed
+CORR_TEXT = "COALESCE(NULLIF(corr_text, ''), text) AS text"
+
+
+# read where the database has them (PRAGMA, _row_sql): the #747 late flag (#917), and what made the text for the late
+# rows' causes (late_cause: the engine #925 records, its catch-up flag, the catch-up's re-run note)
+EXTRA_COLUMNS = ("late", "rerun_result", "stt_engine", "stt_catchup")
+LATE_CAUSES = (("aws", "AWS"), ("gpu", "GPU"), ("station_pool", "station pool"), ("station", "station"),
+               ("catchup", "catch-up"), ("outage", "outage"), ("other", "other"))
+
+
+def late_cause(row: dict) -> str:
+    """Why a push source's text reached intel late: "outage" (#747: a call from while sizeup was down), "catchup"
+    (a shed clip caught up: #925's stt_catchup, else the re-run note), else the engine that made it (#925's
+    stt_engine, else from the model label: "aws-transcribe" AWS, "(GPU " the GPU worker, "(station " the station's
+    pool, any other the station's whisper; a late AWS answer kept as alt_model is never this row's text)."""
+    if row.get("late"):
+        return "outage"
+    if row.get("stt_catchup") or ("stt_catchup" not in row and "catch-up" in str(row.get("rerun_result") or "")):
+        return "catchup"
+    eng = str(row.get("stt_engine") or "")
+    if eng in {c for c, _w in LATE_CAUSES}:
+        return eng
+    m = str(row.get("model") or "")
+    if m == "aws-transcribe":
+        return "aws"
+    if "(GPU " in m:
+        return "gpu"
+    if "(station " in m:
+        return "station_pool"
+    return "station" if m and m != "gpu-worker" else "other"
+
+
+def late_row(snap: dict, now: float, packs=()) -> dict:
+    """Settings > Station > Health's Intel line for the push sources' late text (counters' late_* over 24 h). packs:
+    the ones that can push (their late s in the hover). The row's label says what it is, so the text is the numbers."""
+    h = snap["h24"]
+    n, lost = h.get("late", 0), h.get("late_lost", 0)
+    by = ", ".join(f"{w} {h.get('late_' + c, 0)}" for c, w in LATE_CAUSES if h.get("late_" + c, 0))
+    text = f"24 h: {n}" + (f" ({by})" if by else "") + (f" · would have pushed: {lost}" if lost else "")
+    limits = ", ".join(f"{p.label} {p.late_s / 60:g} min" for p in packs)
+    title = ("Transcripts of the sources intel pushes from that reached it later than their pack's late s after the "
+             f"clip ended ({limits}), or recorded while the hub was down: read as context and kept at log, never "
+             "pushed. By what made the text: the engine, a catch-up of a shed clip, an outage. Would have pushed: on "
+             "time, the row would have raised a new pre-alert, so one was lost. To cut it: raise the police AWS "
+             "budget, keep the PD channels on Auto · priority.")
+    return {"pack": "late", "label": "Late PD text", "on": True, "level": "warn" if lost else "ok", "text": text,
+            "title": title, "late": n, "lost": lost}
+
+
+def text_sql(columns) -> str:
+    """The text column as intel reads it, given radio_traffic's columns: the corrected text when there is one."""
+    return CORR_TEXT if "corr_text" in set(columns) else "text"
+
 SECTIONS = ("intel", "intel_packs", "intel_rules")
 SUMMARY_S = 3600.0                     # one "intel: considered N, in scope M, matched K, events E" line this often
 COUNTERS_META = "intel_counters"       # the counters' hours, kept with that line (never written at startup)
+LATE_META = "intel_late_ids"           # ... and the rows counted late (counters.late_state), under their own key
 PUSH_REFRESH_S = 60.0                  # push_sources(): recomputed at least this often (sources nothing tells us of)
 PUSH_REV_BITS = 53                     # push_rev(): exact as a JSON number in JavaScript too (2^53)
 
@@ -242,6 +317,10 @@ class Entry:
     units: frozenset = frozenset()     # the units it names or its radio is ("car 3"), lower case
     dispatcher: bool = False           # the dispatcher / HQ voices every job: never a tie by talker alone
     place: object = None               # the place in its own words (model.Place), or None
+    late: bool = False                 # logged late (#747, row["late"]; older than max_age_min) or read over the
+                                       # pack's late_s after its clip ended: context and a record, never a push's origin
+    read: float = 0.0                  # when it was read (the clock): kept as context a while after, whenever it aired
+    end: float = 0.0                   # when its clip ended (lateness is measured from it)
     label: str = ""                    # its radio as Settings > Radios names it (talkers.py), "" none
     town: str = ""                     # ... that department's town, one of the source's ("" not known)
 
@@ -250,11 +329,20 @@ class Entry:
 class Window:
     entries: dict = field(default_factory=dict)      # tid -> Entry
 
-    def prune(self, newest: float, span: float, keep: str = "") -> None:
+    def prune(self, newest: float, span: float, keep: str = "", now: float | None = None) -> None:
         """Entries older than span before the newest go; never `keep` (the row being read: a transmission transcribed
-        late, after newer ones of its source, is still judged, with what the window holds, instead of dropped)."""
-        for tid in [t for t, e in self.entries.items() if e.at < newest - span and t != keep]:
+        late, after newer ones of its source, is still judged, with what the window holds, instead of dropped).
+        The engine keeps the source's rows for max_age_min + window_s (Window.around picks a row's own neighbours), so
+        a row transcribed late still finds, and is found by, the rows that aired around it; with now, a row read within
+        span before it is kept too (a burst of late rows, #747: each the others' context)."""
+        for tid in [t for t, e in self.entries.items()
+                    if e.at < newest - span and t != keep and (now is None or e.read < now - span)]:
             del self.entries[tid]
+
+    def around(self, at: float, span: float) -> "Window":
+        """The rows that aired within span of `at` (either side), in AIR-TIME order semantics: a late transcript is
+        judged with its own neighbours, never with whatever arrived last. The same Entry objects (a view)."""
+        return Window({t: e for t, e in self.entries.items() if abs(e.at - at) <= span})
 
     def ordered(self) -> list[tuple[str, Entry]]:
         return sorted(self.entries.items(), key=lambda x: (x[1].at, x[0]))
@@ -351,6 +439,12 @@ class IntelEngine:
         self._stop = threading.Event()
         self.dropped = 0
         self.stale = 0                        # rows too old to be a pre-alert (a backfill, a late re-record): skipped
+        self._row_q: str | None = None        # ROW_SQL for this database (_row_sql)
+        self._late_now: tuple | None = None   # feed(): the row read late, its cause (late_row)
+        self._lost_now = False                # _feed_pack/_raise: the late row would have raised a pre-alert on time
+        self._again = False                   # feed(): this row was read before (a re-text): never counted late again
+        self._unkept: set[str] = set()        # _summary: the meta keys a save skipped for their size (said once)
+        self._as_fresh = False                # _on_time_push: _fresh says yes
         self.unclear = 0                      # unclear transcripts (a loop, noise: sizeup/stt_quality.py): skipped
         self._seen: dict[str, int] = {}
         self.errors = 0
@@ -492,6 +586,11 @@ class IntelEngine:
         if not self.threaded or (self._thread is not None and self._thread.is_alive()):
             return
         self._restore()
+        if self.store is not None:
+            try:
+                self._row_sql()               # radio_traffic's columns (corr_text, late) looked up once, at start
+            except Exception as e:  # noqa: BLE001 - looked up again at the first row
+                self.log(f"intel: radio_traffic columns: {type(e).__name__}")
         self._thread = threading.Thread(target=self._run, name="intel", daemon=True)
         self._thread.start()
         self.log("intel: engine started (" + ", ".join(f"{p.name} {p.mode}" for p in self.packs) + ")")
@@ -544,9 +643,23 @@ class IntelEngine:
     def _one(self, tid: str) -> None:
         if not self.leader():                 # a standby, a fenced hub: the leader does it
             return
-        row = self.store.one(ROW_SQL, (tid,)) if self.store is not None else None
+        if self.store is None:
+            return
+        try:
+            row = self.store.one(self._row_sql(), (tid,))
+        except sqlite3.OperationalError:
+            self._row_q = None                # a column gone since it was looked up: looked up again, once
+            row = self.store.one(self._row_sql(), (tid,))
         if row:
             self.feed(row)
+
+    def _row_sql(self) -> str:
+        """ROW_SQL for this database: its columns looked up once (the corrected text, and a "late" flag, where the
+        columns exist)."""
+        if self._row_q is None:
+            cols = [r["name"] for r in self.store.q("PRAGMA table_info(radio_traffic)")]
+            self._row_q = ROW_SQL.format(text=text_sql(cols), extra="".join(f", {c}" for c in EXTRA_COLUMNS if c in cols))
+        return self._row_q
 
     def _maybe_tick(self) -> None:
         now = self.clock()
@@ -630,6 +743,9 @@ class IntelEngine:
                 self.log(f"intel: the kept counters are {len(raw)} characters: not read, starting fresh")
                 return
             self.counters.restore(json.loads(raw), now, [p.name for p in self.packs])
+            late = self.store.meta_get(LATE_META) or "{}"
+            if len(late) <= counters_mod.LATE_STATE_MAX:
+                counters_mod.restore_late(self.counters, json.loads(late), now)
         except Exception:  # noqa: BLE001 - counters are a convenience
             self.count_errors += 1
 
@@ -641,9 +757,15 @@ class IntelEngine:
             line, self._summed_at = self.counters.hour_line(self._summed_at)
             self.log(line)
             if self.store is not None:
-                raw = json.dumps(self.counters.state(now, [p.name for p in self.packs]))
-                if len(raw) <= counters_mod.STATE_MAX:
-                    self.store.meta_put(COUNTERS_META, raw)
+                raw = json.dumps(self.counters.state(now, [p.name for p in self.packs]), separators=(",", ":"))
+                late = json.dumps(counters_mod.late_state(self.counters, now), separators=(",", ":"))
+                for key, val, cap in ((COUNTERS_META, raw, counters_mod.STATE_MAX),
+                                      (LATE_META, late, counters_mod.LATE_STATE_MAX)):
+                    if len(val) <= cap:
+                        self.store.meta_put(key, val)
+                    elif key not in self._unkept:          # never silent; one line a kind (type and size only)
+                        self._unkept.add(key)
+                        self.log(f"intel: {key} not kept: {len(val)} characters over {cap}")
         except Exception:  # noqa: BLE001 - counters are a convenience
             self.count_errors += 1
 
@@ -659,7 +781,9 @@ class IntelEngine:
             c = snap["packs"][p.name]
             rows.append({**counters_mod.row(c, self.enabled and p.mode != "off", snap["started"], now, p.label, p.name,
                                             here=here), "h24": c["h24"], "start": c["start"]})
-        return {"started": snap["started"], "all": snap["all"], "packs": rows}
+        pushing = [p for p in packs if can_push(p)]
+        late = late_row(snap["all"], now, pushing) if self.enabled and pushing else None     # nothing to lose: hidden
+        return {"started": snap["started"], "all": snap["all"], "packs": rows, "late": late}
 
     def save_policy(self) -> None:
         if self.store is not None:
@@ -685,18 +809,23 @@ class IntelEngine:
         now = self.clock()
         # counted first (counters.py): in whose scope it is, so "nothing matched" and "nothing in scope" read apart
         scoped = self._count_row(row, now)
-        if start and now - start > float(self.policy.cfg.get("max_age_min", 15)) * 60:
-            self.stale += 1
+        max_age = float(self.policy.cfg.get("max_age_min", 15)) * 60
+        if start and now - start > max(IGNORE_S, max_age):
+            self.stale += 1                   # a backfill of days: never read (it can't flood the engine)
             if scoped:
                 self._count(now, "too_old", scoped)
             return []
         # an unclear transcript (sizeup/stt_quality.py: a repetition loop, more words than the clip holds, whisper's
         # stock phrase) is never read: the CAD of record stores it with no text, and words that reach here some other
-        # way (a replay, an old row) are checked again; an unclear alternative is left out alike
+        # way (a replay, an old row) are checked again; an unclear alternative is left out alike. A row read before
+        # whose text is now unclear or empty (#890's re-ask) is withdrawn, whatever its age
         secs = max(0.0, float(row.get("end") or 0.0) - start) if start else None
-        if str(row.get("status") or "") == stt_quality.UNCLEAR or (text and stt_quality.assess(text, secs)):
-            self.unclear += 1
-            return []
+        unclear = str(row.get("status") or "") == stt_quality.UNCLEAR or bool(text and stt_quality.assess(text, secs))
+        if unclear or not text.strip():
+            if unclear:
+                self.unclear += 1
+            with self._lock:
+                return self._withdraw(row, tid) if self._read_before(tid) else []
         if row.get("alt_text") and stt_quality.assess(str(row["alt_text"]), secs):
             row = dict(row, alt_text="")
         sig = hash((text, str(row.get("alt_text") or "")))
@@ -704,17 +833,30 @@ class IntelEngine:
             if scoped:
                 self._count(now, "repeat", scoped)
             return []
+        if start and now - start > max_age:
+            # older than max_age_min (a catch-up, a startup backfill): still read, as context and a record at log
+            # ("late"), never a push, a re-push or a re-open (as a row #747 logged late)
+            self.stale += 1
+            if scoped:
+                self._count(now, "too_old", scoped)
+            row = dict(row, aged=True)        # (never "late": that is radio_traffic.late, an outage's, late_cause)
         if scoped and policy_mod.quiet(self.policy.cfg, now, self.tz):
             self._count(now, "quiet", scoped)
+        self._again = tid in self._seen       # read before, on time or late (a re-text after the window let it go)
         self._seen[tid] = sig
         if len(self._seen) > SEEN_MAX:
             for k in list(self._seen)[: SEEN_MAX // 2]:
                 del self._seen[k]
         out: list[Event] = []
         with self._lock:
+            self._late_now = None             # (cause, would have pushed): this row read late, once overall
             for pack in self.packs:
                 if pack.in_scope(row):
                     out += self._feed_pack(pack, row, tid, text)
+            if self._late_now is not None:
+                cause, lost = self._late_now
+                for k in ("late", f"late_{cause}", *(["late_lost"] if lost else [])):
+                    self._count(now, k, [], overall=True)
         return out
 
     def _feed_pack(self, pack, row: dict, tid: str, text: str) -> list[Event]:
@@ -759,19 +901,29 @@ class IntelEngine:
                 or bool(talker and (DISPATCH_WORDS.search(talker) or talker in self._hq(row))))
         if talker and not disp and UNIT_MENTION.fullmatch(talker):
             units.add(talker.lower())
-        entry = Entry(at, hits, text, who, suppressed, talker, frozenset(units), disp,
-                      label=tk.label if tk else "", town=self._talker_town(pack, key, tk))
+        end = max(at, float(row.get("end") or at))
+        entry = Entry(at, hits, text, who, suppressed, talker, frozenset(units), disp, end=end,
+                      label=tk.label if tk else "", town=self._talker_town(pack, key, tk),
+                      late=bool(row.get("late") or row.get("aged")) or self.clock() - end > pack.late_s,
+                      read=self.clock())
+        # a re-text (#901's correction, a re-ask, a catch-up): the categories its old words said
+        was = ({r.category for r, w in win.entries[tid].hits if w > 0 and not r.id.startswith(("model.", "infer."))}
+               if known else set())
         win.entries[tid] = entry              # in the window before its place is read (_town_prior: the job's console)
         if (self.locate is not None or (pack.hw and self.highway is not None)) and not suppressed and (
-                self._could_reach(pack, win, tid, hits)
+                self._could_reach(pack, win.around(at, pack.window_s), tid, hits)
                 or any(not e.confirmed or pack.category(e.category).get("moves")
                        or (e.category in PEOPLE and MOVE_WORDS.search(text))
                        for e in self._open_for(pack, None, key, at, self._merge_span(pack)))):
             entry.place = self._where(pack, row, key, [text], list(who))
-        win.prune(max(e.at for e in win.entries.values()), pack.window_s, keep=tid)
+        whole = win
+        whole.prune(max(e.at for e in whole.entries.values()), self._keep_s(pack), keep=tid, now=self.clock())
+        win = whole.around(at, pack.window_s)     # AIR-TIME order: the rows that aired around this one, whenever read
         changed: list[Event] = []
+        self._lost_now = False                # _raise: this late row, on time, would have raised a new pre-alert
         if suppressed:
             changed += self._end_window(pack, key, at, tid, win, ws)
+            win = whole.around(at, pack.window_s)     # (what the window held is spent: _consume)
         cats = self._scores(pack, win)
         mine = {r.category for r, _w in hits}
         event_of: dict[str, Event] = {}
@@ -807,6 +959,9 @@ class IntelEngine:
                       + self._deescalate(pack, row, key, at, tid, text, ws, win.entries[tid])):
                 if not any(x is c for c in changed):
                     changed.append(x)
+        if entry.late and not self._again and can_push(pack) and self.counters.first_late(tid, pack.name, self.clock()):
+            cause, lost = late_cause(row), self._lost_now     # a push source's text read late: by cause (late_row),
+            self._late_now = (cause, lost or bool(self._late_now and self._late_now[1]))      # overall only (feed)
         if hits and pack.mode != "off":
             self._count(self.clock(), "matched", [pack.name])
             if not over:
@@ -821,6 +976,7 @@ class IntelEngine:
                     if up is not None:
                         changed.append(up)
         if (self.infer is not None and hits and not suppressed and pack.src.get("infer", True)   # ("infer": false: rules only)
+                and not win.entries[tid].late                                        # (a late row: context only)
                 and not (self.backing is not None and self.backing.owns(pack))):     # one model per row (backing.py)
             try:
                 changed += self._inference(pack, row, key, tid, win, at, cats, mine, event_of, hits)
@@ -837,6 +993,12 @@ class IntelEngine:
             if ev is None and r.category in (rules_mod.WILD, "routine") and len(event_of) == 1:
                 ev = next(iter(event_of.values()))
             self.sink.hit(Hit(tid, r.id, r.v, round(float(w), 4), r.category, pack.name, at, ev.id if ev else None))
+        # a re-text that no longer says a category: that category's events lose this row (scored again without it)
+        for ev in [e for e in self.events.open_events() if e.pack == pack.name and tid in e.traffic_ids
+                   and e.category in was - {r.category for r, w in hits if w > 0} - {rules_mod.WILD, "routine"}]:
+            x = self._unsupport(pack, ev, tid, drop=False)
+            if not any(x is c for c in changed):
+                changed.append(x)
         if self.backing is not None:          # last: only a row the rules raised nothing with is asked (backing.py)
             try:
                 changed += self.backing.consider(self, pack, row, key, tid, win, at, suppressed, hits, changed,
@@ -916,11 +1078,106 @@ class IntelEngine:
         span = pack.window_s if span is None else span
         return [e for e in self.events.open_events()
                 if e.pack == pack.name and e.source_key == key and (cat is None or e.category == cat)
-                and e.last_at >= at - span and (not e.until or e.until >= at)]
+                and e.last_at >= at - span and e.first_at <= at + span and (not e.until or e.until >= at)]
 
     def _merge_span(self, pack) -> float:
         """How far back an open event of the same pack, category and source takes a new mention (#492 review, H3)."""
         return max(pack.window_s, float(self.policy.cfg.get("merge_min", 20)) * 60)
+
+    def _keep_s(self, pack) -> float:
+        """How long a source's rows are kept for context (by air time, from its newest): any row still young enough
+        to be read (max_age_min) finds the rows that aired within window_s of it."""
+        return pack.window_s + float(self.policy.cfg.get("max_age_min", 15)) * 60
+
+    def _aired(self, pack, ev: Event) -> float:
+        """The air time of the event's newest row at hand (a disregard or a de-escalation in its traffic too), else
+        its last_at: a row that aired before it never undoes what that row said (air-time order)."""
+        win = self.windows.get((pack.name, ev.source_key))
+        return max([ev.last_at, *(win.entries[t].at for t in ev.traffic_ids if win is not None and t in win.entries)])
+
+    def _fresh(self, pack, ev: Event) -> bool:
+        """The event may be pushed a first time: its rows read in time (never late, Entry.late) reach the threshold of
+        its category on their own, the newest of them ended within the pack's late_s. A late row corroborates (a place, a
+        read-back, the score shown), it never makes a fresh row's event push."""
+        if self._as_fresh:
+            return True                       # (_on_time_push: as if read on time)
+        rows = {t: e for (p, _k), w in self.windows.items() if p == pack.name
+                for t, e in w.entries.items() if t in ev.traffic_ids and not e.late}
+        if not rows or self.clock() - max(e.end for e in rows.values()) > pack.late_s:
+            return False                      # (its newest row read in time ended over late_s ago)
+        got = self._scores(pack, Window(rows)).get(ev.category)
+        cd = pack.category(ev.category)
+        thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
+        return got is not None and got[0] >= thr
+
+    def _on_time_push(self, pack, ev: Event, mode: str, now: float) -> bool:
+        """This new event, raised by a late row, would have been pushed had the row been read on time: its holds
+        (out of area, our call, the FD, a place) judged as if fresh, pushes on, no quiet hours, no cap. What "would have
+        pushed" counts (late_row): a pre-alert lost, never a follow-up of one already pushed."""
+        probe = copy.deepcopy(ev)
+        probe.suppressed, probe.mode = "", mode
+        self._as_fresh = True
+        try:
+            self._hold(pack, probe, mode)
+        finally:
+            self._as_fresh = False
+        return (probe.mode == "push" and not probe.suppressed and bool(self.policy.cfg.get("push", True))
+                and not policy_mod.quiet(self.policy.cfg, now, self.tz) and not self.policy._over(ev.category, now))
+
+    def _read_before(self, tid: str) -> bool:
+        """This row was read (since the start; or before a restart: it is in an open event)."""
+        return tid in self._seen or any(tid in e.traffic_ids for e in self.events.open_events())
+
+    def _withdraw(self, row: dict, tid: str) -> list[Event]:
+        """A row read before whose text is empty or "unclear" now (#890's re-ask of a loop or noise): its hits go
+        (sink.clear), it leaves the window and the model's context and queue, and each open event it is in loses it
+        (_unsupport). Its next text is read afresh."""
+        self._seen.pop(tid, None)
+        out: list[Event] = []
+        with self._lock:
+            for pack in self.packs:
+                if not pack.in_scope(row):
+                    continue
+                win = self.windows.get((pack.name, str(row.get("source") or row.get("source_key") or "")))
+                if win is not None:
+                    win.entries.pop(tid, None)
+                if self.backing is not None and hasattr(self.backing, "forget"):
+                    self.backing.forget(tid)
+                out += [self._unsupport(pack, ev, tid) for ev in self.events.open_events()
+                        if ev.pack == pack.name and tid in ev.traffic_ids]
+            if hasattr(self.sink, "clear"):
+                self.sink.clear(tid, set())
+        return out
+
+    def _unsupport(self, pack, ev: Event, tid: str, drop: bool = True) -> Event:
+        """The event without this row's words: scored again over its other rows (WHAT, level, rules; never its
+        first_at, mode or pushes). When none of them reaches the threshold alone it rested on this row: noted
+        WITHDRAWN, and ended if never pushed (out of the digest too); a pushed one stays open with the note, never
+        un-pushed. Rows of it no longer at hand (past the window's keep) are taken as still backing it. drop: the row
+        leaves its traffic (withdrawn); a re-text stays in it, its new words no longer this category's."""
+        now = self.clock()
+        rest = [t for t in ev.traffic_ids if t != tid]
+        win = self.windows.get((pack.name, ev.source_key))
+        have = {t: win.entries[t] for t in rest if win is not None and t in win.entries}
+        got = self._scores(pack, Window(have)).get(ev.category) if len(have) == len(rest) else None
+        cd = pack.category(ev.category)
+        thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
+        if drop:
+            ev.traffic_ids = rest
+        if got is not None and got[0] >= thr:
+            ev.what_score, ev.level = got[0], level(got[0])
+            ev.rules = [list(x) for x in sorted({(r.id, r.v, round(float(w), 4)) for _t, r, w in got[1]})]
+        elif len(have) == len(rest):
+            ev.note = WITHDRAWN
+            if ev.pushed_at is None:
+                ev.status = "ended"
+                if ev.id in self.policy.held:
+                    self.policy.held.remove(ev.id)
+                    self.save_policy()
+        ev.updated_at = now
+        self.events.save(ev)
+        self.sink.event(ev, "ended" if ev.status == "ended" else "updated")
+        return ev
 
     def category_words(self, pack, cat: str) -> set:
         """The telling words of a category's rules ("smoke", "flames", "shots" ...)."""
@@ -945,9 +1202,12 @@ class IntelEngine:
         from sizeup.intel.place import callsigns
         return set(callsigns(str(row.get("system") or ""), str(row.get("service") or "")))
 
-    def _event_entries(self, pack, ev: Event) -> list:
+    def _event_entries(self, pack, ev: Event, at: float | None = None) -> list:
+        """The event's rows at hand; with at, only those that aired within window_s of it (a tie by unit or talker is
+        by AIR time: never to a row of the same talker a quarter of an hour away)."""
         win = self.windows.get((pack.name, ev.source_key))
-        return [win.entries[t] for t in ev.traffic_ids if win is not None and t in win.entries]
+        return [win.entries[t] for t in ev.traffic_ids if win is not None and t in win.entries
+                and (at is None or abs(win.entries[t].at - at) <= pack.window_s)]
 
     def _same_job(self, pack, ev: Event, entry, ws: list[str], mine=frozenset()) -> bool:
         """A transmission is about this event only when (#492 re-check):
@@ -962,9 +1222,10 @@ class IntelEngine:
             return True
         if entry.place is not None and ev.precision != "none" and same_place(entry.place, ev.place()):
             return True
-        mine_entries = self._event_entries(pack, ev)
-        shared = entry.units & frozenset(u for e in mine_entries for u in e.units)
-        if shared and not self._busy(pack, ev, shared):
+        mine_entries = self._event_entries(pack, ev, entry.at)
+        shared = frozenset(u for u in entry.units & frozenset(u for e in mine_entries for u in e.units)
+                           if not _unit_placeholder(u))
+        if shared and not self._busy(pack, ev, shared, entry.at):
             return True                       # (a unit on two or more open jobs: only words or the place tie it)
         if (entry.talker and not entry.dispatcher
                 and entry.talker in {e.talker for e in mine_entries if e.talker and not e.dispatcher}):
@@ -976,10 +1237,10 @@ class IntelEngine:
                     if movable(e)] == [ev.id]
         return False
 
-    def _busy(self, pack, ev: Event, units) -> bool:
-        """These units are on another open job too (then they tie by words or place only)."""
-        for e in self._open_for(pack, None, ev.source_key, self.clock(), self._merge_span(pack)):
-            if e.id != ev.id and units & frozenset(u for x in self._event_entries(pack, e) for u in x.units):
+    def _busy(self, pack, ev: Event, units, at: float | None = None) -> bool:
+        """These units are on another open job too, around the row's air time (then they tie by words or place only)."""
+        for e in self._open_for(pack, None, ev.source_key, self.clock() if at is None else at, self._merge_span(pack)):
+            if e.id != ev.id and units & frozenset(u for x in self._event_entries(pack, e, at) for u in x.units):
                 return True
         return False
 
@@ -1031,6 +1292,7 @@ class IntelEngine:
         win = self.windows.get((pack.name, key))
         if win is None:
             return ""
+        win = win.around(float(row.get("start") or self.clock()), pack.window_s)   # the rows that aired around it
         tid = str(row.get("id") or "")
         consoles = [e for t, e in win.entries.items() if t != tid and e.dispatcher and e.label and not e.suppressed]
         towns = {e.town for e in consoles}
@@ -1186,6 +1448,9 @@ class IntelEngine:
         only there or in a "place": true category (unplaced, _unplaced). An event already pushed is never held
         (its mode never goes down: it stays on the map and the console). mode: what the rules say now, given back when
         a hold ends (a moving event leaving our incident's place)."""
+        if ev.pushed_at is None and not self._fresh(pack, ev):
+            ev.suppressed, ev.mode = "late", lowest(ev.mode, "log")   # late rows are context, never a push's origin:
+            return                                                    # recorded at log
         cat = pack.category(ev.category)
         if cat.get("highway"):
             self._hw_hold(pack, ev, mode)
@@ -1311,9 +1576,11 @@ class IntelEngine:
         towns = {t.lower() for t in (pack.towns_for(ev.source_key) or pack.area)}
         return "out_of_area" if towns and (ev.town or "").lower() not in towns else ""
 
-    def _rules_mode(self, pack, ev: Event) -> str | None:
-        """The mode the window's rules give the event's category now (pack, category and rung), None: not reached."""
+    def _rules_mode(self, pack, ev: Event, at: float | None = None) -> str | None:
+        """The mode the window's rules give the event's category now (pack, category and rung), None: not reached.
+        The rows that aired within window_s of `at` (the row being read; else the event's last)."""
         win = self.windows.get((pack.name, ev.source_key))
+        win = win.around(ev.last_at if at is None else at, pack.window_s) if win is not None else None
         got = self._scores(pack, win).get(ev.category) if win is not None else None
         if got is None:
             return None
@@ -1371,15 +1638,20 @@ class IntelEngine:
                 ev, moved = e, True           # a moving incident ("now at", a pursuit): its place moves
             if ev is not None:
                 break
-        if ev is not None and ev.note == "possibly cancelled" and speaks:
+        after = ev is not None and at >= self._aired(pack, ev)    # aired after the disregard / de-escalation (FIFO)
+        if ev is not None and ev.note == "possibly cancelled" and speaks and after and not entry.late:
             reopened = True                   # a nameless disregard, then the call again: it stands, pushed again
             ev.note = "re-opened"
-        elif ev is not None and ev.note == DEESCALATED and speaks:
+        elif ev is not None and ev.note == WITHDRAWN and speaks:
+            ev.note = ""                      # its words are back (a re-ask's clean text, another row saying it)
+        elif ev is not None and ev.note == DEESCALATED and speaks and after:
             ev.note = ""                      # the weapon is back in it: the note goes; a safety category's escalation
-            if cd.get("safety") and pack.escalates(cat, entry.text, rules_mod.words(entry.text)):   # ("pulled out a gun",
+            if cd.get("safety") and pack.escalates(cat, entry.text, rules_mod.words(entry.text)) and not entry.late:   # ("pulled out a gun",
                 reopened, ev.note = True, "re-opened"                                               # never "in custody")
         if ev is None and not speaks:
             return None                       # a cue alone (another job's "respond to ...") never makes an event
+        if ev is None and hasattr(self.events, "bound") and self.events.bound(tid, pack.name, cat):
+            return None                       # already an event's (one expired, a re-feed after a restart): never two
         # its traffic: the rows that say this category (and this one when it ties), never another job's cue
         tids = list(dict.fromkeys([*(t for t, r, _w in contrib if r.category == cat and _w > 0),
                                    *([tid] if speaks or (ev is not None and self._same_job(
@@ -1414,7 +1686,9 @@ class IntelEngine:
         if ev is None:
             ev = Event(domain=pack.domain, pack=pack.name, category=cat, source_key=key,
                        system=str(row.get("system") or ""), service=str(row.get("service") or ""),
-                       dept=str(row.get("dept") or ""), first_at=at, status="open")
+                       dept=str(row.get("dept") or ""), status="open",
+                       # its first transmission by AIR time (the rows that say it, whatever order they were read in)
+                       first_at=min([at, *(win.entries[t].at for t in tids if t in win.entries)]))
             change = "raised"
         else:
             change = "reopened" if reopened else "updated"
@@ -1427,19 +1701,24 @@ class IntelEngine:
         ev.mode = mode if change == "raised" else max(ev.mode, mode, key=mode_rank)
         ev.priority = max(int(cd.get("priority", 3)), ev.priority if change == "updated" else 0)
         ev.until = max(ev.until, ev.last_at + float(cd.get("ttl_min", 45)) * 60)
+        if entry.late:
+            ev.until = max(ev.until, now + pack.window_s)    # its air-time neighbours, read just after, join it
         if place is not None and (moved or ev.precision == "none" or place.confirmed or place.where_score > ev.where_score):
             ev.set_place(place)
             if moved:
                 ev.note = "moved"
         ev.subject = f"{pack.name}:{cat}:{ev.place().key or key}"
         self._hold(pack, ev, mode)
+        if entry.late and change == "raised":
+            self._lost_now = self._lost_now or self._on_time_push(pack, ev, mode, now)
+            ev.suppressed, ev.mode = "late", lowest(ev.mode, "log")   # logged late (#747): a record, never a push
         if before is not None and _same(before, ev):
             return None                       # idempotent: the same row again changes nothing
         ev.updated_at = now
         self.events.save(ev)
         self._note_who(pack, ev)
         self._after(pack, ev, change, now, before, moved=moved and before is not None and before.precision != "none"
-                    and not same_place(before.place(), ev.place()))
+                    and not same_place(before.place(), ev.place()), tid=tid, at=at)
         if cd.get("highway"):
             self._hw_promote(pack, ev, key, now)
         return ev
@@ -1461,13 +1740,13 @@ class IntelEngine:
         ev.last_at = max(ev.last_at, at)
         ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
         ev.subject = f"{pack.name}:{ev.category}:{place.key or key}"
-        self._hold(pack, ev, self._rules_mode(pack, ev))
+        self._hold(pack, ev, self._rules_mode(pack, ev, at))
         if _same(before, ev):
             return None
         ev.updated_at = self.clock()
         self.events.save(ev)
         self._note_who(pack, ev)
-        self._after(pack, ev, "updated", ev.updated_at, before, moved=move)
+        self._after(pack, ev, "updated", ev.updated_at, before, moved=move, tid=tid, at=at)
         if pack.category(ev.category).get("highway"):
             self._hw_promote(pack, ev, key, ev.updated_at)
         return ev
@@ -1517,6 +1796,7 @@ class IntelEngine:
             c = self.infer.cfg()
             key, tid, at, row = job["key"], job["tid"], job["at"], job["row"]
             win = self.windows.get((pack.name, key))
+            win = win.around(at, pack.window_s) if win is not None else None     # the rows that aired around it
             cat = res.category
             target = self.events.get(job["event_id"]) if job["event_id"] else None
             if (job["why"] == "uncertain" and cat in pack.categories and res.confidence > 0 and win is not None
@@ -1569,9 +1849,11 @@ class IntelEngine:
         """ "Disregard" / "cancel" ends only the events of the current window's transmissions, or those it ties to by
         unit, place or category words (#492 re-check: never every event on the channel)."""
         out = []
-        current = set(win.entries) - {tid} if win is not None else set()
+        # by AIR time: only the rows that aired before it, and never an event that began after it (a call read
+        # before a disregard that aired earlier)
+        current = {t for t, e in win.entries.items() if t != tid and e.at <= at} if win is not None else set()
         entry = win.entries.get(tid) if win is not None else None
-        open_ = self._open_for(pack, None, key, at, self._merge_span(pack))
+        open_ = [e for e in self._open_for(pack, None, key, at, self._merge_span(pack)) if e.first_at <= at]
         named = [ev for ev in open_ if entry is not None and self._same_job(pack, ev, entry, list(ws))]
         # what it names (a unit, a place, the category's words); naming nothing, the current window's own events, but
         # never a safety call (shots, a barricade, a fire, a water rescue): that one is only "possibly cancelled"
@@ -1593,7 +1875,7 @@ class IntelEngine:
             self.events.save(ev)
             self.sink.event(ev, "ended")
             out.append(ev)
-        self._consume(pack.name, key)
+        self._consume(pack.name, key, at)
         return out
 
     def _deescalate(self, pack, row: dict, key: str, at: float, tid: str, text: str, ws: list[str], entry) -> list[Event]:
@@ -1619,8 +1901,8 @@ class IntelEngine:
                          and same_place(entry.place, e.place())]
                 if len(open_) != 1:
                     continue
-            if not open_ or open_[0].note in (DEESCALATED, "possibly cancelled"):
-                continue
+            if not open_ or open_[0].note in (DEESCALATED, "possibly cancelled") or at < self._aired(pack, open_[0]):
+                continue                      # (aired before the event's newest row: read late, it undoes nothing)
             ev = open_[0]
             ev.note, ev.updated_at = DEESCALATED, self.clock()
             ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
@@ -1637,15 +1919,15 @@ class IntelEngine:
         mine = {r.category for r, w in entry.hits if w > 0}
         for cat in mine & set(pack.calm) - set(event_of):
             for ev in self._open_for(pack, cat, key, at, self._merge_span(pack)):
-                if ev.note != DEESCALATED or not self._same_job(pack, ev, entry, ws, mine):
-                    continue
+                if ev.note != DEESCALATED or at < self._aired(pack, ev) or not self._same_job(pack, ev, entry, ws, mine):
+                    continue                  # (a row that aired before the de-escalation, read late: undoes nothing)
                 now = self.clock()
-                if pack.is_safety(cat) and pack.escalates(cat, entry.text, ws):
+                if pack.is_safety(cat) and pack.escalates(cat, entry.text, ws) and not entry.late:
                     before = copy.deepcopy(ev)
                     ev.note, ev.last_at, ev.updated_at = "re-opened", max(ev.last_at, at), now
                     ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
                     self.events.save(ev)
-                    self._after(pack, ev, "reopened", now, before)
+                    self._after(pack, ev, "reopened", now, before, tid=tid, at=at)
                 else:
                     ev.note, ev.updated_at = "", now
                     self.events.save(ev)
@@ -1680,26 +1962,35 @@ class IntelEngine:
         """The row speaks of another job ("at the other call"), or names units and none of the event's own."""
         if OTHER_JOB.search(entry.text or ""):
             return True
-        mine = frozenset(u for e in self._event_entries(pack, ev) for u in e.units)
+        mine = frozenset(u for e in self._event_entries(pack, ev, entry.at) for u in e.units)
         return bool(entry.units) and not entry.units & mine
 
-    def _consume(self, pack_name: str, key: str) -> None:
-        """What the window held is spent: a routine cue after "disregard" never adds it up again (#492 review, H2)."""
+    def _consume(self, pack_name: str, key: str, at: float | None = None) -> None:
+        """What the window held is spent: a routine cue after "disregard" never adds it up again (#492 review, H2).
+        at: a disregard's air time: only the rows that aired up to it (one aired after it is the next call's)."""
         win = self.windows.get((pack_name, key))
         if win is not None:
-            win.entries = {t: e for t, e in win.entries.items() if e.suppressed}
+            win.entries = {t: e for t, e in win.entries.items() if e.suppressed or (at is not None and e.at > at)}
 
     def dismissed(self, ev: Event) -> None:
         """A person dismissed it (sizeup/intel/admin.py): its window is spent, and mute_min keeps it from coming back."""
         with self._lock:
             self._consume(ev.pack, ev.source_key)
 
-    def _after(self, pack, ev: Event, change: str, now: float, before: Event | None, moved: bool = False) -> None:
+    def _after(self, pack, ev: Event, change: str, now: float, before: Event | None, moved: bool = False,
+               tid: str = "", at: float | None = None) -> None:
         self.sink.event(ev, "updated" if change == "reopened" else change)
         if change == "raised":
             self._count(now, "events", [pack.name])
         was = ev.suppressed
         d = self.policy.decide(ev, change, now, before, moved)
+        win = self.windows.get((pack.name, ev.source_key))
+        if d.would_push and tid and win is not None and tid in win.entries and win.entries[tid].late:
+            d = Decision(d.mode, False, "late", d.priority)   # a late row (read late, #747's) never pushes
+        elif (d.would_push and ev.pushed_at is not None and before is not None and at is not None
+                and tid in before.traffic_ids):
+            d = Decision(d.mode, False, "late", d.priority)   # a re-text of its own row, or a row read late: never a
+                                                              # push again, out of air-time order
         if d.would_push:
             cat = pack.category(ev.category)
             doubtful = push_mod.doubtful_number(ev.label_full, self._texts(pack, ev.source_key, ev.traffic_ids))
@@ -1932,7 +2223,7 @@ class IntelEngine:
                     self.sink.event(ev, "expired")
                     out.append(ev)
             for k in [k for k, w in self.windows.items()
-                      if not w.entries or max(e.at for e in w.entries.values()) < now - 2 * self._span(k[0])]:
+                      if not w.entries or max(max(e.at, e.read) for e in w.entries.values()) < now - self._keep_for(k[0])]:
                 del self.windows[k]
             if self.backing is not None and self.enabled:
                 try:
@@ -1952,6 +2243,10 @@ class IntelEngine:
     def _span(self, name: str) -> float:
         p = self.pack(name)
         return p.window_s if p is not None else 120.0
+
+    def _keep_for(self, name: str) -> float:
+        p = self.pack(name)
+        return self._keep_s(p) if p is not None else 2 * self._span(name)
 
 
 NOT_A_STREET = STOP_WORDS | {"my", "your", "his", "her", "their", "our", "its", "a", "an", "no", "any", "some", "on",
@@ -2086,6 +2381,19 @@ def rung(evidence: list, damp: list, thr: float, cues: list = ()) -> str:
         if round(what, 4) >= thr:
             return m
     return modes[-1] if modes else "off"
+
+
+def _unit_placeholder(unit: str) -> bool:
+    """A department's placeholder unit (DPT239 ...: sizeup/cad/mapview.is_placeholder, a CAD unit placeholder): never a
+    tie between two rows. Talkers tie as they are (a bare radio ID is most MRRS talkers'), within window_s of air."""
+    w = str(unit or "").strip()
+    if not w:
+        return True
+    try:
+        from sizeup.cad.mapview import is_placeholder
+        return is_placeholder(w.upper())
+    except Exception:  # noqa: BLE001 - the lists unreadable: not one
+        return False
 
 
 def _same(a: Event, b: Event) -> bool:

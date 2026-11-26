@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator
 
-from sizeup import sourcekeys, stt as stt_mod, stt_terms, sttcatchup
+from sizeup import app as app_mod, sourcekeys, stt as stt_mod, stt_terms, sttcatchup
 from sizeup.app import App, AwsJob
 from sizeup.cad import dispatcher
 from sizeup.cad.dispatcher import AudioUnavailable
@@ -223,6 +223,16 @@ def a_station(lv, monkeypatch):
     return st
 
 
+def pin_push_sources(monkeypatch, app, keys, rev: int) -> None:
+    """The hub's pre-alert sources are these, at this revision, for the rest of the test. Pinned, not seeded into the
+    hub's PUSH_CACHE_S cache: a seeded cache expires mid-test, the hub reads the (absent) intel engine's (none, rev 0)
+    and pushes those to the station at its next state post, and the station's revision is 0 again by the end. The
+    cache is also made to expire at once, so a test that seeds it again fails on every machine, not only a slow one."""
+    pinned = (frozenset(keys), rev)
+    monkeypatch.setattr(app_mod, "PUSH_CACHE_S", 0.0)
+    monkeypatch.setattr(app, "_stt_alert_source", lambda: pinned)
+
+
 def every_job_the_hub_makes(lv, st, wire, tmp_path, monkeypatch) -> dict[str, tuple[dict, dict]]:
     """Each kind of job and each function of CALLS, in every form the hub sends, made by the hub's own callers and run
     by the station: {form: (the job, its result)} as they went over the wire."""
@@ -269,7 +279,7 @@ def every_job_the_hub_makes(lv, st, wire, tmp_path, monkeypatch) -> dict[str, tu
                                                       "sdr": "00000105", "minutes": 15}, "admin@example.org"))
     one("reception_sample_b64", lambda: app.reception_sample("0123456789ab"))
     # the pre-alerts' sources, when the station's revision differs from the intel engine's
-    app._push_cache = (time.monotonic(), frozenset({"fm:Paging 1", "p25:east:7001"}), 4242)
+    pin_push_sources(monkeypatch, app, {"fm:Paging 1", "p25:east:7001"}, 4242)
     one("set_stt_alert_keys", app.alert_keys_check)
     assert wait(lambda: not app._alert_push, 5)
     # the term lists for whisper's prompt, when the station's version differs
@@ -303,6 +313,12 @@ def every_job_the_hub_makes(lv, st, wire, tmp_path, monkeypatch) -> dict[str, tu
     ob.late(q["id"], "alarm delivered late, not raised (40 min after it ended)")
     one("quarantine_dismiss", lambda: h.dismiss_rejected("alarm", "admin@example.org"))
     assert [(r["kind"], r["state"]) for r in ob.summary()["rows"]] == [("alarm", "held")]
+    # the hub's pool takes a clip back from the station's whisper (#927): one whose text went up long ago, so "sent"
+    one("stt_withdraw", lambda: app.stt_withdraw_station([tid]))
+    # ... and after a new sizeup process on the station, which of the clips still waiting it has (#927): "sent"
+    app.mdb.wait_add(tid, time.time())
+    one("stt_held", app._station_held_check)
+    app.mdb.wait_drop([tid])
     return out
 
 
@@ -310,7 +326,7 @@ FORMS = ("catch_up", "retranscribe", "retranscribe-all", "retranscribe-as-alt", 
          "set_mode-confirmed", "set_talkgroup", "set_talkgroup-tier", "set_talkgroup_group", "emergency_all_clear",
          "set_adsb_receiver", "set_antenna_groups", "set_antenna_groups-confirmed", "replace_sdr", "sources_poll_now",
          "reception_post", "reception_sample_b64", "set_stt_alert_keys", "set_stt_terms", "set_channel_prefs", "tts",
-         "sources_reset", "quarantine_dismiss")
+         "sources_reset", "quarantine_dismiss", "stt_withdraw", "stt_held")
 
 
 def scrub(doc, tmp=""):
@@ -399,6 +415,9 @@ def test_the_recorded_jobs_and_results_are_what_the_hub_and_the_station_send_now
     assert r["set_stt_terms"]["result"]["v"] == live.hub.app.stt_terms.v != ""
     assert r["tts"]["label"].startswith("Voice: ") and r["sources_reset"]["result"].startswith("east-cad: reset asked")
     assert r["quarantine_dismiss"]["result"] == 1
+    assert r["stt_withdraw"]["result"] == {"withdrawn": [], "running": [], "sent": [got["stt_withdraw"][0]["args"]["args"][0][0]],
+                                           "unknown": []}               # (its text went up long ago)
+    assert r["stt_held"]["result"] == {"held": [], "sent": [got["stt_held"][0]["args"]["args"][0][0]], "unknown": []}
     # the hub puts the channels' result in the status it has (and the station's next status says the same)
     assert wait(lambda: live.hub.app.hub.status["channels"] == r["set_channel_prefs"]["result"], 20)
 
@@ -491,7 +510,7 @@ def test_the_functions_and_their_argument_names_are_the_codes():
     the signatures: every parameter, in order; the list is closed at the last one; `minItems` is the number of
     parameters without a default."""
     defs = c.load(JOBS)["$defs"]
-    assert defs["call"]["properties"]["fn"]["x-known"] == list(station_mod.CALLS) and len(station_mod.CALLS) == 17
+    assert defs["call"]["properties"]["fn"]["x-known"] == list(station_mod.CALLS) and len(station_mod.CALLS) == 19
     assert [b["if"]["properties"]["fn"]["const"] for b in defs["call"]["allOf"]] == list(station_mod.CALLS)
     assert {k for k in defs if k.startswith("call.")} == {f"call.{fn}" for fn in station_mod.CALLS}
     results = c.load(RESULT)["$defs"]
@@ -695,7 +714,7 @@ def test_the_hub_takes_a_newer_stations_results(live, tmp_path):
         p.close()
 
 
-def test_the_hub_guesses_the_argument_list_from_the_stations_status(live):
+def test_the_hub_guesses_the_argument_list_from_the_stations_status(live, monkeypatch):
     """D2 (contracts/README.md), as it shows in the jobs: nothing says which functions and how many arguments a
     station takes, so the hub reads it off the status. A station whose status has no `p25_systems` is sent the county's
     talkgroup as three arguments and no `p25:` channel key; one without `channels.squelch_ok` three arguments of
@@ -739,7 +758,7 @@ def test_the_hub_guesses_the_argument_list_from_the_stations_status(live):
         assert len(old) == 3 and set(old[0]) == {"Fireground 1"} and "deny" not in old[1]
         assert {len(old), len(new)} == set(c.load(JOBS)["$defs"]["call.set_channel_prefs"]["x-forms"])
         assert args_of("set_talkgroup", talkgroup) == [4101, True, None]
-        app._push_cache = (time.monotonic(), frozenset({"fm:Paging 1"}), 4242)
+        pin_push_sources(monkeypatch, app, {"fm:Paging 1"}, 4242)
         n = len(p.jobs)
         app.alert_keys_check()
         time.sleep(0.3)
@@ -795,7 +814,7 @@ def test_what_the_station_answers_to_arguments_of_the_wrong_type(live, monkeypat
     assert refused == {"ok": False, "error": "ValueError: keys: a list of source keys; rev: a number"}
     assert run("call", {"fn": "set_stt_terms", "args": [{"sets": {"Bad Name": {}}}]})["error"].startswith("ValueError: stt terms")
     assert run("call", {"fn": "set_channel_prefs", "args": [{"Fireground 1": {"engine": "from_the_future"}}]})["error"] \
-        == "ValueError: engine: one of local, aws, both"
+        == "ValueError: engine: one of local, aws, both, auto, auto_bg, auto_norm, or pin:<engine id>"
     assert run("call", {"fn": "set_antenna_groups", "args": [{"name": "roof"}]}) \
         == {"ok": True, "result": "each channel has its own dongle: nothing to group"}
     assert run("call", {"fn": "reception_post", "args": [["start"], "", ""]}) == {"ok": True, "result": "a JSON object"}

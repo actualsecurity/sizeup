@@ -1,0 +1,25 @@
+{
+  "epoch": "0123456789abcdef",
+  "station": "st-north",
+  "events": [
+    {
+      "seq": 1,
+      "at": 1794990001.0,
+      "type": "retext",
+      "data": {
+        "id": "Fireground1-1794990000000",
+        "text": "Engine 5 on location, nothing showing",
+        "status": "done",
+        "confidence": 0.9,
+        "model": "m.bin",
+        "engine": "station-whisper",
+        "fill": true,
+        "stt_wait_s": 0.2,
+        "stt_run_s": 0.4,
+        "stt_class": "live"
+      },
+      "audio": null,
+      "audio_dropped": false
+    }
+  ]
+}

@@ -504,7 +504,7 @@ def test_a_station_hears_a_crash_channel_at_high_through_set_channel_prefs(tmp_p
         assert {e[2].id: e[0] for e in q._items} == {"ctx": A_HIGH, "low": A_HIGH, "old": LOW}
         assert st._stt_class(t, NEXT_DOOR) == A_HIGH and st._stt_class(t, "tg:4031") == A_URGENT
         assert st._stt_lane(t, NEXT_DOOR) == sttinput.PRE
-        assert st.stt_engine(NEXT_DOOR) == "aws"
+        assert st.stt_engine(NEXT_DOOR) == "auto"                          # (promoted Auto · background: Auto · priority)
         assert st.channels_applied()["promote_p25_ok"] is True
         st.set_channel_prefs({}, {"ok": True, "why": "", "reserve": []})         # the window over: as before
         assert st._stt_class(t, NEXT_DOOR) not in (A_HIGH, A_URGENT) and st.stt_engine(NEXT_DOOR) != "aws"

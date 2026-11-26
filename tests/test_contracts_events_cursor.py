@@ -39,10 +39,15 @@ E5_NO_READABLE_ANSWER_TO_A_POST_OVER_THE_LIMIT = True   # fixed: the station's c
 FILE_MINUTE = 29916500           # the golden file's activity events are in the minutes after this one ...
 
 
+_RUN_MINUTE = int(time.time() // 60)      # this run's "now", read once: a clock that ticks over to the next minute
+                                         # between a post and its check must not move the minute being looked up
+
+
 def minute(m: int) -> int:
     """... and are replayed in the minutes of half an hour ago: the hub drops activity older than its retention when
-    it starts, so a fixed minute would fail the restart sequence some weeks after the file was written."""
-    return int(time.time() // 60) - 30 + (m - FILE_MINUTE)
+    it starts, so a fixed minute would fail the restart sequence some weeks after the file was written. Half an hour
+    before this run's start, the same for every post and check of a sequence (never the wall clock's minute now)."""
+    return _RUN_MINUTE - 30 + (m - FILE_MINUTE)
 
 
 def event(seq, name: str):

@@ -689,6 +689,7 @@ def test_the_maps_card_editor_call_and_settings_in_a_browser(tmp_path):
         # the layer's legend in the Layers box
         pg.evaluate("""() => { const gm = [...GisLayers.maps].find((x) => x.map.getContainer().closest('#ov-map'));
             gm.control.closeInfo(); gm.control.toggle(); }""")
+        pg.click('#ov-map .ml-panel summary[data-key="layers:County GIS"]')       # the group folds to one line (#952)
         pg.wait_for_selector("#ov-map .hy-legend")
         pg.evaluate("""() => { const d = document.querySelector('#ov-map .hy-legend').closest('details'); if (d) d.open = true;
             document.querySelector('#ov-map .hy-legend').scrollIntoView(); }""")

@@ -16,6 +16,7 @@ No radios, no network. Every talkgroup, name and number here is invented, or alr
 from __future__ import annotations
 
 import json
+import threading
 import time
 
 import pytest
@@ -193,8 +194,8 @@ def test_a_change_retags_the_last_30_days_in_batches_and_back_to_automatic(tmp_p
     for i in range(7):
         cad.record_traffic(p25_row(f"b-{i}", clock.t - i * DAY, PD, "mrrs", "transit"))
     cad.record_traffic(p25_row("same-1", clock.t - 5, PD, "westchester", "police", group="Police"))   # the county's PD
-    monkeypatch.setattr(type(cad.comms), "retag", lambda self, s, v, since, batch=3, pause=0.0,
-                        _real=type(cad.comms).retag: _real(self, s, v, since, batch, pause))         # 3 a batch
+    monkeypatch.setattr(type(cad.comms), "retag", lambda self, s, v, since, batch=3, pause=0.0, stop=None,
+                        _real=type(cad.comms).retag: _real(self, s, v, since, batch, pause, stop))   # 3 a batch
     batches = []
     real_tx = cad.store.tx
     cad.store.tx = lambda: (batches.append(1), real_tx())[1]
@@ -252,6 +253,42 @@ def test_retag_runs_off_the_request_is_marked_with_the_setting_and_resumed_by_th
     assert time.monotonic() - t0 < 0.3                   # the request didn't wait for it
     again.retag_thread.join(10)
     assert started == [1] and pending(again) == []
+
+
+def test_shutdown_stops_a_retag_between_batches_joins_it_and_keeps_its_mark(tmp_path, monkeypatch):
+    """#740: a re-tag still walking its batches when the CAD shuts down (a test's teardown) stops before its next batch
+    and is joined before the store closes (a thread left on the connection as it closed crashed the process: SIGSEGV).
+    Its mark stays for the next start; none starts once shut."""
+    clock = Clock()
+    cad = clocked_cad(tmp_path, clock)
+    cad.comms.context_broadcast = True
+    cad.source_rows = lambda: [{"source": MINE, "service": "transit", "service_auto": "transit"}]
+    for i in range(6):
+        cad.record_traffic(p25_row(f"b-{i}", clock.t - 60 - i, PD, "mrrs", "transit"))
+    batches = []
+    second = threading.Event()               # the re-tag is before its second batch
+    real = type(cad.comms).retag
+
+    def slow(self, s, v, since, batch=1, pause=0.0, stop=None):
+        def stop_after_a_batch():
+            batches.append(1)
+            if len(batches) == 2:
+                second.set()
+                end = time.monotonic() + 5       # held here until shutdown() says stop (5 s at most)
+                while not (stop is not None and stop()) and time.monotonic() < end:
+                    time.sleep(0.005)
+            return stop is not None and stop()
+        return real(self, s, v, since, 1, 0.0, stop_after_a_batch)
+    monkeypatch.setattr(type(cad.comms), "retag", slow)
+    post(cad, action="set", key=MINE, service="fire")
+    t = cad.retag_thread
+    assert second.wait(5), f"the re-tag never reached its second batch in 5 s (batches {len(batches)}, alive {t.is_alive()})"
+    cad.shutdown(wait_s=5)
+    assert not t.is_alive() and len(batches) == 2                # stopped before its second batch, joined
+    assert cad.retag_services() is None                          # shut: nothing new starts
+    again = clocked_cad(tmp_path, clock)
+    assert pending(again) == [MINE] and services(again, MINE).count("fire") == 1       # one batch done, the mark kept
+    assert not [r for r in again.settings.audit_log("radios") if r["key"].endswith("/retag")]
 
 
 def test_back_to_automatic_waits_for_the_stations_talkgroups_never_guesses(tmp_path):
@@ -518,7 +555,7 @@ def test_the_channels_page_sends_the_source_key_and_automatic(channels_page):
 def test_the_settings_page_hands_the_services_store_to_the_channels_card():
     from tests.test_radio_emergency import STATIC
     js = (STATIC / "settings.js").read_text()
-    assert "RadioControls.mount(rc, { reception: true, tab: S.rtab, names: S_RC_NAMES, services: S_RC_SERVICES })" in js
+    assert "RadioControls.mount(rc, { reception: true, tab: S.rtab, names: S_RC_NAMES, services: S_RC_SERVICES, main: S_RC_MAIN })" in js
     assert '"/api/cad/settings/radio_services", { action: "set", key, service' in js
     rc = (STATIC / "radio-controls.js").read_text()
     assert "radio_services\"" not in rc                                          # never from the station's page

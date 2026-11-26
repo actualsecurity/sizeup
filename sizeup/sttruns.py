@@ -78,6 +78,10 @@ _TEXT = "TEXT NOT NULL DEFAULT ''"
 CHECK_TYPES = {"time_check": _TEXT, "time_said": _TEXT, "time_off": "INTEGER", "time_conf": "REAL",
                "time_fixed_text": _TEXT, "fix_rule": _TEXT, "label_flag": _TEXT}
 CHECK_COLUMNS = tuple(CHECK_TYPES)
+# the way the text of record went (#875, sizeup/sttroute.py Route: "auto·priority: gpu-pc → AWS (gpu-pc: gaming)";
+# "" for none): added to a file from before it (Runs._open)
+EXTRA_TYPES = {"route": _TEXT}
+EXTRA_COLUMNS = tuple(EXTRA_TYPES)
 # the vocabulary correction (#879, sizeup/stt_correct.py): added the same way
 CORR_TYPES = {"corr_text": _TEXT, "corr_n": "INTEGER", "corr_rules": _TEXT, "corr_v": _TEXT}
 CORR_COLUMNS = tuple(CORR_TYPES)
@@ -211,9 +215,9 @@ class Runs:
             self._db = db
             try:
                 have = {r[1] for r in db.execute("PRAGMA table_info(stt_runs)")}
-                for c in CHECK_COLUMNS:
+                for c in CHECK_COLUMNS + EXTRA_COLUMNS:
                     if c not in have:
-                        db.execute(f"ALTER TABLE stt_runs ADD COLUMN {c} {CHECK_TYPES[c]}")
+                        db.execute(f"ALTER TABLE stt_runs ADD COLUMN {c} {CHECK_TYPES.get(c) or EXTRA_TYPES[c]}")
                 for c in CORR_COLUMNS:
                     if c not in have:
                         db.execute(f"ALTER TABLE stt_runs ADD COLUMN {c} {CORR_TYPES[c]}")
@@ -237,9 +241,10 @@ class Runs:
             channel: str = "", cls: str = "", clip_end: float | None = None, queued_at: float | None = None,
             engine_start: float | None = None, done_at: float | None = None, wait_s: float | None = None,
             run_s: float | None = None, keyup: dict | None = None, call_id: str = "", turn: int | None = None,
-            vocab_v: str = "", input: str = "") -> bool:       # noqa: A002 - the column's name
+            vocab_v: str = "", input: str = "", route: str = "") -> bool:       # noqa: A002 - the column's name
         """One transcript. True when it was written. vocab_v: the term list or vocabulary that biased it
-        (sizeup/stt_terms.py; prompt_v is the whole prompt's hash). input: the audio it heard (INPUTS; "" unknown)."""
+        (sizeup/stt_terms.py; prompt_v is the whole prompt's hash). input: the audio it heard (INPUTS; "" unknown).
+        route: the way the text of record went (#875)."""
         row = (str(clip_id)[:128], engine if engine in ENGINES else "other", str(model or "")[:120], str(worker or "")[:40],
                str(prompt_v or "")[:20], role if role in ROLES else "text", str(text or "")[:20000],
                str(status or "")[:20], _fin(confidence),
@@ -252,9 +257,9 @@ class Runs:
             return False
         try:
             with self._lock:
-                cols = COLUMNS + CHECK_COLUMNS + CORR_COLUMNS
+                cols = COLUMNS + CHECK_COLUMNS + CORR_COLUMNS + EXTRA_COLUMNS
                 self._open().execute(f"INSERT INTO stt_runs ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
-                                     row + _check_row(check) + _corr_row(corr))
+                                     row + _check_row(check) + _corr_row(corr) + (str(route or "")[:300],))
             return True
         except Exception as e:  # noqa: BLE001 - bookkeeping: never in the way of the transcript
             self._say(f"stt runs: not recorded: {type(e).__name__}: {e}")
@@ -266,7 +271,7 @@ class Runs:
             return []
         try:
             with self._lock:
-                cols = COLUMNS + CHECK_COLUMNS + CORR_COLUMNS
+                cols = COLUMNS + CHECK_COLUMNS + CORR_COLUMNS + EXTRA_COLUMNS
                 cur = self._open().execute(f"SELECT {', '.join(cols)} FROM stt_runs WHERE clip_id = ? ORDER BY id",
                                            (clip_id,))
                 rows = [dict(zip(cols, r)) for r in cur.fetchall()]
