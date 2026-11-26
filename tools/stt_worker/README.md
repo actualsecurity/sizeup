@@ -9,6 +9,10 @@ for its self-update: the hub names a commit and the SHA-256 of `deploy/stt-worke
 `tools/stt_worker/worker.py` at that commit, finds the same hash and switches. The version it switches to downloads
 from `deploy/stt-worker/worker.py` (and from here only for a commit from before the move).
 
+Its config keys are the ones in [`deploy/stt-worker`](../../deploy/stt-worker/README.md#config), `keep_awake`
+included (default `true`: on Windows, no idle sleep while the worker runs and isn't paused; see
+[Keeping the PC awake](../../deploy/stt-worker/README.md#keeping-the-pc-awake)).
+
 Never edit this copy by hand: change `deploy/stt-worker/worker.py`, then
 
 ```sh

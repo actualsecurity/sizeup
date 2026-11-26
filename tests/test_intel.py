@@ -682,7 +682,7 @@ def test_the_console_state_carries_open_events_only_for_signed_in_viewers(rig):
 def test_dismiss_is_a_dispatchers_and_feedback_anyones(rig):
     cad, api = rig
     [ev] = cad.intel.events.open_events()
-    assert needs(f"/api/cad/intel/{ev.id}/dismiss") == "dispatch" and needs(f"/api/cad/intel/{ev.id}/feedback") == "read"
+    assert needs(f"/api/cad/intel/{ev.id}/dismiss") == "dispatch" and needs(f"/api/cad/intel/{ev.id}/feedback") == "active"
     assert call(api, f"/api/cad/intel/{ev.id}/feedback", {"verdict": "useful"}, VAL)[0] == 200
     assert call(api, f"/api/cad/intel/{ev.id}/feedback", {"verdict": "great"}, VAL)[0] == 400
     assert call(api, f"/api/cad/intel/{ev.id}/dismiss", {}, VAL)[0] == 403

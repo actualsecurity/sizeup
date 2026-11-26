@@ -1,0 +1,14 @@
+{
+  "base": "stt-worker-state/valid/gpu-worker-paused.json",
+  "patch": [
+    {
+      "op": "add",
+      "path": "/keep_awake",
+      "value": {
+        "on": true,
+        "held": false,
+        "why": "paused"
+      }
+    }
+  ]
+}

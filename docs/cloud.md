@@ -580,7 +580,29 @@ it changes nothing.
   "Station silent 4 min · Port Chester FD · last heard 14:32", "South 2 not running · PCFD · SDR 101 on South 2";
   the push opens the panel (with `[cloud] public_url` set). A critical alert still on is pushed again every
   `remind_min` (180 min; 0: never), titled "Still: ..." (#547: "P25 trunk silent" was pushed once in 22 h); a muted
-  one isn't, and its "Recovered" says how many reminders went.
+  one isn't, and its "Recovered" says how many reminders went. A push ntfy didn't take is tried again after 1 min
+  (3 times at most), as the same push: a lost first push is no longer followed only by the "Still:" 3 h later.
+* **Dispatch coverage lost (`cover:<job>`, urgent).** Fire/EMS 15 (the county P25 job, trunk-recorder) or a paging
+  channel (kind `paging`: South 2) not running or not heard for 5 min in all within the last 10 min (5 min straight,
+  or flapping / crash-looping), whatever the cause (its dongle gone, trunk-recorder down, "P25 trunk silent": no call
+  or the control channel lost, an antenna group short, no audio #703, its job down, or its dongle held by another app:
+  "Fire/EMS 15 down 5 min: SDR held by shortfinal", switch it Off there): one push at ntfy priority 5 ("urgent", the
+  level a phone can let through Do Not Disturb), "Fire/EMS 15 down 5 min: SDR V4 gone", then "Still: ..." every 30 min
+  while it lasts (not `remind_min`), and "All clear: Fire/EMS 15 back" (priority 4) only once it has run again 2 min
+  without a break. Its causes are pushed as before until it fires ("SDR gone" at once), and from then on said by it.
+  "P25 trunk silent" counts from its own start, so it is pushed when it comes on (20 min without a call by day).
+  The station silent is one such alert for all its dispatch jobs (`cover:station`, "Fire/EMS 15, South 2 down 5 min:
+  station silent", "All clear: station back" once it has reported 2 min straight); "Station silent" itself stays on
+  Health and isn't pushed. Back from silent, a job already lost before it carries on at once; one only "starting" on
+  the first posts back gets its 60 s. Only the station update's **switch** doesn't count: the updater's phase `switch`
+  (state.json, from the switch until the result: services stopping and restarting), and 5 min after it ended, 10 min
+  at most; the 5 min start after it. Its build and the staged wait for a quiet moment do count: the radios keep
+  running. (The first update to a release with phases runs on the old updater: that one switch isn't known.) The
+  counting survives a hub restart. 2026-11-24: Fire/EMS 15 and South 2 lost ~6 h, and the pushes were the usual
+  priority 4 ones.
+* **Dispatch channel Off (`off:<job>`).** Fire/EMS 15 or a paging channel that no dongle runs: "South 2 Off (set by
+  person)" on Health and one push (priority 4); "(no dongle runs it)" after a swap that left the old dongle removed
+  and the new one Off; set Off by auto: urgent, as dispatch lost.
 * Alerts and 24 h of their history are in `hub.sqlite`: a redeploy neither forgets an alert nor pushes it again.
 * **Flapping (#340).** "Recovered" is pushed only once an alert has stayed clear 15 min (30 min once it came back 3
   times within an hour). Back before then, it is the same episode: no second push, no "Recovered", one row in the
@@ -589,9 +611,12 @@ it changes nothing.
   While an alert's hold (e.g. down_min) is counting it again, it isn't clear. A pushed warning back as critical
   (disk 92 % -> 98 %) is pushed again at once.
 * **Muted (#340).** Settings → System → Push notifications → Mute alerts (admins): each alert kind (ADS-B, whisper,
-  channel jobs, P25 trunk silent, station silent, hub errors ...), until unmuted or for 1 h / 24 h / 7 days (station
-  silent, P25 trunk silent and channel jobs: for a time only). A muted alert still shows on Health ("Muted", and the
-  muted kinds in its header); it isn't pushed. One pushed before it was muted still gets its "Recovered". Audited as
+  channel jobs, P25 trunk silent, station silent, dispatch coverage, hub errors ...), until unmuted or for 1 h / 24 h /
+  7 days (station silent, P25 trunk silent, channel jobs and dispatch coverage: for a time only). Muting a cause
+  ("P25 trunk silent", "SDR gone" ...) doesn't mute our dispatch lost: to silence dispatch-lost pushes, mute "Dispatch
+  coverage" (the list's hover says so). Planned dongle work: mute "Dispatch coverage" for the time it takes (two
+  short swaps within 10 min count together as 5 min of 10); muting "Station silent" mutes the station's ("station silent"). A muted alert
+  still shows on Health ("Muted", and the muted kinds in its header); it isn't pushed. One pushed before it was muted still gets its "Recovered". Audited as
   System. Default: none.
 
 **The panel:** Settings → **Station → Health**, a tab shown to admins on the hub (also the Station row in
@@ -720,7 +745,8 @@ keeps it), `/api/station/status` and the logs never carry a name. `GET /api/cad/
    and random, e.g. `python3 -c "import secrets; print('sizeup-health-' + secrets.token_hex(8))"` →
    `sizeup-health-3f9c27d1a0b84e65`. At least 12 characters (letters, digits, `-`, `_`).
 2. **Subscribe on your phone:** the ntfy app (iOS / Android) → **+** → topic name → server `ntfy.sh` →
-   Subscribe. Allow its notifications; a critical alert is sent at high priority. To test, publish one by
+   Subscribe. Allow its notifications; a critical alert is sent at high priority, our dispatch coverage lost at
+   urgent (5): to hear that one at night, allow the topic to override Do Not Disturb (ntfy: the topic's settings). To test, publish one by
    hand to *your* topic only: `curl -d "test" ntfy.sh/<your topic>`.
 3. **Give them to the hub** (secrets by name, so not in the repo):
    `aws ssm put-parameter --name /sizeup-hub/alert-topic --type SecureString --value '<your alerts topic>'`
