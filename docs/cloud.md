@@ -1291,22 +1291,33 @@ them).
 
 ### Live audio on every view: the live player and Listening
 
-Live radio follows the dispatcher around the console (`static/live-player.js`): **Listen** in the header (or on the
-Radio view) turns it on with one click (the browser's autoplay rule), and a strip under every view (Overview, Incident,
-Radio, Search, Settings) shows what plays: service, channel, talker, elapsed, how many wait, play / pause, skip
-(`]`), mute (`M`), volume, *Our calls only*, *Mute police*, **Listening** and *Go to* (its row on the Radio view).
-The page never reloads between views, so a clip is never restarted. /monitor keeps its own **Sound**.
+Live radio follows the dispatcher around the console (`static/live-player.js`): **Listen** in the header (the one
+control; the Radio view has none of its own) turns it on with one click (the browser's autoplay rule), and a strip under
+every view (Overview, Incident, Radio, Search, Settings) shows what plays: service, channel, talker, elapsed, how many
+wait, play / pause, skip (`]`), mute (`M`), volume, *<Our calls view> only*, **Listening** and *Go to* (its row on the
+Radio view). The page never reloads between views, so a clip is never restarted. /monitor keeps its own **Sound**.
 
 - **What plays** is each person's own (`PUT /api/me/prefs/listen`, validated in `sizeup/cad/prefs.py`): a level
-  (*Priority*, *Normal*, *Off*) per target, the most specific first: a channel or talkgroup (also from each row of the
-  Radio rail), a frequency, *Our calls* (dispatch, paging, firegrounds), a system, a service. A new person: Our calls
-  Priority, the rest Off. Volume, mute and on/off are the device's own.
+  (*Priority*, *Normal*, *Off*) per target. A channel's or frequency's own level first (also from each row of the Radio
+  rail); then the person's **views**, the same ones as the Radio rail's VIEWS (the department's and their own, their
+  names, badges and order, the hidden ones left out): the first view that holds the transmission and has a level
+  decides; then a system's. A new person: the Our calls view Priority, the rest Off. Volume, mute and on/off are the
+  device's own. Rename, reorder, add or hide a view and Listening follows at once: there is no second list.
+- **Our calls** is the seeded view with id `ours` (whatever it is named now: *Our calls only* takes its name). What it
+  holds is its filter (✎ on the Radio rail, or Settings > Radios > Views); the filter's *Our calls* item is the channels
+  and talkgroups with **Main** on in Settings > Radios > Channels, and nothing else: FM channels have the switch too
+  (settings `radio_main`; on by default, an airband channel's off), a talkgroup's is its own. The hub decides it for
+  every row it serves (`ours`, `Cad.row_ours`) and for the Radio page's Main and Our calls view (`Cad.not_main`), so a
+  switch changed counts at once, for old rows too. The hovers list those channels by their one name.
+- Rules from before the views (`ours`, `svc:<service>`) move to the seeded view of the same id where it still exists;
+  one without (Fire, Other) is kept and still applied, after the views and systems, unshown. *Mute police* is gone (a
+  view can hold police): an earlier page's `mute_police` is taken and dropped.
 - **Priority** plays first and is never dropped; over a Normal one it interrupts (the Normal one resumes after, unless
   too old), ducks it or waits, as chosen. **Normal** ones queue oldest first and are dropped once older than *Max age*
   (60 s) or when 15 wait. An emergency on a channel you listen to plays as Priority. Key-ups never play.
 - **Load**: no timer of its own. When the state push's `comms_rev` moves, one
   `GET /api/cad/comms?view=all&type=radio&changed=<cursor>` (what changed since; the hub's #419 gate decides what this
-  person may hear), only while it is on. A clip played by hand holds it until that clip ends.
+  person may hear), only while it is on. A clip played by hand holds it until that clip ends or is paused.
 
 ## Config
 

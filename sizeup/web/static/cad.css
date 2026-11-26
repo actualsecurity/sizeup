@@ -755,8 +755,10 @@
   .rn-size:is(:hover, :focus-visible, .on)::before { background: var(--accent); }
   .rn-size:focus-visible { outline: none; }
   .rn-rail { display: grid; gap: var(--s-1); padding: var(--s-2); background: var(--panel); border: var(--bw) solid var(--line);
-             border-radius: var(--radius); min-inline-size: 0; position: sticky; inset-block-start: 0;
-             max-block-size: calc(100vh - 2 * var(--hdr-h)); overflow-y: auto; }
+             border-radius: var(--radius); min-inline-size: 0; position: sticky; inset-block-start: var(--rn-top, 0);
+             /* --rn-max: measured (radio-nav.js fitRail): to the bottom of what can be seen of its column, the live
+                player's strip and the banners left out; its own scroll reaches its last row, the page's never needed */
+             max-block-size: var(--rn-max, calc(100vh - 2 * var(--hdr-h))); overflow-y: auto; overscroll-behavior: contain; }
   .rn-rail-head { display: flex; align-items: center; gap: var(--s-2); padding-inline-start: var(--s-1); }
   .rn-rail { grid-template-columns: minmax(0, 1fr); }
   .rn-rail .tab { gap: var(--s-2); min-inline-size: 0; }

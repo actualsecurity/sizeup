@@ -250,6 +250,7 @@ class Cad:
         self.radio_folders: dict | None = None               # the Radio page's folders (#607): None the default
         self.radio_views: list | None = None                 # ... and its views (radioviews.py): None the coded ones
         self.radio_services: dict[str, str] = {}             # the admins' service per source (Settings > Radios)
+        self.fm_main_over: dict[str, bool] = {}              # an FM / airband channel's Main switch, where not its default
         self._retag_lock = threading.Lock()                  # one re-tag at a time (retag_services)
         self.retag_thread: threading.Thread | None = None    # the last one started
         self.retag_waiting: set[str] = set()                 # sources whose re-tag waits for the station's talkgroups
@@ -547,6 +548,8 @@ class Cad:
                 "radio_names": radionames.rev(),
                 # the admins' service per source: only their rev ("" none); both pages ask again when it moves
                 "radio_services": services_rev(self.radio_services),
+                # the FM / airband channels' Main switches (Our calls): their rev; the live player asks the set again
+                "radio_main": ",".join(f"{k}={int(v)}" for k, v in sorted(self.fm_main_over.items())),
                 # the county talkgroups an incident may be moved to ("+ channel", sizeup/cad/opchannel.py)
                 "op_channels": [{"tg": tg, "name": radionames.name({"talkgroup": tg, "channel": n})}
                                 for tg, n in sorted(self.opchan.names().items())],
@@ -2097,7 +2100,7 @@ class Cad:
             main_limit = max(1, min(int(one("main_limit") or MAIN_LIMIT), MAX_ROWS))
         except ValueError:
             raise CadError("limit, main_limit: numbers") from None
-        main, other = self.comms.split(main_tgs, self.s.airband,
+        main, other = self.comms.split(main_tgs, self.not_main(),
                                        unit=one("unit"), channel=one("channel"), event=one("event"),
                                        pcfd=pcfd if one("pcfd") in ("1", "true", "on") else None,
                                        since=when("since"), until=when("until"), main_limit=main_limit, limit=limit,
@@ -2134,10 +2137,42 @@ class Cad:
         self._comms_cache = kept
         return out
 
+    # ---- Our calls: the channels and talkgroups with Main on (Settings > Radios > Channels), nothing else ------------
+    def fm_kinds(self) -> dict[str, str]:
+        """{label: traffic | paging | airband} for this hub's FM and airband channels."""
+        return {**{c: "traffic" for c in self.s.tactical}, **{c: "paging" for c in self.s.paging},
+                **{c: "airband" for c in self.s.airband}}
+
+    def fm_main_default(self, label: str, kind: str = "") -> bool:
+        """An FM channel's Main with no choice: on (firegrounds, paging); an airband channel's: off (busy, not ours)."""
+        return (kind or self.fm_kinds().get(label, "")) != "airband" and label not in self.s.airband
+
+    def fm_main(self, label: str, kind: str = "") -> bool:
+        """An FM / airband channel's Main switch: the admins' choice (settings radio_main), else its default."""
+        return self.fm_main_over.get(label, self.fm_main_default(label, kind))
+
+    def not_main(self) -> tuple[str, ...]:
+        """The FM / airband channels whose Main is off: Comms leaves them out of Main and Our calls (#241, #415)."""
+        return tuple(sorted({*self.s.airband, *(k for k, v in self.fm_main_over.items() if not v)}
+                            - {k for k, v in self.fm_main_over.items() if v}))
+
+    def row_ours(self, r: dict) -> bool:
+        """Whether a row of the radio log is Our calls now: its channel's or (the county's) talkgroup's Main switch. The
+        flag a station stamped when it was heard is not read: a switch changed since counts for every row."""
+        if r.get("kind") == "note":
+            return False
+        tg, system = r.get("talkgroup"), str(r.get("system") or "")
+        if tg is None:
+            return self.fm_main(str(r.get("channel") or ""), "airband" if system == "airband" else "")
+        return system in ("", sourcekeys.COUNTY) and bool(self.main_tg(int(tg)))
+
     def _comms_rows(self, rows: list[dict]) -> None:
-        """Each row as it is sent: whether its audio is here, without the columns nobody reads."""
+        """Each row as it is sent: whether its audio is here, whether it is Our calls now, without the columns nobody
+        reads."""
         for r in rows:
             r["has_audio"] = r["kind"] == "radio" and self.has_clip(r["id"])
+            if "ours" in r or r.get("kind") == "radio":
+                r["ours"] = int(self.row_ours(r))
             for k in COMMS_UNSENT:
                 r.pop(k, None)
 
@@ -2191,7 +2226,7 @@ class Cad:
         if len(units) > UNITS_MAX or any(len(x) > 60 for x in units):
             raise CadError(f"unit: at most {UNITS_MAX} units")
         got = self.comms.page(
-            main_tgs, self.s.airband, view=view, system=one("system"), group=one("group"), source=keys("source", SOURCES_MAX),
+            main_tgs, self.not_main(), view=view, system=one("system"), group=one("group"), source=keys("source", SOURCES_MAX),
             service=service, tier=one("tier").lower(), dept=one("dept"), safety=one("safety") in ("1", "true", "on"),
             mute=keys("mute", MUTE_MAX), before=before, changed=changed, at=at, limit=limit,
             unit=units[0] if len(units) == 1 else units, channel=one("channel"), event=one("event"),
@@ -2266,7 +2301,7 @@ class Cad:
                 if got:
                     ours = system == county and bool(self.main_tg(got[1]))
                 else:
-                    ours = kind != "airband" and name not in self.s.airband
+                    ours = self.fm_main(name, kind)
                 tier = str(i.get("tier") or s.get("tier") or "")
                 last = max(float(s.get("last") or 0.0), float(i.get("last") or 0.0)) or None
                 if key not in seen and not ours and not last and (system == county or tier in ("", tiers.IGNORE)):

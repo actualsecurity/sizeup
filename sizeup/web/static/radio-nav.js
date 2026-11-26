@@ -1021,6 +1021,8 @@ window.RadioNav = (() => {
     show($("#rn"), true);
     sizer();
     sizeRail();
+    watchFit();
+    askFit();
     render();
     page();
   }
@@ -1040,6 +1042,51 @@ window.RadioNav = (() => {
   function limits() {
     const rn = $("#rn"), css = typeof getComputedStyle === "function" ? getComputedStyle : () => ({});
     return widthLimits(innerWidth, rn.clientWidth, parseFloat(css(rn).columnGap) || 0, parseFloat(css(document.documentElement).fontSize) || 16);
+  }
+  // The rail's height: from where it is on screen to the bottom of what can be seen of the column it scrolls in (the
+  // live player's strip, the banners and the zoom already out of it), so its own scroll reaches its last row and the
+  // page never has to be scrolled for it. Measured on open, on a resize (the column, the strip, the window) and on a
+  // scroll (until the rail sticks), at most once a frame; under 1101 px the page itself scrolls: the window's bottom,
+  // less the strip, and the rail sticks under the header
+  let fitAsked = 0;
+  function fitRail() {
+    fitAsked = 0;
+    if (!dom || !st.open || typeof getComputedStyle !== "function" || !document.getElementById) return;
+    const rn = document.getElementById("rn"), rail = document.getElementById("rn-rail");
+    const col = rn && rn.closest && rn.closest(".detail");
+    if (!col || !rail || !rail.getBoundingClientRect) return;
+    const page = getComputedStyle(col).overflowY === "visible";
+    let top = 0, bottom;
+    if (page) {
+      const hdr = document.querySelector("body > header"), lp = document.getElementById("lp");
+      top = hdr ? Math.round(hdr.getBoundingClientRect().height) : 0;
+      bottom = innerHeight - (lp && !lp.hidden ? lp.getBoundingClientRect().height : 0);
+    } else {
+      const r = col.getBoundingClientRect(), cs = getComputedStyle(col);
+      bottom = r.top + col.clientTop + col.clientHeight - (parseFloat(cs.paddingBottom) || 0);
+    }
+    const h = Math.max(160, Math.floor(bottom - Math.max(rail.getBoundingClientRect().top, top)));
+    rn.style.setProperty("--rn-max", `${h}px`);
+    rn.style.setProperty("--rn-top", `${top}px`);
+  }
+  function askFit() {
+    if (fitAsked) return;
+    fitAsked = typeof requestAnimationFrame === "function" ? requestAnimationFrame(fitRail) : (fitRail(), 0);
+  }
+  let fitWatched = false;
+  function watchFit() {
+    if (fitWatched || !dom || typeof document.getElementById !== "function") return;
+    const rn = document.getElementById("rn"), col = rn && rn.closest && rn.closest(".detail");
+    if (!col) return;
+    fitWatched = true;
+    const onScroll = () => { if (st.open) askFit(); };
+    col.addEventListener("scroll", onScroll, { passive: true });
+    addEventListener("scroll", onScroll, { passive: true });
+    addEventListener("resize", onScroll);
+    if (typeof ResizeObserver === "function") {
+      const ro = new ResizeObserver(onScroll);
+      for (const n of [col, document.getElementById("lp"), document.querySelector("body > header")]) if (n) ro.observe(n);
+    }
   }
   function sizeRail() {                               // the width remembered on the layout (cad.css keeps it in its limits)
     if (!dom) return;

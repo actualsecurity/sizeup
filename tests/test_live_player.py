@@ -44,48 +44,98 @@ def rows() -> str:
            f"TWR = {json.dumps(TWR)};"
 
 
-def test_a_new_person_hears_our_calls_as_priority_and_nothing_else():
-    got = run(rows() + "const d = p(null); out([d, [FG1, DISP, PD, MTA, TWR].map((t) => C.level(t, d))]);")
-    assert got[0] == {"rules": {"ours": "priority"}, "mode": "interrupt", "max_age": 60, "ours_only": False, "mute_police": False}
+# the Radio rail's views as radio-views.js has them (the seeded ones; a renamed Our calls keeps its id)
+VIEWS = """const V = [{ id: "ours", name: "PCFD Primary", filter: { ours: true } },
+                   { id: "police", name: "Police", filter: { services: ["police"] } },
+                   { id: "transit", name: "Transit", filter: { services: ["transit"] } },
+                   { id: "u:k3x9q2", name: "Tower", filter: { sources: ["air:Tower"] } },
+                   { id: "all", name: "All", filter: {} }];
+           const OURS = V[0];"""
+
+
+def test_a_new_person_hears_the_our_calls_view_as_priority_and_nothing_else():
+    got = run(rows() + VIEWS + "const d = p(null); out([d, [FG1, DISP, PD, MTA, TWR].map((t) => C.level(t, d, V, OURS))]);")
+    assert got[0] == {"rules": {"view:ours": "priority"}, "mode": "interrupt", "max_age": 60, "ours_only": False}
     assert got[1] == ["priority", "priority", "off", "off", "off"]
 
 
-def test_the_most_specific_rule_wins():
-    got = run(rows() + """
-      const q = p({ rules: { ours: "priority", "svc:police": "normal", "sys:metro": "normal", "svc:transit": "off",
-                             "src:fm:FG1": "normal", "mhz:118.6": "priority", "sys:airband": "off" } });
-      out([[FG1, DISP, PD, MTA, TWR].map((t) => C.level(t, q)), C.rule(TWR, q), C.rule(MTA, q), C.rule(FG1, q)]);
+def test_a_channel_first_then_the_first_view_in_the_persons_order_then_a_system():
+    got = run(rows() + VIEWS + """
+      const q = p({ rules: { "view:ours": "priority", "view:police": "normal", "view:all": "off", "view:u:k3x9q2": "priority",
+                             "sys:metro": "normal", "src:fm:FG1": "normal", "mhz:118.6": "normal" } });
+      const noAll = V.filter((v) => v.id !== "all");
+      out([[FG1, DISP, PD, MTA, TWR].map((t) => C.level(t, q, V, OURS)), C.rule(TWR, q, V), C.rule(MTA, q, V),
+           C.rule(MTA, q, noAll), C.rule(FG1, q, V), C.rule(PD, q, [V[4], V[1]])]);
     """)
-    assert got[0] == ["normal", "priority", "normal", "normal", "priority"]
-    assert got[1] == ["mhz:118.6", "priority"]      # a frequency over its system
-    assert got[2] == ["sys:metro", "normal"]        # a system over a service
-    assert got[3] == ["src:fm:FG1", "normal"]       # a channel over Our calls
+    assert got[0] == ["normal", "priority", "normal", "off", "normal"]
+    assert got[1] == ["mhz:118.6", "normal"]           # a frequency's own over any view
+    assert got[2] == ["view:all", "off"]               # the first view that holds it (All) over its system
+    assert got[3] == ["sys:metro", "normal"]           # All hidden (not in the list): its system's
+    assert got[4] == ["src:fm:FG1", "normal"]          # a channel's own over its view
+    assert got[5] == ["view:all", "off"]               # the person's order decides
 
 
-def test_quick_toggles_and_an_emergency():
-    got = run(rows() + """
-      const base = { rules: { ours: "priority", "svc:police": "priority", "sys:metro": "normal" } };
+def test_the_our_calls_view_by_its_id_whatever_its_name_and_its_filter_is_what_counts():
+    got = run(rows() + VIEWS + """
+      const base = p({ rules: { "view:ours": "priority", "view:police": "priority" }, ours_only: true });
+      const wider = { ...OURS, filter: { ours: true, sources: ["p25:westchester:2222"] } };
       const em = { ...MTA, emergency: 1 }, emOff = { ...TWR, emergency: 1 };
-      out([[FG1, PD, MTA].map((t) => C.level(t, p({ ...base, ours_only: true }))),
-           [FG1, PD, MTA].map((t) => C.level(t, p({ ...base, mute_police: true }))),
-           C.level(em, p(base)), C.level(emOff, p(base))]);
+      const q2 = p({ rules: { "view:transit": "normal" } });
+      out([[FG1, PD, MTA].map((t) => C.level(t, base, V, OURS)), [FG1, PD, MTA].map((t) => C.level(t, base, V, wider)),
+           C.level(em, q2, V, OURS), C.level(emOff, q2, V, OURS), p({ ...base, mute_police: true })]);
     """)
-    assert got[0] == ["priority", "off", "off"]
-    assert got[1] == ["priority", "off", "normal"]
-    assert got[2] == "priority"        # an emergency on a channel listened to: Priority
-    assert got[3] == "off"             # ... never one you turned off
+    assert got[0] == ["priority", "off", "off"]        # only the view's filter (Main on)
+    assert got[1] == ["priority", "priority", "off"]   # its filter widened in the view's editor: PD now in it
+    assert got[2] == "priority"                         # an emergency on a channel listened to: Priority
+    assert got[3] == "off"                              # ... never one you turned off
+    assert "mute_police" not in got[4]                  # gone (#895's quick toggle): an old copy's is dropped
+
+
+def test_our_calls_are_main_on_as_the_hub_says_and_nothing_else():
+    """The Our calls item of a view's filter = Main on in Settings > Radios: the hub's `ours` on each row. A row's `main`
+    (the Radio view's own section) or a fire service alone never makes it ours."""
+    got = run(rows() + VIEWS + """
+      const d = p(null);
+      out([C.level({ ...FG1, ours: 0 }, d, V, OURS), C.level({ ...PD, main: true }, d, V, OURS),
+           C.level({ ...DISP, service: "fire", ours: 0 }, d, V, OURS), C.level({ ...MTA, ours: 1 }, d, V, OURS)]);
+    """)
+    assert got == ["off", "off", "off", "priority"]
+
+
+def test_units_and_on_an_incident_narrow_a_view():
+    got = run(rows() + """
+      const f = { services: ["fire"], units: ["E60"], linked: true };
+      out([C.inView({ ...FG1, rig: "E60", events: [{ id: 1 }] }, f), C.inView({ ...FG1, rig: "E60" }, f),
+           C.inView({ ...FG1, rig: "E61", events: [{ id: 1 }] }, f), C.inView({ ...DISP, talker: "E60", events: [{ id: 2 }] }, f)]);
+    """)
+    assert got == [True, False, False, True]
+
+
+def test_rules_from_before_the_views_move_to_theirs_or_stay_and_still_apply():
+    got = run(rows() + VIEWS + """
+      const old = p({ rules: { ours: "priority", "svc:police": "normal", "svc:transit": "off", "svc:fire": "normal",
+                               "svc:ems": "priority", "view:transit": "normal" } });
+      const ids = V.map((v) => v.id);                    // (no EMS view: the department deleted it)
+      const m = C.migrate(old, ids);
+      out([m.rules, C.migrate(m, ids) === m, C.rule({ ...DISP, ours: 0 }, m, V), C.level(PD, m, V, OURS)]);
+    """)
+    assert got[0] == {"view:ours": "priority", "view:police": "normal", "view:transit": "normal",
+                      "svc:fire": "normal", "svc:ems": "priority"}   # transit's own view rule kept, the old one dropped
+    assert got[1] is True                                # once: nothing more to move
+    assert got[2] == ["svc:fire", "normal"]              # a rule no view took: still applied, after the views
+    assert got[3] == "normal"
 
 
 def test_a_channels_own_level_and_its_default():
-    got = run("""
+    got = run(VIEWS + """
       const s = { key: "p25:westchester:2222", system: "westchester", service: "police", ours: false };
-      const a = p({ rules: { ours: "priority", "svc:police": "normal" } });
+      const a = p({ rules: { "view:ours": "priority", "view:police": "normal" } });
       const b = C.setRule(a, "src:" + s.key, "off");
-      out([C.sourceLevel(s, a), C.sourceLevel(s, b), C.setRule(b, "src:" + s.key, "").rules]);
+      out([C.sourceLevel(s, a, V, OURS), C.sourceLevel(s, b, V, OURS), C.setRule(b, "src:" + s.key, "").rules]);
     """)
     assert got[0] == {"own": "", "inherited": "normal", "effective": "normal"}
     assert got[1] == {"own": "off", "inherited": "normal", "effective": "off"}
-    assert got[2] == {"ours": "priority", "svc:police": "normal"}
+    assert got[2] == {"view:ours": "priority", "view:police": "normal"}
 
 
 def test_priority_plays_first_and_normal_ones_oldest_first():
@@ -158,13 +208,13 @@ def test_an_interrupted_one_resumes_unless_too_old():
 
 def test_a_changed_choice_judges_what_waits_again():
     got = run(rows() + """
-      let pr = p({ rules: { ours: "priority", "svc:police": "normal", "sys:metro": "normal" } });
+      let pr = p({ rules: { ours: "priority", "svc:police": "normal", "sys:metro": "normal" } });   // (rules from before the views)
       const q = C.make();
       q.playing = { id: "x", start: 0, lvl: "priority" };
       for (const t of [PD, MTA, FG1]) C.add(q, { id: t.id, start: t.start, lvl: C.level(t, pr), row: t }, 1005, pr);
       q.paused = { id: "pp", start: 1000, lvl: "normal", row: PD };
       const before = C.waiting(q);
-      pr = { ...pr, mute_police: true, rules: { ...pr.rules, "sys:metro": "priority" } };
+      pr = { ...pr, rules: { ...pr.rules, "svc:police": "off", "sys:metro": "priority" } };
       C.rejudge(q, pr, (row) => C.level(row, pr));
       out([before, C.waiting(q), q.pq.map((x) => x.id), q.paused]);
     """)
@@ -173,8 +223,8 @@ def test_a_changed_choice_judges_what_waits_again():
 
 def test_bad_stored_choices_fall_back_to_the_defaults():
     got = run("""out([p({ rules: { ours: "loud", "svc:fire": "normal" }, mode: "x", max_age: 5, ours_only: "yes" }), p([]), p("x")]);""")
-    assert got[0] == {"rules": {"svc:fire": "normal"}, "mode": "interrupt", "max_age": 60, "ours_only": False, "mute_police": False}
-    assert got[1]["rules"] == {"ours": "priority"} and got[2]["rules"] == {"ours": "priority"}
+    assert got[0] == {"rules": {"svc:fire": "normal"}, "mode": "interrupt", "max_age": 60, "ours_only": False}
+    assert got[1]["rules"] == {"view:ours": "priority"} and got[2]["rules"] == {"view:ours": "priority"}
 
 
 def test_the_page_loads_it_after_the_radio_scripts_and_the_board_has_none():

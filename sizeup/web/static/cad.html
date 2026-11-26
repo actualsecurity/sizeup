@@ -151,7 +151,6 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <span id="rv-count" class="dim small"></span>
         <span class="spacer"></span>
         <button id="rv-nav" class="sm" type="button" aria-pressed="false" title="Views and the channel tree in a rail">Rail</button>
-        <button id="rv-live" class="live-btn" type="button" aria-pressed="false" aria-controls="lp">Listen</button>
       </div>
       <!-- The rail layout (radio-nav.js, #415; /cad#radio?ui=2 or the Rail button): the views and the tree system >
            group > channel on the left, one list on the right. Hidden until a viewer turns it on; the page as before
@@ -784,8 +783,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
   <a id="lp-go" class="btn sm quiet" href="#radio" title="Its row in Radio" hidden>Go to</a>
   <span class="spacer"></span>
   <span class="seg lp-quick" role="group" aria-label="Quick">
-    <button id="lp-ours" class="sm" type="button" aria-pressed="false" title="Only Our calls (dispatch, paging, firegrounds)">Our calls only</button>
-    <button id="lp-police" class="sm" type="button" aria-pressed="false" title="No police traffic">Mute police</button>
+    <button id="lp-ours" class="sm" type="button" aria-pressed="false" title="Only Our calls: Main in Settings › Radios › Channels">Our calls only</button>
   </span>
   <button id="lp-mute" class="sm icon quiet" type="button" aria-pressed="false"></button>
   <input id="lp-vol" class="lp-vol" type="range" min="0" max="100" step="5" value="100" aria-label="Volume" title="Volume (this device)">

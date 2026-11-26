@@ -3,12 +3,18 @@
 // Search, Settings): the page never reloads between views, so the audio is never restarted by a view change. /monitor
 // (the wall board) keeps its own Sound (RadioLive, radio-view.js): a shared screen, not a person's.
 //
-//   Listen     the header's Listen button: one click turns it on and unlocks sound (the browser's autoplay rule); a
-//              reload remembers it was on and waits for one click (Tap for sound) before it plays anything.
+//   Listen     the header's Listen button (the only one): one click turns it on and unlocks sound (the browser's
+//              autoplay rule); a reload remembers it was on and waits for one click (Tap for sound) before it plays anything.
 //   What       each person's own choices, kept on the hub (/api/me/prefs/listen, sizeup/cad/prefs.py; me-prefs.js):
-//              a level per target, the most specific first: a channel or talkgroup (src:<key>), a frequency
-//              (mhz:<MHz>), Our calls (ours: our dispatch, paging and firegrounds), a system (sys:), a service (svc:);
-//              none: Off. A new person: Our calls Priority, the rest Off. Quick toggles: Our calls only, Mute police.
+//              a level per target: a channel or talkgroup's own (src:<key>) or a frequency's (mhz:<MHz>) first, then
+//              the person's Radio views (view:<id>: the rail's VIEWS, radio-views.js, in their order, the hidden ones
+//              left out; the first that holds it and has a level decides), then a system's (sys:), then a rule from
+//              before the views (ours, svc:, kept where no view took it); none: Off. A new person: the Our calls view
+//              Priority, the rest Off. Listening's groups are those views: rename one and Listening says so at once.
+//   Our calls  the seeded view "ours", by its id (its name whatever it is now: the toggle says "<name> only"): its
+//              filter. Its "Our calls" item is the channels and talkgroups with Main on in Settings > Radios >
+//              Channels, and nothing else (the hub says so on each row: `ours`, Cad.row_ours); the hovers list them
+//              by their one name (RadioNames) with where to change the view and the Main switches.
 //   Levels     Priority plays first, is never dropped and, as chosen (mode): interrupts a Normal one (which resumes
 //              after, unless it got too old), ducks it (plays over it, the Normal one quieter), or waits for it. Normal
 //              ones queue, oldest first, and are dropped once older than max_age (60 s) or when more than
@@ -31,11 +37,13 @@ window.ListenCore = (() => {
   const LEVELS = ["priority", "normal", "off"];
   const MODES = ["interrupt", "duck", "queue"];
   const SERVICES = ["fire", "police", "ems", "transit", "air", "other"];
-  const DEFAULTS = Object.freeze({ rules: Object.freeze({ ours: "priority" }), mode: "interrupt", max_age: 60, ours_only: false,
-                                   mute_police: false });
+  // a new person: the Our calls view (the seeded "ours": its id never changes, whatever its name now) Priority
+  const DEFAULTS = Object.freeze({ rules: Object.freeze({ "view:ours": "priority" }), mode: "interrupt", max_age: 60,
+                                   ours_only: false });
   const MAX_NORMAL = 15;              // Normal ones waiting: more, and the oldest goes
   const MAX_PRIORITY = 100;           // (never dropped for age; this only bounds a runaway)
   const AGE = [10, 600];
+  const SEEDED = ["ours", "police", "ems", "transit", "air", "all"];     // (sizeup/cad/radioviews.py SEED_IDS)
 
   // The choices as stored, every field there (a missing or bad one: the default)
   function norm(v) {
@@ -45,7 +53,23 @@ window.ListenCore = (() => {
     for (const [k, lvl] of Object.entries(src)) if (typeof k === "string" && LEVELS.includes(lvl)) rules[k] = lvl;
     const age = Number.isInteger(o.max_age) && o.max_age >= AGE[0] && o.max_age <= AGE[1] ? o.max_age : DEFAULTS.max_age;
     return { rules, mode: MODES.includes(o.mode) ? o.mode : DEFAULTS.mode, max_age: age,
-             ours_only: o.ours_only === true, mute_police: o.mute_police === true };
+             ours_only: o.ours_only === true };          // (an old copy's mute_police: dropped)
+  }
+  // Rules from before the views (#895: "ours", "svc:<service>") moved to the view they were: the seeded view of that
+  // id where it still exists (Our calls, Police, EMS, Transit, Air). One without (svc:fire, svc:other, a seeded view
+  // the department deleted) stays: still applied, after the views and systems, never shown. ids: every view's id
+  function migrate(p, ids) {
+    const rules = { ...p.rules }, have = new Set(ids);
+    let moved = false;
+    const move = (from, id) => {
+      if (!rules[from] || !have.has(id)) return;
+      if (!rules[`view:${id}`]) rules[`view:${id}`] = rules[from];
+      delete rules[from];
+      moved = true;
+    };
+    move("ours", "ours");
+    for (const svc of ["police", "ems", "transit", "air"]) move(`svc:${svc}`, svc);
+    return moved ? { ...p, rules } : p;
   }
   // A row's source key (the hub's; an older row without one: from its channel / talkgroup, as sizeup/sourcekeys.py)
   function sourceOf(t) {
@@ -53,32 +77,48 @@ window.ListenCore = (() => {
     if (t.talkgroup !== undefined && t.talkgroup !== null) return `p25:${t.system || "westchester"}:${t.talkgroup}`;
     return (t.service === "air" || t.system === "airband" ? "air:" : "fm:") + String(t.channel || "");   // a key, not a label
   }
-  const isOurs = (t) => !!(t.ours || t.main);
+  const isOurs = (t) => !!t.ours;                  // Main on in Settings > Radios (the hub's, as of now)
   const mhzKey = (t) => (+t.mhz > 0 ? `mhz:${+t.mhz}` : "");
   const sysOf = (t) => String(t.system || (sourceOf(t).startsWith("air:") ? "airband" : sourceOf(t).startsWith("fm:") ? "analog" : "westchester"));
-  // The rule that decides a row, most specific first: [target, level] (no rule: ["", "off"])
-  function rule(t, p) {
+  const len = (x) => (Array.isArray(x) ? x.length : 0);
+  // A row in a view's filter (as radio-views.js matches a source, with its units and "on an incident" too): any within
+  // a dimension, all across; ours = Main on (the hub's `ours` on the row)
+  function inView(t, f) {
+    f = f || {};
+    if (len(f.units) && ![t.rig, t.talker, t.unit].some((u) => u && f.units.includes(String(u)))) return false;
+    if (f.linked && !len(t.events)) return false;
+    if (!(f.ours || len(f.services) || len(f.systems) || len(f.sources))) return true;
+    if (f.ours && isOurs(t)) return true;
+    if (len(f.sources) && f.sources.includes(sourceOf(t))) return true;
+    const sv = f.services || [], sy = f.systems || [];
+    if (!sv.length && !sy.length) return false;
+    return (!sv.length || sv.includes(t.service)) && (!sy.length || sy.includes(sysOf(t)));
+  }
+  // The rule that decides a row: its channel's or frequency's own, else the first of this person's views (in their
+  // order, the ones they show) that holds it and has a level, else its system's, else a rule from before the views;
+  // [target, level] (none: ["", "off"]). views: [{id, filter}]
+  function rule(t, p, views = []) {
     const r = p.rules;
-    for (const k of [`src:${sourceOf(t)}`, mhzKey(t), isOurs(t) ? "ours" : "", `sys:${sysOf(t)}`, t.service ? `svc:${t.service}` : ""]) {
-      if (k && r[k]) return [k, r[k]];
-    }
+    for (const k of [`src:${sourceOf(t)}`, mhzKey(t)]) if (k && r[k]) return [k, r[k]];
+    for (const v of views) if (r[`view:${v.id}`] && inView(t, v.filter)) return [`view:${v.id}`, r[`view:${v.id}`]];
+    for (const k of [`sys:${sysOf(t)}`, isOurs(t) ? "ours" : "", t.service ? `svc:${t.service}` : ""]) if (k && r[k]) return [k, r[k]];
     return ["", "off"];
   }
-  // priority | normal | off for a row, the quick toggles and an emergency included
-  function level(t, p) {
-    if (p.ours_only && !isOurs(t)) return "off";
-    if (p.mute_police && t.service === "police") return "off";
-    const lvl = rule(t, p)[1];
+  // priority | normal | off for a row: the quick toggle (only the Our calls view's: ours, its filter now; without the
+  // view, Main on) and an emergency included
+  function level(t, p, views = [], ours = null) {
+    if (p.ours_only && !(ours ? inView(t, ours.filter) : isOurs(t))) return "off";
+    const lvl = rule(t, p, views)[1];
     if (lvl === "normal" && (t.emergency || t.alarm_level)) return "priority";
     return lvl;
   }
   // A channel's own level (src:) and what it gets without one (a source from GET /api/cad/comms/sources)
-  function sourceLevel(s, p) {
+  function sourceLevel(s, p, views = [], ours = null) {
     const row = { source: s.key, system: s.system, service: s.service, ours: s.ours, mhz: s.mhz };
     const own = p.rules[`src:${s.key}`] || "";
     const without = { ...p, rules: { ...p.rules } };
     delete without.rules[`src:${s.key}`];
-    return { own, inherited: rule(row, without)[1], effective: level(row, p) };
+    return { own, inherited: rule(row, without, views)[1], effective: level(row, p, views, ours) };
   }
   // A new rules object with target set to level ("" removes it)
   function setRule(p, target, lvl) {
@@ -144,7 +184,7 @@ window.ListenCore = (() => {
     }
   }
   const waiting = (q) => ({ priority: q.pq.length, normal: q.nq.length + (q.paused ? 1 : 0) });
-  return { LEVELS, MODES, SERVICES, DEFAULTS, MAX_NORMAL, AGE, norm, sourceOf, rule, level, sourceLevel, setRule,
+  return { LEVELS, MODES, SERVICES, SEEDED, DEFAULTS, MAX_NORMAL, AGE, norm, migrate, sourceOf, inView, rule, level, sourceLevel, setRule,
            make, add, next, rejudge, waiting };
 })();
 
@@ -171,7 +211,7 @@ window.LivePlayer = (() => {
     p: C.norm(local), on: dev.on === true, armed: false, blocked: false, held: false, manual: false, paused: false,
     volume: Number.isFinite(dev.volume) ? Math.min(1, Math.max(0, dev.volume)) : 1, muted: dev.muted === true,
     q: C.make(), cur: null, over: null,              // cur: on the main element; over: a Priority one ducking it
-    since: 0, cursor: null, rev: "", busy: false, again: false, gen: 0, sig: "", elapsed: "", sources: null, srcAt: 0, arming: false,
+    oursSig: "", mainRev: undefined, viewsKnown: false, since: 0, cursor: null, rev: "", busy: false, again: false, gen: 0, sig: "", elapsed: "", sources: null, srcAt: 0, arming: false,
     panel: false,
   };
   const a = new Audio(), b = new Audio();          // a: the queue; b: a Priority one over a ducked Normal one
@@ -179,23 +219,45 @@ window.LivePlayer = (() => {
   const now = () => (typeof serverNow === "function" ? serverNow() : Date.now() / 1000);
 
   function saveDevice() { write(DKEY, { on: st.on, volume: st.volume, muted: st.muted }); }
-  function choicesChanged() {
-    write(LKEY, st.p);
-    if (window.MePrefs) MePrefs.changed(NS);
-    C.rejudge(st.q, st.p, (row) => C.level(row, st.p));
-    if (st.cur && C.level(st.cur.row, st.p) === "off") skip();     // what plays now was just turned off
+  // The Radio views (radio-views.js: the department's and this person's, in their order, the hidden ones left out):
+  // Listening's groups are these, one thing with the rail's VIEWS. ourView: the seeded Our calls view (id "ours", its
+  // name whatever it is now), shown or hidden; none (the department deleted it): Our calls only does nothing
+  const RV = () => window.RadioViews || null;
+  const views = () => (RV() ? RV().views() : []);
+  const ourView = () => (RV() ? RV().every().find((v) => v.id === "ours") || null : null);
+  const choices = () => (ourView() ? st.p : { ...st.p, ours_only: false });
+  const levelOf = (row) => C.level(row, choices(), views(), ourView());
+  // what waits and what plays judged again, the dock, the panel and the rail's marks drawn again
+  function rejudged() {
+    C.rejudge(st.q, st.p, levelOf);
+    if (st.cur && levelOf(st.cur.row) === "off") skip();     // what plays now was just turned off
     paint(true);
     if (st.panel) renderPanel();
     window.dispatchEvent(new CustomEvent("sizeup:listen-changed"));
   }
+  function choicesChanged() {
+    write(LKEY, st.p);
+    if (window.MePrefs) MePrefs.changed(NS);
+    rejudged();
+  }
+  // rules from before the views moved to theirs, once the department's views are known (the tree's)
+  function migrated() {
+    if (!RV() || !st.viewsKnown) return false;
+    const m = C.migrate(st.p, RV().every().map((v) => v.id));
+    if (m === st.p) return false;
+    st.p = m;
+    choicesChanged();
+    return true;
+  }
   if (window.MePrefs) {
     MePrefs.register(NS, {
       get: () => st.p,
-      apply: (v) => { st.p = C.norm(v); write(LKEY, st.p); C.rejudge(st.q, st.p, (row) => C.level(row, st.p)); paint(true);
-                       if (st.panel) renderPanel(); window.dispatchEvent(new CustomEvent("sizeup:listen-changed")); },
+      apply: (v) => { st.p = C.norm(v); write(LKEY, st.p); if (!migrated()) rejudged(); },
       hadLocal: !!local,
     });
   }
+  // a view renamed, added, reordered, hidden (the rail's ✎, Settings > Radios > Views): Listening follows at once
+  if (RV()) RV().onChange(() => { if (!migrated()) rejudged(); });
 
   // ---- playing -----------------------------------------------------------------------------------------------------
   function levels() {
@@ -366,7 +428,7 @@ window.LivePlayer = (() => {
       if (t.start < st.since - NEW_SLACK_S) { st.q.seen.add(t.id); continue; }    // from before it was armed: never
       if (t.status === "no_speech") { st.q.seen.add(t.id); continue; }            // a key-up
       if (t.has_audio === false) continue;                                       // its audio isn't here yet: next time
-      const r = C.add(st.q, { id: t.id, start: t.start, lvl: C.level(t, st.p), row: t }, t0, st.p);
+      const r = C.add(st.q, { id: t.id, start: t.start, lvl: levelOf(t), row: t }, t0, st.p);
       if (r === "interrupt" || r === "duck" || (r === "play" && act === "none")) act = r;
     }
     if (act === "interrupt" || act === "duck") priorityOver();
@@ -417,6 +479,9 @@ window.LivePlayer = (() => {
     if (!st.on || !st.armed) return;
     const rev = (cad.state && cad.state.comms_rev) || "";
     if (rev && rev !== st.rev) { st.rev = rev; pull(); }
+    // Main switched in Settings, or a name changed: Our calls' list again (its hover)
+    const mr = `${(cad.state && cad.state.radio_main) || ""}|${(cad.state && cad.state.radio_names) || ""}`;
+    if (mr !== st.mainRev) { const first = st.mainRev === undefined; st.mainRev = mr; if (!first || !st.sources) loadSources(true); }
   }
 
   // ---- on, off, the controls ---------------------------------------------------------------------------------------
@@ -424,6 +489,7 @@ window.LivePlayer = (() => {
   // armed only once it did. What was playing (a reload, a refusal) waits in the queue meanwhile
   function arm() {
     if (st.arming) return;
+    if (!st.sources) loadSources();                // Our calls' list (the hovers)
     requeue();
     st.arming = true;
     st.blocked = false;
@@ -507,10 +573,10 @@ window.LivePlayer = (() => {
     const w = C.waiting(st.q);
     if (st.over && st.cur) w.normal++;             // the Normal one under a Priority one waits too
     const sig = JSON.stringify([st.on, st.armed, st.blocked, st.held, st.manual, st.paused, st.muted, st.volume, it && it.id,
-                                it && it.lvl, w, st.q.dropped, st.p.ours_only, st.p.mute_police, st.panel]);
+                                it && it.lvl, w, st.q.dropped, st.p.ours_only, st.panel, st.oursSig]);
     if (!force && sig === st.sig) return;
     st.sig = sig;
-    for (const head of [$id("lp-on"), $id("rv-live")]) {          // the header's, and the Radio view's
+    for (const head of [$id("lp-on")]) {                          // the header's: the one Listen
       if (!head) continue;
       head.classList.toggle("active", st.on && st.armed);
       head.classList.toggle("blocked", st.on && !st.armed);
@@ -564,10 +630,10 @@ window.LivePlayer = (() => {
     m.setAttribute("aria-label", st.muted ? "Unmute" : "Mute");
     const v = $id("lp-vol");
     if (+v.value !== Math.round(st.volume * 100)) v.value = String(Math.round(st.volume * 100));
-    for (const [id, on] of [["lp-ours", st.p.ours_only], ["lp-police", st.p.mute_police]]) {
-      const q = $id(id);
-      q.setAttribute("aria-pressed", String(on));
-    }
+    const ov = ourView(), q = $id("lp-ours");          // the Our calls view's quick toggle, by its name now
+    q.hidden = !ov;
+    q.setAttribute("aria-pressed", String(!!ov && st.p.ours_only));
+    if (ov) { setLabel(q, `${ov.name} only`); q.title = viewTitle(ov, `Only ${ov.name}`); }
     $id("lp-set").setAttribute("aria-expanded", String(st.panel));
   }
 
@@ -578,7 +644,27 @@ window.LivePlayer = (() => {
       const d = await get("/api/cad/comms/sources");
       st.sources = d.sources || [];
       st.srcAt = Date.now();
+      if (RV() && d.views) { RV().setShared(d.views, st.sources); st.viewsKnown = true; migrated(); }
     } catch (_) { st.sources = st.sources || []; }
+    const sig = oursNames().join("\n");
+    if (sig !== st.oursSig) { st.oursSig = sig; paint(true); if (st.panel) renderPanel(); }
+  }
+  function setLabel(n, text) { if (n.textContent !== text) n.textContent = text; }
+  // A view's hover: what it holds; with Our calls in its filter, which channels those are (Main on) and where to change
+  // either (the view: ✎ on the Radio rail or Settings › Radios › Views; Main: Settings › Radios › Channels)
+  function viewTitle(v, head) {
+    const f = v.filter || {}, parts = [];
+    if (f.ours) parts.push(`Main: ${oursNames().join(", ") || "none"}`);
+    for (const [k, w] of [["services", ""], ["systems", ""], ["units", "Units "]]) if ((f[k] || []).length) parts.push(w + f[k].join(", "));
+    if ((f.sources || []).length) parts.push(`${f.sources.length} channel${f.sources.length === 1 ? "" : "s"}`);
+    if (f.linked) parts.push("On an incident");
+    return [`${head}: ${parts.join(" · ") || "everything"}`, "Edit: ✎ on the Radio rail, or Settings › Radios › Views",
+            ...(f.ours ? ["Main: Settings › Radios › Channels"] : [])].join("\n");
+  }
+  // Our calls as they are now: the sources with Main on, by their one name (radio-names.js when the page has it)
+  function oursNames() {
+    return (st.sources || []).filter((x) => x.ours)
+      .map((x) => (window.RadioNames && RadioNames.name ? RadioNames.name({ source: x.key, channel: x.name }) : "") || x.name || x.key);
   }
   function lvlSelect(target, cur, label, inherit = true) {
     const s = el("select", "lp-lvl");
@@ -590,12 +676,11 @@ window.LivePlayer = (() => {
     s.title = inherit ? "— : as a broader rule says" : "";
     return s;
   }
-  function row(label, target, extra) {
+  function row(label, target, ...extra) {
     const r = el("div", "lp-rule");
     const name = el("span", "trunc", label);
     name.title = label;
-    r.append(name, el("span", "spacer"), lvlSelect(target, st.p.rules[target] || "", `${label}: level`));
-    if (extra) r.append(extra);
+    r.append(name, el("span", "spacer"), ...extra, lvlSelect(target, st.p.rules[target] || "", `${label}: level`));
     return r;
   }
   // a control's selector, to find it again after a redraw
@@ -640,9 +725,30 @@ window.LivePlayer = (() => {
     age.append(el("span", "dim", "Max age"), ai, el("span", "dim", "s"));
     how.append(seg, age);
     out.push(how);
-    out.push(el("h3", "lp-sub", "Groups"));
-    out.push(row("Our calls", "ours"));
-    for (const s of C.SERVICES) out.push(row(SVC[s], `svc:${s}`));
+    // the person's views (the rail's VIEWS: their names, badges and order, the hidden ones left out); the first that
+    // holds a transmission and has a level decides it
+    const vs = views();
+    const vh = el("h3", "lp-sub", "Views");
+    vh.title = "The Radio rail's views, in your order: the first that holds it and has a level decides";
+    out.push(vh);
+    if (!vs.length) out.push(el("div", "dim small", "None shown"));
+    for (const v of vs) {
+      const links = [];
+      const edit = el("a", "btn sm quiet", "Edit");
+      edit.href = "#settings/radios/views";
+      edit.title = "Edit views (✎ on the Radio rail, or Settings › Radios › Views)";
+      links.push(edit);
+      if ((v.filter || {}).ours) {
+        const main = el("a", "btn sm quiet", "Main");
+        main.href = "#settings/radios/channels";
+        main.title = "Which channels are Main: Settings › Radios › Channels";
+        links.push(main);
+      }
+      const r = row(v.name, `view:${v.id}`, ...(v.id === "ours" ? links : []));
+      if (RV() && RV().badge) r.prepend(RV().badge(v));
+      r.querySelector(".trunc").title = viewTitle(v, v.name);
+      out.push(r);
+    }
     const srcs = st.sources || [];
     const systems = new Map();
     for (const s of srcs) if (!systems.has(s.system)) systems.set(s.system, s.system_label || s.system);
@@ -686,7 +792,7 @@ window.LivePlayer = (() => {
     add.append(pick, mhz, btn("sm", "Add", "Add the frequency", { act: "mhz" }));
     out.push(add);
     const foot = el("div", "lp-pfoot");
-    foot.append(btn("sm quiet", "Reset", "Our calls Priority, the rest Off", { act: "reset" }), el("span", "spacer"),
+    foot.append(btn("sm quiet", "Reset", `${(ourView() || { name: "Our calls" }).name} Priority, the rest Off`, { act: "reset" }), el("span", "spacer"),
                 el("span", "dim small", window.MePrefs && MePrefs._st && MePrefs._st.mode === "hub" ? "Yours, on every device" : "This browser"));
     out.push(foot);
     // drawn again on each change: the focus stays on the same control (a keyboard user is never dropped to the page)
@@ -718,11 +824,11 @@ window.LivePlayer = (() => {
   // ---- the Radio rail's per-channel control (radio-nav.js asks for it) -----------------------------------------------
   // A source's level: its own (src:) or, dimmed, what it gets from a broader rule; a menu to set it
   function sourceControl(s) {
-    const lv = C.sourceLevel(s, st.p);
+    const lv = C.sourceLevel(s, choices(), views(), ourView());
     const face = el("span", `lp-lv lp-${lv.effective}${lv.own ? " own" : ""}`, LVL_MARK[lv.effective]);
     const label = `Listen ${LVL_TEXT[lv.effective]}${lv.own ? "" : " (default)"}`;
     const items = () => {
-      const cur = C.sourceLevel(s, st.p);
+      const cur = C.sourceLevel(s, choices(), views(), ourView());
       return [...C.LEVELS.map((l) => ({ label: LVL_TEXT[l], checked: cur.own === l, run: () => setSource(s.key, l) })), "-",
               { label: "Default", checked: !cur.own, hint: LVL_TEXT[cur.inherited], run: () => setSource(s.key, "") }];
     };
@@ -739,12 +845,10 @@ window.LivePlayer = (() => {
   // ---- wiring --------------------------------------------------------------------------------------------------------
   // each control of its own (cad.js's $)
   $("#lp-on").addEventListener("click", toggleOn);
-  $("#rv-live").addEventListener("click", toggleOn);
   $("#lp-pp").addEventListener("click", playPause);
   $("#lp-skip").addEventListener("click", skip);
   $("#lp-mute").addEventListener("click", () => mute());
   $("#lp-ours").addEventListener("click", () => { st.p = { ...st.p, ours_only: !st.p.ours_only }; choicesChanged(); });
-  $("#lp-police").addEventListener("click", () => { st.p = { ...st.p, mute_police: !st.p.mute_police }; choicesChanged(); });
   $("#lp-set").addEventListener("click", () => { if (st.panel) closePanel(); else openPanel(); });
   $("#lp-off").addEventListener("click", () => setOn(false));
   $("#lp-go").addEventListener("click", goToRow);
