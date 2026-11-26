@@ -495,12 +495,15 @@ For a worker that runs its own llama-server (`llm_server`), the hub can name its
 whether it needs `--reasoning off`). Nothing in `worker.toml` changes.
 
 - **Same file as `worker.toml`'s** (by SHA-256: the 8B today): nothing downloaded, no restart; the hub sees the id.
-- **Another one:** its GGUF is downloaded to `models\managed` like a speech model's (allowed hosts, exact size and
-  SHA-256, never while gaming or paused). Then, with no LLM job in hand and not gaming, llama-server is stopped and
-  started again with that `-m` and its `--reasoning` (every other option as `llm_server` says), its hash checked
-  before its first start. Health shows its id and hash; its `vram_mb` is the LLM's share in the VRAM plan.
+- **Another one:** its GGUF is downloaded to `models\managed` through the same path as the speech models and the
+  [runtime builds](#runtime-updates-llamacpp-whispercpp) (allowed hosts, exact size and SHA-256, a disk-space check,
+  resumed, never while gaming or paused). Then, with no LLM job in hand or being claimed, not gaming, and no
+  llama.cpp switch under way, llama-server is stopped and started again with that `-m` and its `--reasoning` (every
+  other option as `llm_server` says), its hash checked before its first start. It gets LLM jobs only after the same
+  1-token test answer a new llama.cpp build passes. Health shows its id and hash; its `vram_mb` is the LLM's share
+  in the VRAM plan.
 - **Nothing named, `""`, an id the catalog doesn't have, or an older hub:** `worker.toml`'s LLM, as before.
-- **A failure** (download, hash, an exit, no answer within 3 minutes): `worker.toml`'s LLM again, the named one tried
+- **A failure** (download, hash, an exit, no answer within 3 minutes, a failed test answer): `worker.toml`'s LLM again, the named one tried
   again after 5 minutes, then 10, 20, 30. Out of VRAM three times in a row: parked `no room (VRAM)` until the budget,
   the hub's models or the free VRAM change. Any other failure the third time in a row: marked bad for 6 hours.
 - **Health:** `llm_state` is `ok`, or why not: `downloading`, `failed: out of VRAM (again in 5 min)`, `no room
