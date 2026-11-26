@@ -6,9 +6,13 @@ Tables (created IF NOT EXISTS here; no SCHEMA_VERSION bump):
     intel_events   one per event (sizeup/intel/model.py Event): no transcript text, ever; traffic_ids are references
     intel_hits     one per (traffic id, rule): every hit, shadow and below-threshold too (recall), 30 days
     intel_feedback a person's verdict on an event (useful | noise | wrong_place | wrong_type | late | missed |
-                   should_push: the Intel page's "should have pushed", a held event that was worth a push), a year
+                   should_push: the Intel page's "should have pushed", a held event that was worth a push; garbled |
+                   out_of_area | rule_to_add: a note's tags, sizeup/intel/notes.py, note_id its note), a year
+    intel_notes    people's notes on an event (sizeup/intel/notes.py): text, tags, corrections, "done / PR #"
+    intel_note_audit  every add, edit, delete and done of a note, before and after
 
-Events are kept 90 days (the radio log's own default for context traffic), hits 30.
+Events are kept 90 days (the radio log's own default for context traffic), hits 30; an event with a note is kept as
+long as its notes (a year: KEEP_NOTES_S), so the notes stay usable for tuning.
 
 intel_events.delivery: the last push's outcome at ntfy, JSON {ok, at, status, id} or {ok: false, at, status, error} ("":
 none yet), written by delivered() from the notify thread (sizeup/notify.py Notifier.send's done). Not an Event field:
@@ -28,7 +32,9 @@ from sizeup.intel.model import Event
 KEEP_EVENTS_S = 90 * 86400
 KEEP_HITS_S = 30 * 86400
 KEEP_FEEDBACK_S = 366 * 86400
-VERDICTS = ("useful", "noise", "wrong_place", "wrong_type", "late", "missed", "should_push")
+KEEP_NOTES_S = 366 * 86400
+VERDICTS = ("useful", "noise", "wrong_place", "wrong_type", "late", "missed", "should_push", "garbled", "out_of_area",
+            "rule_to_add")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS intel_events (
@@ -76,6 +82,26 @@ CREATE TABLE IF NOT EXISTS intel_feedback (
   operator TEXT NOT NULL DEFAULT '', at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS intel_feedback_event ON intel_feedback(event_id);
+CREATE TABLE IF NOT EXISTS intel_notes (
+  id INTEGER PRIMARY KEY,
+  event_id INTEGER NOT NULL,
+  text TEXT NOT NULL DEFAULT '',
+  tags TEXT NOT NULL DEFAULT '[]',                   -- notes.TAGS
+  corrected_category TEXT NOT NULL DEFAULT '', corrected_place TEXT NOT NULL DEFAULT '',
+  corrected_level TEXT NOT NULL DEFAULT '',
+  author TEXT NOT NULL DEFAULT '', author_email TEXT NOT NULL DEFAULT '',
+  created_at REAL NOT NULL, updated_at REAL NOT NULL,
+  done TEXT NOT NULL DEFAULT '', done_by TEXT NOT NULL DEFAULT '', done_at REAL   -- acted on: "PR #123", "rule added"
+);
+CREATE INDEX IF NOT EXISTS intel_notes_event ON intel_notes(event_id);
+CREATE INDEX IF NOT EXISTS intel_notes_created ON intel_notes(created_at);
+CREATE TABLE IF NOT EXISTS intel_note_audit (
+  id INTEGER PRIMARY KEY, note_id INTEGER NOT NULL, event_id INTEGER NOT NULL,
+  action TEXT NOT NULL,                              -- add | edit | delete | done
+  operator TEXT NOT NULL DEFAULT '', at REAL NOT NULL,
+  before TEXT NOT NULL DEFAULT '', after TEXT NOT NULL DEFAULT ''     -- the note as JSON ('' none)
+);
+CREATE INDEX IF NOT EXISTS intel_note_audit_note ON intel_note_audit(note_id);
 """
 
 JSON_COLS = ("rules", "alts", "traffic_ids")
@@ -149,6 +175,10 @@ class SqlEvents:
                 store.db.execute("ALTER TABLE intel_events ADD COLUMN delivery TEXT NOT NULL DEFAULT ''")
             if "fd" not in cols:                    # a table from before the FD check (engine._fire)
                 store.db.execute("ALTER TABLE intel_events ADD COLUMN fd TEXT NOT NULL DEFAULT ''")
+            fcols = {r[1] for r in store.db.execute("PRAGMA table_info(intel_feedback)")}
+            if "note_id" not in fcols:              # a note's tags as verdicts (sizeup/intel/notes.py)
+                store.db.execute("ALTER TABLE intel_feedback ADD COLUMN note_id INTEGER")
+                store.db.execute("CREATE INDEX IF NOT EXISTS intel_feedback_note ON intel_feedback(note_id)")
 
     @contextmanager
     def _w(self):
@@ -254,7 +284,10 @@ class SqlEvents:
 
     def prune(self, now: float) -> int:
         with self._w() as db:
-            n = db.execute("DELETE FROM intel_events WHERE last_at < ? AND status != 'open'", (now - KEEP_EVENTS_S,)).rowcount
+            n = db.execute("DELETE FROM intel_notes WHERE updated_at < ?", (now - KEEP_NOTES_S,)).rowcount
+            n += db.execute("DELETE FROM intel_note_audit WHERE at < ?", (now - KEEP_NOTES_S,)).rowcount
+            n += db.execute("DELETE FROM intel_events WHERE last_at < ? AND status != 'open' AND id NOT IN "
+                            "(SELECT event_id FROM intel_notes)", (now - KEEP_EVENTS_S,)).rowcount   # (a note keeps it)
             n += db.execute("DELETE FROM intel_hits WHERE at < ?", (now - KEEP_HITS_S,)).rowcount
             n += db.execute("DELETE FROM intel_feedback WHERE at < ?", (now - KEEP_FEEDBACK_S,)).rowcount
         return n
