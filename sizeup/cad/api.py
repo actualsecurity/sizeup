@@ -233,6 +233,9 @@ GET  /api/cad/comms?unit=&channel=&event=&pcfd=1&emergency=1&since=&until=&main_
                                           ?system= ?group= ?source= ?service= ?tier= ?dept= ?safety=1 ?mute= ?before=
                                           ?changed= ?at= gives one page {rows, older, newer, next, cursor, reload}
                                           (Cad.comms_query). Another system's rows: only to a viewer who may see them
+GET  /api/cad/radio-names              {rev, names, shorts, systems, freqs}: what every channel / talkgroup label on
+                                          the page shows (sizeup/radionames.py, static/radio-names.js); another
+                                          system's keys only to a reader who may see its traffic
 GET  /api/cad/comms/sources?rev=          the Radio page's tree: {live, sources: [{key, system, group, name, service,
                                           tier, ours, last, counts: [[minutes ago, calls]], emergency}], folders: the
                                           admins' folders (#607) | null} (Cad.comms_sources)
@@ -1345,6 +1348,8 @@ class CadApi:
                 return _json(200, self.cad.comms_query(parse_qs(query)))
             if path == "/api/cad/comms/sources":
                 return _json(200, self.cad.comms_sources(parse_qs(query)))
+            if path == "/api/cad/radio-names":        # one name per source, every label on the page (sizeup/radionames.py)
+                return _json(200, self.cad.radio_names())
             if path == "/api/cad/comms/activity":      # per-minute activity per source (#409); ?source=&hours= (24)
                 # which radios keyed an encrypted talkgroup: a verified, signed-in admin only (read_refused checks the
                 # admin when someone is signed in; with nobody verified, never: sourcekeys.may_see_context)

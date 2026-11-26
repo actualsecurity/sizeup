@@ -42,10 +42,19 @@ const S_RADIO_TABS = [["receivers", "Receivers"], ["channels", "Channels"], ["sq
 const S_RC_TABS = new Set(["receivers", "channels", "vocabulary", "stt"]);    // radio-controls.js's cards
 // Channels' display names (#607): the radio rail's own store (sizeup/cad/radiofolders.py), so a name set in either place
 // shows in both. The CAD's (the station's own page mounts RadioControls without: no names there)
+// ... and beside each name its short label for chips (sizeup/radionames.py: the settings section radio_shorts). One
+// name per channel: every chip and hover on every page reads these two (radio-names.js)
 const S_RC_NAMES = {
-  load: async () => (await api("GET", "/api/cad/comms/sources")).folders || { rev: "", names: {} },
+  load: async () => {
+    const [src, nm] = await Promise.all([api("GET", "/api/cad/comms/sources"), api("GET", "/api/cad/radio-names")]);
+    const f = src.folders || { rev: "", names: {} };
+    // (the rev radio-controls.js compares with the push: the folders' and the names')
+    return { rev: `${f.rev || ""}|${nm.rev || ""}`, names: f.names || {}, shorts: nm.shorts || {} };
+  },
   save: async (key, name) => (await api("POST", "/api/cad/settings/radio_folders", { action: "name", key, name, operator: operator() }))
     .radio_folders || { rev: "", names: {} },
+  saveShort: async (key, short) => (await api("POST", "/api/cad/settings/radio_folders", { action: "short", key, short, operator: operator() }))
+    .radio_shorts || {},
 };
 // ... and each source's service (fire, police, ...: the settings section radio_services), the rail's Edit sets it too
 const S_RC_SERVICES = {
@@ -865,7 +874,7 @@ function sUnnamed(d) {
     const tr = el("tr", "s-trow");
     tr.dataset.id = key;
     const playB = Icon.play(el("button", "play ro-ok"));
-    playB.title = u.has_audio ? `Play its latest page (${fmtTime(u.last)} ${u.channel}), tones and all` : "Recording expired (12 h)";
+    playB.title = u.has_audio ? `Play its latest page (${fmtTime(u.last)} ${(typeof chName === "function" ? chName(u) : u.channel)}), tones and all` : "Recording expired (12 h)";
     playB.disabled = !u.has_audio;
     playB.addEventListener("click", () => play(clipUrl({ id: u.page }, true)));
     const acts = sTd("s-t-act");

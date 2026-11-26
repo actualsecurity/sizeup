@@ -36,13 +36,15 @@ window.Radio = (() => {
     if (e.alias) return e.alias;
     return "";
   }
+  // a source's one name (cad.js chName: radio-names.js), its real label where that isn't loaded
+  const ch = (e) => (typeof chName === "function" ? chName(e) : String((e && e.channel) || ""));
   function label(e) {
     const w = who(e);
-    if (e.ended) return `${w || e.radio_id || "Radio"} ${e.channel} ended`;
-    if (w) return `TX ${w} ${e.channel}`;
-    if (e.system === "fm" && e.id_on_release) return `${e.channel} · ID on release`;   // MDC post-ID: known when the PTT is let go
-    if (e.system === "fm") return `${e.channel} open`;
-    return `TX ${e.channel}` + (e.radio_id ? ` radio ${e.radio_id}` : "");
+    if (e.ended) return `${w || e.radio_id || "Radio"} ${ch(e)} ended`;
+    if (w) return `TX ${w} ${ch(e)}`;
+    if (e.system === "fm" && e.id_on_release) return `${ch(e)} · ID on release`;   // MDC post-ID: known when the PTT is let go
+    if (e.system === "fm") return `${ch(e)} open`;
+    return `TX ${ch(e)}` + (e.radio_id ? ` radio ${e.radio_id}` : "");
   }
   function chipClass(e) {          // the strip's and the Overview's chip: rig, 60 Control, ended, no ID yet
     return "talk-chip" + (e.ended ? " ended" : "") + (e.rig ? " rig" : "") + (e.dispatcher ? " disp" : "")
@@ -80,7 +82,7 @@ window.Radio = (() => {
   const pairWord = (x) => pairName(x, true) || `unknown ${pairTones(x)}`;
   function pageWords(p) {
     const pairs = p.pairs || [];
-    return [p.channel, p.ended ? "Paged" : "Paging", ...(pairs.length ? [pairs.map(pairWord).join(" + ")] : []),
+    return [ch(p), p.ended ? "Paged" : "Paging", ...(pairs.length ? [pairs.map(pairWord).join(" + ")] : []),
             ...(p.phase === "voice" ? ["voice"] : [])].join(" · ");
   }
   function pageTags(tones) {
@@ -103,7 +105,7 @@ window.Radio = (() => {
   function pagingRow(p) {
     const r = el("div", "paging-row" + (p.ours ? " ours" : "") + (p.ended ? " ended" : ""));
     if (window.Icon) r.append(Icon("page"));
-    r.append(el("b", "", p.channel), el("span", "pg-what", p.ended ? "Paged" : "Paging"), ...pageTags(p.pairs));
+    r.append(el("b", "", ch(p)), el("span", "pg-what", p.ended ? "Paged" : "Paging"), ...pageTags(p.pairs));
     if (p.phase === "voice") r.append(el("span", "dim", "voice"));
     r.title = pageWords(p);
     return r;
@@ -236,7 +238,7 @@ window.Radio = (() => {
     let rang = false;
     for (const [rig, e] of fresh) {
       if (!want.has(rig)) continue;
-      toast(`${e.ended ? "" : "TX "}${rig} ${e.channel}${e.ended ? " ended" : ""}`,
+      toast(`${e.ended ? "" : "TX "}${rig} ${ch(e)}${e.ended ? " ended" : ""}`,
             [e.radio_id ? `radio ${e.radio_id}` : "", e.label || ""].filter(Boolean).join(", "));
       if (!rang) { ring(); rang = true; }
     }

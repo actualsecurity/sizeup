@@ -697,11 +697,11 @@ function fillQueueItem(li, inc) {
     }
     li.append(chips);
   }
-  if (live.length) li.append(el("div", "qs q-live", `TX ${live.map((e) => `${Radio.who(e) || "Radio"} ${e.channel}`).join(", ")}`));
+  if (live.length) li.append(el("div", "qs q-live", `TX ${live.map((e) => `${Radio.who(e) || "Radio"} ${chName(e)}`).join(", ")}`));
   if (o && o.radio) {
     const r = el("div", "qs q-last");
     const who = o.radio.rig || o.radio.talker || (o.radio.dispatcher ? "60 Control" : "radio");
-    r.append(el("span", "t", fmtTime(o.radio.start)), el("b", "", who), el("span", "dim", ` ${o.radio.channel}`),
+    r.append(el("span", "t", fmtTime(o.radio.start)), el("b", "", who), el("span", "dim", ` ${chName(o.radio)}`),
              o.radio.text ? el("span", "q", ` “${o.radio.text}”`) : el("span", "dim", " —"));
     r.title = r.textContent;
     li.append(r);
@@ -1029,6 +1029,11 @@ function renderSourcePages(inc) {
   }));
   show(box, pages.length > 0);
 }
+// A source's label and its hover: the one name everywhere (radio-names.js; sizeup/radionames.py): the short label on
+// chips, "System · Name (TG n)" on hover; the row's real label until the names have loaded (and where radio-names.js
+// isn't on the page). Display only: filters, links and comparisons keep t.channel.
+function chName(t) { return typeof RadioNames !== "undefined" ? RadioNames.short(t) : String((t && t.channel) || ""); }
+function chTitle(t) { return typeof RadioNames !== "undefined" ? RadioNames.title(t) : String((t && t.channel) || ""); }
 // A clip's URL: a page plays from where the voice starts (voice_at, a media fragment: nothing new on the server)
 // unless the tones are wanted too.
 function clipUrl(t, withTones) {
@@ -1287,7 +1292,9 @@ function radioRow(t, ctx = {}) {
   meta.append(b, el("span", "t", fmtTime(t.start, true)));
   const tag = Radio.rigTag({ rig: t.rig, radio_id: t.radio_id, unit: t.talker });
   if (tag) meta.append(tag);
-  meta.append(el("span", "chip src", t.channel));        // the channel once; never in the talker's place
+  const src = el("span", "chip src", chName(t));          // the channel once; never in the talker's place
+  src.title = chTitle(t);                                 // which system and talkgroup: never ambiguous
+  meta.append(src);
   if (t.mhz > 0) {                                        // the frequency it was heard on (an airband row, #260: NY
     const ctaf = +t.mhz === HPN_TOWER_MHZ && !hpnTowerOpenAt(t.start);   // Approach is 126.4 by day, 120.8 overnight)
     const f = el("span", "dim small", ctaf ? `${+t.mhz} CTAF` : `${+t.mhz}`);
@@ -1539,7 +1546,7 @@ async function nameTonesDialog(t, opts = {}) {
   head.querySelector("h2").id = "tone-form-title";
   const body = el("form", "dialog-body");
   const toneHow = "Each pair goes in the tone book under its places and service; this page is read again";
-  const pageLine = el("p", "dim small", `Page ${fmtTime(t.start, true)} ${t.channel} `);
+  const pageLine = el("p", "dim small", `Page ${fmtTime(t.start, true)} ${chName(t)} `);
   if (window.Help && Help.info) pageLine.append(Help.info(toneHow, "How tones are saved")); else pageLine.title = toneHow;
   body.append(pageLine);
   if (opts.ours) body.append(el("p", "warnbox small", `${oursNamedText(t)} · prefilled PC / RB: check which is whose`));
@@ -1720,7 +1727,7 @@ async function keepTx(t, iid, undo = false) {
   txChanged();
 }
 async function copyText(t) {
-  const text = `${fmtTime(t.start, true)} ${t.rig || t.talker || ""} (${t.channel}): ${t.text}`;
+  const text = `${fmtTime(t.start, true)} ${t.rig || t.talker || ""} (${chName(t)}): ${t.text}`;
   try {
     await navigator.clipboard.writeText(text);
   } catch (e) {                            // no clipboard API (http, an old browser): a hidden field
@@ -2123,7 +2130,7 @@ function renderOnUnits(inc) {
         .filter(([, t]) => t).map(([k, t]) => el("span", "", `${k} ${fmtTime(t, true)}`)));
       head.append(times, el("span", "spacer"));
       const talk = !a.cleared_at && Radio.talkingFor(a.name);
-      if (talk) head.append(el("span", "talk-badge", `${talk.ended ? "Ended" : "TX"} ${talk.channel}`));
+      if (talk) head.append(el("span", "talk-badge", `${talk.ended ? "Ended" : "TX"} ${chName(talk)}`));
       if (!a.cleared_at && onMap(a.name)) head.append(followBtn(a.name));
       if (!a.cleared_at && isOpen(inc)) {
         head.append(statusButtons({ id: a.unit_id, status: a.status, next: a.next, cmd: cmd !== a.name && cmd,
@@ -2288,7 +2295,7 @@ function renderDispatches(inc) {
       const meta = el("div", "meta");
       meta.append(el("span", "t", fmtTime(d.at, true)), el("span", `ek ${d.kind === "upgrade" ? "upgrade" : "dispatch"}`,
         DISPATCH_KINDS[d.kind] || d.kind || "dispatch"), d.operator ? opSpan(d.operator) : el("span", "", ""),
-      el("span", "", d.channel || ""));
+      el("span", "", d.channel ? chName({ channel: d.channel }) : ""));
       const tx = el("span", d.transmitted ? "txd" : "notx", d.transmitted ? "Transmitted" : "Not transmitted");
       if (!d.transmitted && d.tx_note) tx.title = d.tx_note;
       meta.append(tx);
@@ -2662,7 +2669,7 @@ async function dispatch() {
     try {
       const r = await api("POST", `/api/cad/incident/${inc.id}/dispatch`,
         { unit_ids: ids, operator: op, channel: $("#r-channel").value, full: $("#r-full").checked, remarks: $("#r-remarks").value });
-      const how = r.transmitted ? `transmitted on ${r.channel}` : "logged, not transmitted";
+      const how = r.transmitted ? `transmitted on ${chName({ channel: r.channel })}` : "logged, not transmitted";
       showSent(`${r.kind === "add-on" ? "Add-on" : "Dispatch"} #${r.dispatch_id}: ${how}`
         + (r.moved.length ? `. Moved ${r.moved.join(", ")}` : ""), r);
       $("#r-full").checked = false;
@@ -2696,7 +2703,7 @@ async function upgrade(e, previewOnly) {
       if (previewOnly) await showPreviewThenAudio(() => "Preview upgrade: not logged", `/api/cad/incident/${inc.id}/upgrade`, body);
       else {
         const r = await api("POST", `/api/cad/incident/${inc.id}/upgrade`, body);
-        const how = r.transmitted ? `transmitted on ${r.channel}` : "logged, not transmitted";
+        const how = r.transmitted ? `transmitted on ${chName({ channel: r.channel })}` : "logged, not transmitted";
         showSent(`Upgrade #${r.dispatch_id}: ${how}`, r);
         $("#upgrade-form").reset();
         show($("#upgrade-form"), false);
@@ -3809,7 +3816,7 @@ function renderUnits() {
         if (!BOARD) li.setAttribute("aria-expanded", String(cad.openUnit === u.id));
         if (u.spare) head.append(el("span", "chip spare", "spare"));
         if (talk) {
-          const tb = el("span", "talk-badge", `${talk.ended ? "Ended" : "TX"} ${talk.channel}`);
+          const tb = el("span", "talk-badge", `${talk.ended ? "Ended" : "TX"} ${chName(talk)}`);
           tb.title = [talk.radio_id ? `Radio ${talk.radio_id}` : "", talk.label || talk.alias || ""].filter(Boolean).join(", ");
           head.append(tb);
         }

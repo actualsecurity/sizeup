@@ -1744,13 +1744,13 @@ window.CadMap = (() => {
     if (live.length) {
       const l = el("div", "ov-live");
       l.append(el("b", "", "TX "),
-               el("span", "", live.map((e) => `${Radio.who(e) || "Radio"} ${e.channel}`).join(", ")));
+               el("span", "", live.map((e) => `${Radio.who(e) || "Radio"} ${chName(e)}`).join(", ")));
       li.append(l);
     }
     if (o.radio) {
       const r = el("div", "ov-radio");
       const who = o.radio.rig || o.radio.talker || (o.radio.dispatcher ? "60 Control" : "radio");
-      r.append(el("span", "t", fmtTime(o.radio.start)), el("b", "", who), el("span", "dim", ` ${o.radio.channel}`));
+      r.append(el("span", "t", fmtTime(o.radio.start)), el("b", "", who), el("span", "dim", ` ${chName(o.radio)}`));
       if (o.radio.text) r.append(el("span", "q", ` “${o.radio.text}”`));
       else r.append(el("span", "dim", " —"));
       li.append(r);

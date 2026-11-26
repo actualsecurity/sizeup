@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from sizeup import polly, sourcekeys, tiers
+from sizeup import polly, radionames, sourcekeys, tiers
 from sizeup.cad import airport, commonplaces, dispatcher, eta, export, feedtypes, mapview, radiofolders, runcards
 from sizeup.cad.activity import Activity
 from sizeup.cad.prefs import Prefs
@@ -533,10 +533,13 @@ class Cad:
                 # the Radio page's folders (#607): only their rev ("" the default); the rail asks its sources again when
                 # it moves (the folders themselves come with them, GET /api/cad/comms/sources)
                 "radio_folders": radiofolders.rev(self.radio_folders),
+                # one name per source (sizeup/radionames.py): only its rev ("" none); every page asks the names again
+                "radio_names": radionames.rev(),
                 # the admins' service per source: only their rev ("" none); both pages ask again when it moves
                 "radio_services": services_rev(self.radio_services),
                 # the county talkgroups an incident may be moved to ("+ channel", sizeup/cad/opchannel.py)
-                "op_channels": [{"tg": tg, "name": n} for tg, n in sorted(self.opchan.names().items())],
+                "op_channels": [{"tg": tg, "name": radionames.name({"talkgroup": tg, "channel": n})}
+                                for tg, n in sorted(self.opchan.names().items())],
             })
         st = self._state[1]
         now = self.clock()
@@ -2363,6 +2366,16 @@ class Cad:
         except Exception:  # noqa: BLE001
             return None
         return self.retag_services()
+
+    def radio_names(self) -> dict:
+        """GET /api/cad/radio-names: the names, shorts, system labels and frequencies every label on the page is made from
+        (sizeup/radionames.py), as this reader may know them."""
+        try:
+            radionames.use(systems={"analog": "Analog", "airband": "Airband", **{str(k): str(v) for k, v in self.source_systems().items()}},
+                           freqs=self.source_freqs())
+        except Exception:  # noqa: BLE001 - a hover's detail, never in the way of the names
+            pass
+        return radionames.for_viewer(bool(self.comms._sees_context()), hidden_labels=self.context_labels())
 
     def context_labels(self) -> list[str]:
         """The other P25 systems' labels ("Metro"): a heading named so is not shown to a reader who may not see them."""
