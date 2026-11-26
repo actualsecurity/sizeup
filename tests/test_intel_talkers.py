@@ -16,7 +16,7 @@ from sizeup.intel import place as P
 from sizeup.intel import rules as rules_mod
 from sizeup.intel import talkers as T
 from sizeup.intel.model import Place
-from tests.test_intel import KEY, engine, row
+from tests.test_intel import KEY, Clock, engine, row
 
 PC, RYE = "Port Chester", "Rye"         # two of the police pack's dispatch towns (data/intel/police.json, public)
 CONSOLE_ID, OFFICER_ID, OTHER_ID, READBACK_ID, BLANK_ID = "7000001", "7000002", "7000003", "7000004", "7000009"
@@ -56,8 +56,8 @@ def police(agency_towns=AGENCY_TOWNS, console_cue=None):
     return rules_mod.load_packs(overrides={"intel_packs": {"police": po}} if po else {})
 
 
-def labelled(radios=None, locate=None, agency_towns=AGENCY_TOWNS, console_cue=None):
-    kw = {"locate": locate} if locate is not None else {}
+def labelled(radios=None, locate=None, agency_towns=AGENCY_TOWNS, console_cue=None, clock=None):
+    kw = {**({"locate": locate} if locate is not None else {}), **({"clock": clock} if clock is not None else {})}
     e, sink = engine(packs=police(agency_towns, console_cue), **kw)
     e.talkers.radios = radios if radios is not None else FakeRadios()
     return e, sink
@@ -452,3 +452,38 @@ def test_an_answer_from_before_an_edit_is_never_cached():
     radios.name = real
     radios.labels[CONSOLE_ID] = "Example PD desk"
     assert t.of(r).label == "Example PD desk"
+
+
+# -- a tie by talker never goes through a dispatch console's radio ID (a multi-key-up row "a, b") -----------------------
+
+SAMPLE_CTRL, OFFICER_A, OFFICER_B = "7701", "7702", "7703"
+TOWNS_LABELS = {OFFICER_A: "Sampletown PD officer", OFFICER_B: "Othertown PD officer"}
+
+
+@pytest.mark.parametrize("labels", [
+    {SAMPLE_CTRL: "Sampletown PD ctrl", **TOWNS_LABELS},             # a labelled console (the registry says so)
+    TOWNS_LABELS,                                                     # a console nothing labels
+])
+def test_two_officers_answered_by_one_console_never_tie(labels):
+    t = 5000.0
+    e, _sink = labelled(FakeRadios(labels), clock=Clock(t + 16))
+    [ev] = e.feed(row("k", "respond for a male with a knife", t, radio_id=f"{OFFICER_A}, {SAMPLE_CTRL}"))
+    e.feed(row("r", "copy, 100 Example Ave", t + 14, radio_id=f"{OFFICER_B}, {SAMPLE_CTRL}"))
+    got = e.events.get(ev.id)
+    assert got.traffic_ids == ["k"] and got.precision == "none"
+
+
+def test_an_officers_own_read_back_still_ties_past_the_console():
+    t = 5000.0
+    e, _sink = labelled(FakeRadios({SAMPLE_CTRL: "Sampletown PD ctrl", **TOWNS_LABELS}), clock=Clock(t + 16))
+    [ev] = e.feed(row("k", "respond for a male with a knife", t, radio_id=f"{OFFICER_A}, {SAMPLE_CTRL}"))
+    [up] = e.feed(row("r", "copy, 100 Example Ave", t + 14, radio_id=OFFICER_A))
+    assert up.id == ev.id and up.traffic_ids == ["k", "r"]
+
+
+def test_is_console_is_one_radio_ids_label():
+    t = T.Talkers(FakeRadios({SAMPLE_CTRL: "Sampletown PD ctrl", **TOWNS_LABELS}))
+    assert t.is_console("mrrs", SAMPLE_CTRL) and t.is_console("mrrs", f" {SAMPLE_CTRL} ")
+    assert not t.is_console("mrrs", OFFICER_A) and not t.is_console("mrrs", "7709")
+    assert not t.is_console("westchester", SAMPLE_CTRL) and not t.is_console("", SAMPLE_CTRL)
+    assert not T.Talkers(None).is_console("mrrs", SAMPLE_CTRL)

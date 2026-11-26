@@ -3,6 +3,8 @@
     Talkers(radios=None)       radios: the CAD's registry (Registry: name(system, radio_id), rev); None: no radio is
                                named (replay, tests, a station), so every row reads exactly as before
     talkers.of(row) -> Talker | None
+    talkers.is_console(system, radio_id) -> bool
+                               that one radio is a labelled dispatch console (engine.py: never a tie by talker)
                                the first of the row's radio IDs ("a,b": one per key-up) the registry names, on another
                                P25 system only (OTHER_P25: an agency's radios, labelled by agency and role; the county's
                                and the fireground's IDs are our rigs, never a talker label here)
@@ -118,6 +120,18 @@ class Talkers:
             if t is not None:
                 return t
         return None
+
+    def is_console(self, system: str, rid: str) -> bool:
+        """The registry labels this one radio ID a dispatch console (another P25 system's only, as of())."""
+        reg = self.radios
+        system, rid = str(system or ""), str(rid or "").strip()
+        if reg is None or not system or not rid:
+            return False
+        from sizeup.cad.radios import OTHER_P25
+        if system not in OTHER_P25:
+            return False
+        t = self._one(reg, system, rid)
+        return bool(t is not None and t.console)
 
     def _one(self, reg, system: str, rid: str) -> Talker | None:
         rev = getattr(reg, "rev", None)

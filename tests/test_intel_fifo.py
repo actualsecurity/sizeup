@@ -442,9 +442,9 @@ def test_a_bare_radio_id_ties_the_call_out_and_its_read_back():
     t = 5000.0
     clock = Clock(t + 12)
     e, sink = engine(clock=clock)
-    [ev] = e.feed(row("k", "respond for a male with a knife", t, talker="1234567"))     # MRRS: a bare radio ID
+    [ev] = e.feed(row("k", "respond for a male with a knife", t, talker="7701", radio_id="7701"))   # MRRS: a bare ID
     assert ev.precision == "none"
-    [up] = e.feed(row("r", "copy, 100 Example Ave", t + 10, talker="1234567"))         # its read-back, 10 s later
+    [up] = e.feed(row("r", "copy, 100 Example Ave", t + 10, talker="7701", radio_id="7701"))  # its read-back, 10 s on
     assert up.id == ev.id and up.label_full == "100 Example Ave, Port Chester" and up.traffic_ids == ["k", "r"]
 
 
@@ -463,6 +463,9 @@ def test_two_rows_of_one_unknown_radio_14_s_apart_tie():
     ({"talker": "unknown MRRS radio", "radio_id": "7701"}, {"talker": "unknown MRRS radio", "radio_id": "7702"}),
     ({"talker": "Sampletown PD officer", "radio_id": "7701"}, {"talker": "Sampletown PD officer", "radio_id": "7702"}),
     ({"talker": "unknown MRRS radio"}, {"talker": "unknown MRRS radio"}),         # no radio ID: a generic text alone
+    ({"talker": "unknown MRRS radio", "radio_id": "-1"}, {"talker": "unknown MRRS radio", "radio_id": "-1"}),  # no ID
+    ({"talker": "unknown MRRS radio", "radio_id": "0, 7701"}, {"talker": "unknown MRRS radio", "radio_id": "0,7702"}),
+    ({"talker": "SAMPLE CTRL 2"}, {"talker": "SAMPLE CTRL 2"}),                  # a console's alias: the dispatcher
 ])
 def test_two_radios_with_one_stored_talker_text_never_tie(first, second):
     t = 5000.0
@@ -477,8 +480,10 @@ def test_two_radios_with_one_stored_talker_text_never_tie(first, second):
 @pytest.mark.parametrize("first, second", [
     ({"talker": "Sampletown PD officer", "radio_id": "7701"}, {"talker": "Sampletown PD officer", "radio_id": "7701"}),
     ({"talker": "Sampletown PD officer", "radio_id": "7701"}, {"talker": "unknown MRRS radio", "radio_id": "7701"}),
-    ({"talker": "unknown MRRS radio", "radio_id": "7702,7701"}, {"talker": "unknown MRRS radio", "radio_id": "7701"}),
+    ({"talker": "Sampletown PD officer", "radio_id": "7702, 7701"}, {"talker": "unknown MRRS radio", "radio_id": "7701"}),
+    ({"talker": "unknown MRRS radio", "radio_id": "7701"}, {"talker": "Sampletown PD officer", "radio_id": "7702,7701"}),
     ({"talker": "SAMPLE-4"}, {"talker": "SAMPLE-4"}),                  # no radio ID: an alias as heard ties as before
+    ({"talker": "SAMPLE-4", "radio_id": "-1"}, {"talker": "SAMPLE-4", "radio_id": "0"}),   # no ID decoded: the alias
 ])
 def test_one_radio_ties_whatever_its_stored_text(first, second):
     t = 5000.0
@@ -497,6 +502,17 @@ def test_one_radio_ties_whatever_its_stored_text(first, second):
     ("unknown MRRS radio", "", set()),
     ("Unknown", "", set()),
     ("", "", set()),
+    ("unknown MRRS radio", "-1", set()),                               # p25.UNKNOWN_SRC: no radio ID decoded
+    ("unknown MRRS radio", "0", set()),
+    ("SAMPLE-4", "-1", {"SAMPLE-4"}),                                  # ... then the alias as heard
+    ("unknown MRRS radio", "0, 7701", {"mrrs:7701"}),
+    ("unknown MRRS radio, unknown MRRS radio", "", set()),             # a multi-key row's joined texts
+    ("Unknown caller", "", set()),
+    ("unidentified", "", set()),
+    ("UNK", "", set()),
+    ("UNKNOWN-4", "", {"UNKNOWN-4"}),                                  # an alias that only starts so
+    ("Unk-4", "", {"Unk-4"}),
+    ("Unknown 12", "", {"Unknown 12"}),
 ])
 def test_the_talker_ties_of_a_row(talker, radio_id, ties):
     assert _talker_ties({"system": "mrrs", "radio_id": radio_id}, talker) == ties
