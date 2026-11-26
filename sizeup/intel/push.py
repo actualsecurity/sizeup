@@ -9,7 +9,10 @@
                                                                (house numbers under 100: never "0 blk"); a number the
                                                                transcript says after a plate / ID / unit / DOB word:
                                                                the street alone (fail closed); "location not heard"
-           "14:32 · high"                                      line 2: the time, the level
+           "14:32 · high · <Agency> PD dispatch"               line 2: the time, the level, who it was heard
+                                                               from (heard: the radio's label, Settings > Radios;
+                                                               engine.py _heard; only with push_pii on, and never
+                                                               the raw radio ID)
     Tags   the category's tag, police_car (a police pack)      Priority: the category's
     Click  <public url>/radio?view=police&intel=<id>           behind Cloudflare Access (the engine's LiveSink puts
                                                                the Listen link here instead, and this one on an
@@ -18,8 +21,9 @@
            second line ends "FD on scene · #26-000123" (fd_text), its priority the pack's fyi / safety priority. The FD
            cleared (a rekindle): a pre-alert as usual, its second line ending "FD here 14:05 · #26-000123"
 
-Not among its fields: transcript words, a talker, a roster alias, a radio ID, a plate, a date of birth, a person's
-name. Only the fields above go in, and (push_pii off) scrub() checks the result anyway: any of the event's
+Not among its fields: transcript words, a talker as heard (only an admin's label for the radio, push_pii on), a
+roster alias, a radio ID, a plate, a date of birth, a person's name. Only the fields above go in, and (push_pii off)
+scrub() checks the result anyway: any of the event's
 transmissions' talkers / radio IDs / units, a 6+ digit number (a radio ID), a plate-like letters-and-digits token, a
 date: the push is not sent and the event says suppressed "scrub" (logged without the text).
 
@@ -107,9 +111,10 @@ def fd_text(fd: str, number: str = "", at=None, tz=None) -> str:
 
 
 def compose(ev, pack_label: str, cat: dict, public_url: str = "", tz=None, doubtful: bool = False,
-            number: str = "", fd_at=None) -> dict:
+            number: str = "", fd_at=None, heard: str = "") -> dict:
     """{title, body, tags, priority, click} for the event (never the transcript). number: the incident it is linked
-    to (an FYI's "FD on scene · #<number>"); fd_at: when the FD cleared it ("FD here HH:MM")."""
+    to (an FYI's "FD on scene · #<number>"); fd_at: when the FD cleared it ("FD here HH:MM"); heard: who it was heard
+    from, as Settings > Radios labels the radio ("" none)."""
     if cat.get("highway"):
         return _highway(ev, pack_label, cat, public_url, tz)
     town = ev.town or ""
@@ -119,8 +124,9 @@ def compose(ev, pack_label: str, cat: dict, public_url: str = "", tz=None, doubt
         title += " ·m"                        # the local model raised it, not the rules alone (backing.py)
     where = where_text(ev, doubtful)
     when = datetime.fromtimestamp(ev.first_at, tz).strftime("%H:%M") if ev.first_at else ""
-    # terse, data-first (two lines on a lock screen): where; then when, the level, the FD
-    body = "\n".join(x for x in (where or "location not heard", " · ".join(x for x in (when, ev.level, fd) if x)) if x)
+    # terse, data-first (two lines on a lock screen): where; then when, the level, the FD, who it was heard from
+    heard = " ".join(str(heard or "").split())
+    body = "\n".join(x for x in (where or "location not heard", " · ".join(x for x in (when, ev.level, fd, heard) if x)) if x)
     tags = [t for t in (cat.get("tag") or "", DOMAIN_TAG.get(ev.domain, "")) if t]
     click = ""
     if public_url and ev.id is not None:

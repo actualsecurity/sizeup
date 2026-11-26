@@ -50,7 +50,7 @@ import hashlib
 import json
 from datetime import datetime
 
-from sizeup import sourcekeys
+from sizeup import radionames, sourcekeys
 from sizeup.cad import addrkey
 from sizeup.cad.store import TZ, CadError
 from sizeup.intel.model import lowest
@@ -179,8 +179,10 @@ def _window(cad, found: list[dict], window_s: float, evidence: set[str]) -> dict
         t["evidence"] = r["id"] in evidence
         t["related"] = r.get("channel") not in chans
         items.append(t)
-    related = list(dict.fromkeys(r["channel"] for r in rows if r.get("channel") not in chans))
-    return {"window_s": window_s, "from": lo, "to": hi, "channels": chans, "related_channels": related,
+    # what the page says: each channel's one name (sizeup/radionames.py); the real labels stay what is matched above
+    shown = list(dict.fromkeys(radionames.short(r) for r in found if r.get("channel")))
+    related = list(dict.fromkeys(radionames.short(r) for r in rows if r.get("channel") and r.get("channel") not in chans))
+    return {"window_s": window_s, "from": lo, "to": hi, "channels": shown, "related_channels": related,
             "capped": {"before": len(before) >= CAP["before"], "after": len(after) >= CAP["after"] + len(evidence)},
             "items": items,
             "empty": "" if items else f"nothing else heard within {window_s / 60:g} min"}

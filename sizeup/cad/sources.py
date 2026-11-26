@@ -3944,7 +3944,7 @@ class Sources:
             cur = db.execute("INSERT OR IGNORE INTO incoming (ref, at, kind, source, text, until) VALUES (?, ?, 'radio', ?, ?, ?)",
                              (tid, t["start"], t["channel"], text, t["start"] + INCOMING_S))
         if cur.rowcount:
-            self.log(f"incident sources: possible incoming ({t['channel']}): {text}")
+            self.log(f"incident sources: possible incoming ({t['channel']}): {tid}")     # (never the words)
             self.poke("radio pre-alert")
         return self.store.one("SELECT * FROM incoming WHERE ref = ?", (tid,))
 

@@ -144,6 +144,9 @@ prompt = ""                        # optional vocabulary hint (can make the mode
 talker_prompt = "off"              # "ids": hint each call with who keyed up ("77 Alpha 4, 60 Control"); "ids+time": also its HHMM
 # time_channels = [111, 113, 303, 103, 305, 307, 105, 107, 309, 311, 325, 327, 329, 331]   # the hub checks the dispatcher's
 #                                  # trailing HHMM against the air time here (#727, sizeup/stt_time.py; Fire/EMS 10-23 by default; [] = off)
+# correct_channels = [111, 113, 303, 103, 305, 307, 105, 107, 309, 311, 325, 327, 329, 331]   # post-ASR vocabulary
+#                                  # correction here (#879, sizeup/stt_correct.py; the county Fire/EMS dispatch by default; [] = off)
+# correct_towns = ["Port Chester", "Rye Brook", "Rye"]   # ... into these towns' streets only (the term list's "streets:")
 # Amazon Transcribe streaming (docs/cloud.md "Speech-to-text per channel"). It runs on the hub
 # (deploy/hub/config.hub.toml: aws = true); a station forwarding to the hub needs nothing here.
 # All-in-one with AWS credentials in the environment could set aws = true too, and needs SIZEUP_ALLOW_OUTBOUND=1 for it

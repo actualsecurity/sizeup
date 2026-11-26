@@ -12,6 +12,7 @@
 //   MapFollow.Lights     one per layer: the mark picked from a list or a chip (pick: ringed for HIGHLIGHT_MS once
 //                        centred) and the ones whose row or card is hovered (hover: a wider ring).
 //   MapFollow.shownMap   the first of a layer's maps on screen.
+//   MapFollow.screen     whether a map is on screen, kept (not read each frame), and a callback when it comes on.
 //   MapFollow.LiveInfo   a mark's box kept up to date while it is open (trains, aircraft; #375): view() gives its
 //                        lines, foot, subtitle and ⓘ again once a second (LIVE_MS) and on refresh() (a new fix);
 //                        only what changed is swapped, in place (no rebuild, no focus moved): the ⓘ's text, not
@@ -229,9 +230,37 @@ window.MapFollow = (() => {
     }
   }
 
-  // the first of these maps on screen (each {map}: a MapLibre map)
+  // the first of these maps on screen (each {map}: a MapLibre map); read now, not screen()'s kept flag: on a click,
+  // just after the Overview was opened (its observer not yet called back)
   function shownMap(maps) {
     return [...maps].find((m) => { try { return !!m.map.getContainer().offsetParent; } catch (_) { return false; } }) || null;
+  }
+
+  // Whether a map is on screen (laid out: its box has an offsetParent; an Expand shut has none), kept, not read on every
+  // frame (#887: a layout read per map per frame): read once, then again only when MapLibre resizes the map or its box's
+  // intersection with the viewport changes (an IntersectionObserver: an Expand opened or shut). onShow(): each time it
+  // comes on screen (a loop asleep draws it at once). Without an IntersectionObserver: read on each ask.
+  const screens = new WeakMap();
+  function screen(map, onShow) {
+    let s = screens.get(map);
+    if (!s) {
+      const el = map.getContainer();
+      const read = () => { try { return !!el.offsetParent; } catch (_) { return false; } };
+      s = { on: read(), subs: new Set(), shown: null };
+      const check = () => {
+        const was = s.on;
+        s.on = read();
+        if (s.on && !was) for (const f of [...s.subs]) { try { f(); } catch (e) { console.error(e); } }
+      };
+      if (typeof IntersectionObserver === "function") {
+        try { new IntersectionObserver(check).observe(el); s.shown = () => s.on; } catch (_) { /* an older browser */ }
+      }
+      if (!s.shown) s.shown = () => (s.on = read());
+      try { map.on("resize", check); } catch (_) { /* */ }
+      screens.set(map, s);
+    }
+    if (onShow) s.subs.add(onShow);
+    return s;
   }
 
   // a drag of the viewer's: a mouse, or one finger (two are a pinch: a zoom round the mark)
@@ -243,5 +272,5 @@ window.MapFollow = (() => {
 
   const takeMap = (map) => { try { map.fire("sizeup:takemap"); } catch (_) { /* */ } };
 
-  return { Follower, Lights, LiveInfo, shownMap, takeMap, ago, LIVE_MS, FOLLOW_ZOOM, PAN_MS, EASE_MS, HIGHLIGHT_MS };
+  return { Follower, Lights, LiveInfo, shownMap, screen, takeMap, ago, LIVE_MS, FOLLOW_ZOOM, PAN_MS, EASE_MS, HIGHLIGHT_MS };
 })();

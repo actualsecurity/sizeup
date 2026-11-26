@@ -26,7 +26,7 @@
   const onto = (h) => (h.onto && h.incident_number ? ` on ${h.incident_number}` : "");
 
   function heard(h) {
-    return `Heard ${hms(h.heard_at)} on ${h.channel}${h.who === "talker" ? ` from ${h.unit}'s radio` : ""}: “${h.text}”`
+    return `Heard ${hms(h.heard_at)} on ${(typeof chName === "function" ? chName(h) : h.channel)}${h.who === "talker" ? ` from ${h.unit}'s radio` : ""}: “${h.text}”`
       + (h.onto ? `\nAccepting puts ${h.unit} on ${h.incident_number || "that event"}` : "");
   }
 

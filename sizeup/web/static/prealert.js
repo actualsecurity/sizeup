@@ -7,8 +7,9 @@
 //                                            60 Control feed, no Dismiss; deps: {api, operator, time, readonly}
 //   PreAlert.badge(node, pa)                 the header (console and board): "Phone ringing 0:42"
 //   PreAlert.notify(pa)                      a toast and the chime per new ring (radio.js alert settings)
+//   PreAlert.ticking(node, at)               an age that ticks (incoming.js's too)
 //
-// The ages tick here (every [data-pa-at]), on the server's clock.
+// The ages tick here (each node from ticking(), [data-pa-at]), on the server's clock.
 "use strict";
 
 window.PreAlert = (() => {
@@ -25,16 +26,23 @@ window.PreAlert = (() => {
     const m = Math.floor(s / 60);
     return `${m}:${String(s % 60).padStart(2, "0")}`;
   }
+  // the ages on the page: only the nodes made here (and by incoming.js), not a search of the whole page every second;
+  // a node taken off the page is let go at the next tick
+  const ages = new Set();
   function ticking(node, at) {
     node.dataset.paAt = String(at);
     node.textContent = age(at);
+    ages.add(node);
     return node;
   }
   function clock(pa) {
     if (pa && typeof pa.time === "number") st.skew = pa.time - Date.now() / 1000;
   }
   setInterval(() => {
-    for (const n of document.querySelectorAll("[data-pa-at]")) n.textContent = age(Number(n.dataset.paAt));
+    for (const n of ages) {
+      if (n.isConnected) n.textContent = age(Number(n.dataset.paAt));
+      else ages.delete(n);
+    }
   }, 1000);
 
   const open = (pa) => (pa && pa.open) || [];
@@ -118,5 +126,5 @@ window.PreAlert = (() => {
     if (st.seen.size > 200) st.seen = new Set(items.map((p) => p.id));
   }
 
-  return { column, badge, notify };
+  return { column, badge, notify, ticking };
 })();

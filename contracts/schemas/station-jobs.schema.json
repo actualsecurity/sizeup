@@ -258,6 +258,7 @@
             "catch_up",
             "set_adsb_receiver",
             "set_antenna_groups",
+            "replace_sdr",
             "sources_poll_now",
             "reception_post",
             "reception_sample_b64",
@@ -476,6 +477,26 @@
           "if": {
             "properties": {
               "fn": {
+                "const": "replace_sdr",
+                "description": "The job calls replace_sdr."
+              }
+            },
+            "required": [
+              "fn"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/call.replace_sdr"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "fn": {
                 "const": "sources_poll_now",
                 "description": "The job calls sources_poll_now."
               }
@@ -634,20 +655,22 @@
       ]
     },
     "call.set_talkgroup": {
-      "description": "App.set_talkgroup(tg, record=None, main=None, tier=None, system=\"\"): a talkgroup's switches. The hub sends [tg, record, main] for the county system's, and [tg, record, main, tier, system] when a tier or another system is named, but only to a station whose status has `p25_systems` (an older one raises TypeError on five arguments). Result: null, else why not.",
+      "description": "App.set_talkgroup(tg, record=None, main=None, tier=None, system=\"\", transcribe=None, alerts=None): a talkgroup's switches. The hub sends [tg, record, main] for the county system's, and [tg, record, main, tier, system] when a tier or another system is named, but only to a station whose status has `p25_systems` (an older one raises TypeError on five arguments). It never sends transcribe / alerts: it writes them as the tier they make (tiers.from_switches). Result: null, else why not.",
       "x-names": [
         "tg",
         "record",
         "main",
         "tier",
-        "system"
+        "system",
+        "transcribe",
+        "alerts"
       ],
       "x-forms": [
         3,
         5
       ],
       "minItems": 1,
-      "maxItems": 5,
+      "maxItems": 7,
       "prefixItems": [
         {
           "type": "integer",
@@ -692,6 +715,20 @@
         {
           "type": "string",
           "description": "system: the P25 system's name; \"\" for the county's."
+        },
+        {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "transcribe: another system's Transcribe switch, written as its tier; never sent by the hub."
+        },
+        {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "alerts: another system's Alerts switch, written as its tier; never sent by the hub."
         }
       ]
     },
@@ -1092,6 +1129,47 @@
         {
           "type": "string",
           "description": "confirm: the station's question, word for word, as the person confirmed it. The station refuses it if its question has changed since."
+        }
+      ]
+    },
+    "call.replace_sdr": {
+      "description": "App.replace_sdr(missing, new=\"\", action=\"use\", by=\"person\"): a dongle swapped for a new one (sizeup/radio/replace.py). From #903 on. \"use\": the gone dongle's job, and its place in its antenna group, go to the new one; \"not_now\": its offer is not made again for 6 h; \"drop\": a gone dongle out of its antenna group. The hub sends all four: Health's or the console's answer with by `person`, the hub's auto-replace (sizeup/cloud/dongleswap.py) with by `auto`. Result: null, else why not. A station from before #903 answers `not allowed from the hub`.",
+      "x-names": [
+        "missing",
+        "new",
+        "action",
+        "by"
+      ],
+      "x-forms": [
+        4
+      ],
+      "minItems": 1,
+      "maxItems": 4,
+      "prefixItems": [
+        {
+          "type": "string",
+          "description": "missing: the gone dongle's serial."
+        },
+        {
+          "type": "string",
+          "description": "new: the new dongle's serial, one the station offers for `missing` now (else refused); \"\" for not_now and drop."
+        },
+        {
+          "type": "string",
+          "description": "action: what to do.",
+          "x-known": [
+            "use",
+            "not_now",
+            "drop"
+          ]
+        },
+        {
+          "type": "string",
+          "description": "by: who asked; anything but `auto` counts as `person`.",
+          "x-known": [
+            "person",
+            "auto"
+          ]
         }
       ]
     },
