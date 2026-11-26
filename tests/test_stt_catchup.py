@@ -396,10 +396,11 @@ def test_nothing_is_read_or_written_at_start():
 # -- the radio log: which rows, in which order ---------------------------------------------------------------------
 
 
-def record(app, tid, start, *, status="skipped", model=f"m.bin ({SHED_WHY})", tg=None, system="", tier="", seconds=2.0):
+def record(app, tid, start, *, status="skipped", model=f"m.bin ({SHED_WHY})", tg=None, system="", tier="", seconds=2.0,
+           **kw):
     app.cad.comms.record({"id": tid, "start": start, "end": start + seconds, "source": "Chan" if tg is None else "",
                           "talkgroup": tg, "system": system, "tier": tier, "unit": "", "text": "", "status": status,
-                          "model": model})
+                          "model": model, **kw})
 
 
 def test_the_shed_rows_alert_tier_first_then_newest_their_keys_and_their_tries(tmp_path):
@@ -665,6 +666,431 @@ def test_a_catch_up_retext_of_a_context_row_calls_neither_hook(tmp_path):
         assert heard == {"text": ["fm-1"], "context": ["pd-1"]}
     finally:
         app.stop()
+
+
+def test_a_catch_up_retext_with_intel_tells_the_intel_hook_alone(tmp_path):
+    """Comms.retext intel=True (a catch-up or a late row on a push source): another system's row to on_context_text,
+    ours to on_intel_text, once each with its own id; on_text never; a late row (#747) too, beside on_late_text."""
+    from sizeup.app import App
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    try:
+        comms, now = app.cad.comms, time.time()
+        assert comms.on_intel_text == app.cad.intel.consider                      # wired to intel alone
+        record(app, "pd-1", now - 600, tg=9211, system="mrrs", tier="alert")
+        record(app, "fm-1", now - 600)
+        record(app, "pd-late", now - 600, tg=9211, system="mrrs", tier="alert", late=True)
+        record(app, "fm-late", now - 600, late=True)
+        heard = {"text": [], "context": [], "intel": [], "late": []}
+        comms.on_text, comms.on_context_text, comms.on_intel_text, comms.on_late_text = (
+            heard["text"].append, heard["context"].append, heard["intel"].append, heard["late"].append)
+        assert comms.retext("pd-1", "Car 12 out with one at the plaza", "done", "m.bin", notify=False, intel=True)
+        assert comms.retext("fm-1", "Car 12 clear of the scene", "done", "m.bin", notify=False, intel=True)
+        assert heard == {"text": [], "context": ["pd-1"], "intel": ["fm-1"], "late": []}
+        assert comms.retext("pd-late", "Car 12 clear", "done", "m.bin", notify=False, intel=True, late=True)
+        assert comms.retext("fm-late", "Car 12 clear", "done", "m.bin", intel=True, late=True)      # a late retext
+        assert heard == {"text": [], "context": ["pd-1", "pd-late"], "intel": ["fm-1", "fm-late"], "late": ["fm-late"]}
+        # a non-quiet, non-late retext: its usual hook alone (which tells intel itself), never twice
+        assert comms.retext("pd-1", "Car 12 clear", "done", "m.bin", intel=True)
+        assert heard["context"] == ["pd-1", "pd-late", "pd-1"] and heard["intel"] == ["fm-1", "fm-late"]
+        lates = {r["id"]: r["late"] for r in app.cad.store.q("SELECT id, late FROM radio_traffic")}
+        assert lates == {"pd-1": 0, "fm-1": 0, "pd-late": 1, "fm-late": 1}          # kept through the retexts
+    finally:
+        app.stop()
+
+
+def test_a_catch_up_on_a_push_source_reaches_intel_and_nothing_else(tmp_path, monkeypatch):
+    """App._retext quiet=True (every catch-up path): a row on a source intel pushes from (sizeup.intel.is_push_source)
+    goes to the intel hook once, under its own id, its air time untouched; a row on any other source to no hook. Both
+    stay quiet otherwise: no on_text (status hints, possible incoming, dispatch steps), no alarm or ATC pre-alert, and
+    the retext event still says "catchup"."""
+    from sizeup import intel
+    from sizeup.app import App
+    asked = []
+
+    def push(key, kind=""):
+        asked.append(key)
+        return key in (PD, "Chan")
+
+    monkeypatch.setattr(intel, "is_push_source", push)
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    try:
+        comms, now = app.cad.comms, time.time()
+        record(app, "pd-1", now - 600, tg=9211, system="mrrs", tier="alert")      # a push source, another system's
+        record(app, "fm-1", now - 500)                                             # a push source, ours ("Chan")
+        record(app, "pd-txt", now - 400, tg=9570, system="mrrs", tier="text")     # not a push source
+        starts = {r["id"]: r["start"] for r in app.cad.store.q("SELECT id, start FROM radio_traffic")}
+        heard = {"text": [], "context": [], "intel": []}
+        comms.on_text, comms.on_context_text, comms.on_intel_text = (heard["text"].append, heard["context"].append,
+                                                                     heard["intel"].append)
+        loud, events = [], []
+        monkeypatch.setattr(app, "_alarm", lambda *a, **k: loud.append(("alarm", a)))
+        monkeypatch.setattr(app, "_atc", lambda *a, **k: loud.append(("atc", a)))
+        monkeypatch.setattr(app, "_emit", lambda kind, data, clip=None: events.append((kind, data)))
+        for tid in ("pd-1", "fm-1", "pd-txt"):
+            app._retext(tid, "Car 12 back in service", "done", 0.9, "m.bin", why="catch-up", quiet=True)
+        assert heard == {"text": [], "context": ["pd-1"], "intel": ["fm-1"]}
+        assert set(asked) == {PD, "Chan", "p25:mrrs:9570"}
+        assert loud == [] and [k for k, _ in events] == ["retext"] * 3 and all(d.get("catchup") for _, d in events)
+        rows = {r["id"]: r for r in app.cad.store.q("SELECT id, start, text FROM radio_traffic")}
+        assert {i: r["start"] for i, r in rows.items()} == starts                  # same ids, air times untouched
+        assert all(r["text"] == "Car 12 back in service" for r in rows.values())
+        # no words on a row that had some: intel too (to withdraw what it scored); on one that never had any: nothing
+        heard["context"].clear()
+        record(app, "pd-2", now - 300, tg=9211, system="mrrs", tier="alert")
+        app._retext("pd-1", "", "no_speech", None, "m.bin", why="catch-up", quiet=True)
+        app._retext("pd-2", "", "no_speech", None, "m.bin", why="catch-up", quiet=True)
+        assert heard == {"text": [], "context": ["pd-1"], "intel": ["fm-1"]}
+        heard["context"].clear()
+        # the same rows re-run by a person (not quiet): their usual hooks, as before
+        app._retext("pd-1", "Car 12 clear", "done", 0.9, "m.bin")
+        app._retext("pd-txt", "Car 12 clear", "done", 0.9, "m.bin")
+        assert heard["context"] == ["pd-1", "pd-txt"] and heard["intel"] == ["fm-1"]
+    finally:
+        app.stop()
+
+
+def test_a_late_catch_up_on_a_push_source_reaches_intel_with_late_on_its_row(tmp_path, monkeypatch):
+    """A #747 late row: its late column is 1 from Comms.record (0 for any other row) and stays through a re-record
+    without the flag. Caught up quietly on a push source, it reaches the intel hook once, same id, same air time (intel
+    scores it, never pushes it); on any other source, no hook at all."""
+    from sizeup import intel
+    from sizeup.app import App
+    monkeypatch.setattr(intel, "is_push_source", lambda key, kind="": key == PD)
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    try:
+        comms, now = app.cad.comms, time.time()
+        record(app, "pd-late", now - 900, tg=9211, system="mrrs", tier="alert", late=True)     # a push source
+        record(app, "txt-late", now - 800, tg=9570, system="mrrs", tier="text", late=True)    # not one
+        record(app, "pd-now", now - 700, tg=9211, system="mrrs", tier="alert")
+        record(app, "pd-late", now - 900, tg=9211, system="mrrs", tier="alert")               # again, without the flag
+        row = lambda tid: app.cad.store.one("SELECT start, late FROM radio_traffic WHERE id = ?", (tid,))  # noqa: E731
+        assert (row("pd-late")["late"], row("txt-late")["late"], row("pd-now")["late"]) == (1, 1, 0)
+        heard = {"text": [], "context": [], "intel": [], "late": []}
+        comms.on_text, comms.on_context_text, comms.on_intel_text, comms.on_late_text = (
+            heard["text"].append, heard["context"].append, heard["intel"].append, heard["late"].append)
+        loud = []
+        monkeypatch.setattr(app, "_alarm", lambda *a, **k: loud.append("alarm"))
+        monkeypatch.setattr(app, "_atc", lambda *a, **k: loud.append("atc"))
+        for tid in ("pd-late", "txt-late"):
+            app._retext(tid, "Car 12 out with one at the plaza", "done", 0.9, "m.bin", why="catch-up", quiet=True,
+                        late=True)
+        assert heard == {"text": [], "context": ["pd-late"], "intel": [], "late": []} and loud == []
+        assert row("pd-late")["start"] == now - 900 and row("pd-late")["late"] == 1     # air time and the flag kept
+    finally:
+        app.stop()
+
+
+def test_an_unclear_catch_up_on_a_scored_push_source_row_reaches_intel(tmp_path, monkeypatch):
+    """A row intel scored, caught up again as unclear (sizeup/stt_quality.py: no text, the words kept apart): the intel
+    hook hears it once, under its own id, so intel can withdraw what it scored; nothing else hears it."""
+    from sizeup import intel, stt_quality
+    from sizeup.app import App
+    monkeypatch.setattr(intel, "is_push_source", lambda key, kind="": key == PD)
+    monkeypatch.setattr(stt_quality, "assess", lambda *a, **k: "loop")
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    try:
+        comms, now = app.cad.comms, time.time()
+        record(app, "pd-1", now - 600, tg=9211, system="mrrs", tier="alert", status="done", model="m.bin",
+               text="Car 12 out with one at the plaza")
+        heard = {"text": [], "context": [], "intel": []}
+        comms.on_text, comms.on_context_text, comms.on_intel_text = (heard["text"].append, heard["context"].append,
+                                                                     heard["intel"].append)
+        app._retext("pd-1", "thank you thank you thank you", "done", 0.9, "m.bin", why="catch-up", quiet=True)
+        r = app.cad.store.one("SELECT text, status FROM radio_traffic WHERE id = 'pd-1'")
+        assert (r["text"], r["status"]) == ("", stt_quality.UNCLEAR)
+        assert heard == {"text": [], "context": ["pd-1"], "intel": []}
+    finally:
+        app.stop()
+
+
+@pytest.mark.parametrize("chan, want_key, want_kind", [
+    ({"tg": 307, "system": "westchester"}, "tg:307", ""),     # the county's talkgroup: its tg:<n> key, no kind
+    ({"source": "HPN Tower"}, "HPN Tower", "airband"),       # an airband channel: its label and kind
+    ({"source": "FG1"}, "FG1", "traffic"),                   # an analog channel of ours
+])
+def test_a_catch_up_asks_is_push_source_with_the_channels_key_and_kind(tmp_path, monkeypatch, chan, want_key,
+                                                                       want_kind):
+    from sizeup import intel
+    from sizeup.app import App
+    from sizeup.config import ChannelCfg
+    from tests.test_cloud import CHANNELS
+    asked = []
+
+    def push(key, kind=""):
+        asked.append((key, kind))
+        assert (key, kind) == (want_key, want_kind)
+        return True
+
+    monkeypatch.setattr(intel, "is_push_source", push)
+    app = App(base(clips_dir=str(tmp_path / "clips"), channels=CHANNELS + (ChannelCfg("HPN Tower", 118.575, "airband"),)))
+    try:
+        comms, now = app.cad.comms, time.time()
+        source = chan.get("source", "")
+        comms.record({"id": "row-1", "start": now - 600, "end": now - 598, "source": source,
+                      "talkgroup": chan.get("tg"), "system": chan.get("system", ""), "unit": "", "text": "",
+                      "status": "skipped", "model": f"m.bin ({SHED_WHY})",
+                      **({"mhz": 118.575} if want_kind == "airband" else {})})
+        heard = {"text": [], "context": [], "intel": []}
+        comms.on_text, comms.on_context_text, comms.on_intel_text = (heard["text"].append, heard["context"].append,
+                                                                     heard["intel"].append)
+        monkeypatch.setattr(app, "_atc", lambda *a, **k: None)
+        app._retext("row-1", "Engine 60 responding", "done", 0.9, "m.bin", why="catch-up", quiet=True)
+        assert asked == [(want_key, want_kind)]
+        assert heard == {"text": [], "context": [], "intel": ["row-1"]}     # ours (the county's, airband, analog)
+    finally:
+        app.stop()
+
+
+def test_a_late_row_recorded_transcribed_on_a_push_source_reaches_intel_and_the_late_hook(tmp_path, monkeypatch):
+    """A #747 late row that reaches Comms.record with its words: on a push source, the intel hook (ours on_intel_text,
+    another system's on_context_text) once, same id, its air start and late = 1, beside on_late_text for ours; on any
+    other source, on_late_text only; empty or unclear words reach no intel hook. The check runs off store.lock."""
+    from sizeup import intel
+    from sizeup.app import App
+    locked = []
+
+    def push(key, kind=""):
+        locked.append(owned())                                  # held by this thread (locked(): by any thread)
+        return key in (PD, "Chan")
+
+    monkeypatch.setattr(intel, "is_push_source", push)
+    if not hasattr(threading.RLock(), "_is_owned"):
+        pytest.skip("this Python's RLock can't say whether the current thread holds it")
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    lock = app.cad.store.lock
+    owned = lock._is_owned
+    try:
+        comms, now = app.cad.comms, time.time()
+        assert comms.intel_pushes == app._intel_source
+        with lock:
+            assert owned()                                      # (the check itself works)
+        heard = {"text": [], "context": [], "intel": [], "late": []}
+        comms.on_text, comms.on_context_text, comms.on_intel_text, comms.on_late_text = (
+            heard["text"].append, heard["context"].append, heard["intel"].append, heard["late"].append)
+        words = {"status": "done", "model": "m.bin", "text": "Car 12 out with one at the plaza", "late": True}
+        record(app, "fm-late", now - 900, **words)                                            # ours, a push source
+        record(app, "pd-late", now - 880, tg=9211, system="mrrs", tier="alert", **words)    # another system's, one
+        assert heard == {"text": [], "context": ["pd-late"], "intel": ["fm-late"], "late": ["fm-late"]}
+        rows = {r["id"]: r for r in app.cad.store.q("SELECT id, start, late FROM radio_traffic")}
+        assert (rows["fm-late"]["start"], rows["fm-late"]["late"]) == (now - 900, 1)
+        assert (rows["pd-late"]["start"], rows["pd-late"]["late"]) == (now - 880, 1)
+        # not a push source: on_late_text only (another system's late row: nothing at all, as before)
+        record(app, "txt-late", now - 860, tg=9570, system="mrrs", tier="text", **words)
+        record(app, "county-late", now - 850, tg=307, system="westchester", **words)
+        assert heard == {"text": [], "context": ["pd-late"], "intel": ["fm-late"], "late": ["fm-late", "county-late"]}
+        # no words, or unclear ones: no intel hook
+        record(app, "fm-empty", now - 840, status="no_speech", model="m.bin", late=True)
+        record(app, "fm-unclear", now - 830, status="unclear", model="m.bin", late=True, quality="loop",
+               unclear_text="thank you thank you")
+        record(app, "pd-empty", now - 820, tg=9211, system="mrrs", tier="alert", status="unclear", model="m.bin",
+               late=True, quality="loop", unclear_text="thank you thank you")
+        assert heard["intel"] == ["fm-late"] and heard["context"] == ["pd-late"] and heard["text"] == []
+        assert heard["late"] == ["fm-late", "county-late", "fm-empty", "fm-unclear"]
+        assert locked and not any(locked)                                             # never under store.lock
+    finally:
+        app.stop()
+
+
+def test_a_context_row_re_recorded_without_its_words_reaches_intel_to_withdraw(tmp_path):
+    """Another system's row recorded again (replace=True) with no text, or unclear: on_context_text if it had words,
+    so intel withdraws what it scored; a row that never had words (a late one too) hears nothing."""
+    from sizeup.app import App
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    try:
+        comms, now = app.cad.comms, time.time()
+        heard = {"text": [], "context": [], "late": []}
+        comms.on_text, comms.on_context_text, comms.on_late_text = (heard["text"].append, heard["context"].append,
+                                                                    heard["late"].append)
+        pd = {"tg": 9211, "system": "mrrs", "tier": "alert", "model": "m.bin"}
+        record(app, "pd-1", now - 900, status="done", text="Car 12 out with one at the plaza", **pd)
+        record(app, "pd-2", now - 880, status="done", text="Car 14 on scene", **pd)
+        assert heard["context"] == ["pd-1", "pd-2"]
+        record(app, "pd-1", now - 900, status="no_speech", **pd)                              # its words gone
+        record(app, "pd-2", now - 880, status="unclear", quality="loop", unclear_text="thank you thank you", **pd)
+        assert heard["context"] == ["pd-1", "pd-2", "pd-1", "pd-2"]
+        # never had words: nothing, late or not, again or not
+        record(app, "pd-3", now - 860, status="no_speech", **pd)
+        record(app, "pd-4", now - 850, status="skipped", late=True, **pd)
+        record(app, "pd-4", now - 850, status="no_speech", late=True, **pd)
+        record(app, "pd-1", now - 900, status="no_speech", **pd)                              # (already empty)
+        assert heard == {"text": [], "context": ["pd-1", "pd-2", "pd-1", "pd-2"], "late": []}
+    finally:
+        app.stop()
+
+
+def test_our_late_row_re_recorded_without_its_words_reaches_intel_to_withdraw(tmp_path, monkeypatch):
+    """One of our late rows (#747) recorded with words, then again with none (no_speech, unclear): on a push source,
+    on_intel_text each time beside on_late_text, so intel withdraws what it scored; on any other source, or a row that
+    never had words, on_late_text only."""
+    from sizeup import intel
+    from sizeup.app import App
+    monkeypatch.setattr(intel, "is_push_source", lambda key, kind="": key == "Chan")
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    try:
+        comms, now = app.cad.comms, time.time()
+        heard = {"text": [], "intel": [], "late": []}
+        comms.on_text, comms.on_intel_text, comms.on_late_text = (heard["text"].append, heard["intel"].append,
+                                                                  heard["late"].append)
+        words = {"status": "done", "model": "m.bin", "text": "Engine 60 responding", "late": True}
+        record(app, "fm-1", now - 900, **words)
+        record(app, "fm-2", now - 880, **words)
+        assert heard["intel"] == ["fm-1", "fm-2"]
+        record(app, "fm-1", now - 900, status="no_speech", model="m.bin", late=True)          # its words gone
+        record(app, "fm-2", now - 880, status="unclear", model="m.bin", late=True, quality="loop",
+               unclear_text="thank you thank you")
+        assert heard["intel"] == ["fm-1", "fm-2", "fm-1", "fm-2"]
+        # never had words: on_late_text only
+        record(app, "fm-3", now - 860, status="no_speech", model="m.bin", late=True)
+        record(app, "fm-3", now - 860, status="no_speech", model="m.bin", late=True)
+        assert heard["intel"] == ["fm-1", "fm-2", "fm-1", "fm-2"] and heard["text"] == []
+        assert heard["late"] == ["fm-1", "fm-2", "fm-1", "fm-2", "fm-3", "fm-3"]
+        rows = {r["id"]: r for r in app.cad.store.q("SELECT id, start, late FROM radio_traffic")}
+        assert rows["fm-1"]["start"] == now - 900 and all(r["late"] == 1 for r in rows.values())
+    finally:
+        app.stop()
+
+
+def test_our_late_row_on_another_source_losing_its_words_reaches_only_the_late_hook(tmp_path, monkeypatch):
+    from sizeup import intel
+    from sizeup.app import App
+    monkeypatch.setattr(intel, "is_push_source", lambda key, kind="": False)
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    try:
+        comms, now = app.cad.comms, time.time()
+        heard = {"intel": [], "late": []}
+        comms.on_intel_text, comms.on_late_text = heard["intel"].append, heard["late"].append
+        record(app, "fm-1", now - 900, status="done", model="m.bin", text="Engine 60 responding", late=True)
+        record(app, "fm-1", now - 900, status="no_speech", model="m.bin", late=True)
+        assert heard == {"intel": [], "late": ["fm-1", "fm-1"]}
+    finally:
+        app.stop()
+
+
+@pytest.fixture
+def real_intel(tmp_path, monkeypatch):
+    """An all-in-one app whose CAD runs the REAL intel engine (drained here, not on its thread): the police pack over
+    the PD dispatch talkgroup, a fake notifier and gazetteer; only the push-source gate is set (PD is one)."""
+    from sizeup import intel
+    from sizeup.app import App
+    from tests.test_intel import FakeNotifier, example_locate
+    monkeypatch.setattr(intel, "is_push_source", lambda key, kind="": key == PD)
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    n = FakeNotifier()
+    app.cad.intel.notifier, app.cad.intel.locate = n, example_locate
+    yield app, n
+    app.stop()
+
+
+SHOTS_AT = "respond to 100 Example Ave, shots fired, male with a gun"   # invented: a weapons push alone
+
+
+def pd_row(app, tid, start, **kw):
+    """A PD dispatch row (the police pack's scope: MRRS 9211, police), skipped while busy unless kw says otherwise."""
+    record(app, tid, start, tg=9211, system="mrrs", tier="alert", service="police", **kw)
+
+
+def test_end_to_end_a_fresh_catch_up_on_a_push_source_is_scored_and_pushed(real_intel):
+    """A shed PD dispatch clip caught up (quiet) within the pack's late_s of its clip's end: the real engine scores it
+    at its air time and pushes it once; no on_text consumer hears it."""
+    app, n = real_intel
+    now = time.time()
+    pd_row(app, "pd-fresh", now - 30)                       # skipped while busy, 30 s ago (its clip ended 28 s ago)
+    app.cad.intel.drain()
+    heard = []
+    app.cad.comms.on_text = heard.append
+    app._retext("pd-fresh", SHOTS_AT, "done", 0.9, "m.bin", why="catch-up", quiet=True)
+    assert app.cad.intel.drain() == 1 and heard == []
+    [ev] = app.cad.intel.events.open_events()
+    assert ev.category == "weapons" and ev.traffic_ids == ["pd-fresh"] and ev.first_at == now - 30
+    assert len(n.sent) == 1
+
+
+def test_end_to_end_a_stale_catch_up_is_recorded_at_air_time_never_pushed(real_intel):
+    """The same clip caught up after the police pack's late_s (300 s from its clip's END): recorded at log ("late"),
+    at its air time, never pushed."""
+    app, n = real_intel
+    now = time.time()
+    pd_row(app, "pd-stale", now - 400)                      # its clip ended 398 s ago
+    app._retext("pd-stale", SHOTS_AT, "done", 0.9, "m.bin", why="catch-up", quiet=True)
+    assert app.cad.intel.drain() == 1
+    [ev] = app.cad.intel.events.open_events()
+    assert (ev.suppressed, ev.mode, ev.first_at) == ("late", "log", now - 400) and n.sent == []
+
+
+def test_end_to_end_a_747_late_row_is_recorded_late_and_never_pushed(real_intel):
+    """A P25 call from while sizeup was down (#747) recorded with its words seconds after its air time: late = 1 on
+    the row, intel reads it from the column and records the event at log, never pushes it."""
+    app, n = real_intel
+    now = time.time()
+    pd_row(app, "pd-747", now - 20, status="done", model="m.bin", text=SHOTS_AT, late=True)
+    assert app.cad.store.one("SELECT late FROM radio_traffic WHERE id = 'pd-747'")["late"] == 1
+    assert app.cad.intel.drain() == 1
+    [ev] = app.cad.intel.events.open_events()
+    assert (ev.suppressed, ev.mode) == ("late", "log") and ev.traffic_ids == ["pd-747"] and n.sent == []
+
+
+def test_end_to_end_an_unclear_catch_up_of_a_scored_row_is_withdrawn(real_intel, monkeypatch):
+    """A PD row intel scored (and pushed), caught up again as unclear (sizeup/stt_quality.py): the real engine
+    withdraws its words from the event."""
+    from sizeup import stt_quality
+    from sizeup.intel.engine import WITHDRAWN
+    app, n = real_intel
+    now = time.time()
+    pd_row(app, "pd-1", now - 30, status="done", model="m.bin", text=SHOTS_AT)
+    assert app.cad.intel.drain() == 1 and len(n.sent) == 1
+    [ev] = app.cad.intel.events.open_events()
+    monkeypatch.setattr(stt_quality, "assess", lambda *a, **k: "loop")
+    app._retext("pd-1", "thank you thank you thank you", "done", 0.9, "m.bin", why="catch-up", quiet=True)
+    assert app.cad.store.one("SELECT status FROM radio_traffic WHERE id = 'pd-1'")["status"] == stt_quality.UNCLEAR
+    assert app.cad.intel.drain() == 1
+    got = app.cad.intel.events.get(ev.id)
+    assert got.note == WITHDRAWN and len(n.sent) == 1
+
+
+def test_a_pending_row_fires_no_intel_and_its_fill_fires_it_once(tmp_path, monkeypatch):
+    """#927 with #917: a push-source row logged at its clip's close with its text still to come (pending) reaches no
+    intel hook, late or not; its fill (App._retext) reaches it exactly once, with the same id: another system's row by
+    on_context_text, one of our late rows by on_intel_text beside on_late_text."""
+    from sizeup import intel
+    from sizeup.app import App
+    monkeypatch.setattr(intel, "is_push_source", lambda key, kind="": key in (PD, "Chan"))
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    try:
+        comms, now = app.cad.comms, time.time()
+        heard = {"text": [], "context": [], "intel": [], "late": []}
+        comms.on_text, comms.on_context_text, comms.on_intel_text, comms.on_late_text = (
+            heard["text"].append, heard["context"].append, heard["intel"].append, heard["late"].append)
+        record(app, "pd-p", now - 20, tg=9211, system="mrrs", tier="alert", status="pending", model="")
+        record(app, "fm-p", now - 15, status="pending", model="", late=True)
+        assert heard == {"text": [], "context": [], "intel": [], "late": []}
+        app._retext("pd-p", "Car 12 out with one at the plaza", "done", 0.9, "m.bin", why="speech-to-text")
+        app._retext("fm-p", "Engine 60 responding", "done", 0.9, "m.bin", why="speech-to-text", late=True)
+        assert heard == {"text": [], "context": ["pd-p"], "intel": ["fm-p"], "late": ["fm-p"]}
+        starts = {r["id"]: r["start"] for r in app.cad.store.q("SELECT id, start FROM radio_traffic")}
+        assert starts == {"pd-p": now - 20, "fm-p": now - 15}
+    finally:
+        app.stop()
+
+
+def test_the_late_column_is_added_to_an_old_database(tmp_path):
+    from tests.test_cad import make_cad
+    cad, now = make_cad(tmp_path), time.time()
+    cad.comms.record({"id": "9211-1-call_1", "start": now - 60, "end": now - 58, "source": "", "talkgroup": 9211,
+                      "system": "mrrs", "text": "", "status": "done", "model": "m.bin"})
+    cad.shutdown()
+    import sqlite3
+    db = sqlite3.connect(tmp_path / "cad.sqlite")           # the database as the last release left it
+    db.execute("ALTER TABLE radio_traffic DROP COLUMN late")
+    db.commit()
+    db.close()
+    cad = make_cad(tmp_path)
+    try:
+        assert [(r["id"], r["late"]) for r in cad.store.q("SELECT id, late FROM radio_traffic")] == [("9211-1-call_1", 0)]
+        cad.comms.record({"id": "9211-2-call_2", "start": now - 30, "end": now - 28, "source": "", "talkgroup": 9211,
+                          "system": "mrrs", "text": "", "status": "done", "model": "m.bin", "late": True})
+        assert cad.store.one("SELECT late FROM radio_traffic WHERE id = '9211-2-call_2'")["late"] == 1
+    finally:
+        cad.shutdown()
 
 
 # -- fire first: what pauses it ----------------------------------------------------------------------------------------
