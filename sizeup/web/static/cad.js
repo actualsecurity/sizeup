@@ -1787,7 +1787,7 @@ function repaintTx() {                   // the rows' busy state changed: draw t
 }
 // An unclear transcript's reason (sizeup/stt_quality.py LABELS): a loop, more words than the clip holds, noise.
 const UNCLEAR_SAID = { repeated: "Unclear (repeated)", too_long: "Unclear (too long)", stock_phrase: "Unclear (stock phrase)",
-                       no_words: "Unclear (no words)" };
+                       no_words: "Unclear (no words)", not_english: "Unclear (not English)" };
 // What a transmission without text says (its status): sizeup/app.py, sizeup/channels.py.
 // Pending: which engine has it (the row's model, sizeup/app.py _stt_row): AWS, or whisper after AWS failed.
 function sttSaid(t) {

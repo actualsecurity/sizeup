@@ -1167,3 +1167,38 @@ def test_the_pre_alert_gate_is_per_worker_reopens_by_probe_or_window_and_ignores
     assert "went gaming" in j.fell["g"] and not w.fast
     online(p, "gpu-1")
     assert p.ready(URGENT)[0]
+
+
+def test_airband_pool_jobs_go_without_a_whisper_prompt(tmp_path, monkeypatch):
+    """An ATC prompt costs words and makes large-v3-turbo loop on a weak AM clip: the airband's pool jobs (_pool_first,
+    _pool_clip, _catchup_pool) carry no prompt (and so no vocab_v); every other channel's keeps its own (_prompt_v)."""
+    from types import SimpleNamespace
+
+    from sizeup.incidents import Traffic
+    from tests.test_cloud import HubRun, hub_cfg
+    monkeypatch.delenv("LITESTREAM_BUCKET", raising=False)
+    hub = HubRun(hub_cfg(tmp_path))
+    try:
+        app = hub.app
+        jobs = []
+        monkeypatch.setattr(app, "sttpool", SimpleNamespace(ready=lambda cls, **kw: (True, ""), has=lambda cid: False,
+                                                            ready_forced=lambda cls, **kw: (True, ""), workers={},
+                                                            submit=lambda job: jobs.append(job) or True))
+        monkeypatch.setattr(app, "_prompt_v", lambda item: ("the source's own words", "v1"))
+        monkeypatch.setitem(app._kind, "HPN Tower", "airband")
+        pcm = np.zeros(8000 * 2, np.int16)
+        assert app._pool_first(Traffic("HPNTower-1795650700312", "HPN Tower", 1.0, 3.0, ""), pcm, "HPN Tower")
+        assert jobs[-1].prompt == "" and jobs[-1].extra["vocab_v"] == ""
+        assert app._pool_first(Traffic("FG1-901", "FG1", 1.0, 3.0, ""), pcm, "FG1")
+        assert jobs[-1].prompt == "the source's own words" and jobs[-1].extra["vocab_v"] == "v1"
+        app._pool_clip(Traffic("HPNTower-1795650700999", "HPN Tower", 1.0, 3.0, ""), "HPN Tower", None)
+        assert jobs[-1].id == "HPNTower-1795650700999" and jobs[-1].prompt == ""
+        monkeypatch.setattr(app, "_catchup_pcm", lambda *a: pcm)
+        t = Traffic("HPNTower-1795650701000", "HPN Tower", 1.0, 3.0, "")
+        monkeypatch.setattr(app, "_find", lambda cid: (t, "HPN Tower"))
+        sent, _why = app._catchup_pool({"id": t.id, "key": "HPN Tower", "source": "HPN Tower", "start": 1.0,
+                                        "seconds": 2.0})
+        assert sent and jobs[-1].prompt == "" and jobs[-1].extra["vocab_v"] == ""
+    finally:
+        monkeypatch.undo()                                                # (the real pool back before the hub stops)
+        hub.close()
