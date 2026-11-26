@@ -325,7 +325,7 @@ def test_in_a_browser_the_map_is_resized_by_its_edge_and_its_pins_at_one_point_b
     now = time.time()
     for i, (lat, lon) in enumerate(((40.985, -73.68), (40.985, -73.68), (41.0, -73.66))):
         cad.intel.events.save(Event(
-            pack="police", category="weapons", subject=f"police:weapons:{i}", source_key="p25:mrrs:9211", system="mrrs",
+            pack="police", category="weapons", subject=f"police:weapons:{i}", source_key="p25:mrrs:7701", system="mrrs",
             service="police", first_at=now - 60 * (i + 1), last_at=now - 60 * (i + 1), until=now + 3600, status="open",
             what_score=0.7, level="medium", rules=[["pd.shots", 1, 0.7]], mode="map", updated_at=now, traffic_ids=["c1"],
             precision="street", lat=lat, lon=lon, radius_m=0.0, confirmed=True, label_full="Example Road", town="Rye"))
