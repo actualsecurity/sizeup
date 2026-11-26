@@ -2863,12 +2863,13 @@ class App:
             return alt
         return {**alt, "text": ""}            # (its model kept as it is: an engine's name, sttfix keys on it)
 
-    def _intel_pushes(self, cid: str) -> bool:
+    def _intel_pushes(self, cid: str, scored: bool) -> bool:
         """The radio pre-alerts push from this transmission's source (is_push_source), read from the CAD's row (a clip
-        caught up hours later may no longer be in memory). False for a page, or when it can't be told."""
+        caught up hours later may no longer be in memory), and it has words for intel (scored: new words or old ones
+        in memory; else the row's text before this retext). False for a page, or when it can't be told."""
         try:
-            r = self.cad.store.one("SELECT channel, talkgroup, system FROM radio_traffic WHERE id = ?", (cid,))
-            if not r:
+            r = self.cad.store.one("SELECT channel, talkgroup, system, text FROM radio_traffic WHERE id = ?", (cid,))
+            if not r or not (scored or r["text"]):
                 return False
             if r["talkgroup"] is None:
                 return self.is_push_source(r["channel"] or "", getattr(self, "_kind", {}).get(r["channel"] or "", ""))
@@ -2924,9 +2925,10 @@ class App:
         t = next((x for x in list(self.store.loose) + [x for i in self.store.incidents for x in i.traffic]
                   if x.id == cid), None)
         late = late or bool(getattr(t, "late", False))
-        # a catch-up's words on a source the pre-alerts push from still reach intel (only intel: it scores them at air
-        # time and pushes only while fresh); everything else stays quiet
-        intel = quiet and not late and bool(text) and self._intel_pushes(cid)
+        # a catch-up's or a late row's words on a source the pre-alerts push from still reach intel (only intel: it
+        # scores them at air time, pushes only while fresh, a late one never); everything else stays as it was. No
+        # words (empty, unclear) on a row that had some: intel too, to withdraw what it scored from them
+        intel = (quiet or late) and self._intel_pushes(cid, bool(text) or bool(old))
         try:
             self.cad.comms.retext(cid, text, status, model, alt, notify=not quiet, vocab_v=vocab_v, late=late,
                                   quality=unclear.get("quality", ""), unclear_text=unclear.get("unclear_text", ""),

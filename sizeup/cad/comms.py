@@ -243,8 +243,8 @@ class Comms:
         # "late"): only what keeps the record (the per-incident radio log), never on_text's consumers (status hints,
         # pre-alerts, possible incoming, the airport) nor on_context_text. Called after commit, like on_text.
         self.on_late_text = None
-        # traffic id -> None: the radio pre-alerts only (IntelEngine.consider), for a quiet catch-up's text on one of
-        # our rows whose source intel pushes from (retext intel=True); never on_text's other consumers. After commit.
+        # traffic id -> None: the radio pre-alerts only (IntelEngine.consider), for a quiet catch-up's or a late row's
+        # text on one of our rows whose source intel pushes from (retext intel=True); never on_text's other consumers.
         self.on_intel_text = None
         # (t, rigs) -> ({incident: (why, unit)}, {incident}): the operating channels' links for a transmission and the
         # "on this channel" links it must not keep (sizeup/cad/opchannel.py rule_links), asked before record()'s
@@ -288,7 +288,7 @@ class Comms:
         late?, cut? ("grant": a P25 key-up cut where the control channel granted another radio mid-call, #819)}.
         Returns the event ids it is linked to. replace=False: skip one already logged (the startup backfill). An emergency once logged stays (a later write without the
         flag never clears it), and so does its evidence. late (#747: a P25 call from while sizeup was down): logged
-        and linked by its rules like any, told only to on_late_text. Must not be called with store.lock held: the
+        and linked by its rules like any, told only to on_late_text; the row's late column 1 (never cleared). Must not be called with store.lock held: the
         hooks (on_text, on_context_text, on_late_text) run on the caller's thread after commit."""
         tid = str(t["id"])
         p25 = t.get("talkgroup") is not None
@@ -369,6 +369,8 @@ class Comms:
             elif have:
                 db.execute("UPDATE radio_traffic SET quality = '', unclear_text = '' WHERE id = ? AND quality != ''",
                            (tid,))
+            if t.get("late"):                   # (#747) on the row for intel; a later write without it never clears it
+                db.execute("UPDATE radio_traffic SET late = 1 WHERE id = ? AND late = 0", (tid,))
             cut = str(t.get("cut") or "")
             if cut in CUTS:                     # (#819) cut at a mid-call grant: its talker is the granted radio
                 db.execute("UPDATE radio_traffic SET cut = ? WHERE id = ?", (cut, tid))
@@ -820,9 +822,10 @@ class Comms:
         context pre-alerts) acts on old words. vocab_v: the term list that biased the new text ("" none or unknown).
         late (#747: a P25 call from while sizeup was down): on_late_text only (another system's row: neither).
         quality / unclear_text: an unclear transcript's reason and words (sizeup/stt_quality.py; its text is ""); new
-        words without them clear them. intel (with notify=False): a catch-up on a source the pre-alerts push from: the
-        intel hook alone hears it (on_context_text for another system's row, on_intel_text for ours; late: neither, as
-        with notify), so a dispatch only caught up is still scored (at its air time; pushed only while fresh)."""
+        words without them clear them. intel: a catch-up (notify=False) or a late row on a source the pre-alerts push
+        from: the intel hook hears it too (on_context_text for another system's row, on_intel_text for ours), and no
+        other hook beyond what notify / late already call, so a dispatch only caught up is still scored (at its air
+        time; pushed only while fresh; a late one never pushed, the row's late column says so). Never clears late."""
         with self.store.tx() as db:
             self.touch(tid)
             if alt is not None:
@@ -847,7 +850,7 @@ class Comms:
                 self._heard_late(tid)
             else:
                 self._heard(tid)
-        elif n and intel and not late:
+        if n and intel and (not notify or late):     # (notify, not late: _heard / _heard_context told intel already)
             if row is not None and sources.other_p25(row):
                 self._heard_context(tid)
             else:
