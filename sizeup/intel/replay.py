@@ -283,8 +283,9 @@ def load_rows(db: sqlite3.Connection, since: float | None = None, until: float |
     """The radio log's rows in time order, an empty service filled from the talkgroups files (fill_service) under the
     copy's own admin choices (read_service_overrides; the process's are neither read nor changed), then only
     `services` when given. A row's stored service is never changed."""
+    from sizeup.intel.engine import text_sql
     have = {r[1] for r in db.execute("PRAGMA table_info(radio_traffic)")}
-    cols = ", ".join(c if c in have else f"'' AS {c}" for c in ROW_COLUMNS)
+    cols = ", ".join((text_sql(have) if c == "text" else c) if c in have else f"'' AS {c}" for c in ROW_COLUMNS)
     where, args = ["1"], []
     if since is not None:
         where.append("start >= ?")
