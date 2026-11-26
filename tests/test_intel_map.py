@@ -19,7 +19,7 @@ import pytest
 from sizeup.cad.api import CadApi
 from sizeup.intel import eventlog
 from tests.test_intel_page import STATIC, T0, get, heard, listing, needs_node, run_node, save, site  # noqa: F401
-from tests.test_roles import CASEY, JORDAN, VAL
+from tests.test_roles import CASEY, JORDAN, VAL, call
 
 
 def pins(cad, who=VAL, **q):
@@ -77,11 +77,15 @@ def test_the_map_reads_the_first_at_index(site, monkeypatch):
     save(cad, precision="address", lat=41.0, lon=-73.7)
     seen = []
     real = cad.store.q
+    real1 = cad.store.one
     monkeypatch.setattr(cad.store, "q", lambda sql, args=(): (seen.append((sql, args)), real(sql, args))[1])
+    monkeypatch.setattr(cad.store, "one", lambda sql, args=(): (seen.append((sql, args)), real1(sql, args))[1])
     pins(cad, held="quiet")
-    sql, args = next(x for x in seen if "LIMIT :lim" in x[0])
-    plan = " ".join(r["detail"] for r in real(f"EXPLAIN QUERY PLAN {sql}", args))
-    assert "intel_events_first" in plan and "SCAN e " not in plan + " "
+    reads = list({sql: (sql, args) for sql, args in seen if "intel_events e" in sql}.values())
+    assert len(reads) == 2                                             # the counts, the pins
+    for sql, args in reads:
+        plan = " ".join(r["detail"] for r in real(f"EXPLAIN QUERY PLAN {sql}", args))
+        assert "intel_events_first" in plan and "SCAN e " not in plan + " ", sql
 
 
 def test_the_map_is_for_whoever_reads_the_list(site):
@@ -101,9 +105,14 @@ def test_a_list_row_has_its_place_and_the_list_its_revision(site):
     d = listing(cad)
     a, b = d["events"]
     assert (a["lat"], a["lon"], a["radius_m"]) == (41.0, -73.7, 25.0) and (b["lat"], b["lon"]) == (None, None)
-    rev = d["rev"]
+    rev = d["map_rev"]
+    assert call(CadApi(cad), f"/api/cad/intel/{a['id']}/feedback", {"verdict": "useful"}, VAL)[0] == 200
+    cad.intel.events.delivered(a["id"], {"ok": True, "at": T0})
+    assert listing(cad)["map_rev"] == rev                               # a vote, a delivery: the map as it was
     save(cad, first_at=T0 - 9)
-    assert listing(cad)["rev"] != rev
+    assert listing(cad)["map_rev"] == rev + 1
+    assert call(CadApi(cad), f"/api/cad/intel/{a['id']}/dismiss", {}, JORDAN)[0] == 200
+    assert listing(cad)["map_rev"] == rev + 2
 
 
 # -- the page ------------------------------------------------------------------------------------------------------------
@@ -169,14 +178,24 @@ def test_a_pin_selects_its_row_and_a_row_its_pin_and_nothing_is_read_again_witho
     save(cad, first_at=T0 - 120, precision="none")
     d, m = listing(cad), pins(cad)
     m["pins"].append({**m["pins"][1], "id": 999999})                  # a pin of another page
+    assert call(CadApi(cad), f"/api/cad/intel/{d['events'][1]['id']}/feedback", {"verdict": "useful"}, VAL)[0] == 200
+    voted = listing(cad)                                                # the hub's answer after a vote
+    save(cad, first_at=T0 - 180, precision="none")
+    more = listing(cad)                                                 # ... after a new (unplaced) event
+    filtered, mapf = listing(cad, level="push"), pins(cad, level="push")
     script = f"""
 {MAPSTUB}
 {(STATIC / "map-style.js").read_text()}
 {(STATIC / "intel-map.js").read_text()}
 {(STATIC / "intel-page.js").read_text()}
 global.cad.scene.home = {{ center: [-73.66, 41.0], zoom: 13 }};
-let LIST = JSON.parse(JSON.stringify(IN.list));
-global.api = (meth, path) => {{ calls.get.push(path); return Promise.resolve(JSON.parse(JSON.stringify(path.includes("map=1") ? IN.map : LIST))); }};
+let LIST = IN.list, MAPANS = IN.map, FAIL = false;
+global.api = (meth, path) => {{
+  calls.get.push(path);
+  if (FAIL && path.includes("map=1")) return Promise.reject(new Error("boom"));
+  return Promise.resolve(JSON.parse(JSON.stringify(path.includes("map=1") ? MAPANS : LIST)));
+}};
+const maps = () => calls.get.filter((p) => p.includes("map=1")).length;
 (async () => {{
   IntelPage.open("");
   await flush();
@@ -201,24 +220,42 @@ global.api = (meth, path) => {{ calls.get.push(path); return Promise.resolve(JSO
   // a pin of another page: selected, its More info a link away
   MAP.lh["click:il-pin"][0]({{ features: [{{ properties: {{ id: 999999 }} }}] }});
   const off = {{ hidden: $("#il-map-sel").hidden, href: $("#il-map-sel").href }};
-  // no change: nothing read, nothing drawn
-  const g0 = calls.get.length, s0 = calls.setData, f0 = calls.fit;
-  IntelPage.render(JSON.parse(JSON.stringify(IN.list)));
-  const votes = JSON.parse(JSON.stringify(IN.list));
-  votes.events[0].votes = {{ useful: 1 }};                            // the list changed, the events' revision not
-  IntelPage.render(votes);
+  // the page's own reads: a poll with the same answer, then the hub's answer after a vote: no map read, nothing drawn
+  const g0 = maps(), s0 = calls.setData, f0 = calls.fit;
+  await IntelPage.run(true);
+  LIST = IN.voted;
+  await IntelPage.run(true);
+  // More info and back: the list read, the map not
+  IntelPage.close();
+  IntelPage.open("");
   await flush();
-  const quiet = {{ gets: calls.get.length - g0, sets: calls.setData - s0 }};
-  const more = JSON.parse(JSON.stringify(IN.list));
-  more.total += 1; more.rev += 1;                                      // the events changed: read again
-  IntelPage.render(more);
+  const quiet = {{ gets: maps() - g0, sets: calls.setData - s0, voted: body.children[1].find("il-n").map((x) => x.textContent) }};
+  LIST = IN.more;                                                      // a new event: read again
+  await IntelPage.run(true);
   await flush();
-  const moved = {{ gets: calls.get.slice(g0).filter((p) => p.includes("map=1")).length, sets: calls.setData - s0, fits: calls.fit - f0 }};
-  console.log(JSON.stringify({{ before, feats, pin, row, again, nopin, off, quiet, moved, n: $("#il-map-n").textContent,
+  const moved = {{ gets: maps() - g0, sets: calls.setData - s0, fits: calls.fit - f0 }};
+  // other filters: one map read, fitted to them, the selection gone
+  LIST = IN.filtered; MAPANS = IN.mapf;
+  const g1 = maps();
+  IntelPage.open("level=push");
+  await flush();
+  const filt = {{ gets: maps() - g1, fits: calls.fit - f0, link: $("#il-map-sel").hidden, sel: calls.sel.slice(-1)[0],
+                 pins: MAP.data.features.length }};
+  // a failed read: no pins under the error; Refresh reads it again
+  FAIL = true; LIST = IN.list; MAPANS = IN.map;
+  IntelPage.open("");
+  await flush();
+  const failed = {{ n: $("#il-map-n").textContent, pins: MAP.data.features.length }};
+  FAIL = false;
+  const g2 = maps();
+  $("#il-refresh").on.click[0]();
+  await flush();
+  const retried = {{ gets: maps() - g2, pins: MAP.data.features.length }};
+  console.log(JSON.stringify({{ before, feats, pin, row, again, nopin, off, quiet, moved, filt, failed, retried, n: $("#il-map-n").textContent,
                                 ids: body.children.map((r) => Number(r.dataset.id)), images: calls.images }}));
 }})();
 """
-    out = run_node(script, {"list": d, "map": m})
+    out = run_node(script, {"list": d, "map": m, "voted": voted, "more": more, "filtered": filtered, "mapf": mapf})
     ids = out["ids"]
     assert out["before"] == {"maps": 1, "made": True}
     assert out["images"] == 2 * 10                                     # each glyph, light and dark, once
@@ -231,8 +268,11 @@ global.api = (meth, path) => {{ calls.get.push(path); return Promise.resolve(JSO
     assert out["row"]["ease"] == [[-73.67, 41.01]] and out["row"]["hash"] == ""
     assert out["again"] == f"#prealert/intel/{ids[0]}" and out["nopin"] == f"#prealert/intel/{ids[2]}"
     assert out["off"] == {"hidden": False, "href": "#prealert/intel/999999"}
-    assert out["quiet"] == {"gets": 0, "sets": 0}
+    assert out["quiet"] == {"gets": 0, "sets": 0, "voted": ["1"]}       # (the vote on its row)
     assert out["moved"] == {"gets": 1, "sets": 0, "fits": 0}           # read again; the same pins: not drawn, view kept
+    assert out["filt"] == {"gets": 1, "fits": 1, "link": True, "sel": -1, "pins": 1}
+    assert out["failed"] == {"n": "Map: boom", "pins": 0}
+    assert out["retried"] == {"gets": 1, "pins": 3}
     assert out["n"] == "1 unplaced"
 
 

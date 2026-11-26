@@ -8,8 +8,9 @@ gate); names and PII as the events have them; nothing here leaves the hub.
         review queue: every event kept). q: words in its notes; tag: a note's tag; review=1: a note tagged for a rule
         or model change (notes.REVIEW_TAGS) not yet done (sizeup/intel/notes.py).
         {events: [row], total, page, size, since, until, facets: {categories, sources, systems}, held: [{key, label,
-        tip}], rev}. Newest first (first_at, then id), PAGE_SIZE a page (at most PAGE_MAX), on intel_events_first.
-        rev: the events' revision (the page's map reads again only when it or the total moved).
+        tip}], map_rev}. Newest first (first_at, then id), PAGE_SIZE a page (at most PAGE_MAX), on intel_events_first.
+        map_rev: an event saved or dismissed (events.py; never a vote or a delivery): the page's map reads again only
+        when it or the total moved.
     GET /api/cad/intel/list?map=1&<the same filters>
         the Intel page's map (#937): every placed event of the filters, all pages, newest first, at most MAP_MAX;
         {pins: [{id, lat, lon, precision, radius_m, confirmed, level, category, label, held}], placed, unplaced,
@@ -375,7 +376,7 @@ class IntelLog:
         return {"events": out, "total": total, "page": page, "size": size, "since": f["since"], "until": f["until"],
                 "now": f["now"], "facets": self.facets(f["since"], f["until"], names), "held": held_options(),
                 "levels": list(LEVELS), "decided": list(DECIDED), "statuses": list(STATUSES), "tags": list(TAGS),
-                "review_tags": list(REVIEW_TAGS), "rev": rev}
+                "review_tags": list(REVIEW_TAGS), "map_rev": int(getattr(self.engine.events, "map_rev", rev))}
 
     def map(self, q: dict) -> dict:
         """GET /api/cad/intel/list?map=1 (the module doc): the filters' placed events as pins, all pages, the newest
@@ -404,7 +405,7 @@ class IntelLog:
                          "category": r["category"], "label": labels[lk],
                          "held": "" if pushed else held_label(r["held"] or "", r["mode"])[0]})
         return {"pins": pins, "placed": n["placed"], "unplaced": n["unplaced"], "limit": MAP_MAX, "since": f["since"],
-                "until": f["until"], "rev": self._rev()}
+                "until": f["until"]}
 
     def _notes(self, ids: list[int]) -> dict:
         n = getattr(self.cad.intel_admin, "notes", None) if hasattr(self.cad, "intel_admin") else None
