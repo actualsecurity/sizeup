@@ -243,6 +243,9 @@ class Comms:
         # "late"): only what keeps the record (the per-incident radio log), never on_text's consumers (status hints,
         # pre-alerts, possible incoming, the airport) nor on_context_text. Called after commit, like on_text.
         self.on_late_text = None
+        # traffic id -> None: the radio pre-alerts only (IntelEngine.consider), for a quiet catch-up's text on one of
+        # our rows whose source intel pushes from (retext intel=True); never on_text's other consumers. After commit.
+        self.on_intel_text = None
         # (t, rigs) -> ({incident: (why, unit)}, {incident}): the operating channels' links for a transmission and the
         # "on this channel" links it must not keep (sizeup/cad/opchannel.py rule_links), asked before record()'s
         # transaction; None: none. on_pages_linked(iid, page ids): after link_pages committed.
@@ -579,6 +582,14 @@ class Comms:
             except Exception as e:  # noqa: BLE001 - a suggestion never stops the log
                 print(f"CAD: status suggestion for {tid}: {type(e).__name__}: {e}")
 
+    def _heard_intel(self, tid: str) -> None:
+        """on_intel_text, once the write has committed: whatever it does or raises never reaches the write."""
+        if self.on_intel_text is not None:
+            try:
+                self.on_intel_text(tid)
+            except Exception as e:  # noqa: BLE001 - a pre-alert never stops the log
+                self.log(f"CAD: intel transcript {tid}: {type(e).__name__}")
+
     def _heard_late(self, tid: str) -> None:
         """on_late_text (#747), once the write has committed."""
         if self.on_late_text is not None:
@@ -799,7 +810,7 @@ class Comms:
 
     def retext(self, tid: str, text: str, status: str, model: str = "", alt: dict | None = None,
                notify: bool = True, vocab_v: str = "", late: bool = False, quality: str = "",
-               unclear_text: str = "") -> bool:
+               unclear_text: str = "", intel: bool = False) -> bool:
         """New text for a transmission. alt {text, model}: the other engine's transcript, kept to compare
         ("both": Amazon Transcribe's is the text, whisper's the alternative). Another P25 system's row goes to
         on_context_text only, never to on_text (as in record()). Must not be called with store.lock held: the hooks
@@ -809,7 +820,9 @@ class Comms:
         context pre-alerts) acts on old words. vocab_v: the term list that biased the new text ("" none or unknown).
         late (#747: a P25 call from while sizeup was down): on_late_text only (another system's row: neither).
         quality / unclear_text: an unclear transcript's reason and words (sizeup/stt_quality.py; its text is ""); new
-        words without them clear them."""
+        words without them clear them. intel (with notify=False): a catch-up on a source the pre-alerts push from: the
+        intel hook alone hears it (on_context_text for another system's row, on_intel_text for ours; late: neither, as
+        with notify), so a dispatch only caught up is still scored (at its air time; pushed only while fresh)."""
         with self.store.tx() as db:
             self.touch(tid)
             if alt is not None:
@@ -834,6 +847,11 @@ class Comms:
                 self._heard_late(tid)
             else:
                 self._heard(tid)
+        elif n and intel and not late:
+            if row is not None and sources.other_p25(row):
+                self._heard_context(tid)
+            else:
+                self._heard_intel(tid)
         return bool(n)
 
     def set_stt(self, tid: str, status: str, model: str) -> bool:

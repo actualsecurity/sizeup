@@ -667,6 +667,76 @@ def test_a_catch_up_retext_of_a_context_row_calls_neither_hook(tmp_path):
         app.stop()
 
 
+def test_a_catch_up_retext_with_intel_tells_the_intel_hook_alone(tmp_path):
+    """Comms.retext notify=False, intel=True (a catch-up on a push source): another system's row to on_context_text,
+    ours to on_intel_text, once each with its own id; on_text never; a late row (#747) to neither, as with notify."""
+    from sizeup.app import App
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    try:
+        comms, now = app.cad.comms, time.time()
+        assert comms.on_intel_text == app.cad.intel.consider                      # wired to intel alone
+        record(app, "pd-1", now - 600, tg=9211, system="mrrs", tier="alert")
+        record(app, "fm-1", now - 600)
+        record(app, "pd-late", now - 600, tg=9211, system="mrrs", tier="alert")
+        heard = {"text": [], "context": [], "intel": []}
+        comms.on_text, comms.on_context_text, comms.on_intel_text = (heard["text"].append, heard["context"].append,
+                                                                     heard["intel"].append)
+        assert comms.retext("pd-1", "Car 12 out with one at the plaza", "done", "m.bin", notify=False, intel=True)
+        assert comms.retext("fm-1", "Car 12 clear of the scene", "done", "m.bin", notify=False, intel=True)
+        assert comms.retext("pd-late", "Car 12 clear", "done", "m.bin", notify=False, intel=True, late=True)
+        assert heard == {"text": [], "context": ["pd-1"], "intel": ["fm-1"]}
+    finally:
+        app.stop()
+
+
+def test_a_catch_up_on_a_push_source_reaches_intel_and_nothing_else(tmp_path, monkeypatch):
+    """App._retext quiet=True (every catch-up path): a row on a source intel pushes from (sizeup.intel.is_push_source)
+    goes to the intel hook once, under its own id, its air time untouched; a row on any other source to no hook. Both
+    stay quiet otherwise: no on_text (status hints, possible incoming, dispatch steps), no alarm or ATC pre-alert, and
+    the retext event still says "catchup"."""
+    from sizeup import intel
+    from sizeup.app import App
+    asked = []
+
+    def push(key, kind=""):
+        asked.append(key)
+        return key in (PD, "Chan")
+
+    monkeypatch.setattr(intel, "is_push_source", push)
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    try:
+        comms, now = app.cad.comms, time.time()
+        record(app, "pd-1", now - 600, tg=9211, system="mrrs", tier="alert")      # a push source, another system's
+        record(app, "fm-1", now - 500)                                             # a push source, ours ("Chan")
+        record(app, "pd-txt", now - 400, tg=9570, system="mrrs", tier="text")     # not a push source
+        starts = {r["id"]: r["start"] for r in app.cad.store.q("SELECT id, start FROM radio_traffic")}
+        heard = {"text": [], "context": [], "intel": []}
+        comms.on_text, comms.on_context_text, comms.on_intel_text = (heard["text"].append, heard["context"].append,
+                                                                     heard["intel"].append)
+        loud, events = [], []
+        monkeypatch.setattr(app, "_alarm", lambda *a, **k: loud.append(("alarm", a)))
+        monkeypatch.setattr(app, "_atc", lambda *a, **k: loud.append(("atc", a)))
+        monkeypatch.setattr(app, "_emit", lambda kind, data, clip=None: events.append((kind, data)))
+        for tid in ("pd-1", "fm-1", "pd-txt"):
+            app._retext(tid, "Car 12 back in service", "done", 0.9, "m.bin", why="catch-up", quiet=True)
+        assert heard == {"text": [], "context": ["pd-1"], "intel": ["fm-1"]}
+        assert set(asked) == {PD, "Chan", "p25:mrrs:9570"}
+        assert loud == [] and [k for k, _ in events] == ["retext"] * 3 and all(d.get("catchup") for _, d in events)
+        rows = {r["id"]: r for r in app.cad.store.q("SELECT id, start, text FROM radio_traffic")}
+        assert {i: r["start"] for i, r in rows.items()} == starts                  # same ids, air times untouched
+        assert all(r["text"] == "Car 12 back in service" for r in rows.values())
+        # no words: nothing for intel to score
+        heard["context"].clear()
+        app._retext("pd-1", "", "no_speech", None, "m.bin", why="catch-up", quiet=True)
+        assert heard == {"text": [], "context": [], "intel": ["fm-1"]}
+        # the same rows re-run by a person (not quiet): their usual hooks, as before
+        app._retext("pd-1", "Car 12 clear", "done", 0.9, "m.bin")
+        app._retext("pd-txt", "Car 12 clear", "done", 0.9, "m.bin")
+        assert heard["context"] == ["pd-1", "pd-txt"] and heard["intel"] == ["fm-1"]
+    finally:
+        app.stop()
+
+
 # -- fire first: what pauses it ----------------------------------------------------------------------------------------
 
 
