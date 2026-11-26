@@ -141,19 +141,21 @@ Remove-Item "$d\llama-cuda.zip", "$d\llama-cudart.zip"
 The zip has llama.cpp's other tools too; the worker runs only `llama-server.exe` (which loads
 `llama-server-impl.dll` and the `ggml*.dll` beside it).
 
-**The model is a choice in `worker.toml`:** two are pinned, and switching is config only (download the other one,
-change three keys, restart the worker). Qwen3-8B is the default. Why these two: the PR that added the LLM compares
-them with Qwen2.5-7B and Llama-3.1-8B on synthetic dispatch traffic (`llm_eval/`).
+**The model is a choice in `worker.toml`:** three are pinned, and switching is config only (download the other one,
+change three keys, restart the worker). Qwen3-8B is the default. Why these: the PR that added the LLM compares
+Qwen3-8B and Gemma with Qwen2.5-7B and Llama-3.1-8B on synthetic dispatch traffic (`llm_eval/`). Qwen3-4B is the
+small one: it fits beside every speech model on a 12 GB card (see [Speech models](#speech-models), VRAM). It isn't
+the default yet: intel re-evaluates it first.
 
-| | Qwen3-8B Q4_K_M (default) | Gemma-3-12B-it Q4_K_M |
-|---|---|---|
-| repo, revision | `Qwen/Qwen3-8B-GGUF`, `7c41481f57cb95916b40956ab2f0b139b296d974` | `bartowski/google_gemma-3-12b-it-GGUF`, `648e3a36a77c8a9f12d86e741f9dcb9089c769c4` |
-| file, bytes | `Qwen3-8B-Q4_K_M.gguf`, 5,027,783,488 | `google_gemma-3-12b-it-Q4_K_M.gguf`, 7,300,575,264 |
-| SHA256 | `D98CDCBD03E17CE47681435B5150E34C1417F50B5C0019DD560E4882C5745785` | `FC57F67EFA46D711C346E587CBEF7D049E95F3DF8DB2EB2271153343EF0ACC7B` |
-| license | Apache-2.0 | Gemma Terms of Use |
-| VRAM (4k context) | about 6 GB | about 8.3 GB |
-| `llm_model` | `qwen3-8b-q4_k_m` | `gemma-3-12b-it-q4_k_m` |
-| `llm_server` | `-m models\Qwen3-8B-Q4_K_M.gguf ... --reasoning off` | `-m models\google_gemma-3-12b-it-Q4_K_M.gguf ...` (no `--reasoning off`: Qwen3's) |
+| | Qwen3-8B Q4_K_M (default) | Gemma-3-12B-it Q4_K_M | Qwen3-4B-Instruct-2507 Q4_K_M |
+|---|---|---|---|
+| repo, revision | `Qwen/Qwen3-8B-GGUF`, `7c41481f57cb95916b40956ab2f0b139b296d974` | `bartowski/google_gemma-3-12b-it-GGUF`, `648e3a36a77c8a9f12d86e741f9dcb9089c769c4` | `bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF`, `ae44f08e1392f39c0e474af10c3ff8355c8b6688` |
+| file, bytes | `Qwen3-8B-Q4_K_M.gguf`, 5,027,783,488 | `google_gemma-3-12b-it-Q4_K_M.gguf`, 7,300,575,264 | `Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf`, 2,497,280,736 |
+| SHA256 | `D98CDCBD03E17CE47681435B5150E34C1417F50B5C0019DD560E4882C5745785` | `FC57F67EFA46D711C346E587CBEF7D049E95F3DF8DB2EB2271153343EF0ACC7B` | `2FDE00CE69DD4899C70D020845E2638353015BBA0FDF161B3EB965F2BCA4464E` |
+| license | Apache-2.0 | Gemma Terms of Use | Apache-2.0 |
+| VRAM (4k context; the worker's estimate) | about 6 GB (6,179 MB) | about 8.3 GB | about 3.5 GB (3,522 MB) |
+| `llm_model` | `qwen3-8b-q4_k_m` | `gemma-3-12b-it-q4_k_m` | `qwen3-4b-instruct-2507-q4_k_m` |
+| `llm_server` | `-m models\Qwen3-8B-Q4_K_M.gguf ... --reasoning off` | `-m models\google_gemma-3-12b-it-Q4_K_M.gguf ...` (no `--reasoning off`: Qwen3's) | `-m models\Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf ... --reasoning off` |
 
 ```powershell
 # Qwen3-8B (the default)
@@ -164,6 +166,19 @@ Invoke-WebRequest https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/7c41481f57cb
 Invoke-WebRequest https://huggingface.co/bartowski/google_gemma-3-12b-it-GGUF/resolve/648e3a36a77c8a9f12d86e741f9dcb9089c769c4/google_gemma-3-12b-it-Q4_K_M.gguf `
   -OutFile "$d\models\google_gemma-3-12b-it-Q4_K_M.gguf"
 (Get-FileHash "$d\models\google_gemma-3-12b-it-Q4_K_M.gguf").Hash -eq 'FC57F67EFA46D711C346E587CBEF7D049E95F3DF8DB2EB2271153343EF0ACC7B'   # True
+# Qwen3-4B-Instruct-2507 (the small one)
+Invoke-WebRequest https://huggingface.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/resolve/ae44f08e1392f39c0e474af10c3ff8355c8b6688/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf `
+  -OutFile "$d\models\Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+(Get-FileHash "$d\models\Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf").Hash -eq '2FDE00CE69DD4899C70D020845E2638353015BBA0FDF161B3EB965F2BCA4464E'   # True
+```
+
+To switch to Qwen3-4B, these three lines in `worker.toml` (the rest of `llm_server` stays as it is):
+
+```ini
+llm_model = "qwen3-4b-instruct-2507-q4_k_m"
+llm_model_sha256 = "2fde00ce69dd4899c70d020845e2638353015bba0fdf161b3eb965f2bca4464e"
+llm_server = ['llama\llama-server.exe', '-m', 'models\Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf', '--host', '127.0.0.1', '--port', '8180',
+              '-c', '4096', '-ngl', '99', '-np', '1', '--jinja', '--no-webui', '--no-slots', '--reasoning', 'off']
 ```
 
 To switch, set `llm_model`, `llm_model_sha256` (the SHA256 above, lower or upper case) and the `-m` file in
@@ -487,30 +502,60 @@ and SHA-256, the VRAM it holds, its services, and whether the channel's context 
   hashes, [`recipes/merge_lora.py`](recipes/merge_lora.py), whisper.cpp's `convert-h5-to-ggml.py` at a pinned commit,
   the package versions; two runs from scratch gave the same file) and is a release asset of this repo (`stt-models-1`).
 - **VRAM:** the budget is the GPU's total less `vram_reserve_mb` (1.5 GB for Windows and the desktop), or
-  `vram_budget_mb`. The primary comes first, then the wanted models in the hub's order while each fits. The local LLM
-  gets what is left: once a model that needs its room is downloaded and ready to start, the worker stops llama-server
-  (the LLM) between its jobs and Health shows `llm: gave its VRAM to the speech models`. On a 12 GB card the primary,
-  Qwen3-ASR and the airband model (about 7 GB) leave no room for Qwen3-8B (6 GB).
+  `vram_budget_mb`. The primary comes first, then the wanted models in the hub's order while each fits. A model that
+  can't start on this PC (no program for it, or a llama-server older than it needs) isn't planned at all: nothing is
+  downloaded or stopped for it, and Health says why.
+- **The local LLM, `llm_priority`:** `yield` (the default: speech first). The LLM gets what the speech models leave.
+  Once a model that needs its room can start now (files downloaded and checked, no retry pending), the worker stops
+  llama-server between its jobs. Health shows `llm: gave its VRAM to the speech models`, the hub hears no LLM (intel
+  falls back to its rules), and llama-server starts again once there is room. `keep`: the LLM's share comes off the
+  budget first; a model that fits only without it isn't loaded, Health shows it `unavailable: no room beside the
+  LLM`, and the hub keeps that channel on its champion or route. The hub can set it for its workers (`stt_models`
+  `llm_priority`); worker.toml's is used otherwise.
+- **12 GB (RTX 3080 Ti), the worker's own numbers:** 12,288 MB less the 1,536 MB reserve is **10,752 MB**. Speech models
+  (catalog `vram_mb`): turbo q5_0 1,000, turbo q8_0 1,400, Qwen3-ASR 3,800, the airband model 2,300. The LLM (its
+  GGUF's size x 1.05 + 900 MB; the 900 MB is the KV cache at `-c 4096`, 576 MiB for both Qwen3s (36 layers, 8 KV
+  heads of 128, f16), and llama-server's buffers): Qwen3-8B Q4_K_M 6,179 MB, Qwen3-4B-Instruct-2507 Q4_K_M 3,522 MB.
+
+  | primary + speech models | speech | + Qwen3-4B (3,522) | + Qwen3-8B (6,179) |
+  |---|---|---|---|
+  | q5_0 + Qwen3-ASR + airband | 7,100 | 10,622: fits (130 left) | 13,279: no |
+  | q5_0 + Qwen3-ASR | 4,800 | 8,322: fits (2,430 left) | 10,979: no (227 over) |
+  | q5_0 + airband | 3,300 | 6,822: fits (3,930 left) | 9,479: fits (1,273 left) |
+  | q8_0 + Qwen3-ASR + airband | 7,500 | 11,022: no (270 over) | 13,679: no |
+  | q8_0 + Qwen3-ASR | 5,200 | 8,722: fits (2,030 left) | 11,379: no |
+  | q8_0 + airband | 3,700 | 7,222: fits (3,530 left) | 9,879: fits (873 left) |
+
+  So with Qwen3-8B, Qwen3-ASR alone doesn't fit beside the LLM on 12 GB: under `yield` the LLM stops for it. With
+  Qwen3-4B every speech model fits beside it with the q5_0 primary, only just (130 MB): with the q8_0 primary and all
+  three, the LLM yields.
 - **Only when idle:** downloads wait while gaming or paused (a stopped download resumes from its `.part`). A server
   starts or stops only while the worker holds no clip, one at a time; a server a clip is being decoded on is never
-  stopped by the models thread. A new server must answer a test decode (a second of silence) within 3 minutes; else
-  it is stopped and its hash marked bad for 6 hours (`state\models.json`). A new version of a model that runs is
-  downloaded beside it; once it is ready it takes the old one's place, and the old files are kept: if the new one
-  doesn't answer, the old version runs again. A ready server that exits is started again later (not marked bad).
+  stopped by the models thread. A new server must answer a test decode (a second of silence) within 3 minutes.
+- **A server that fails to load:** out of VRAM or on a port another program holds (its own log says which) is never
+  the model's fault: it is tried again in 5 minutes, then 10, 20, 30 (that port left alone for 30 minutes). Any other
+  exit, or no answer, is tried again in 5 minutes, then 10; the third time in a row with the same hash, it is marked
+  bad for 6 hours (`state\models.json`). A new version of a model that runs is downloaded beside it; once it is
+  ready it takes the old one's place, and the old files are kept: while the new one waits to be tried again, and
+  once it is marked bad, the old version runs. A ready server that exits is started again later (not marked bad).
 - **Ports:** 8181 on, never `whisper_url`'s or `llm_url`'s; one another program holds is skipped. Each model's server
   output is in `state\model-<id>.log`. These servers listen on 127.0.0.1 only; whisper-server answers any web page
   there, as the primary does (each llama-server has its own key).
-- **Gaming:** the same rule as whisper-server: after `gaming_stop_whisper_min` of gaming the worker stops them all and
-  starts them again when gaming ends.
+- **Gaming:** the LLM's rule, not whisper-server's longer one: after `llm_stop_gaming_s` of gaming (unset: 60 s, 20 s
+  when they hold more than 6 GB together) the worker stops them all, and starts them again when gaming ends. The
+  primary whisper-server keeps `gaming_stop_whisper_min` (10 minutes).
 - **A clip:** the hub names the model it wants for each clip. The worker decodes it there if that model answers, else
   on the primary, and says which model wrote the text. Context: the clip's `prompt` (whisper) or `context` (a short
   list: a llama-asr model's system message), unless the hub says it is off for that model (`plain`).
 - **A llama-asr request:** `/v1/chat/completions` with the context list as the system message (a short comma list of
-  spoken forms) and the WAV as an `input_audio` part, temperature 0; llama-server gives the transcript as the
-  content and Qwen3-ASR's `language ...` as `reasoning_content` (`language None`: no speech). Not
-  `/v1/audio/transcriptions`: its prompt replaces the model's instruction and leaks into the text.
+  spoken forms), the WAV as an `input_audio` part and the answer begun `language English<asr_text>`, temperature 0.
+  On llama.cpp b12728 (checked on a real server with synthetic speech) the transcript comes as the content and
+  `language English` as `reasoning_content`; if a build ever leaves the content empty with the transcript after
+  `<asr_text>` in `reasoning_content`, the worker takes it from there. Not `/v1/audio/transcriptions`: its prompt
+  replaces the model's instruction and leaks into the text.
 - **Silence:** a clip whose speech level is under `gate_dbfs` (-55 dBFS) isn't decoded at all (every model makes words
-  up on silence): the hub gets no text, which it reads as no speech.
+  up on silence; Qwen3-ASR, told English, answered a stray "The." on digital silence): the hub gets no text, which it
+  reads as no speech. This holds for the primary whisper-server's clips too.
 - `status` shows the models' states; Health on the hub shows each worker's.
 
 ## Gaming mode
@@ -600,6 +645,8 @@ names another group: the policy must name that one.)
 The config file is `worker.toml` (Python 3.11+) or `worker.json`. Keys go at the top level or under `[worker]`. The
 environment overrides the file. Paths may use `%LOCALAPPDATA%`, and relative ones are from the config file's folder.
 Without `-c`, the worker reads `SIZEUP_STT_WORKER_CONFIG`, else `worker.toml` or `worker.json` next to `worker.py`.
+A key the worker doesn't know is ignored and named in `worker.log` (and by `check`), so an older `worker.py` (a
+rollback) still starts with a newer one's keys; a known key with a bad value stops it with the reason.
 
 | key / env | default | what |
 |---|---|---|
@@ -633,7 +680,8 @@ Without `-c`, the worker reads `SIZEUP_STT_WORKER_CONFIG`, else `worker.toml` or
 | `whisper_bin`, `llama_bin` | `whisper_server`'s, `llm_server`'s program | the programs for whisper-ggml and llama-asr models |
 | `vram_budget_mb`, `vram_reserve_mb` | 0 (auto), 1536 | VRAM for all the servers: `vram_budget_mb`, else the GPU's total less the reserve |
 | `llm_vram_mb`, `primary_vram_mb` | auto, 1000 | the LLM's share (auto: its GGUF's size and a context's worth); `whisper_server`'s when its model isn't in the list |
-| `gate_dbfs` | -55 | clips quieter than this aren't decoded (no speech); -120 never |
+| `gate_dbfs` | -55 | clips quieter than this aren't decoded (no speech), on every model and the primary; -120 never |
+| `llm_priority` | `yield` | the local LLM vs a speech model that doesn't fit beside it: `yield` (the LLM stops for it) or `keep` (the model isn't loaded); the hub's word wins ([Speech models](#speech-models)) |
 | `catalog_file` | | a local `models.json` instead of the hub's (testing only) |
 
 ## Troubleshooting

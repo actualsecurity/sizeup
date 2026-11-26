@@ -806,7 +806,8 @@ def test_config_toml_and_token_file(tmp_path):
 
 
 @pytest.mark.parametrize("doc, env, msg", [
-    ({"hub_url": "https://hub.example.org", "gamin_util": 1}, {}, "unknown config keys: gamin_util"),
+    ({"hub_url": "https://hub.example.org", "llm_priority": "first"}, {"SIZEUP_STT_WORKER_TOKEN": TOKEN},
+     "llm_priority: first: one of keep, yield"),
     ({"hub_url": "http://hub.example.org"}, {"SIZEUP_STT_WORKER_TOKEN": TOKEN}, "https only"),
     ({"hub_url": "https://hub.example.org"}, {}, "no token"),
     ({"hub_url": "https://hub.example.org"}, {"SIZEUP_STT_WORKER_TOKEN": "sz1.station." + SECRET}, "isn't a worker token"),
@@ -819,6 +820,33 @@ def test_config_errors_never_quote_the_token(tmp_path, doc, env, msg):
     with pytest.raises(W.ConfigError) as e:
         W.validate(W.load_config(p, env=env))
     assert msg in str(e.value) and SECRET not in str(e.value)
+
+
+def test_an_unknown_key_is_warned_of_and_ignored_never_refused(tmp_path, capsys):
+    """A worker.py rolled back (or not yet updated) starts with a worker.toml a newer one's key was added to: the key
+    is ignored and named in worker.log and `check`, never a refusal (a known key's bad value still is)."""
+    p = tmp_path / "worker.json"
+    p.write_text(json.dumps({"hub_url": "https://hub.example.org", "gamin_util": 1, "from_the_future": "x",
+                             "gaming_util_pct": 55}))
+    cfg = W.load_config(p, env={"SIZEUP_STT_WORKER_TOKEN": TOKEN})
+    W.validate(cfg)
+    assert cfg.ignored_keys == ["from_the_future", "gamin_util"] and cfg.gaming_util_pct == 55.0
+    assert not hasattr(cfg, "gamin_util") and "ignored_keys" not in repr(cfg)
+    cfg.state_dir, cfg.log_file = str(tmp_path / "state"), ""
+    W.setup_logging(cfg)
+    try:
+        for h in W.log.handlers:
+            h.flush()
+        text = (tmp_path / "state" / "worker.log").read_text()
+    finally:
+        for h in list(W.log.handlers):
+            W.log.removeHandler(h)
+            h.close()
+    assert "ignoring keys this worker.py doesn't know: from_the_future, gamin_util" in text
+    assert W.load_config(p, env={}).llm_priority == "yield"                  # (the default: speech first)
+    with pytest.raises(W.ConfigError, match="gaming_util_pct: expected float"):
+        p.write_text(json.dumps({"hub_url": "https://hub.example.org", "gaming_util_pct": "lots"}))
+        W.load_config(p, env={})
 
 
 def test_cli_config_error_exits_2_without_the_token(tmp_path, capsys, monkeypatch):

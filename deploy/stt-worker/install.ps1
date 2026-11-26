@@ -83,6 +83,12 @@ $PinsJson = @'
       "url": "https://huggingface.co/bartowski/google_gemma-3-12b-it-GGUF/resolve/648e3a36a77c8a9f12d86e741f9dcb9089c769c4/google_gemma-3-12b-it-Q4_K_M.gguf",
       "bytes": 7300575264,
       "sha256": "FC57F67EFA46D711C346E587CBEF7D049E95F3DF8DB2EB2271153343EF0ACC7B"
+    },
+    "qwen3_4b": {
+      "what": "Qwen3-4B-Instruct-2507 Q4_K_M GGUF (the small choice: beside every speech model on 12 GB; install.ps1 doesn't fetch it)",
+      "url": "https://huggingface.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/resolve/ae44f08e1392f39c0e474af10c3ff8355c8b6688/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+      "bytes": 2497280736,
+      "sha256": "2FDE00CE69DD4899C70D020845E2638353015BBA0FDF161B3EB965F2BCA4464E"
     }
   }
 }
