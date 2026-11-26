@@ -100,7 +100,7 @@ from sizeup.radio.tap import LiveTap
 from sizeup.cad import tonelist
 from sizeup.radio.tones import ToneEvent, TonePlan, base_name
 from sizeup.talkers import talker_prompt
-from sizeup import channels, stt_terms
+from sizeup import channels, stt_quality, stt_terms
 from sizeup.stt import (CATCHUP, CATCHUP_MAX_CLIP_S, CATCHUP_NOTE, CLASS_NAMES, CONTEXT, CONTEXT_FALLBACK, HIGH, LIVE, LOW,
                         RERUN, SHED, URGENT, Transcriber, WhisperClient, radio_voice, wav_bytes)
 from sizeup.talkgroups import TalkgroupPrefs
@@ -444,6 +444,7 @@ class AwsJob:
     recovered: bool = False   # left waiting by a restart (the hub): its fallback waits for the station to reconnect
     catchup: bool = False     # a shed clip caught up (sizeup/sttcatchup.py): quiet (no alerts), a failed try on its row
     vocab_v: str = ""         # the vocabulary its stream used (AwsTranscriber sets it): the transcript's vocab_v
+    requeue: bool = False     # (with rerun) an unclear transcript asked again by the hub itself: no re-run result said
 
 
 @dataclass
@@ -1096,6 +1097,8 @@ class App:
                  rerun_result=getattr(page, "rerun_result", ""),
                  model=getattr(page, "model", ""), stt=getattr(page, "stt", ""),
                  read_twice=page.read_twice, vocab_v=getattr(page, "vocab_v", "") or "")
+        if getattr(page, "quality", ""):                 # unclear words (sizeup/stt_quality.py), kept apart
+            d.update(quality=page.quality, unclear_text=getattr(page, "unclear_text", ""))  # type: ignore[attr-defined]
         if getattr(page, "alt_model", ""):
             d.update(alt_text=getattr(page, "alt_text", ""), alt_model=page.alt_model)  # type: ignore[attr-defined]
         for k in ("keyup", "radio_id", "unit"):          # a unit's key-up cut from a page (radio/page.py PageHold)
@@ -1635,6 +1638,7 @@ class App:
                                      "talkgroup": None, "unit": getattr(page, "unit", "") or ("60 Control" if page.tones else ""),
                                      "rig": "", "radio_id": getattr(page, "radio_id", ""),
                                      "text": page.raw, "status": page.status, "model": getattr(page, "model", ""),
+                                     "quality": getattr(page, "quality", ""), "unclear_text": getattr(page, "unclear_text", ""),
                                      "tones": [{"a_hz": round(t.a_hz, 1), "b_hz": round(t.b_hz, 1) if t.b_hz else None,
                                                 "names": list(t.names), "ours": self.paging.is_ours(t.names)}
                                                | ({} if any(t is m for m in own) else {"other_page": True})
@@ -2052,11 +2056,13 @@ class App:
         self._transcribed_one(item)
         wait = (self._aws_wait.pop(getattr(item, "id", ""), None)
                 if self._aws_wait and not isinstance(item, Rerun) else None)
-        if wait is not None and getattr(item, "status", "") in ("done", "no_speech"):
+        if wait is not None and getattr(item, "status", "") in ("done", "no_speech", stt_quality.UNCLEAR):
             self._aws_alt(item, *wait)          # "both": the local text is in; Amazon Transcribe's next
 
     def _transcribed_one(self, item) -> None:
         if isinstance(item, Traffic):
+            # any engine's words checked first (sizeup/stt_quality.py): a loop or noise is "unclear", its text ""
+            item.raw, item.status, _q = self._screen(item, getattr(item, "raw", ""), item.status)
             item.text = getattr(item, "raw", "")
             # attach: the station's talkgroup choice when this came from one (hub); pairs: P25 talkers
             attach = item.__dict__.pop("attach", None)
@@ -2083,8 +2089,10 @@ class App:
             self.store.on_traffic(item, attach=attach)
             self._to_cad(item)
             if not getattr(item, "system", ""):      # another system's traffic (#409) raises none of our alarms
-                self._alarm(item)
+                self._alarm(item, getattr(item, "unclear_text", None) if item.status == stt_quality.UNCLEAR else None)
             self._atc(item)
+            if item.status == stt_quality.UNCLEAR:      # (a late call's old words: never asked again, #747)
+                self._unclear(item, traffic_key(item), quiet=bool(getattr(item, "late", False)))
             if item.status != "no_speech":         # (its words never in a log: CloudWatch, #419)
                 log(f"{item.source}: transmission {item.id} ({item.status}, {logscrub.said(item.text)})"
                     + (f" · unit {item.unit}" if item.unit and not other else ""))
@@ -2093,6 +2101,7 @@ class App:
             return self._rerun_done(item)
         page: Page = item
         page.model = getattr(page, "model", "") or Path(self.cfg.stt_model).name  # type: ignore[attr-defined]
+        page.raw, page.status, _q = self._screen(page, page.raw, page.status)    # (never parsed when unclear)
         d = self._dispatch(page.raw)
         page.dispatch = d.as_dict() if d else None  # type: ignore[attr-defined]
         self._save_page(page)
@@ -2100,6 +2109,8 @@ class App:
         self._emit("page_text", self._page_doc(page))
         log(f"{page.label} {page.kind} {page.id}: {page.status}, {logscrub.said(page.raw)}"     # (never its words)
             + {True: " [read twice]", False: " [not read twice]"}.get(page.read_twice, ""))
+        if page.status == stt_quality.UNCLEAR:
+            self._unclear(page, page.label)
         if d is None:
             return
         # Ours by this page's own tones (#183): the group its message answers, never a page's before it
@@ -2266,6 +2277,8 @@ class App:
             self.cad.record_traffic({"id": t.id, "start": t.start, "end": t.end, "source": t.source,
                                      "talkgroup": t.talkgroup, "unit": t.unit, "rig": t.rig, "radio_id": t.radio_id,
                                      "text": t.text, "status": t.status, "model": getattr(t, "model", ""),
+                                     # unclear words (sizeup/stt_quality.py): shown dimmed, never the text
+                                     "quality": getattr(t, "quality", ""), "unclear_text": getattr(t, "unclear_text", ""),
                                      "id_note": getattr(t, "id_note", ""),
                                      # the emergency button (#128), its raw call record, kept by its window
                                      "emergency": bool(getattr(t, "emergency", False)),
@@ -2791,9 +2804,12 @@ class App:
 
     def _set_alt(self, cid: str, text: str, model: str) -> None:
         """The alternative transcript ("both": the local model's next to AWS's), the text left as it is."""
-        alt = {"text": text, "model": model}
         with self._lock:
             page = next((p for p in self.pages if p.id == cid), None)
+        item = page if page is not None else next(
+            (x for x in list(self.store.loose) + [x for i in self.store.incidents for x in i.traffic] if x.id == cid), None)
+        alt = self._screen_alt(item, {"text": text, "model": model})
+        text, model = alt["text"], alt["model"]
         if page is not None:
             page.alt_text, page.alt_model = text, model  # type: ignore[attr-defined]
             self._save_page(page)
@@ -2804,9 +2820,57 @@ class App:
             log(f"CAD: could not update the communications log: {type(e).__name__}: {e}")
         self._emit("alt_text", {"id": cid, **alt})
 
+    # -- unclear transcripts (sizeup/stt_quality.py) -----------------------------------------------------------------
+
+    @staticmethod
+    def _clip_seconds(item) -> float | None:
+        """The clip's length for the words-a-second check: a transmission's, a page's voice (after its tones)."""
+        try:
+            s = float(item.end) - float(item.start) - float(getattr(item, "voice_offset_s", 0.0) or 0.0)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return s if s > 0 else None
+
+    def _screen(self, item, text: str, status: str, language: str = "") -> tuple[str, str, dict]:
+        """Any engine's words on the CAD of record (a station forwarding to a hub leaves it to the hub, which sees every
+        engine's words): (text, status, {}) as they stand, or ("", "unclear", {quality, unclear_text}) for a loop, more
+        words than the clip holds or whisper's stock phrase on noise (sizeup/stt_quality.py). The words are kept on the
+        item apart from its text (shown dimmed, on hover), so nothing that reads the text acts on them: intel and its
+        model, the pre-alerts, page parsing, incident matching, search. New words take the old flag off."""
+        if item is not None and status != stt_quality.UNCLEAR:
+            for k in ("quality", "unclear_text"):
+                vars(item).pop(k, None)
+        if status == stt_quality.UNCLEAR and item is not None:      # (a page or row read again: as it was)
+            return text, status, {"quality": str(getattr(item, "quality", "") or ""),
+                                  "unclear_text": str(getattr(item, "unclear_text", "") or "")}
+        if status != "done" or not text or self.forwarding():
+            return text, status, {}
+        why = stt_quality.assess(text, self._clip_seconds(item) if item is not None else None, language)
+        if not why:
+            return text, status, {}
+        if item is not None:
+            item.quality, item.unclear_text = why, text  # type: ignore[attr-defined]
+        return "", stt_quality.UNCLEAR, {"quality": why, "unclear_text": text}
+
+    def _screen_alt(self, item, alt: dict | None) -> dict | None:
+        """The other engine's words ("both") through the same check: unclear ones are no alternative (the intel packs
+        read it too), the model says why."""
+        if alt is None or self.forwarding() or not str(alt.get("text") or ""):
+            return alt
+        why = stt_quality.assess(str(alt["text"]), self._clip_seconds(item) if item is not None else None)
+        if not why:
+            return alt
+        return {**alt, "text": ""}            # (its model kept as it is: an engine's name, sttfix keys on it)
+
+    def _unclear(self, item, key: str, quiet: bool = False) -> None:
+        """An unclear transcript on the CAD of record: said in the log (which engine, why; never its words). The hub asks
+        another engine once (HubApp._unclear)."""
+        log(f"speech-to-text {getattr(item, 'id', '')}: {stt_quality.label(getattr(item, 'quality', '')).lower()} "
+            f"from {getattr(item, 'model', '') or 'unknown'}")
+
     def _retext(self, cid: str, text: str, status: str, confidence: float | None, model: str,
                 alt: dict | None = None, why: str = "re-run", quiet: bool = False, vocab_v: str = "",
-                prompted: bool = False, late: bool = False) -> bool:
+                prompted: bool = False, late: bool = False, language: str = "") -> bool:
         """New text for a page or transmission already on screen (a re-run here, or one the station
         sent the hub, or Amazon Transcribe's), the old text kept in its history. True = the text changed.
         alt {text, model}: the other engine's transcript, kept to compare ("both"). quiet: a shed clip caught up
@@ -2817,10 +2881,14 @@ class App:
         call from while sizeup was down (#747; the row's own t.late says so too): no pre-alert either (no ATC, and
         Comms.retext late: only the per-incident radio log), but its words still go to the alarms (a mayday that only
         AWS heard alarms, labelled late; the same transmission's alarm is updated, never raised twice); "late" on the
-        retext event."""
+        retext event. language: the engine's detected language, when it said (sizeup/stt_quality.py)."""
         changed = False
         with self._lock:
             page = next((p for p in self.pages if p.id == cid), None)
+        item = page if page is not None else next(
+            (x for x in list(self.store.loose) + [x for i in self.store.incidents for x in i.traffic] if x.id == cid), None)
+        text, status, unclear = self._screen(item, text, status, language)    # (sizeup/stt_quality.py)
+        alt = self._screen_alt(item, alt)
         if page is not None:
             if page.raw != text and (page.raw or page.status not in ("pending", "remote")):
                 hist = list(getattr(page, "history", None) or [])
@@ -2831,7 +2899,7 @@ class App:
             page.rerun_at, page.model, page.vocab_v = time.time(), model, vocab_v  # type: ignore[attr-defined]
             if alt is not None:
                 page.alt_text, page.alt_model = str(alt.get("text") or ""), str(alt.get("model") or "")  # type: ignore[attr-defined]
-            page.status = "done" if text else "no_speech"
+            page.status = "done" if text else stt_quality.UNCLEAR if unclear else "no_speech"
             d = self._dispatch(text)
             page.dispatch = d.as_dict() if d else None  # type: ignore[attr-defined]
             self._save_page(page)
@@ -2843,20 +2911,27 @@ class App:
                   if x.id == cid), None)
         late = late or bool(getattr(t, "late", False))
         try:
-            self.cad.comms.retext(cid, text, status, model, alt, notify=not quiet, vocab_v=vocab_v, late=late)
+            self.cad.comms.retext(cid, text, status, model, alt, notify=not quiet, vocab_v=vocab_v, late=late,
+                                  quality=unclear.get("quality", ""), unclear_text=unclear.get("unclear_text", ""))
         except Exception as e:  # the CAD must never stop the monitor
             log(f"CAD: could not update the communications log: {type(e).__name__}: {e}")
-        if t is not None and text and not quiet:
-            self._alarm(t, text)                       # the words came later (Amazon Transcribe, a re-run)
-            if not late:
+        if t is not None and (text or unclear) and not quiet:
+            # the words came later (Amazon Transcribe, a re-run); unclear ones still reach the alarms (a looped
+            # "mayday" is never dropped), nothing else
+            self._alarm(t, text or unclear["unclear_text"])
+            if not late and text:
                 self._atc(t, text)
         if changed:
             # (no transcript's words are ever in a log: CloudWatch; #419 masked only another P25 system's)
-            log(f"{why} {cid}: text changed ({logscrub.said(text)}, {model or '?'})")
+            log(f"{why} {cid}: text changed ({logscrub.said(text)}{', unclear' if unclear and not text else ''}, "
+                f"{model or '?'})")
         self._emit("retext", {"id": cid, "text": text, "status": status, "confidence": confidence, "model": model,
                               **({"stt_prompt_time": True} if prompted else {}),    # (whisper's prompt had its time, #727)
                               **({"alt": alt} if alt is not None else {}), **({"catchup": True} if quiet else {}),
                               **({"vocab_v": vocab_v} if vocab_v else {}), **({"late": True} if late else {})})
+        if unclear and item is not None:
+            self._unclear(item, traffic_key(item) if isinstance(item, Traffic) else str(getattr(item, "label", "")),
+                          quiet=quiet or late)
         return changed
 
 
@@ -3018,14 +3093,14 @@ class App:
     def _has_text(self, cid: str, item=None) -> bool:
         """This clip has its transcript already (a page read, a row with text or "no speech"): a saved entry for it is
         stale (whisper finished it while the station stopped)."""
-        if item is not None and getattr(item, "status", "") in ("done", "no_speech") and (
-                getattr(item, "raw", "") or getattr(item, "status", "") == "no_speech"):
+        if item is not None and getattr(item, "status", "") in ("done", "no_speech", stt_quality.UNCLEAR) and (
+                getattr(item, "raw", "") or getattr(item, "status", "") != "done"):
             return True
         try:
             r = self.cad.store.one("SELECT status FROM radio_traffic WHERE id = ?", (cid,))
         except Exception:  # noqa: BLE001 - no log here: not known
             return False
-        return bool(r) and r.get("status") in ("done", "no_speech")
+        return bool(r) and r.get("status") in ("done", "no_speech", stt_quality.UNCLEAR)
 
     def _stt_resume(self) -> int:
         """Starting: the clips a stop saved (_stt_handoff) queued again at their own class, each with its saved
@@ -3600,6 +3675,8 @@ class App:
         if job.rerun:
             changed = self._retext(job.id, text, status, conf, channels_model(), why="AWS Transcribe re-run",
                                    quiet=job.catchup, vocab_v=job.vocab_v)
+            if job.requeue:
+                return None                    # (nobody asked: no result on the row)
             return self._rerun_finish(job.id, "changed" if changed else "same", channels_model())
         if job.kind == "page" and job.alt is None:
             page = job.page
