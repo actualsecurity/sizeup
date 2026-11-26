@@ -19,7 +19,8 @@
 //                a hard turn, or a change between fresh and stale jumps. Redrawn on animation frames while
 //                something moves on a visible map, never while the page is hidden: as often as the fastest mark
 //                moves STEP_PX on that map at its zoom (at most one every FRAME_MS, at least one every MAX_FRAME_MS),
-//                so a zoomed-out map isn't redrawn 20 times a second for marks that move a pixel a second. A
+//                so a zoomed-out map isn't redrawn 20 times a second for marks that move a pixel a second; no frame
+//                is asked for between draws (a timer sleeps till the next is due). A
 //                position older than the hub's stale_s (15 s) is not moved: it is drawn hollow where it really
 //                was, fading until the hub drops it (drop_s). No age is printed (the click says stale, or estimated).
 //   Trails       its reported positions joined to the mark where it is drawn, every frame (no gap), as a
@@ -319,22 +320,33 @@ window.AircraftLayer = (() => {
     looks = null;
   }
   // a frame: each map on screen redrawn once its fastest mark has moved STEP_PX there, only while something moves on
-  // a visible map
-  let raf = 0;
+  // a visible map. Between draws the loop sleeps on a timer, as cadmap.js's rigs do (#453): a frame asked for on every
+  // vsync (120 a second on a fast screen) ran the whole page's frame (style, the observers, the commit) for 4 to 20
+  // draws a second, all the time the layer was on.
+  let raf = 0, sleepT = 0;
   const wanted = () => anyOn() && document.visibilityState !== "hidden" && ((!!glide && glide.busy()) || ringsOn(store.data));
   function animate() {
-    if (wanted() && !raf && window.requestAnimationFrame) raf = requestAnimationFrame(frame);
+    if (wanted() && !raf && !sleepT && window.requestAnimationFrame) raf = requestAnimationFrame(frame);
+  }
+  // now, not when the sleep ends (zooming: the marks move faster or slower on screen)
+  function wake() {
+    if (sleepT) { clearTimeout(sleepT); sleepT = 0; }
+    animate();
   }
   function frame(ts) {
     raf = 0;
     if (!wanted()) return;
+    let wait = Infinity;
     for (const m of maps) {
-      if (ts - (m.drawnAt || 0) >= m.frameMs() - 2) {
+      const ms = m.frameMs();
+      if (ts - (m.drawnAt || 0) >= ms - 2) {
         m.drawnAt = ts;
         m.draw();
       }
+      wait = Math.min(wait, (m.drawnAt || 0) + ms - ts);
     }
-    raf = requestAnimationFrame(frame);
+    if (!(wait < Infinity) || typeof setTimeout !== "function") raf = requestAnimationFrame(frame);
+    else sleepT = setTimeout(() => { sleepT = 0; animate(); }, Math.max(0, wait - 2));   // (the next vsync: the draw's)
   }
 
   // what each aircraft looks like, worked out once an answer (colours read from the tokens), not every frame; and the
@@ -423,6 +435,7 @@ window.AircraftLayer = (() => {
       maps.add(this);
       store.subs.add(() => this.sync());
       this.map.on("click", (e) => this.clicked(e));
+      this.map.on("zoom", wake);            // closer in, the marks move faster on screen: drawn more often from now
       this.live = null;                     // the open box, kept up to date (#375): a MapFollow.LiveInfo
       // following (mapfollow.js): a drag (not a pinch), Recenter (cadmap.js), ✕ or a unit followed lets it go
       this.fol = new MapFollow.Follower(this.map, control.host, { cls: "ac-follow", textCls: "ac-follow-t", icon: "aircraft",
@@ -598,8 +611,12 @@ window.AircraftLayer = (() => {
       if (hs && (hl.length || this.hlShown)) hs.setData(fc(hl));
       this.hlShown = hl.length > 0;
       if (this.following) this.track(hl.find((f) => f.properties.hex === this.following), force);
+      // the tower: only when it changed (unlit it never does; each setData is a round trip to the map's worker)
       const tw = this.map.getSource(TWR_SRC);
-      if (tw) tw.setData(towerFc(d, now));
+      if (tw) {
+        const t = towerFc(d, now), sig = JSON.stringify(t);
+        if (tw !== this.twr || sig !== this.twrSig) { tw.setData(t); this.twr = tw; this.twrSig = sig; }
+      }
     }
     // a mark in the ringed source: its alert's colour (the mark too), wider while its card is hovered; a followed one
     // that no alert names: a plain ring in the text colour
