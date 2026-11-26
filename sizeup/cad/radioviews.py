@@ -191,10 +191,25 @@ def for_viewer_list(views: list[dict], sees_context: bool) -> list[dict]:
     return out
 
 
-def for_viewer(views: list[dict] | None, sees_context: bool = True) -> dict:
-    """What one reader is sent: {rev, custom, views}."""
-    return {"rev": rev(views), "custom": views is not None,
-            "views": for_viewer_list(SEED if views is None else views, sees_context)}
+def matches(src: dict, f: dict) -> bool:
+    """A source of the tree ({key, system, service, ours}) in a filter (static/radio-views.js matches, the same rule)."""
+    if not channels(f):
+        return True
+    if (f.get("ours") and src.get("ours")) or src.get("key") in f.get("sources", []):
+        return True
+    sv, sy = f.get("services", []), f.get("systems", [])
+    return bool(sv or sy) and (not sv or src.get("service") in sv) and (not sy or src.get("system") in sy)
+
+
+def for_viewer(views: list[dict] | None, sees_context: bool = True, sources=None) -> dict:
+    """What one reader is sent: {rev, custom, views}. sources: the tree this reader is sent; a reader who may not see
+    another system is sent no view that holds none of them (Our calls and a view of everything always): a service's
+    view with only the other system's talkgroups would say that they are there."""
+    out = for_viewer_list(SEED if views is None else views, sees_context)
+    if not sees_context and sources is not None:
+        out = [v for v in out if v["id"] == "ours" or v["filter"].get("ours") or not channels(v["filter"])
+               or any(matches(s, v["filter"]) for s in sources)]
+    return {"rev": rev(views), "custom": views is not None, "views": out}
 
 
 def merge_hidden(new: list[dict], old: list[dict]) -> list[dict]:

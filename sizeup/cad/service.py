@@ -2281,7 +2281,7 @@ class Cad:
                                                    hidden_labels=self.context_labels()),
                 "services": self.settings.services_page(),
                 # the rail's views: the department's ({rev, custom, views}; the coded ones while none are set)
-                "views": radioviews.for_viewer(self.radio_views, sees_context=bool(context)),
+                "views": radioviews.for_viewer(self.radio_views, sees_context=bool(context), sources=hit[1]),
                 # a source's re-tag waiting for the station's talkgroups (its automatic service not known yet)
                 "retag_waiting": sorted(k for k in self.retag_waiting if context or not radiofolders.context_key(k))}
 

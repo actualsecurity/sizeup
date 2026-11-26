@@ -132,6 +132,7 @@ def test_a_reader_who_may_not_see_another_system_gets_none_of_it(tmp_path):
     cad.comms.context_broadcast = True
     views = [radioviews.SEED[0], METRO, {**MUTUAL, "filter": {"sources": ["fm:FG2", "p25:metro:9001"], "systems": ["metro", "analog"]}}]
     cad.settings_post("radio_views", {"action": "set", "views": views, "operator": "Lt. Test"})
+    cad.record_traffic(tx("fg2-1", cad.clock() - 5, "FG2", rig="E61"))       # a channel of ours in Mutual aid
     api = CadApi(cad)
 
     def tree(who=None):
