@@ -258,8 +258,11 @@ class IntelAdmin:
         ev = self.engine.events.get(eid)
         if ev is not None:
             self.engine.dismissed(ev)             # its window spent; mute_min keeps it from coming straight back
-        self.engine.events.feedback(eid, None, str(body.get("verdict") or "noise") if body.get("verdict") in VERDICTS
-                                    else "noise", op, self.cad.clock())
+        v = str(body.get("verdict") or "noise") if body.get("verdict") in VERDICTS else "noise"
+        if v in VOTE_PAIRS and hasattr(self.engine.events, "ensure_vote"):
+            self.engine.events.ensure_vote(eid, v, op, self.cad.clock())     # a Noise vote already there: not twice
+        else:
+            self.engine.events.feedback(eid, None, v, op, self.cad.clock())
         return {"ok": True}
 
     def feedback(self, eid: int, body: dict) -> dict:

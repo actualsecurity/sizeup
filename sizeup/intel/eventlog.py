@@ -37,7 +37,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sizeup.cad.store import TZ, CadError
 from sizeup.intel.events import MODEL_PREFIXES, VOTE_ROWS, decided_of
@@ -191,9 +191,11 @@ def _when(v: str, end: bool) -> float | None:
         d = datetime.fromisoformat(v)
     except ValueError:
         raise CadError("from, to: a date (2026-11-01) or unix seconds") from None
+    if end and len(v) <= 10:           # a day: to its end, the next local midnight (a DST day is 23 or 25 h)
+        d = datetime.combine(d.date() + timedelta(days=1), datetime.min.time())
     if d.tzinfo is None:
         d = d.replace(tzinfo=TZ)
-    return d.timestamp() + (86400 if end and len(v) <= 10 else 0)
+    return d.timestamp()
 
 
 class IntelLog:
