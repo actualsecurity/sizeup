@@ -876,19 +876,27 @@ def test_every_police_category_but_aided_and_alarm_loads_its_cues_whole_words_on
     assert not m._cued(pack, "fire_call", "the fdny unit from the city is on the parkway", [])  # "fd"
     for cat, text in (("officer", "car 3 i need backup"), ("officer", "send me another car"), ("weapons", "a shooting"),
                       ("weapons", "gunshots heard"), ("pursuit", "he fled the scene"), ("barricade", "two hostages"),
-                      ("edp", "a jumper on the roof"), ("mva_injury", "ems is requested"),
-                      ("mva_injury", "the driver is not moving"), ("mva_injury", "a roll over on the ramp"),
+                      ("edp", "a jumper on the roof"), ("mva_injury", "the driver is not moving"), ("mva_injury", "a roll over on the ramp"),
                       ("dispute", "a large crowd outside the bar"), ("dispute", "disorderly group")):
         assert m._cued(pack, cat, text, []), (cat, text)
     assert m._cued(pack, "aided", "anything at all", [])
+    for cat, text in (("mva_injury", "ems is requested for a fall"), ("dispute", "a possible heart attack"),
+                      ("fire_call", "a fire alarm drill at the school"), ("weapons", "he left a hammer in the truck"),
+                      ("officer", "she says she might have hurt her shoulder")):
+        assert not m._cued(pack, cat, text, []), (cat, text)                     # too broad: CUE_EXEMPT, never cues
+    for text in ("my partner is hurt", "i'm hurt send me another car", "officer down", "i'm hit"):
+        assert m._cued(pack, "officer", text, []), text
 
 
 # What each category's rules say, its cues must say too (or the model can't raise what the rules would have, under
 # their threshold): every wording a rule phrase can match, its "..." gaps dropped. The intended exceptions only:
 CUE_EXEMPT = {
     "mva_injury": ("mva", "motor vehicle accident", "car accident", "crash",   # pd.mva: a crash alone is no injury
-                   "pin"),                                                     # (pinned, trapped: cues)
-    "weapons": ("pipe", "bottle"),                                             # an object, not a weapon word alone
+                   "pin",                                                      # (pinned, trapped: cues)
+                   "ems"),                                                     # routine medical calls say it
+    "weapons": ("pipe", "bottle", "hammer", "crowbar", "golf club", "box cutter"),   # objects, not weapon words
+    "dispute": ("attack",),                                                    # "heart attack", "panic attack"
+    "fire_call": ("fire",),                                                    # alarms, drills (fd, fire department: cues)
 }
 
 
