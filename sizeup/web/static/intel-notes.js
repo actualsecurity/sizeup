@@ -8,7 +8,8 @@
 //   IntelNotes.incident(inc)     the incident view (#d-intel): the notes of the intel events linked to it (GET
 //                                /api/cad/incident/<id>/intel), folded with a count; read when the incident changes and
 //                                at most every STALE_MS after, drawn only when it changed
-//   IntelNotes.chip(n)           the Intel page row's count chip ({n, tags, review}); null for none
+//   IntelNotes.chip(n)           the Intel page row's count chip ({n, tags, review, done, done_texts}); null for none
+//   IntelNotes.linkify(text)     a done text as text and PR links (DOM nodes)
 //   IntelNotes.TAGS              tag -> its short label
 //
 // Terse: what a tag means is in its hover. Uses cad.js's helpers (el, $, show, setText, api, canDo, fmtTime).
@@ -103,13 +104,30 @@ window.IntelNotes = (() => {
     b.addEventListener("click", () => { st.editing = "new"; draw(host); });
     return b;
   }
+  // PR #12 / #12 in a done text -> a link to the pull request; the rest stays text (DOM nodes only: the text is admin input)
+  function linkify(text) {
+    const out = [];
+    let at = 0;
+    for (const m of String(text).matchAll(/(?:PR\s*)?#(\d{1,6})\b/g)) {
+      if (m.index > at) out.push(text.slice(at, m.index));
+      const a = el("a", "", m[0]);
+      a.setAttribute("href", `https://github.com/actualsecurity/sizeup/pull/${m[1]}`);
+      a.setAttribute("target", "_blank");
+      a.setAttribute("rel", "noopener");
+      out.push(a);
+      at = m.index + m[0].length;
+    }
+    if (at < text.length) out.push(text.slice(at));
+    return out;
+  }
   function noteRow(host, n) {
     const li = el("li", "nt-note");
     li.dataset.id = String(n.id);
     const top = el("div", "nt-note-head");
     top.append(...n.tags.map(tagChip));
     if (n.done) {
-      const dn = el("span", "chip nt-done", `done: ${n.done}`);
+      const dn = el("span", "chip nt-done", "done: ");
+      dn.append(...linkify(n.done));
       dn.title = `${n.done_by} ${when(n.done_at)}`;
       top.append(dn);
     } else if (n.review) {
@@ -275,8 +293,13 @@ window.IntelNotes = (() => {
     const c = el("span", "chip nt-count" + (n.review ? " nt-review" : ""), `✎${n.n}`);
     c.title = `${n.n} note${n.n === 1 ? "" : "s"}` + (n.tags.length ? `: ${n.tags.map((t) => TAGS[t] || t).join(", ")}` : "")
       + (n.review ? ` · ${n.review} in review` : "");
+    if (n.done) {                                     // a note led to a change: its author sees it
+      const ok = el("span", "nt-ok", " ✓");
+      ok.title = `Done: ${(n.done_texts || []).join(" · ")}`;
+      c.append(ok);
+    }
     return c;
   }
 
-  return { mount, incident, chip, TAGS };
+  return { mount, incident, chip, linkify, TAGS };
 })();

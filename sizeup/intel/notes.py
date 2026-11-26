@@ -108,7 +108,7 @@ class IntelNotes:
         return [{"key": k, "label": v} for k, v in seen.items()]
 
     def counts(self, ids: list[int]) -> dict:
-        """{event id: {n, tags, review}} for a page of events (the Intel page's chip)."""
+        """{event id: {n, tags, review[, done, done_texts]}} for a page of events (the Intel page's chip)."""
         if not ids:
             return {}
         out: dict = {}
@@ -121,6 +121,11 @@ class IntelNotes:
             except ValueError:
                 tags = []
             o["tags"] = sorted(set(o["tags"]) | set(tags))
+            if r["done"]:                       # the ✓ on the row: how many, and the first few texts
+                o["done"] = o.get("done", 0) + 1
+                o.setdefault("done_texts", [])
+                if len(o["done_texts"]) < 3:
+                    o["done_texts"].append(r["done"])
             if not r["done"] and any(t in REVIEW_TAGS for t in tags):
                 o["review"] += 1
         return out
