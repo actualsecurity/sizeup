@@ -1047,6 +1047,31 @@ def test_end_to_end_an_unclear_catch_up_of_a_scored_row_is_withdrawn(real_intel,
     assert got.note == WITHDRAWN and len(n.sent) == 1
 
 
+def test_a_pending_row_fires_no_intel_and_its_fill_fires_it_once(tmp_path, monkeypatch):
+    """#927 with #917: a push-source row logged at its clip's close with its text still to come (pending) reaches no
+    intel hook, late or not; its fill (App._retext) reaches it exactly once, with the same id: another system's row by
+    on_context_text, one of our late rows by on_intel_text beside on_late_text."""
+    from sizeup import intel
+    from sizeup.app import App
+    monkeypatch.setattr(intel, "is_push_source", lambda key, kind="": key in (PD, "Chan"))
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    try:
+        comms, now = app.cad.comms, time.time()
+        heard = {"text": [], "context": [], "intel": [], "late": []}
+        comms.on_text, comms.on_context_text, comms.on_intel_text, comms.on_late_text = (
+            heard["text"].append, heard["context"].append, heard["intel"].append, heard["late"].append)
+        record(app, "pd-p", now - 20, tg=9211, system="mrrs", tier="alert", status="pending", model="")
+        record(app, "fm-p", now - 15, status="pending", model="", late=True)
+        assert heard == {"text": [], "context": [], "intel": [], "late": []}
+        app._retext("pd-p", "Car 12 out with one at the plaza", "done", 0.9, "m.bin", why="speech-to-text")
+        app._retext("fm-p", "Engine 60 responding", "done", 0.9, "m.bin", why="speech-to-text", late=True)
+        assert heard == {"text": [], "context": ["pd-p"], "intel": ["fm-p"], "late": ["fm-p"]}
+        starts = {r["id"]: r["start"] for r in app.cad.store.q("SELECT id, start FROM radio_traffic")}
+        assert starts == {"pd-p": now - 20, "fm-p": now - 15}
+    finally:
+        app.stop()
+
+
 def test_the_late_column_is_added_to_an_old_database(tmp_path):
     from tests.test_cad import make_cad
     cad, now = make_cad(tmp_path), time.time()
