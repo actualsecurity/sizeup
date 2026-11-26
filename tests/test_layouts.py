@@ -132,7 +132,8 @@ def test_the_overlay():
     js = read("camoverlay.js")
     assert "const MIN_ZOOM = 10" in js and "SIZES = [[15, 208], [14, 176], [13, 144], [12, 112], [11, 88], [MIN_ZOOM, 72]]" in js
     assert 'E.tile(c, "overlay", { compact: true })' in js                          # camwall.js's tiles: the same budget and rules
-    assert 'for (const ev of ["move", "zoom", "resize", "rotate", "pitch"]) o.map.on(ev, schedule)' in js
+    assert 'for (const ev of ["move", "zoom", "rotate", "pitch"]) o.map.on(ev, schedule)' in js
+    assert 'o.map.on("resize", () => { o.box = null; schedule(); })' in js          # its size read again (test_map_frames.py)
     assert "requestAnimationFrame(() => { o.frame = 0; place(); })" in js           # once a frame while the map moves
     assert "CANDIDATES(W, H)" in js and "inside(r, box) && !placed.some((q) => overlaps(r, q))" in js   # nudged, kept on the map
     assert 'document.createElementNS(SVG, "line")' in js                            # the leader to the exact spot
