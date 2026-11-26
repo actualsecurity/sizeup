@@ -513,6 +513,8 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
                 "matched_from": "current rules",
                 "rules_changed": bool(raw.get("ruleset_hash")) and raw.get("ruleset_hash") != now_hash,
                 "empty": "" if e["rules"] else "no rules recorded",
+                # who said it and who answered (sizeup/intel/engine.py _talkers): Settings > Radios labels
+                "talkers": e.get("talkers") or {},
                 # the local model's answer when it raised (or noted) the event (sizeup/intel/backing.py)
                 "model": _model(cad, e["id"])},
         "trigger": _empty(trigger, why),
@@ -521,7 +523,7 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
                              "precision": e["precision"]} if placed else None),
                   "label": e["place"], "town": e["town"], "basis": e["basis"], "phrases": [], "alts": e["alts"] or [],
                   "key": key, "nearby": _nearby(cad, key, lat, lon, may) if exact else {}, "site_unconfirmed": unsure,
-                  "empty": "" if placed else "location not heard"},
+                  "empty": "" if placed else "town only" if e["precision"] == "town" else "location not heard"},
         "site_history": {
             "site": e["place"] if exact else "", "key": key, "unconfirmed": unsure,
             "calls": (_site_calls(cad, key, lat, lon, False, e["place"] if e["precision"] == "landmark" else "", e["first_at"])

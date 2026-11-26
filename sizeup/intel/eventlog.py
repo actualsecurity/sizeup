@@ -70,7 +70,7 @@ from datetime import datetime, timedelta
 from sizeup.cad.store import TZ, CadError
 from sizeup.geo.normalize import EXPAND, STREET_TYPES
 from sizeup.intel.events import MODEL_PREFIXES, VOTE_ROWS, decided_of
-from sizeup.intel.model import lowest, mode_rank
+from sizeup.intel.model import lowest, mode_rank, shown_place, talkers_of
 
 PAGE_SIZE = 50
 PAGE_MAX = 100
@@ -168,7 +168,7 @@ LEVEL_SQL = {"push": "pushed_at IS NOT NULL", "held": "pushed_at IS NULL AND mod
              "shadow": "pushed_at IS NULL AND mode = 'shadow'"}
 COLS = ("id, pack, category, source_key, system, first_at, last_at, status, what_score, level, rules, precision, "
         "label_full, town, confirmed, mode, pushed_at, suppressed, near_incident, incident_id, traffic_ids, lat, lon, "
-        "radius_m")
+        "radius_m, stated_by, stated_town, answered_by, answered_town, talker_town")
 PLACED = "COALESCE(precision, 'none') != 'none' AND lat IS NOT NULL AND lon IS NOT NULL"   # (the listing's columns; row()'s placed)
 
 
@@ -523,7 +523,7 @@ class IntelLog:
         # area and the words over them here: never a scan of the whole range
         rows = self._rq(
             "SELECT e.id, e.pack, e.category, e.first_at, e.status, e.mode, e.pushed_at, e.precision, e.lat, e.lon, "
-            "e.radius_m, e.confirmed, e.label_full, e.town, e.traffic_ids FROM intel_events e "
+            "e.radius_m, e.confirmed, e.label_full, e.town, e.talker_town, e.traffic_ids FROM intel_events e "
             "WHERE e.first_at >= :since AND e.first_at < :until ORDER BY e.first_at DESC, e.id DESC LIMIT :scan",
             {"since": since, "until": until, "scan": SEARCH_SCAN + 1})
         capped = len(rows) > SEARCH_SCAN
@@ -598,7 +598,9 @@ class IntelLog:
                         "place": r["label_full"] if r["precision"] != "none" else "", "precision": r["precision"],
                         "confirmed": bool(r["confirmed"]), "town": r["town"],
                         "lat": round(r["lat"], 6) if placed else None, "lon": round(r["lon"], 6) if placed else None,
-                        "radius_m": round(r["radius_m"] or 0), "matched": sorted(matched.get(r["id"], ()))})
+                        "radius_m": round(r["radius_m"] or 0), "matched": sorted(matched.get(r["id"], ())),
+                        # no place heard: "<Town> (handoff)" / "(talker)" (model.py shown_place), never "unplaced"
+                        **shown_place(r)})
         return {"events": out, "total": len(rows), "more": more, "limit": SEARCH_MAX,
                 "scanned": scanned, "capped": capped, "since": since,
                 "until": until}
@@ -702,7 +704,10 @@ class IntelLog:
                 "lat": r["lat"] if placed else None, "lon": r["lon"] if placed else None,
                 "radius_m": (r["radius_m"] or 0) if placed else 0, "held": held,
                 "pushed_at": r["pushed_at"], "n": n, "votes": votes, "mine": mine,
-                "near_incident": r["near_incident"], "incident_id": r["incident_id"]}
+                "near_incident": r["near_incident"], "incident_id": r["incident_id"],
+                # no place heard: the town ("<Town> (handoff)" / "(talker)", precision town, basis which; model.py), and
+                # who said it and who answered (engine.py _talkers)
+                **shown_place(r), "talkers": talkers_of(r)}
 
     @staticmethod
     def _detail(key: str, r: dict) -> str:

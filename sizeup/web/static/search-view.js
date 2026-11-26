@@ -315,8 +315,10 @@ window.SearchView = (() => {
     cat.append(el("span", "chip sv-ichip", "Intel"), " ", e.label || e.category);
     cat.title = `${e.pack_label} · ${e.category}`;
     const lv = el("span", `chip il-lv il-lv-${e.level}`, e.level);
-    const loc = e.place ? el("td", "loc", e.confirmed ? e.place : `${e.place} ?`) : el("td", "loc dim", "unplaced");
-    if (e.place && !e.confirmed) loc.title = "Unconfirmed";
+    const town = e.precision === "town";       // no place heard: "<Town> (talker)" / "(handoff)" (sizeup/intel/model.py shown_place)
+    const loc = e.place ? el("td", "loc", e.confirmed || town ? e.place : `${e.place} ?`) : el("td", "loc dim", "unplaced");
+    if (town) loc.title = e.basis === "handoff" ? "The town of the console that took the call" : "No place heard: the town of who said it (Settings > Radios)";
+    else if (e.place && !e.confirmed) loc.title = "Unconfirmed";
     const why = e.held ? el("td", "il-why") : el("td", "il-why dim", "—");
     if (e.held) { why.append(el("span", "chip il-held", e.held.label)); why.title = e.held.tip || ""; }
     const lvc = el("td", "il-level");

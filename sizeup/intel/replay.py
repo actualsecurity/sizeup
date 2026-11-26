@@ -117,15 +117,48 @@ PipelineFactory = Callable[[Recorder, "Path | None", Callable[[], float]], "Inte
 
 
 def core_pipeline(sink: Recorder, rules: Path | None, clock: Callable[[], float], settings: dict | None = None,
-                  locate=None) -> IntelEngine:
+                  locate=None, radios=None) -> IntelEngine:
     """The intel core's engine, offline: in-memory events, no store, no thread. rules: a pack file in place of
-    data/intel/*.json; settings: the Settings snapshot (read_settings), its overrides on either."""
+    data/intel/*.json; settings: the Settings snapshot (read_settings), its overrides on either; radios: the copy's
+    Radio IDs (CopyRadios: the talkers), None: no radio is named."""
     from sizeup.intel import events, rules as rules_mod
     from sizeup.intel.engine import IntelEngine
     snap = settings or {}
     packs = rules_mod.load_packs([rules], snap) if rules else None
-    return IntelEngine(packs=packs, settings=snap, events=events.MemoryEvents(), sink=sink, locate=locate, clock=clock,
-                       thread=False, store=None, log=lambda m: None)
+    e = IntelEngine(packs=packs, settings=snap, events=events.MemoryEvents(), sink=sink, locate=locate, clock=clock,
+                    thread=False, store=None, log=lambda m: None)
+    e.talkers.radios = radios
+    return e
+
+
+class CopyRadios:
+    """The copy's Settings > Radios > Radio IDs (its radios and radio_ranges tables), read once, in memory only: the
+    replay's talkers (sizeup/intel/talkers.py) as the live registry names them (sizeup/cad/radios.py Registry.name: an
+    ID's own label, else its range's). The labels are the admin's: never printed, never written anywhere."""
+    rev = 1
+
+    def __init__(self, db: sqlite3.Connection):
+        have = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        self._rows = ([{"system": r[0], "radio_id": str(r[1]), "label": r[2] or ""}
+                       for r in db.execute("SELECT system, radio_id, label FROM radios")] if "radios" in have else [])
+        self._ranges = ([{"system": r[0], "lo": int(r[1]), "hi": int(r[2]), "label": r[3] or ""}
+                         for r in db.execute("SELECT system, lo, hi, label FROM radio_ranges ORDER BY system, lo")]
+                        if "radio_ranges" in have else [])
+        self._by = {(r["system"], r["radio_id"]): r["label"] for r in self._rows if r["label"]}
+
+    def name(self, system: str, radio_id: str) -> str:
+        rid = str(radio_id or "").strip()
+        if (system, rid) in self._by:
+            return self._by[(system, rid)]
+        n = int(rid) if rid.isdigit() else None
+        return next((r["label"] for r in self._ranges if n is not None and r["system"] == system
+                     and r["lo"] <= n <= r["hi"]), "")
+
+    def rows(self) -> list[dict]:
+        return list(self._rows)
+
+    def ranges(self) -> list[dict]:
+        return list(self._ranges)
 
 
 def gazetteer_locator():
@@ -335,12 +368,12 @@ def heard_at(row: dict, latency: float | None, fixed: float | None = None) -> fl
 
 
 def replay(rows: list[dict], factory: PipelineFactory | None = None, rules: Path | None = None,
-           settings: dict | None = None, locate=None) -> Run:
+           settings: dict | None = None, locate=None, radios=None) -> Run:
     """Every row through the engine in time order, the clock at each row's START (the policy decides by clock()),
     ticked every TICK_EVERY_S of row time, then flushed FLUSH_S on. factory: the intel core's engine unless given."""
     if factory is None:
         def factory(sink, r, clock):
-            return core_pipeline(sink, r, clock, settings, locate)
+            return core_pipeline(sink, r, clock, settings, locate, radios)
     now = [float(rows[0]["start"]) if rows else time.time()]
     rec = Recorder(lambda: now[0])
     p = factory(rec, rules, lambda: now[0])
@@ -473,6 +506,20 @@ def metrics(run: Run, incidents: list[dict] | None = None, categories: dict | No
                         "feed_ms_max": _round(max(ms) if ms else None),
                         "raise_s_median": _pct(delays, 0.5), "raise_s_p90": _pct(delays, 0.9)},
             "digests": rec.digests, "shed": shed}
+
+
+def talker_metrics(run: Run) -> dict:
+    """Who said it (engine.py _talkers), counts only: events whose stater is labelled, that a console answered, with a
+    talker town; with a talker town and no heard place (its coarse place: town_only); with a heard place in a town and
+    a talker town, how many differ (wrong_town, wrong_rate: the talker town against the heard address's)."""
+    evs = list(run.rec.events.values())
+    both = [e for e in evs if e.get("precision") not in (None, "none") and e.get("town") and e.get("talker_town")]
+    wrong = sum(e["talker_town"].lower() != e["town"].lower() for e in both)
+    return {"events": len(evs), "stated": sum(bool(e.get("stated_by")) for e in evs),
+            "answered": sum(bool(e.get("answered_by")) for e in evs),
+            "town": sum(bool(e.get("talker_town")) for e in evs),
+            "town_only": sum(bool(e.get("talker_town")) and e.get("precision") in (None, "none") for e in evs),
+            "heard_town": len(both), "wrong_town": wrong, "wrong_rate": _rate(wrong, len(both))}
 
 
 def _round(x):

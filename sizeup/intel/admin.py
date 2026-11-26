@@ -37,7 +37,7 @@ from sizeup.cad.store import CadError
 from sizeup.intel import policy as policy_mod
 from sizeup.intel import rules as rules_mod
 from sizeup.intel.events import VERDICTS, VOTE_PAIRS
-from sizeup.intel.model import MODES
+from sizeup.intel.model import MODES, shown_place, talkers_of
 from sizeup.intel.push import category_label
 
 SECTIONS = ("intel", "intel_packs", "intel_rules")
@@ -257,6 +257,10 @@ class IntelAdmin:
                 "what": e["what_score"], "level": e["level"], "where": e["where_score"], "precision": e["precision"],
                 "confirmed": bool(e["confirmed"]), "lat": e["lat"], "lon": e["lon"], "radius_m": e["radius_m"],
                 "place": e["label_full"], "town": e["town"], "alts": e["alts"], "basis": e["basis"], "mode": e["mode"],
+                # no place heard: who said it as the coarse place ("Port Chester (talker)", precision town: model.py)
+                **shown_place(e),
+                # who said it and who answered (engine.py _talkers): labels, never a raw radio ID
+                "talkers": talkers_of(e),
                 "priority": e["priority"], "pushed_at": e["pushed_at"], "suppressed": e["suppressed"],
                 "delivery": e.get("delivery"),        # the last push at ntfy: {ok, at, status, id | error} or None
                 "traffic_ids": e["traffic_ids"][-12:], "rules": e["rules"], "accept": bool(p.accept) if p else False,

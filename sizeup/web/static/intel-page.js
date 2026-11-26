@@ -11,7 +11,8 @@
 // Paging holds the first page's newest id (upto): an event saved while paging never pushes a row onto the next page
 // twice.
 //
-// A row: time · category · level (→ the level it would have had if not held) · source · place + precision ·
+// A row: time · category · level (→ the level it would have had if not held) · source · place + precision (and who
+// said it: "stated by: <label> · answered by: <label> (PC)", sizeup/intel/engine.py _talkers) ·
 // score and its parts (rule weights; the model's as "model 95%") · why it didn't push · Useful / Noise / Should
 // have pushed (POST /api/cad/intel/<id>/feedback: intel_feedback, what tuning reads). A click opens its More info
 // (/cad#prealert/intel/<id>, prealert-info.js). Terse: what a label means is in its hover.
@@ -352,11 +353,15 @@ window.IntelPage = (() => {
     // source
     const s = cell("il-src", e.source || "—");
     s.title = [e.source_key, e.system].filter(Boolean).join(" · ");
-    // place + precision, or unplaced
+    // place + precision ("<Town> (talker)" / "(handoff)" · town: no place heard, the town of who said it or of the console that took the call), or unplaced; who said it
+    const town = e.precision === "town";
     const pl = e.place
-      ? cell("loc", e.confirmed ? e.place : `${e.place} ?`, el("span", "dim small", ` · ${PREC[e.precision] || e.precision}`))
+      ? cell("loc", e.confirmed || town ? e.place : `${e.place} ?`, el("span", "dim small", ` · ${PREC[e.precision] || e.precision}`))
       : cell("loc dim", "unplaced");
-    if (e.place && !e.confirmed) pl.title = "Unconfirmed";
+    if (town) pl.title = e.basis === "handoff" ? "The town of the console that took the call" : "No place heard: the town of who said it (Settings > Radios)";
+    else if (e.place && !e.confirmed) pl.title = "Unconfirmed";
+    const said = (e.talkers || {}).line;
+    if (said) pl.append(el("div", "dim small", said));
     // the score and its parts
     const sc = cell("il-score", el("span", `il-sl ${e.score_level}`, `${e.score_level} ${pct(e.what)}`));
     sc.title = `${DECIDED[e.decided] || "—"}`;
