@@ -536,7 +536,7 @@ class Pool:
         """Another GPU worker has this job's model loaded and could take the job now (in a claim, room for a lease;
         for a pre-alert clip: quick and holding nothing)."""
         return any(o is not w and o.kind == "gpu" and j.model in o.models and o.polling > 0 and self._ready(o, now)
-                   and o.id not in j.avoid and (not j.pin or o.id == j.pin) and not (rank(j) == 0 and self._holds_bg(o))
+                   and o.id not in j.avoid and (not j.pin or o.id == j.pin) and not (priority(j) and self._holds_bg(o))
                    and len(o.leases) < MAX_LEASES and (j.cls not in FAST_CLASSES or self._fast_ok(o, now))
                    for o in self.workers.values())
 
