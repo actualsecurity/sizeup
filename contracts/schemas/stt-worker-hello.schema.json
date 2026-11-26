@@ -86,6 +86,12 @@
         "why": {"type": "string", "maxLength": 40, "description": "Not held: why, in words (starting, paused, refused by Windows, stopped, error). Sent only with `on` true and `held` false; the hub keeps 40 characters and shows it in Health's hover."}
       }
     },
+    "caps": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {"type": "string", "maxLength": 40},
+      "description": "What this worker.py fully supports, also in its claim body. `challenger`: challenger / greedy jobs, their POST jobs/<lease>/watch preemption and stt_models.try (deploy/stt-worker/worker.py CAPS). The hub sends challenger jobs only to a worker whose latest hello, state or claim said it; a worker from before sends none. A hub from before ignores it."
+    },
     "runtimes": {
       "title": "Runtimes",
       "description": "A GPU worker's llama.cpp and whisper.cpp builds (deploy/stt-worker/worker.py Runtimes): the worker keeps the programs its servers run at the builds its worker.py pins (pins.json), downloading, testing and switching them itself, with a rollback. Only the runtimes its worker.toml runs; left out by a worker from before. The hub keeps it as said (sizeup/cloud/sttworkers.py clean_runtimes) and Health shows it on the worker's row. A hub from before ignores it.",

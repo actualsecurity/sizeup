@@ -10,5 +10,6 @@
     "state": "starting",
     "bad": []
   },
+  "caps": ["challenger"],
   "worker": "gpu-1"
 }

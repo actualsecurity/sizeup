@@ -10,5 +10,6 @@
     "state": "starting",
     "bad": []
   },
+  "caps": ["challenger"],
   "reason": "whisper-server: checking"
 }

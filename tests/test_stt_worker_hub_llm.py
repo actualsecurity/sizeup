@@ -153,6 +153,14 @@ class Rig:
         self.w = W.Worker(cfg, run=no_smi, clock=lambda: self.clock[0],
                           popen=lambda argv, **kw: self.procs.append(FakeProc(argv, **kw)) or self.procs[-1])
         self.w.llm.status = lambda: self.code[0]
+        self.answer = [({"ok": True}, 5, 1)]                          # llama-server's test answer (llm_answer)
+
+        def check():
+            a = self.answer[0]
+            if isinstance(a, Exception):
+                raise a
+            return a
+        self.w.llm.check = check
         self.w.llm.alive = lambda: False
         self.m = self.w.stt_models
 
@@ -403,3 +411,34 @@ def test_yield_with_the_4b_keeps_the_llms_room_and_with_the_8b_it_gives_way(tmp_
     assert m.llm_mb() == 6179
     m.make_plan(GPU_12GB)
     assert not m.llm_room_ok
+
+
+def test_a_new_llm_that_fails_its_test_answer_falls_back_and_is_tried_again(tmp_path, monkeypatch):
+    """The test answer every llama-server switch passes (llm_answer, as a new llama.cpp build's): a new model that
+    answers /v1/models but not a 1-token constrained answer is never given jobs: worker.toml's again, its backoff."""
+    r = Rig(tmp_path, monkeypatch)
+    w = r.w
+    w.verify_llm()
+    r.name("small-llm")
+    r.models_step()
+    r.tick(2)
+    assert model_of(r.procs[-1].argv).endswith("small.gguf")
+    r.answer[0] = W.LlmError("llama-server said 500")
+    r.code[0] = 200
+    r.tick(2)                                                     # (its answer; then worker.toml's argv)
+    assert not w.llm_ok and model_of(w.llm_proc.argv) == str(r.toml_gguf)
+    assert r.m.llm_note() == "failed: its test answer failed (again in 5 min)"
+    r.answer[0] = ({"ok": True}, 5, 1)
+    r.tick(2)
+    assert w.llm_ok and w.models()["llm"] == "toml-llm"               # worker.toml's passes and serves meanwhile
+
+
+def test_a_runtime_switch_waits_for_the_llms_model_switch(tmp_path, monkeypatch):
+    r = Rig(tmp_path, monkeypatch)
+    r.w.verify_llm()
+    r.name("small-llm")
+    r.models_step()
+    r.tick(2)
+    assert r.w._llm_new is not None
+    monkeypatch.setattr(W, "UPDATE_QUIET_S", 0.0)
+    assert r.w.runtime_busy() == "the LLM's model switching"

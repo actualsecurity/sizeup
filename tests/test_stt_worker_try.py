@@ -399,3 +399,20 @@ def test_gaming_ends_a_challenger_at_once(tmp_path, whub, whisper):
         wait_for(lambda: whub.calls("/release"), what="handed back")
         wait_for(lambda: whisper.aborted == 1, what="the decode aborted")
     assert released(whub)[0].startswith("gaming") and not whub.accepted()
+
+
+def test_the_worker_says_it_takes_challenger_jobs_in_hello_state_and_claim(tmp_path):
+    """caps ["challenger"]: this worker.py takes challenger / greedy jobs, their watch preemption and stt_models.try.
+    The hub sends challenger jobs only to a worker whose latest hello, state or claim said so."""
+    from tests.test_stt_worker import FakeWhisper
+    hub, whisper = FakeHub(), FakeWhisper()
+    try:
+        w = W.Worker(make_cfg(tmp_path, hub, whisper), run=no_smi)
+        with running(w):
+            wait_for(lambda: hub.calls("/claim") and hub.calls("/state"), what="a claim and a heartbeat")
+        for route in ("/hello", "/state", "/claim"):
+            assert all(r[3]["caps"] == ["challenger"] for r in hub.calls(route)), route
+        assert W.CAPS == ("challenger",)
+    finally:
+        hub.stop()
+        whisper.stop()

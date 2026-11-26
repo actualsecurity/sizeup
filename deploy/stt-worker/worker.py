@@ -73,6 +73,9 @@ WHISPER_FIELDS = (("suppress_nst", "true"), ("entropy_thold", "2.4"), ("logprob_
 TEMPERATURE_INC = "0.2"                    # a full decode: fallback at 0.2, 0.4 ... 1.0 (up to 5 more passes)
 FAST_TEMPERATURE_INC = "0.4"               # a pre-alert (fast) one: at 0.4 and 0.8 only (up to 2 more, its lease short)
 GREEDY_TEMPERATURE_INC = "0.0"             # a challenger job (greedy): one pass, no fallback (comparable, short)
+# what this worker.py fully supports, said in hello, state and claim: "challenger" = challenger / greedy jobs, their
+# POST jobs/<lease>/watch preemption and stt_models.try (the hub sends challenger jobs only to a worker that says so)
+CAPS = ("challenger",)
 LONG_CLASSES = {"RERUN", "LOW", "CATCHUP"}  # long leases: gaming hands these back at once
 ENV = {"hub_url": "SIZEUP_STT_HUB_URL", "token": "SIZEUP_STT_WORKER_TOKEN",
        "cf_client_id": "SIZEUP_STT_CF_CLIENT_ID", "cf_client_secret": "SIZEUP_STT_CF_CLIENT_SECRET"}
@@ -3846,20 +3849,20 @@ class Models:
                 self.park(key)
                 self.llm_st[e["id"]] = "no room (VRAM)"
                 return self.llm_st[e["id"]]
-            wait = min(MODEL_SHORT_RETRY_S * 2 ** (n - 1), MODEL_RETRY_S)
+            wait = retry_wait(n, MODEL_SHORT_RETRY_S, MODEL_RETRY_S)
             self._retry[key] = self.clock() + wait
             why = "out of VRAM" if cause == "oom" else "its port was taken"
         else:
             n = self._fails[sha] = self._fails.get(sha, 0) + 1
             why = {"hash": "model hash mismatch", "exit": "llama-server exited",
-                   "noanswer": "llama-server didn't answer"}.get(cause, cause)
+                   "noanswer": "llama-server didn't answer", "answer": "its test answer failed"}.get(cause, cause)
             if n >= MODEL_BAD_TRIES:
                 self._fails.pop(sha, None)
                 self._sha_retry.pop(sha, None)
                 self.mark_bad(e["id"], sha, f"{why} ({n} times)")
                 self.llm_st[e["id"]] = f"failed: {why} (marked bad)"
                 return self.llm_st[e["id"]]
-            wait = min(MODEL_SHORT_RETRY_S * 2 ** (n - 1), MODEL_RETRY_S)
+            wait = retry_wait(n, MODEL_SHORT_RETRY_S, MODEL_RETRY_S)
             self._sha_retry[sha] = self.clock() + wait
         self.llm_st[e["id"]] = f"failed: {why} (again in {wait / 60:.0f} min)"
         return self.llm_st[e["id"]]
@@ -4615,7 +4618,7 @@ class Worker:
     def _state_body(self) -> dict:
         state, reason = self.state()
         body = {"state": state, "model": self.cfg.model, "version": VERSION, "models": self.models(),
-                "self_update": self.updater.report()}
+                "self_update": self.updater.report(), "caps": list(CAPS)}
         if reason:
             body["reason"] = reason
         rts = self.runtimes.report()
@@ -4873,7 +4876,7 @@ class Worker:
             self._llm_stop()
         if self.llm_proc is not None and self.llm_proc.running() and not self.stt_models.llm_room_ok:
             with self._lock:
-                give = self.llm_job is None and self._llm_call is None and not self._llm_claiming
+                give = self.llm_idle()
                 if give:
                     self._llm_down("gave its VRAM to the speech models")   # (said first: no job comes to it now)
             if give:
@@ -4900,6 +4903,16 @@ class Worker:
         self._llm_checked = now
         code = self.llm.status()
         if code == 200:
+            rec = self._llm_new
+            if rec is not None and not self.llm_ok:
+                why = self.llm_answer()            # (a new model: the test answer every llama-server switch passes)
+                if why:
+                    self._llm_new = None
+                    self._llm_stop()
+                    state = self.stt_models.llm_failed(rec["entry"], "answer")
+                    self._llm_down(f"{rec['entry']['id']}: {state}"[:80])
+                    log.warning("llama-server: %s: %s: back to worker.toml's model", rec["entry"]["id"], why)
+                    return
             if not self.llm_ok:
                 log.info("llama-server: ok (%s)", self.llm_label())
             self.llm_ok, self.llm_err, self.llm_fails = True, "", 0
@@ -4974,7 +4987,7 @@ class Worker:
             return False
         with self._lock:
             self._llm_down("switching models")             # (no new claim: llm_ok false)
-            if self.llm_job is not None or self._llm_call is not None or self._llm_claiming:
+            if not self.llm_idle():
                 return True
         old = self.llm_label()
         self.llm_proc.stop()
@@ -5179,6 +5192,8 @@ class Worker:
             return "a clip"
         if self.llm_job is not None or self._llm_call is not None:
             return "an LLM job"
+        if self._llm_new is not None:
+            return "the LLM's model switching"
         held = self.held()
         if held is not None:
             return held[0]
@@ -5384,7 +5399,8 @@ class Worker:
             if self.stopped or self.draining:      # (the self-update's drain began after the state was read)
                 return
             ans = self.hub.request("POST", f"{API}/claim", {"wait": self.claim_wait, "state": state,
-                                                            "model": self.cfg.model, "models": self.loaded()},
+                                                            "model": self.cfg.model, "models": self.loaded(),
+                                                            "caps": list(CAPS)},
                                    timeout=self.claim_wait + 15)
         finally:
             self._claiming = False
