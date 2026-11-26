@@ -497,6 +497,8 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
             <section id="d-intel" class="d-intel" hidden aria-label="Intel notes"></section>
             <!-- an Airport event (#105): what the tower passed, one compact row; the subtype's FAA definition behind "?" -->
             <div id="d-airport" class="d-airport" hidden aria-label="Airport: what the tower passed"></div>
+            <!-- a Notification (notif.js): its sub-type and the hydrants out of service it names -->
+            <div id="d-notif" class="pp-box d-notif" hidden aria-label="Notification: sub-type and hydrants"></div>
             <div id="d-roads" class="d-roads" hidden aria-label="Road closures and projects nearby"></div>
             <div id="d-tides" class="d-tides" hidden aria-label="Tides"><div class="wx-tides-body"></div></div>
             <div id="d-pages" class="d-pages" hidden aria-label="The 60 Control page"></div>
@@ -943,6 +945,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/preplan.js"></script>
 <script src="/static/bldg-highlight.js"></script>
 <script src="/static/hydrants.js"></script>
+<script src="/static/notif.js"></script>
 <script src="/static/streetview.js"></script>
 <script src="/static/preplan-docs.js"></script>
 <script src="/static/radio-controls.js"></script>

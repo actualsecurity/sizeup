@@ -350,6 +350,11 @@ function typeLabel(t, s) {
   if (!t) return s ? `? / ${nameOf("event_subtypes", s)}` : "";
   return s ? `${nameOf("event_types", t)} / ${nameOf("event_subtypes", s)}` : nameOf("event_types", t);
 }
+// the type, and a notification's sub-type after it ("Notification / Fire · Hydrants OOS": notif.js)
+function typeText(inc) {
+  const base = typeLabel(inc.type, inc.subtype);
+  return window.Notif ? Notif.label(inc, base) : base;
+}
 function typeColor(t) {
   const x = (L().event_types || []).find((i) => i.code === t);
   return x ? x.color : "";
@@ -663,7 +668,7 @@ function fillQueueItem(li, inc) {
   else right.textContent = fmtTime(inc.closed_at);
   head.append(el("b", "qn", incTitle(inc)), right);
   const type = el("div", "qtl");
-  const t = el("span", "qt", typeLabel(inc.type, inc.subtype) || "No type");
+  const t = el("span", "qt", typeText(inc) || "No type");
   if (inc.type) t.style.setProperty("--c", typeColor(inc.type) || "#9AA3AD");
   else t.classList.add("warn");
   type.append(t);
@@ -678,6 +683,8 @@ function fillQueueItem(li, inc) {
   li.replaceChildren(head, type, addr);
   const ap = airportLine(inc);
   if (ap) li.append(el("div", "qs ap-line", ap));       // the tower's facts on an airport event (#105)
+  const nl = window.Notif && Notif.line(inc);           // a notification's hydrants OOS (notif.js)
+  if (nl) li.append(nl);
   const ask = globalThis.DispatchMode && isOpen(inc) && DispatchMode.closeRow(inc, autoDeps());   // County in service: close? (#311)
   if (ask) li.append(ask);
   if (inc.status === "queued") {
@@ -765,7 +772,8 @@ function renderQueue() {
   const sig = (i) => JSON.stringify([i.status, i.number, i.type, i.subtype, i.address, i.location_qualifier, i.id === cad.sel, i.emergency,
     i.until_at, untilInfo(i)?.text, i.disposition, i.type_note, unconfirmed(i), i.joint_call, openAssignments(i).map((a) => [a.name, a.status, txNow(a.name)]),
     i.closed_at, cad.listSig.length, canDo("dispatch"), airportLine(i), i.scope && [i.scope.short, i.scope.label, i.scope.source, i.scope.feed],
-    i.merge_offer && [i.merge_offer.into, i.merge_offer.ref, i.merge_offer.why], i.merged_into && i.merged_into.into, queueExtra(i)]);
+    i.merge_offer && [i.merge_offer.into, i.merge_offer.ref, i.merge_offer.why], i.merged_into && i.merged_into.into, queueExtra(i),
+    window.Notif ? Notif.sig(i) : ""]);
   const opts = { key: (i) => String(i.id), sig, make: queueItem, fill: fillQueueItem };
   syncList($("#q-queued"), all.filter((i) => i.status === "queued").sort(byAge), { ...opts, empty: "None" });
   syncList($("#q-pending"), all.filter((i) => i.status === "pending" && i.emergency).sort(byAge),
@@ -920,7 +928,7 @@ function renderDetail() {
     }
   }
   const type = $("#d-type");
-  setText(type, typeLabel(inc.type, inc.subtype) || "No type");
+  setText(type, typeText(inc) || "No type");
   type.style.setProperty("--c", inc.type ? typeColor(inc.type) || "#ff7a5c" : "#E0A030");
   const addr = $("#d-addr");
   addr.className = "d-addr" + (inc.address ? "" : " dim");
@@ -952,6 +960,7 @@ function renderDetail() {
   const caller = [inc.caller_name, inc.phone, inc.caller_address].filter(Boolean).join(" / ");
   setText($("#d-caller"), caller ? `Caller: ${caller}` : "");
   renderAirport(inc, open);
+  if (window.Notif) Notif.card(inc, open);                 // a notification's sub-type and hydrants OOS (notif.js)
   renderSourcePages(inc);
   renderComments(inc);
   renderMap(inc);
@@ -3046,7 +3055,9 @@ async function closeIncident(e) {
   flash($("#c-error"));
   const d = $("#c-disp").value;
   if (!d) return flash($("#c-error"), "Pick a disposition");
-  const r = await act("close", { disposition: d }, $("#c-error"));
+  const ok = window.Notif ? await Notif.confirmClose(selected()) : {};   // hydrants still OOS on it: asked first
+  if (!ok) return;
+  const r = await act("close", { disposition: d, ...ok }, $("#c-error"));
   if (r) { $("#c-disp").value = ""; show($("#close-form"), false); }
 }
 

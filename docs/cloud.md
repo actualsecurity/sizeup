@@ -2819,6 +2819,25 @@ lacks, and county hydrants removed from the maps.
 - **CSV.** The export has every overlay column, keyed by `key`. An import changes only the columns the file has
   (an empty cell clears that field) and shows a preview first. If any row is in error, nothing is applied.
 
+### Notifications: sub-type and hydrants out of service
+
+`sizeup/cad/notif.py`, `static/notif.js`. A Notification gets a sub-type (Settings > Lists > Notification sub-types:
+Hydrants OOS, Hydrants back in service, Road closure, Water main, Other), shown after its type as an Airport event
+shows its alert ("Notification / Fire · Hydrants OOS"). It comes from the admins' rules or is set by hand on the event.
+
+- **Rules.** Settings > Lists > Notification rules (admins, audited as Lists; settings section `notif_rules`). Each rule
+  is a regular expression over the notification's remarks, feed comments and notes, the sub-type it sets, and whether
+  the hydrant numbers it names are out of service or back in service. None ship in the repo: the department's
+  comment formats are entered there (a Test box shows what a text gives). The hub reads the comments the station's
+  adapter already sends; the adapter needs no change.
+- **Numbers to hydrants.** Each number is matched to the hydrant list (the number shown, the county number or the asset
+  id, leading zeros aside). One near the call: Mark OOS, or Link when it is already out of service. Only elsewhere: the
+  distance and where, and a person confirms. Not listed: an admin can add it. Admins apply (as every hydrant edit), and
+  it is audited as one; auto-apply per rule is off by default and never takes a number found elsewhere.
+- **Held open.** A linked hydrant keeps its notification open: the county's in service and an Until never close it,
+  and a person's Close asks first. Back in service (the event, the hydrant's card, a CSV, or a later "back in service"
+  notification) releases it; once all are back the notification asks to be closed, or closes (`auto_close`).
+
 ## Metro-North trains (the MTA)
 
 > "Metro-North New Haven Line runs through Port Chester and Rye (stations, grade crossings, catenary).

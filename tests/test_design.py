@@ -50,6 +50,7 @@ HOOKS = {
     "og-name", "og-n", "og-last", "og-snip", "muted", "clamp", "lists", "s-num", "s-color", "db-body", "db-panel",
     "feed-tog", "inc", "ov-head", "ptext", "rv-head", "rv-list", "s-tabs", "tg-gchip", "tg-heard", "unit-groups",
     "alt-tog", "pa-dismiss", "tg-eng", "tg-tier", "page",
+    "hy-notif", "nf-line", "nf-list", "nf-row", "nf-test-out",          # notif.js / hydrants.js hooks (the tests' selectors)
 }
 
 

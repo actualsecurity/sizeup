@@ -51,6 +51,9 @@ shows). A new export can replace the file without a code change:
                                      Stored by code on an event (incidents.location_qualifier) and a hydrant: shown in
                                      front of the address ("IFO 12 Sample St"), never a point moved. Not in the file:
                                      DEFAULT_QUALIFIERS
+    notification_kinds               {code, name}: what a Notification is about, shown after its type ("Notification /
+                                     Fire · Hydrants OOS"): set by the admins' rules or by hand (sizeup/cad/notif.py).
+                                     HYD-OOS and HYD-IS are what the hydrant rules set. Not in the file: DEFAULT_NOTIF_KINDS
 
 Any item may carry "confirm": why its meaning or role is a guess. Settings shows it as "meaning to
 confirm" until someone edits or confirms the item there (the override drops the note), as it does for a
@@ -95,7 +98,8 @@ HOME_DEPARTMENT = "Port Chester FD"     # whose apparatus a run card's full-depa
 ANY_KIND = "any"                        # a run-card kind slot that takes any apparatus ("1 × any")
 ANY_SKIPS = ("chief",)                  # ...but not a chief officer's car (those are named on a card)
 COMMAND = "IC"                          # Incident command: one unit per event
-LIST_SECTIONS = ("event_types", "event_subtypes", "dispositions", "received_via", "unit_statuses", "location_qualifiers")
+LIST_SECTIONS = ("event_types", "event_subtypes", "dispositions", "received_via", "unit_statuses", "location_qualifiers",
+                 "notification_kinds")
 # Where at a location (Settings > Lists > Location qualifiers): a data file without its own list gets these.
 DEFAULT_QUALIFIERS = (
     {"code": "IFO", "name": "In front of", "short": "IFO", "spoken": "in front of"},
@@ -106,6 +110,15 @@ DEFAULT_QUALIFIERS = (
     {"code": "NEAR", "name": "Near", "short": "NR", "spoken": "near"},
     {"code": "SIDE", "name": "Side of", "short": "SIDE", "spoken": "side of"},
     {"code": "BETWEEN", "name": "Between", "short": "BTWN", "spoken": "between"},
+)
+# What a Notification is about (Settings > Lists > Notification sub-types, sizeup/cad/notif.py): a data file without its
+# own list gets these.
+DEFAULT_NOTIF_KINDS = (
+    {"code": "HYD-OOS", "name": "Hydrants OOS"},
+    {"code": "HYD-IS", "name": "Hydrants back in service"},
+    {"code": "ROAD", "name": "Road closure"},
+    {"code": "WATER-MAIN", "name": "Water main"},
+    {"code": "OTHER", "name": "Other"},
 )
 QUAL_SHORT_MAX, QUAL_SPOKEN_MAX = 12, 40
 QUAL_SHORT = re.compile(r"[A-Za-z0-9][A-Za-z0-9/&.\- ]{0,11}")      # "IFO", "R/O", "BTWN"
@@ -173,6 +186,7 @@ class Lists:
     agency_status_sets: dict = field(default_factory=dict) # {"default", "sets": {id: {statuses, labels}}, "boards"}
     unit_placeholders: str = ""                            # regex: a department's placeholder code ('' = none)
     location_qualifiers: tuple[dict, ...] = ()             # {"code", "name", "short", "spoken"}: where at a location
+    notification_kinds: tuple[dict, ...] = ()              # {"code", "name"}: a Notification's sub-type (notif.py)
     path: str = ""
     _names: dict[str, dict[str, str]] = field(default_factory=dict, repr=False)
     _board_of: dict[str, str] = field(default_factory=dict, repr=False)
@@ -660,6 +674,7 @@ class Lists:
                 "free_status": self.status_for("free"),
                 "type_subtypes_partial": self.type_subtypes_partial,
                 "location_qualifiers": [dict(q) for q in self.location_qualifiers],
+                "notification_kinds": [dict(k) for k in self.notification_kinds],
                 "source": _shown_path(self.path)}
 
 
@@ -753,6 +768,8 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
     received = _items(d, "received_via", where, LONG_CODE)
     statuses = _items(d, "unit_statuses", where, LONG_CODE, ("role", "bg", "fg"))
     quals = _qualifiers(d, where)
+    kinds_n = _items(d if d.get("notification_kinds") is not None else {"notification_kinds": [dict(k) for k in DEFAULT_NOTIF_KINDS]},
+                     "notification_kinds", where, CODE)
     type_codes, sub_codes = {t["code"] for t in types}, {s["code"] for s in subtypes}
     for x in types + subtypes + dispositions + received + statuses:
         if "confirm" in x and not isinstance(x["confirm"], str):
@@ -979,7 +996,7 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
                  status_flow=flow,
                  lead_in_joint_only={str(t): str(v) for t, v in only.items()}, dispatch_tones=tones,
                  free_status=free_status, release_on_close=release, type_subtypes_partial=tsp, agency_status_sets=agency_sets,
-                 unit_placeholders=ph, location_qualifiers=quals, path=str(path))
+                 unit_placeholders=ph, location_qualifiers=quals, notification_kinds=kinds_n, path=str(path))
 
 
 def _qualifiers(d: dict, where: str) -> tuple[dict, ...]:

@@ -36,6 +36,7 @@ from sizeup.cad.premise import Premise
 from sizeup.cad.sttfix import SttCorrections
 from sizeup.cad.hydrants import KEY_RE as HYDRANT_KEY
 from sizeup.cad.hydrants import Hydrants
+from sizeup.cad.notif import Notif
 from sizeup.cad.footprints import Footprints
 from sizeup.cad.preplan import Preplan
 from sizeup.cad.preplan_docs import PreplanDocs
@@ -461,6 +462,9 @@ class Cad:
         # Hydrants (#799, sizeup/cad/hydrants.py): the department's overlay on the county's hydrant layer (status, flow,
         # class ...): the gis serves the layer through it (the app sets gis.overlays), each open call gets its nearest
         self.hydrants = Hydrants(self)
+        # A notification's sub-type and the hydrants out of service it names (sizeup/cad/notif.py): the admins' rules
+        # over its comments; a hydrant linked to it keeps it open until back in service
+        self.notif = Notif(self)
         # A call's building (sizeup/cad/footprints.py): the county footprint(s) its address, range or place name is, lit
         # whole on its maps; .gaz the gazetteer's address points (the app sets it)
         self.footprints = Footprints(self)
@@ -499,6 +503,7 @@ class Cad:
             self.premise.decorate(incs)
             self.preplan.decorate(incs)                   # its building's pre-plan points (#456)
             self.hydrants.decorate(incs)                  # its nearest hydrants, the out-of-service ones (#799)
+            self.notif.decorate(incs)                     # a notification's sub-type and its hydrants OOS (notif.py)
             self.footprints.decorate(incs)                # its building's footprint(s), lit on its maps
             try:
                 self.sources.decorate(incs)               # a feed's jurisdiction and run numbers on the incident (#297)
@@ -1113,6 +1118,7 @@ class Cad:
         airport.default_location(f)            # an Airport event with no location: the terminal (#87)
         self._auto_geo(f)
         iid = self.store.create_incident(**f, source="manual", status="pending", operator=_text(body, "operator", OPERATOR_MAX))
+        self.notif.scan(iid)                       # a notification typed in by hand: its remarks (notif.py)
         inc = self.store.incident(iid)
         self._prealert_match(inc)
         return inc
@@ -1154,6 +1160,8 @@ class Cad:
         if "pin" in hand and "lat" not in body:
             hand.remove("pin")                       # re-placed from a typed address, not a pin a person put down
         self.sources.mark_manual(iid, hand, op)
+        if any(before[k] != after[k] for k in ("type", "subtype", "remarks")):
+            self.notif.scan(iid)                   # made a notification, or its remarks changed (notif.py)
         return after
 
     def feed_use(self, iid: int, body: dict) -> dict:
@@ -1192,6 +1200,7 @@ class Cad:
         return self.store.dismiss(iid, _text(body, "operator", OPERATOR_MAX), _text(body, "reason", 200))
 
     def close(self, iid: int, body: dict) -> dict:
+        self.notif.close_check(iid, body)          # hydrants still OOS on a notification: the person confirms
         return self.store.close(iid, _text(body, "disposition", 40), _text(body, "operator", OPERATOR_MAX))
 
     def settle_unstaffed(self, now: float | None = None) -> list[int]:
@@ -1241,6 +1250,7 @@ class Cad:
             raise CadError(f"units: {bad[0]!r} is not on the boards")
         tags = list(dict.fromkeys(codes[u.strip().upper()] for u in units))
         self.store.note(iid, text, _text(body, "operator", OPERATOR_MAX), units=tags, places=places)
+        self.notif.scan(iid)                       # a notification's rules read the notes too (notif.py)
         return {"ok": True, "units": tags, "places": places}
 
     @staticmethod

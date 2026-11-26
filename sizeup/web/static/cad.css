@@ -192,6 +192,15 @@
   .d-airport .ap-fact { display: inline-flex; gap: var(--s-1); align-items: baseline; white-space: nowrap; }
   .d-airport .ap-fact .dim { font-size: var(--fs-xs); line-height: var(--lh-xs); }
   .d-airport .ap-none { color: var(--dim); font-size: var(--fs-sm); line-height: var(--lh-sm); }
+  .d-notif { margin-block-start: var(--s-2); }
+  .d-notif[hidden] { display: none; }
+  .d-notif .nf-kind { max-inline-size: 14rem; }
+  .d-notif .nf-what { display: flex; flex: 1 1 auto; flex-wrap: wrap; align-items: center; column-gap: var(--s-1);
+                     min-inline-size: 0; overflow-wrap: anywhere; }
+  .d-notif .nf-what > b, .d-notif .nf-st { white-space: nowrap; }
+  .d-notif .nf-cand { padding-inline-start: var(--s-5); }
+  .d-notif .nf-back, .d-notif .nf-done, .d-notif .nf-dismissed { color: var(--dim); }
+  .d-notif .nf-foot { gap: var(--s-2); flex-wrap: wrap; }
   /* road closures and projects in effect near the event (roadprojects.js, #185): a line each, the colour its state */
   .d-roads { display: flex; flex-direction: column; gap: var(--s-0); margin-block-start: var(--s-2); font-size: var(--fs-sm); line-height: var(--lh-sm); }
   .d-roads[hidden] { display: none; }
