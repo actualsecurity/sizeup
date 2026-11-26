@@ -1094,6 +1094,24 @@ def _where(d: dict) -> dict:
     return {"channel": str(d.get("source") or ""), "talkgroup": tg if isinstance(tg, int) and not isinstance(tg, bool) else None}
 
 
+def clip_lag(app, kind: str, d: dict, audio: bytes | None) -> None:
+    """#986: the clip reached the hub (and, with its audio, is playable) this long after its air start, by source kind
+    only (sizeup/perf.py ClipLag): the "lag 1h:" log line and Health's Hub CPU card. A function, not a method: a test
+    may call HubApp.apply on a stand-in."""
+    perf = getattr(app, "perf", None)
+    if perf is None:
+        return
+    try:
+        from sizeup.perf import air_start, lag_kind
+        cid = str(d.get("id") or "")
+        tg = d.get("talkgroup")
+        lk = lag_kind(kind == "page", str(d.get("system") or ""), tg if isinstance(tg, int) else None,
+                      (getattr(app, "_kind", None) or {}).get(str(d.get("source") or ""), ""), sourcekeys.is_context(d))
+        perf.lag.event(cid, lk, air_start(cid, d.get("start")), d.get("end"), bool(audio))
+    except Exception:  # noqa: BLE001 - a measurement, never in an event's way
+        pass
+
+
 def _short_why(why: str, worker: str = "") -> str:
     """A pool fallback's reason as a route says it: "went gaming", "no text in time (its lease ran out)"."""
     why = re.sub(r"^GPU worker \S+:?\s*", "", str(why or "")) if why.startswith("GPU worker ") else str(why or "")
@@ -1402,23 +1420,7 @@ class HubApp(App):
         else:
             self.hub.log(f"hub: ignoring event type {kind!r} (a newer station?)")
         if kind in ("page", "traffic", "alarm"):
-            self._clip_lag(kind, d, audio)
-
-    def _clip_lag(self, kind: str, d: dict, audio: bytes | None) -> None:
-        """#986: the clip reached the hub (and, with its audio, is playable) this long after its air start, by source
-        kind only (sizeup/perf.py ClipLag): the "lag 1h:" log line and Health's Hub CPU card."""
-        perf = getattr(self, "perf", None)
-        if perf is None:
-            return
-        try:
-            from sizeup.perf import air_start, lag_kind
-            cid = str(d.get("id") or "")
-            tg = d.get("talkgroup")
-            lk = lag_kind(kind == "page", str(d.get("system") or ""), tg if isinstance(tg, int) else None,
-                          self._kind.get(str(d.get("source") or ""), ""), sourcekeys.is_context(d))
-            perf.lag.event(cid, lk, air_start(cid, d.get("start")), d.get("end"), bool(audio))
-        except Exception:  # noqa: BLE001 - a measurement, never in an event's way
-            pass
+            clip_lag(self, kind, d, audio)
 
     @staticmethod
     def _id(d: dict) -> str:
