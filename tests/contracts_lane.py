@@ -42,6 +42,12 @@ class Whisper:
         return (PAGED if round(len(audio) / 16000) == 6 else SAID), 0.9
 
 
+# The hub's caps from before #927 (no "traffic_pending"): a Lane's hub answers with these unless told otherwise, so its
+# station sends a transmission in one event after its text, as the recorded vectors and the cursor's counts have it;
+# at_the_close() is the other way (a Lane made with answer_with=None: the hub's own caps)
+OLDER_CAPS = ["p25_systems", "stt_input", "stt_pool"]
+
+
 class Lane(c.Live):
     """tests/contracts.py Live, with every events post the hub handled kept as it came and as it was answered:
     `events_seen` = [(request bytes, status, answer bytes)]. events_answer_with: keys added to every 200 answer (what a
@@ -51,6 +57,8 @@ class Lane(c.Live):
 
     def __init__(self, tmp_path, events_answer_with: dict | None = None, **kw):
         import os
+        if "caps" not in kw.get("answer_without", ()):
+            kw.setdefault("answer_with", {"caps": OLDER_CAPS})
         super().__init__(tmp_path, **kw)
         self.events_seen: list[tuple[bytes, int, bytes]] = []
         h = self.hub.app.hub
@@ -171,6 +179,53 @@ def context_call(st, name: str = "7001-1794990000_770181250.0-call_2", tg: int =
                 [Turn(0.0, radio, radio, "", at=at)], system="east")
     call.late = late
     st._call_system(rt, call)
+
+
+def at_the_close(lv: Lane, st, monkeypatch) -> dict[str, str]:
+    """(#927) A plain station of a hub whose caps say "traffic_pending", through each way the text of a transmission sent
+    at its close fills it: whisper's words; whisper behind, the next clip handed to the hub's pool (its fill says
+    "pool", with its class); a channel on both engines. The clip ids by what they are. What stands in: whisper (Whisper,
+    held while the clips queue), the hub's word that its pool has room, and the channel map it would push back."""
+    import threading
+    from sizeup.stt import SHED
+    from tests.test_app import wait
+    assert wait(lambda: "traffic_pending" in st.link.hub_caps, 30)
+    gate, then, real = threading.Event(), threading.Event(), st.stt.client
+    calls = []
+
+    class Held:
+        def transcribe(self, audio, prompt=""):
+            calls.append(1)
+            if len(calls) == 1:
+                gate.wait(30)                                 # (the first clip held while the others queue)
+            elif round(len(audio) / 16000) == 4:
+                then.wait(30)                                 # (the one the hub withdraws while whisper has it)
+            return real.transcribe(audio, prompt)
+    st.stt.client = Held()
+    ids: dict[str, str] = {}
+    t = time.time() - 300.0
+    ids["fm"] = fm(st, at=t)                                                    # transcript_pending station; fill
+    assert wait(lambda: st.stt.current() is not None, 10)                       # (whisper on it, held)
+    ids["fm_pool"] = fm(st, at=t + 10, radio=0x7306)                            # behind it: shed, to the pool
+    for name, fn in (("pool_has_room", lambda seconds=None: True), ("pool_takes", lambda: True)):
+        monkeypatch.setattr(st.link, name, fn)
+    [(_p, item, _a, _c, _q)] = st.stt.withdraw(ids={ids["fm_pool"]})
+    st._stt_dropped(item, f"{SHED} (the contract run)")                         # transcript_pending pool, stt_class
+    ids["fm_withdrawn"] = fm(st, at=t + 15, seconds=4.0, radio=0x7307)          # the hub's pool takes it: authoritative
+    monkeypatch.setattr(lv.hub.app, "channels_check", lambda force=False: None)   # (the hub's map: not pushed back)
+    st.set_channel_prefs({"Fireground 1": {"engine": "both"}}, {"ok": True, "why": "", "reserve": []})
+    ids["fm_both"] = fm(st, at=t + 20, radio=0x7305)                            # stt both
+    gate.set()
+    assert wait(lambda: getattr((st.stt.current() or (0, None))[1], "id", "") == ids["fm_withdrawn"], 10)
+    got = st.stt_withdraw([ids["fm_withdrawn"]])
+    assert got["running"] == [ids["fm_withdrawn"]], got                         # (whisper began it)
+    then.set()
+
+    def filled() -> bool:
+        got = {ev["data"]["id"] for ev in lv.events("retext") if ev["data"].get("fill")}
+        return set(ids.values()) <= got and st.link.outbox.pending()[0] == 0
+    assert wait(filled, 60), "the fills did not reach the hub"
+    return ids
 
 
 # -- an event's data against the sub-schema of its type ------------------------------------------------------------------

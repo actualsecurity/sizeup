@@ -520,3 +520,28 @@ def test_forget_drops_a_question_already_queued_for_the_model():
     e.backing._q.put_nowait(("ask", e, job, None))
     e.backing.forget("q1")
     assert job["dead"] and e.backing._ask(e, job) == [] and b.asked == []
+
+
+# -- #927 x #923: a row on the timeline at its close ("Transcribing"), its text filled later ----------------------------
+
+def test_a_row_still_transcribing_is_never_read_and_its_late_fill_is_context_then_withdrawn(live):
+    """A station's whisper clip lands at its close with no text (status pending) and its text fills the row later
+    (Comms.retext). The engine never reads the pending row (nothing considered, no window entry); the fill, read more than
+    the pack's late_s after the clip ended, is late (#923): recorded at log, never pushed; a pending copy sent again never
+    blanks it (so never withdraws it); a re-ask that comes back unclear withdraws it."""
+    cad, n = live
+    now = cad.clock()
+    pend = dict(ctx_row("w1-t0", "", now - 400), status="pending", model="whisper-station")
+    cad.comms.record(pend)
+    assert cad.intel.drain() == 0 and cad.intel.counters.snapshot(now)["all"]["h24"]["considered"] == 0
+    assert not any("w1-t0" in w.entries for w in cad.intel.windows.values())
+    assert cad.comms.retext("w1-t0", SHOTS, "done", "m.bin")                         # the fill, 400 s after air
+    assert cad.intel.drain() == 1
+    [ev] = cad.intel.events.open_events()
+    assert ev.category == "weapons" and (ev.suppressed, ev.mode) == ("late", "log") and n.sent == []
+    cad.comms.record(pend, replace=True)                                             # the close's event sent again
+    assert cad.store.one("SELECT text FROM radio_traffic WHERE id = 'w1-t0'")["text"] == SHOTS
+    assert cad.intel.drain() == 0 and cad.intel.events.get(ev.id).note != WITHDRAWN
+    assert cad.comms.retext("w1-t0", "", "unclear", "m.bin")                         # a re-ask: unclear now
+    cad.intel.drain()
+    assert cad.intel.events.get(ev.id).note == WITHDRAWN and n.sent == []

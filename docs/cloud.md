@@ -1745,6 +1745,54 @@ Settings > Radios > Channels picks each channel's engine (a group heading's "Eng
 - **Later:** the shadow-evidence summary (a channel's GPU candidates against AWS on the same clips), so an admin can
   move a channel off AWS on evidence. Nothing switches a channel by itself.
 
+### Whisper clips on the radio timeline at their close (#927)
+
+A transmission that waits for the station's whisper goes to the hub at its close, not once its text is in. The row is
+then on the radio timeline at air time, with its audio, talker, radio IDs, emergency flags, call and key-up, and late
+flag. It shows "Transcribing on the station (whisper)", and the text fills the same row later.
+
+- **At the close:** a `traffic` event with `status: "pending"`, `transcript_pending: "station"` and its clip
+  (`App._land_pending`). The station's own store and radio log get the row the same way.
+- **The text:** a `retext` with `fill: true` (`App._fill_pending`). It carries the words, status, model, `engine` and
+  whisper's wait and run. It covers whatever whisper made of the clip: words, no speech, an error, shed (`skipped`), or
+  handed to the pool (`transcript_pending: "pool"`). It is never a second `traffic`, because the hub drops a resent id.
+  A second answer for the same clip (a stop handing on a clip whisper finished) is dropped on the station.
+- **Once, on the text:** the text hooks (intel, status hints, possible incoming, the airport), the alarms' words, the
+  ATC watch, the unclear check and the run in `stt_runs`. `Comms.record` tells no hook about a row still `pending` or
+  `remote` with no text. The emergency button still alarms at the close (the `alarm` event), and the words update that
+  same alarm. A late call (#747) is late on both events.
+- **First text wins:** a fill for a row whose text came another way first is kept as a `late` run, not the text.
+- **Durable:** the rows waiting for their text are in hub.sqlite (`station_wait`), not only in memory. A fill for a
+  row that has left memory (1000 newer rows, a hub restart) fills the radio log by its id, and its mayday still
+  alarms. A fill that comes before its transmission (that event held back and sent again later) is kept
+  (`early_fill`, 6 h) and applied when the transmission comes. A copy still "Transcribing" that is sent again never
+  blanks a row that has its text.
+- **Never stuck, never shed early:** a row is marked shed (`skipped`, so the catch-up runs it from the hub's clip)
+  only on evidence that its text isn't coming. When sizeup on the station starts again (a new `proc` in its state
+  post: a crash, a kill, an update, a reboot), the hub asks the new process which waiting clips it still has
+  (`stt_held`, again 2 min later) and sheds the ones it doesn't know. The backstop, for an older station too: a row
+  older than whisper ever keeps a clip waiting (`MAX_WAIT_S`, 3 h) + 15 min. A station that is only offline is never
+  shed: its queue lives on and its fills come when it is back. Its text still fills a shed row if it comes. A clip
+  saved at a stop keeps `landed` in `stt-queue.json`, so after the restart its text is a fill too, and the new
+  process says it holds it. The station refuses a catch-up of a clip still waiting for its first text.
+- **Late words still alarm:** a fill whose row has a text already (another engine's, the catch-up's) is a run, not
+  the text, but its words still reach the alarms (deduped by id). Words that come over 2 min after air alarm labelled
+  late ("raised N min late", at the transmission's own time); past the alarms' age (30 min + 10 %) they are a notice,
+  never pushed.
+- **Writes:** a loose row at its close is written to the station's `incidents.json` with its fill, and the station
+  coalesces those writes (at most one each 1.5 s). The radio log's rules that need no words (a fireground's links)
+  run at the close.
+- **Gated:** only for a hub whose caps say `traffic_pending`. An older hub gets the one `traffic` after the text. Pages
+  keep their own way (PageHold, `page_text`).
+- **Withdraw (for the pool, #896):** `HubApp.stt_withdraw_station(ids)` calls the station's `stt_withdraw`. It is
+  sent only to a connected station whose status `caps` has `stt_withdraw`, and returns None otherwise. The station takes
+  a waiting landed clip out of whisper's queue and sends nothing for it, not even a `skipped`. A clip whisper has begun
+  runs on, and its text goes up as a fill with `authoritative: false`: the hub keeps it as a run, never as the text by
+  itself. The answer is `{withdrawn, running, sent, unknown}` (sent: its text went up already or is about to; unknown:
+  the station doesn't know it, as after its restart). A withdrawn or running one no longer waits for the station.
+- **Volume:** one more event per whisper clip (about 7–10k a day), each a `retext` of about 350 bytes with no audio.
+  The audio moves to the event at the close.
+
 ## Phone pre-alert (Tapout)
 
 > "can we bake in the ntfy.sh feed from tapout into this? lets receive that feed as a possible

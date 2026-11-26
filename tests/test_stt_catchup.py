@@ -842,7 +842,7 @@ def test_a_restarted_station_catches_up_from_the_hubs_spec_and_the_clip_on_disk(
         assert got == {"queued": [tid], "refused": {}, "hold": ""}
         assert wait(lambda: [k for k, _ in out] == ["retext", "rerun"], 10), out
         assert out[0][1] == {"id": tid, "text": "Car 12 clear of the scene", "status": "done", "confidence": 0.9,
-                             "model": "m.bin", "catchup": True}
+                             "model": "m.bin", "engine": "station-whisper", "catchup": True}
         assert out[1][1]["result"] == "changed; catch-up" and w.calls == [("fast", 3)]
         assert prompts == [("FG1", "Car 12", start)]            # the spec's fields, as the live pass had them
     finally:

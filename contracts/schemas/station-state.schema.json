@@ -22,6 +22,12 @@
       "maxLength": 64,
       "description": "This boot of the station's machine: Linux's /proc/sys/kernel/random/boot_id, null where there is none (macOS) or where the station can't keep `wall_steps` across a restart (no state folder: a `:memory:` outbox); null means the count is unknown across restarts. On every post since #773's clock fields (sizeup/cloud/wallclock.py); a station from before sends none. A new one means the station rebooted and `wall_steps` started again from 0. The hub reads neither yet."
     },
+    "proc": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "This sizeup process on the station: 32 hex characters made at random when it started (PROC_ID, sizeup/cloud/station.py; #927). On every post. A new one means sizeup started again (an update, a crash, a kill, a reboot): the hub asks the new process which of the transmissions still waiting for their text it has (the `stt_held` call, when its status `caps` say so) and sheds the ones it doesn't know. The hub keeps 64 characters; a station from before sends none."
+    },
     "wall_steps": {
       "type": "integer",
       "minimum": 0,
@@ -809,6 +815,13 @@
             "state": {"type": "string", "description": "`off`, `paused` or `online`."},
             "why": {"type": "string", "description": "Why it is off or paused; \"\" when online."}
           }
+        },
+        "caps": {
+          "type": "array",
+          "description": "Capability strings: what this station takes from the hub (StationLink.status, STATION_CAPS in sizeup/cloud/station.py). The hub reads them only while the station is connected, and asks nothing of a station without the string. Today: `stt_withdraw` (the `stt_withdraw` call: the hub's pool takes clips back from this station's whisper, #927), `stt_held` (the `stt_held` call: which waiting clips a new process still has, #927).",
+          "items": {"type": "string", "description": "One capability name, lower case with underscores."},
+          "uniqueItems": true,
+          "x-known": ["stt_withdraw", "stt_held"]
         },
         "stt_alert_rev": {
           "type": "integer",
