@@ -103,8 +103,8 @@ window.IntelCard = (() => {
       ev.stopPropagation();
       st.busy.add(e.id);
       try {
-        await deps.api("POST", `/api/cad/intel/${e.id}/${path}`, { ...body, operator: deps.operator() });
-        if (ok) UI.toast(ok, "ok");
+        const r = await deps.api("POST", `/api/cad/intel/${e.id}/${path}`, { ...body, operator: deps.operator() });
+        if (ok) UI.toast(r && r.removed ? "Vote taken back" : ok, "ok");      // a vote again takes it back (events.vote)
       } catch (err) {
         UI.toast(`${path}: ${err.message}`, "err");
       } finally {

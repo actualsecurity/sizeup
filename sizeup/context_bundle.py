@@ -522,10 +522,20 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
                     "near_incident": _incident(cad, e.get("near_incident")), "fd": e.get("fd_shown") or "",
                     "fd_state": e.get("fd") or "",
                     "feedback": votes, "pushed": e["pushed_at"] is not None,
-                    "pushed_at": e["pushed_at"], "suppressed": e["suppressed"], "delivery": e.get("delivery")},
+                    "pushed_at": e["pushed_at"], "suppressed": e["suppressed"], "delivery": e.get("delivery"),
+                    # why it didn't push, as the Intel page says it (sizeup/intel/eventlog.py): {key, label, tip, detail}
+                    "held": _held(cad, e["id"])},
     }
     rev = [raw["updated_at"], e["status"], len(feedback), feedback[0]["at"] if feedback else 0, raw.get("delivery") or ""]
     return out, rev
+
+
+def _held(cad, eid) -> dict | None:
+    try:
+        rows = cad.intel_admin.eventlog.rows_by_id([int(eid)])
+    except Exception:  # noqa: BLE001 - the bundle never fails on the label
+        return None
+    return rows[0]["held"] if rows else None
 
 
 def _model(cad, eid) -> dict | None:

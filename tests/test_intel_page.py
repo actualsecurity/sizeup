@@ -205,8 +205,8 @@ def test_derived_reasons_from_mode_settings_model_and_status(site):
     cue = save(cad, rules=[["model.pc", 1, 0.92], ["pd.dispatch_cue", 1, 0.2]], mode="map")
     sh = save(cad, mode="shadow")
     dis = save(cad, mode="push", status="dismissed")
-    exp = save(cad, mode="push", status="expired")
-    end = save(cad, mode="push", status="ended")
+    exp = save(cad, mode="log", status="expired")           # (its status at every mode: #906 review)
+    end = save(cad, mode="map", status="ended")
     pend = save(cad, mode="push")
     rows = {r["id"]: r for r in listing(cad, size=100)["events"]}
     want = {pack.id: "mode_pack", cat.id: "mode_category", rung.id: "mode_rule", unc.id: "uncorroborated",
@@ -217,7 +217,8 @@ def test_derived_reasons_from_mode_settings_model_and_status(site):
     assert rows[rung.id]["held"]["label"] == "rules map"
     assert rows[unc.id]["held"]["detail"] == "no cue · no rule · unplaced"
     assert rows[unc2.id]["held"]["detail"] == "no cue · no rule · unconfirmed place"
-    assert rows[unc.id]["would"] == "push" and rows[cap.id]["would"] == "push" and rows[cat.id]["would"] == ""
+    assert rows[unc.id]["would"] == "push" and rows[cap.id]["would"] == "push"
+    assert rows[cat.id]["would"] == rows[pack.id]["would"] == "push"         # held by a mode: its rules' rung
     for i, key in want.items():                                      # the filter is the same classification
         assert i in [r["id"] for r in listing(cad, held=key, size=100)["events"]], key
     # Corroborate off: the model's map events are capped, never "uncorroborated"
@@ -233,9 +234,25 @@ def test_held_and_level_filters_reject_nonsense(site):
     assert get(api, "/api/cad/intel/list", VAL, "decided=magic")[0] == 400
     assert get(api, "/api/cad/intel/list", VAL, "held=DROP%20TABLE")[0] == 400
     assert get(api, "/api/cad/intel/list", VAL, "from=yesterday")[0] == 400
+    for bad in ("nan", "inf", "-inf", "1e999"):
+        assert get(api, "/api/cad/intel/list", VAL, f"from={bad}")[0] == 400, bad
 
 
 # -- decided by --------------------------------------------------------------------------------------------------------
+
+def test_decided_is_stored_and_read_back_from_an_older_releases_rows(site):
+    cad, _clock = site
+    a = save(cad, rules=[["model.pc", 1, 0.95], ["pd.shots", 1, 0.4]])
+    b = save(cad, rules=[["infer.bedrock", 1, 0.8]])
+    assert {r["id"]: r["decided"] for r in cad.store.q("SELECT id, decided FROM intel_events")} == {a.id: "both", b.id: "model"}
+    with cad.store.tx() as db:                       # an older release's save(): no column value
+        db.execute("UPDATE intel_events SET decided = NULL")
+    assert {r["id"]: r["decided"] for r in listing(cad)["events"]} == {a.id: "both", b.id: "model"}
+    assert [r["id"] for r in listing(cad, decided="both")["events"]] == [a.id]
+    from sizeup.intel.events import SqlEvents
+    SqlEvents(cad.store)                             # the next start fills them in
+    assert {r["id"]: r["decided"] for r in cad.store.q("SELECT id, decided FROM intel_events")} == {a.id: "both", b.id: "model"}
+
 
 @pytest.mark.parametrize("rules,want", [
     ([["pd.shots", 1, 0.7]], "rules"),
@@ -298,6 +315,31 @@ def test_newest_first_paged_on_the_hub_last_24_hours_by_default(site):
     assert [e["id"] for e in rng["events"]] == [old.id]
 
 
+def test_a_poll_reuses_the_count_and_the_facets_until_the_events_change(site, monkeypatch):
+    """#906 review M2: the 30 s poll counts again only after a change, and the filters' choices are cached."""
+    cad, _clock = site
+    for i in range(5):
+        save(cad, first_at=T0 - i * 60)
+    seen = []
+    real = cad.store.q
+    monkeypatch.setattr(cad.store, "q", lambda sql, args=(): (seen.append(sql), real(sql, args))[1])
+    listing(cad, held="unplaced")
+    n0 = len(seen)
+    assert any("COUNT(*)" in x for x in seen) and any("GROUP BY" in x for x in seen)
+    seen.clear()
+    d = listing(cad, held="unplaced", poll=1)
+    assert not any("COUNT(*)" in x or "GROUP BY" in x for x in seen) and len(seen) < n0
+    save(cad, first_at=T0 - 600, suppressed="unplaced")        # a change: counted and grouped again
+    seen.clear()
+    d2 = listing(cad, held="unplaced", poll=1)
+    assert any("COUNT(*)" in x for x in seen) and any("GROUP BY" in x for x in seen)
+    assert (d["total"], d2["total"]) == (0, 1)
+    seen.clear()
+    cad.intel.events.hit(__import__("sizeup.intel.model", fromlist=["Hit"]).Hit("c9", "pd.shots", 1, 0.7, "weapons", "police", T0))
+    listing(cad, held="unplaced", poll=1)
+    assert not any("COUNT(*)" in x for x in seen)               # a rule hit is no change to the list
+
+
 def test_the_listing_walks_the_first_at_index(site):
     cad, _clock = site
     save(cad)
@@ -311,6 +353,28 @@ def test_the_listing_walks_the_first_at_index(site):
 
 
 # -- feedback ----------------------------------------------------------------------------------------------------------
+
+def test_a_vote_is_one_per_person_and_the_same_one_again_takes_it_back(site):
+    """#906 review M1: a double click is one vote; Useful and Noise are one of the two; Should have pushed its own."""
+    cad, _clock = site
+    e = save(cad, suppressed="unplaced")
+    api = CadApi(cad)
+    vote = lambda v, who=VAL: call(api, f"/api/cad/intel/{e.id}/feedback", {"verdict": v}, who)[1]   # noqa: E731
+    rows = lambda: sorted((r["verdict"], r["operator"].split(" <")[0]) for r in cad.store.q(       # noqa: E731
+        "SELECT verdict, operator FROM intel_feedback WHERE event_id = ?", (e.id,)))
+    assert vote("useful")["removed"] is False
+    assert vote("noise")["removed"] is False                  # replaces Useful
+    assert rows() == [("noise", "Val")]
+    assert vote("should_push")["removed"] is False and vote("useful", JORDAN)["removed"] is False
+    assert rows() == [("noise", "Val"), ("should_push", "Val"), ("useful", "Jordan")]
+    assert vote("noise")["removed"] is True                    # the same again: taken back
+    assert vote("should_push")["removed"] is True
+    assert rows() == [("useful", "Jordan")]
+    [row] = listing(cad, who=JORDAN)["events"]
+    assert row["votes"] == {"useful": 1} and row["mine"] == ["useful"]
+    assert vote("wrong_place")["ok"] and vote("wrong_place")["ok"]           # (the card's other verdicts: as before)
+    assert rows().count(("wrong_place", "Val")) == 2
+
 
 def test_useful_noise_and_should_have_pushed_are_stored_for_tuning(site):
     cad, _clock = site
@@ -329,6 +393,18 @@ def test_useful_noise_and_should_have_pushed_are_stored_for_tuning(site):
     assert row["votes"] == {"should_push": 2, "useful": 1} and row["mine"] == ["should_push"]
 
 
+def test_more_info_says_why_it_was_held_as_the_page_does(site):
+    cad, _clock = site
+    a = save(cad, suppressed="out_of_area")
+    b = save(cad, mode="map", first_at=T0 - 60)
+    api = CadApi(cad)
+    held = lambda i: get(api, f"/api/cad/prealerts/intel/{i}", VAL)[1]["outcome"]["held"]       # noqa: E731
+    assert held(a.id)["key"] == "out_of_area" and held(a.id)["label"] == "out of area"
+    assert held(b.id)["key"] == "mode_rule" and held(b.id)["label"] == "rules map"
+    js = (STATIC / "prealert-info.js").read_text()
+    assert "held: ${o.held.label}" in js
+
+
 # -- the page --------------------------------------------------------------------------------------------------------------
 
 def test_the_page_is_in_the_nav_and_linked_from_the_60_control_column():
@@ -342,6 +418,9 @@ def test_the_page_is_in_the_nav_and_linked_from_the_60_control_column():
     page = (STATIC / "intel-page.js").read_text()
     assert int(re.search(r"POLL_MS = (\d+)", page).group(1)) >= 30000   # nothing per second
     assert page.count("setInterval(") == 1 and "requestAnimationFrame" not in page
+    # polled only for the default view's newest page over a short span; else a Refresh; hidden, no timer
+    assert "POLL_SPAN_S = 7 * 86400" in page and '"visibilitychange"' in page and 'p.set("poll", "1")' in page
+    assert '$("#il-refresh").addEventListener' in page
     assert "/api/cad/intel/list?" in page and "/feedback`" in page
 
 
@@ -374,7 +453,7 @@ class El {
 }
 global.Option = class extends El { constructor(text, value) { super("option"); this.textContent = text; this.value = value; } };
 const ids = {};
-global.document = { createElement: (t) => new El(t), hidden: false, readyState: "complete" };
+global.document = { createElement: (t) => new El(t), hidden: false, readyState: "complete", addEventListener() {} };
 global.location = { hash: "" };
 global.$ = (sel) => { const id = sel.slice(1); return ids[id] || (ids[id] = new El(id.endsWith("-view") ? "div" : "select", id)); };
 global.el = (tag, cls, text) => { const n = new El(tag); if (cls) n.className = cls; if (text !== undefined && text !== null) n.textContent = text; return n; };
@@ -419,8 +498,16 @@ changed.events[1].votes = {{ useful: 1 }};
 IntelPage.render(changed);
 const kept = body.children.map((r, i) => r === rows[i]);
 rows[2].on.click[0]();
+// a vote: every button of its row disabled at the click, before the hub answers (one vote, never two)
+let posts = 0;
+global.api = () => {{ posts++; return new Promise(() => {{}}); }};
+const acts = body.children[0].children[7];
+const btns = acts.children.filter((x) => x.tagName === "BUTTON");
+btns[0].on.click[0]({{ stopPropagation() {{}} }});
+const off = btns.map((x) => x.disabled);
+btns[0].on.click[0]({{ stopPropagation() {{}} }});
 console.log(JSON.stringify({{ text, same, kept, hash: location.hash, count: $("#il-count").textContent,
-                               cats: $("#il-category").options.map((o) => o.value) }}));
+                               cats: $("#il-category").options.map((o) => o.value), off, posts }}));
 """
     out = run_node(script, d)
     assert out["same"] is True and out["kept"] == [True, False, True]      # only the changed row rebuilt
@@ -432,3 +519,4 @@ console.log(JSON.stringify({{ text, same, kept, hash: location.hash, count: $("#
     assert held[2] == "log →push" and held[6] == "out of area" and "12 Example Road, Rye ?" in held[4]
     assert out["hash"] == f"#prealert/intel/{d['events'][2]['id']}"
     assert out["count"] == "3 events" and out["cats"] == ["", "weapons"]
+    assert out["off"] == [True, True] and out["posts"] == 1

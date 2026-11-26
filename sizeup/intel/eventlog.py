@@ -35,17 +35,19 @@ Radio page's own), so a Settings > Radios name resolver can replace it in one pl
 from __future__ import annotations
 
 import json
+import math
 import re
 from datetime import datetime
 
 from sizeup.cad.store import TZ, CadError
+from sizeup.intel.events import MODEL_PREFIXES, VOTE_ROWS, decided_of
 from sizeup.intel.model import lowest, mode_rank
 
 PAGE_SIZE = 50
 PAGE_MAX = 100
 DEFAULT_S = 24 * 3600
+FACET_S = 300                      # the filters' choices: read again when the range moved this far (or the events changed)
 SPAN_MAX_S = 92 * 86400            # events are kept 90 days (events.py KEEP_EVENTS_S)
-MODEL_PREFIXES = ("model.", "infer.")
 LEVELS = ("push", "held", "map", "log", "shadow")
 DECIDED = ("rules", "model", "both")
 STATUSES = ("open", "ended", "expired", "dismissed")
@@ -92,24 +94,34 @@ POLICY_HOLDS = ("off", "quiet", "rate", "merged", "scrub", "unsent")
 HELD_KEY = re.compile(r"[a-z][a-z_]{0,39}")
 
 _IS_MODEL = " OR ".join(f"json_extract(j.value, '$[0]') LIKE '{p}%'" for p in MODEL_PREFIXES)
-HAS_MODEL = f"EXISTS (SELECT 1 FROM json_each(e.rules) j WHERE {_IS_MODEL})"
-HAS_RULE = f"EXISTS (SELECT 1 FROM json_each(e.rules) j WHERE NOT ({_IS_MODEL}))"
+# The rules list as stored (json.dumps of [[id, rev, weight], ...]: each rule's id right after '["'), read by its text:
+# string functions over the row, never json_each per row (a 90-day filtered view, #906 review M2). Python's twin:
+# decided_by().
+_N_RULES = "((length(e.rules) - length(replace(e.rules, '[\"', ''))) / 2)"
+_N_MODEL = ("((length(e.rules) - length(" + "".join("replace(" for _ in MODEL_PREFIXES) + "e.rules"
+            + "".join(f", '[\"{p}', '')" for p in MODEL_PREFIXES) + f")) / {len(MODEL_PREFIXES[0]) + 2})")
+assert len({len(p) for p in MODEL_PREFIXES}) == 1          # (one length: the count's divisor)
+HAS_MODEL = "(" + " OR ".join(f"instr(e.rules, '[\"{p}') > 0" for p in MODEL_PREFIXES) + ")"
+HAS_RULE = f"({_N_RULES} > {_N_MODEL})"
+# only for a model event at map (the CASE reaches it for those rows alone)
 HAS_POS_RULE = f"EXISTS (SELECT 1 FROM json_each(e.rules) j WHERE NOT ({_IS_MODEL}) AND json_extract(j.value, '$[2]') > 0)"
-DECIDED_SQL = (f"CASE WHEN {HAS_MODEL} AND {HAS_RULE} THEN 'both' WHEN {HAS_MODEL} THEN 'model' "
-               f"WHEN {HAS_RULE} THEN 'rules' ELSE '' END")
+# who raised it: the column save() writes (events.decided_of), else (a row an older release wrote) from its text
+DECIDED_SQL = (f"COALESCE(e.decided, CASE WHEN {HAS_MODEL} AND {HAS_RULE} THEN 'both' WHEN {HAS_MODEL} THEN 'model' "
+               f"WHEN {HAS_RULE} THEN 'rules' ELSE '' END)")
+IS_MODEL_ROW = f"(e.decided IN ('model', 'both') OR (e.decided IS NULL AND {HAS_MODEL}))"
 # why it didn't push (the module doc). :packs / :cats: today's pack and category modes, as "pack|mode" and
 # "pack|category|mode" (classes()); :corr: Corroborate (backing.py infer_pd_corroborate)
 HELD_SQL = f"""CASE
   WHEN e.pushed_at IS NOT NULL THEN ''
   WHEN e.suppressed != '' THEN e.suppressed
+  WHEN e.status IN ('dismissed', 'expired', 'ended') THEN e.status
   WHEN e.mode IN ('log', 'map') AND (e.pack || '|' || e.mode) IN (SELECT value FROM json_each(:packs)) THEN 'mode_pack'
   WHEN e.mode IN ('log', 'map') AND (e.pack || '|' || e.category || '|' || e.mode) IN (SELECT value FROM json_each(:cats))
     THEN 'mode_category'
-  WHEN e.mode IN ('log', 'map') AND {HAS_MODEL} THEN
+  WHEN e.mode IN ('log', 'map') AND {IS_MODEL_ROW} THEN
     CASE WHEN e.mode = 'map' AND :corr AND e.confirmed = 0 AND NOT {HAS_POS_RULE} THEN 'uncorroborated' ELSE 'model_cap' END
   WHEN e.mode IN ('log', 'map') THEN 'mode_rule'
   WHEN e.mode = 'shadow' THEN 'shadow'
-  WHEN e.status IN ('dismissed', 'expired', 'ended') THEN e.status
   ELSE 'not_pushed'
 END"""
 LEVEL_SQL = {"push": "pushed_at IS NOT NULL", "held": "pushed_at IS NULL AND mode = 'push'",     # (on the listing's
@@ -125,9 +137,7 @@ def is_model(rule_id) -> bool:
 
 def decided_by(rules) -> str:
     """rules | model | both | "" (none): the rules list's model.* / infer.* against the rest (DECIDED_SQL's twin)."""
-    ids = [str(r[0]) for r in rules or [] if r]
-    m, o = any(is_model(i) for i in ids), any(not is_model(i) for i in ids)
-    return "both" if m and o else "model" if m else "rules" if o else ""
+    return decided_of(rules)
 
 
 def held_label(key: str, mode: str = "") -> tuple[str, str]:
@@ -170,9 +180,13 @@ def _when(v: str, end: bool) -> float | None:
     if not v:
         return None
     try:
-        return float(v)
+        f = float(v)
     except ValueError:
-        pass
+        f = None
+    if f is not None:
+        if not math.isfinite(f):
+            raise CadError("from, to: a date (2026-11-01) or unix seconds")
+        return f
     try:
         d = datetime.fromisoformat(v)
     except ValueError:
@@ -187,6 +201,13 @@ class IntelLog:
 
     def __init__(self, cad, engine):
         self.cad, self.engine = cad, engine
+        self._facets: tuple | None = None          # (key, facets): the range's choices, again only on a new revision
+        self._totals: dict = {}                     # filters -> (revision, total): a poll's count, again only then
+
+    def _rev(self) -> int:
+        """The events' revision for what the list shows (events.py list_rev: an event saved, dismissed, voted on or
+        delivered; never a rule hit)."""
+        return int(getattr(self.engine.events, "list_rev", getattr(self.engine.events, "rev", 0)))
 
     # -- today's settings, as HELD_SQL reads them ----------------------------------------------------------------------
 
@@ -216,6 +237,8 @@ class IntelLog:
         p = self.engine.pack(r["pack"]) if hasattr(self.engine, "pack") else None
         if key in POLICY_HOLDS:
             return "push"
+        if key in ("mode_pack", "mode_category"):          # held by a mode: its rules' own rung is push (#906 review)
+            return "push" if mode_rank(r["mode"]) < mode_rank("push") else ""
         if p is None:
             return ""
         cap = lowest(p.mode, p.category(r["category"]).get("mode", "push"))
@@ -287,7 +310,17 @@ class IntelLog:
                  f"{DECIDED_SQL} AS decided FROM intel_events e WHERE e.first_at >= :since AND e.first_at < :until")
         outer = " AND ".join(where) or "1"
         store = self.cad.store
-        total = store.one(f"SELECT COUNT(*) AS n FROM ({inner}) WHERE {outer}", args)["n"]
+        rev = self._rev()
+        # a poll (the page's own, ?poll=1) counts again only when the events changed: the same filters, the same total
+        fkey = json.dumps([sorted((k, v) for k, v in q.items() if k not in ("page", "poll")), self.classes()])
+        hit = self._totals.get(fkey)
+        if one("poll", 4) == "1" and hit is not None and hit[0] == rev:
+            total = hit[1]
+        else:
+            total = store.one(f"SELECT COUNT(*) AS n FROM ({inner}) WHERE {outer}", args)["n"]
+            if len(self._totals) > 64:
+                self._totals.clear()
+            self._totals[fkey] = (rev, total)
         rows = store.q(f"SELECT * FROM ({inner}) WHERE {outer} ORDER BY first_at DESC, id DESC LIMIT :lim OFFSET :off",
                        {**args, "lim": size, "off": page * size})
         names = source_names(self.cad)
@@ -297,6 +330,16 @@ class IntelLog:
                 "facets": self.facets(since, until, names), "held": held_options(), "levels": list(LEVELS),
                 "decided": list(DECIDED), "statuses": list(STATUSES)}
 
+    def rows_by_id(self, ids: list[int]) -> list[dict]:
+        """These events as the page's rows (level, would, held, decided ...), whatever their date."""
+        if not ids:
+            return []
+        args = {"since": 0, "until": 1e12, **self.classes(), "ids": json.dumps([int(i) for i in ids])}
+        inner = (f"SELECT {', '.join('e.' + c.strip() for c in COLS.split(','))}, {HELD_SQL} AS held, "
+                 f"{DECIDED_SQL} AS decided FROM intel_events e WHERE e.id IN (SELECT value FROM json_each(:ids))")
+        names = source_names(self.cad)
+        return [self.row(r, names, {}, []) for r in self.cad.store.q(f"SELECT * FROM ({inner})", args)]
+
     def _votes(self, ids: list[int], operator: str) -> tuple[dict, dict]:
         """{event id: {verdict: n}} and {event id: [this reader's verdicts]} for the page's events (intel_feedback)."""
         if not ids:
@@ -304,7 +347,7 @@ class IntelLog:
         votes: dict = {}
         mine: dict = {}
         for f in self.cad.store.q(f"SELECT event_id, verdict, operator FROM intel_feedback WHERE event_id IN "
-                                  f"({','.join('?' * len(ids))})", ids):
+                                  f"({','.join('?' * len(ids))}) AND {VOTE_ROWS}", ids):
             v = votes.setdefault(f["event_id"], {})
             v[f["verdict"]] = v.get(f["verdict"], 0) + 1
             if operator and f["operator"] == operator and f["verdict"] not in mine.setdefault(f["event_id"], []):
@@ -351,7 +394,16 @@ class IntelLog:
         return key                              # an engine's value this page doesn't know yet: as it is
 
     def facets(self, since: float, until: float, names: dict) -> dict:
-        """The filters' choices in the range: categories (with their labels) and sources (named), by count."""
+        """The filters' choices in the range: categories (with their labels) and sources (named), by count. Read again
+        only when the events changed or the range moved FACET_S (the last 24 h moves with every poll)."""
+        key = (self._rev(), int(since // FACET_S), int(until // FACET_S))
+        if self._facets is not None and self._facets[0] == key:
+            return self._facets[1]
+        out = self._facets_read(since, until, names)
+        self._facets = (key, out)
+        return out
+
+    def _facets_read(self, since: float, until: float, names: dict) -> dict:
         cats: dict = {}
         srcs: dict = {}
         systems: dict = {}

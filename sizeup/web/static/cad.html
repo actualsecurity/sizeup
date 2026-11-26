@@ -280,6 +280,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       <div class="view-head">
         <h2 class="view-title">Intel</h2>
         <span id="il-count" class="dim small" aria-live="polite"></span>
+        <button id="il-refresh" type="button" class="sm quiet" title="Read it again (a long or filtered view isn't refreshed on its own)" hidden>Refresh</button>
       </div>
       <form id="il-filters" class="rv-filters il-filters" autocomplete="off" role="search">
         <select id="il-level" aria-label="Level" title="Level: pushed, held at push, map, log, shadow"><option value="">Any level</option>
