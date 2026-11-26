@@ -1136,6 +1136,11 @@ class HubApp(App):
         from sizeup.notify import STATUS
         notifier = self.pushes.notifier(STATUS)
         self.health = self.hub.health_ = StationHealth(self.hub, cfg, self.mdb, notifier, log)
+        # a dongle swapped for a new one (sizeup/radio/replace.py): the station's offers on the console, and the
+        # optional auto-replace for Fire/EMS 15 and paging (sizeup/cloud/dongleswap.py; Settings, off by default)
+        from sizeup.cloud.dongleswap import AutoReplace
+        self.cad.dongle_swaps_source = lambda: (self.hub.sdr() or {}).get("replace") or []
+        self.swaps = AutoReplace(self.hub, self.cad, notifier, log, public_url=cfg.cloud_public_url or "")
         # The incident sources (#297): paging is a tier only while the station is connected; Settings > Station > Health shows them.
         self.cad.sources.paging_ok = self.hub.connected
         self.cad.sources.trigger = self._sources_poll_now      # a pre-alert here: the station's adapters poll now
@@ -2599,6 +2604,11 @@ class HubApp(App):
         return self._switch("set_antenna_groups", groups, str(confirm)) if confirm else \
             self._switch("set_antenna_groups", groups)
 
+    def replace_sdr(self, missing: str, new: str = "", action: str = "use", by: str = "person") -> str | None:
+        """Health / the console here: a gone dongle's jobs to a new one, Not now, or a gone dongle out of its group,
+        done on the station (App.replace_sdr, sizeup/radio/replace.py); who asked is audited here (server.py)."""
+        return self._switch("replace_sdr", str(missing or ""), str(new or ""), str(action or "use"), by)
+
     def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None,
                       tier: str | None = None, system: str = "", transcribe: bool | None = None,
                       alerts: bool | None = None) -> str | None:
@@ -3018,6 +3028,7 @@ class HubApp(App):
         threading.Thread(target=self._audio_uploader, name="audio-uploader", daemon=True).start()
         threading.Thread(target=self._metrics_backup, name="metrics-backup", daemon=True).start()
         threading.Thread(target=self.health.run, args=(self._stopping,), name="station-health", daemon=True).start()
+        threading.Thread(target=self.swaps.run, args=(self._stopping,), name="dongle-swap", daemon=True).start()
         threading.Thread(target=self.error_watch.run, args=(self._stopping,), name="hub-errors", daemon=True).start()
         threading.Thread(target=self._aws_watch, name="aws-sweep", daemon=True).start()
         self.sttpool.start()                      # the GPU workers' queue (#639): empty, nothing written

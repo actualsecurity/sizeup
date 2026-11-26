@@ -327,6 +327,8 @@ window.UI = (() => {
     [["G", "S"], "Go to Settings"],
     [["J"], "Next incident in the queue"],
     [["K"], "Previous incident in the queue"],
+    [["M"], "Live audio: mute / unmute"],
+    [["]"], "Live audio: skip"],
     [["Esc"], "Close or cancel; leave a field"],
     [["?"], "This sheet"],
   ];

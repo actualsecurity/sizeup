@@ -23,6 +23,7 @@ deploy/stt-worker/README.md."""
 from __future__ import annotations
 
 import argparse
+import atexit
 import ctypes
 import dataclasses
 import hashlib
@@ -151,6 +152,7 @@ class Config:
                                            # back to its rules; back when there is room) or "keep" (the LLM stays; that
                                            # model isn't loaded, the hub hears it unavailable and the channel keeps its
                                            # champion/route). The hub's stt_models llm_priority, when it sends one, wins
+    keep_awake: bool = True                # Windows: no idle sleep while running and not paused by hand (KeepAwake)
     base_dir: str = dataclasses.field(default="", repr=False)  # the config file's folder (not a key)
     ignored_keys: list = dataclasses.field(default_factory=list, repr=False)  # keys this file doesn't know (not a key)
 
@@ -222,8 +224,12 @@ def load_config(path: str | os.PathLike | None, env: dict | None = None) -> Conf
     unknown = sorted(str(k)[:40] for k in set(doc) - keys)
     cfg = Config(base_dir=base, ignored_keys=unknown)
     for key, value in doc.items():
-        if key in keys:
-            setattr(cfg, key, _coerce(key, value, getattr(cfg, key)))
+        if key not in keys:
+            continue
+        if key in STRICT_BOOLS and not (isinstance(value, bool) or (isinstance(value, str)
+                                                                     and value.strip().lower() in BOOL_WORDS)):
+            raise ConfigError(f"{key}: true or false")
+        setattr(cfg, key, _coerce(key, value, getattr(cfg, key)))
     cfg.llm_priority = str(cfg.llm_priority).strip().lower()
     if cfg.llm_priority not in LLM_PRIORITIES:
         raise ConfigError(f"llm_priority: {cfg.llm_priority[:20]}: one of {', '.join(LLM_PRIORITIES)}")
@@ -242,6 +248,10 @@ def load_config(path: str | os.PathLike | None, env: dict | None = None) -> Conf
     cfg.heartbeat_s = min(max(cfg.heartbeat_s, 0.01), MAX_HEARTBEAT_S)
     cfg.claim_wait_s = min(max(cfg.claim_wait_s, 0.0), MAX_CLAIM_WAIT_S)
     return cfg
+
+
+STRICT_BOOLS = ("keep_awake",)             # keys whose value must be a yes or a no (a typo never reads as false)
+BOOL_WORDS = ("1", "0", "true", "false", "yes", "no", "on", "off")
 
 
 def _path(value: str, base: str) -> str:
@@ -1291,6 +1301,144 @@ def file_sha256(path: Path, cache: Path) -> str:
             h.update(chunk)
     write_json(cache, dict(key, sha256=h.hexdigest()))
     return h.hexdigest()
+
+
+# --- keeping the PC awake (keep_awake) -----------------------------------------------------------------------------
+
+ES_CONTINUOUS = 0x80000000
+ES_SYSTEM_REQUIRED = 0x00000001            # (never ES_DISPLAY_REQUIRED, 0x2: the screen may still turn off)
+KEEP_AWAKE_RETRY_S = 60.0                  # Windows refused: asked again this often
+KEEP_AWAKE_RESTART_S = (10.0, 60.0, 300.0)  # its thread died: a new one after these waits (then the last, each time)
+
+
+class KeepAwake:
+    """keep_awake (worker.toml, default on): while the worker runs and isn't paused by hand, Windows doesn't idle-sleep
+    the PC: SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED), never the display (the screen still turns off;
+    Sleep from the Start menu, the lid and the power button still work). Gaming, a self-update or whisper-server
+    trouble don't change it. The flag is the setting thread's, so a long-lived thread of its own sets it and clears it
+    (ES_CONTINUOUS alone) on a pause, a stop, the exit or an error; a hard kill ends that thread and Windows drops the
+    flag itself. A stop (a self-update's exit too) first resets the idle timer (ES_SYSTEM_REQUIRED alone), so the PC
+    gets a whole idle timeout before it may sleep: time for the task to start the worker again. No rights needed, no
+    powercfg change. Not Windows: nothing (a no-op, nothing reported)."""
+
+    def __init__(self, on: bool, kernel32=None, windows: bool | None = None, clock: Callable[[], float] = time.monotonic):
+        self.on = bool(on)
+        self.windows = os.name == "nt" if windows is None else bool(windows)
+        self._k32 = kernel32
+        self.clock = clock
+        self._cv = threading.Condition()
+        self._want = False
+        self._closed = False
+        self._thread: threading.Thread | None = None
+        self._deaths = 0
+        self._restart_at = 0.0
+        self._atexit = False
+        self._failed = False
+        self.held = False                  # the flag is set now (what the hub is told)
+        self.why = "starting"              # not held: why (the hub's hover)
+
+    def report(self) -> dict | None:
+        """keep_awake in hello and state: {on, held, why (not held)}; None off Windows (nothing to keep awake there)."""
+        if not self.windows:
+            return None
+        doc = {"on": self.on, "held": self.held}
+        if self.on and not self.held:
+            doc["why"] = self.why[:40]
+        return doc
+
+    def want(self, awake: bool) -> None:
+        """From any thread: the flag should be set (True) or not; the thread does it. A thread that died is replaced
+        after KEEP_AWAKE_RESTART_S (held false meanwhile)."""
+        if not (self.on and self.windows):
+            return
+        with self._cv:
+            if self._closed:
+                return
+            t = self._thread
+            if t is not None and not t.is_alive():
+                if not self._restart_at:
+                    self._deaths += 1
+                    self._restart_at = self.clock() + KEEP_AWAKE_RESTART_S[min(self._deaths, len(KEEP_AWAKE_RESTART_S)) - 1]
+                if self.clock() < self._restart_at:
+                    return
+                self._thread, self._restart_at, t = None, 0.0, None
+            if t is None and not awake:
+                return
+            changed = bool(awake) != self._want
+            self._want = bool(awake)
+            if t is None:
+                self._thread = threading.Thread(target=self._loop, name="keep-awake", daemon=True)
+                self._thread.start()
+                if not self._atexit:
+                    atexit.register(self.close)
+                    self._atexit = True
+            elif changed:
+                self._cv.notify_all()       # (only a change: a retry's wait isn't cut short every tick)
+
+    def close(self) -> None:
+        """The idle timer reset, the flag cleared and the thread ended (a stop, the exit). Never set again by this
+        one."""
+        with self._cv:
+            self._closed, self._want = True, False
+            self._cv.notify_all()
+            t = self._thread
+        if t is not None and t is not threading.current_thread():
+            t.join(2)
+        if self._atexit:
+            atexit.unregister(self.close)
+            self._atexit = False
+
+    def _set(self, flags: int) -> bool:
+        if self._k32 is None:
+            self._k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            self._k32.SetThreadExecutionState.argtypes = [ctypes.c_uint32]
+            self._k32.SetThreadExecutionState.restype = ctypes.c_uint32
+        return bool(self._k32.SetThreadExecutionState(flags))
+
+    def _loop(self) -> None:
+        applied = False                    # what was last asked of Windows on this thread
+        closed = False
+        try:
+            while True:
+                with self._cv:
+                    while not self._closed and self._want == applied and not (applied and not self.held):
+                        self._cv.wait()
+                    if applied and not self.held and not self._closed and self._want:
+                        self._cv.wait(KEEP_AWAKE_RETRY_S)          # it failed: try again now and then
+                    want, closed = self._want and not self._closed, self._closed
+                if want:
+                    ok = self._set(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+                    if ok and not self.held:
+                        log.info("keep awake: Windows won't idle-sleep this PC while the worker runs")
+                    elif not ok and not self._failed:
+                        err = getattr(ctypes, "get_last_error", lambda: 0)()
+                        log.warning("keep awake: SetThreadExecutionState failed (error %s): Windows may sleep this PC",
+                                    err)
+                    self._failed = not ok
+                    self.held, self.why = ok, "" if ok else "refused by Windows"
+                elif applied:
+                    if closed and self.held:
+                        self._set(ES_SYSTEM_REQUIRED)  # the idle timer from now: the restart's grace
+                    self._set(ES_CONTINUOUS)
+                    if self.held and not closed:
+                        log.info("keep awake: released (paused): Windows may sleep this PC")
+                    self.held, self.why = False, "stopped" if closed else "paused"
+                elif closed:
+                    self.why = "stopped"
+                applied = want
+                if closed:
+                    return
+        except Exception:  # noqa: BLE001 - keeping the PC awake never takes the worker down
+            log.exception("keep awake: unexpected error (Windows may sleep this PC; tried again later)")
+        finally:
+            if self.held or applied:
+                try:
+                    self._set(ES_CONTINUOUS)
+                except Exception:  # noqa: BLE001
+                    pass
+            self.held = False
+            if not closed:
+                self.why = "error (see worker.log)"
 
 
 # --- the GPU: gaming detection -------------------------------------------------------------------------------------
@@ -3320,9 +3468,10 @@ class Worker:
     def __init__(self, cfg: Config, run: Callable[[list], str] = run_cmd, clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], object] | None = None, popen: Callable = subprocess.Popen,
                  fullscreen: Callable[[], str] = windows_fullscreen, updater: Updater | None = None,
-                 logship: LogShip | None = None):
+                 logship: LogShip | None = None, keep_awake: KeepAwake | None = None):
         """logship: the log shipper `run` made (its handler on the log since the start); its thread runs here."""
         self.cfg, self.run_cmd, self.clock = cfg, run, clock
+        self.keep_awake = keep_awake if keep_awake is not None else KeepAwake(cfg.keep_awake)  # (started by run())
         self.logship = logship
         self._stop = threading.Event()
         self.sleep = sleep if sleep is not None else self._stop.wait     # backoff and refused waits (tests record them)
@@ -3459,6 +3608,9 @@ class Worker:
             body["reason"] = reason
         if self.gpu.info:
             body["gpu"] = dict(self.gpu.info)
+        ka = self.keep_awake.report()
+        if ka is not None:
+            body["keep_awake"] = ka
         return body
 
     def models(self) -> dict:
@@ -3525,7 +3677,8 @@ class Worker:
             try:
                 state = self.state()
                 now = self.clock()
-                sig = (state, self.llm_ok)         # (the LLM coming or going: the hub hears at once too)
+                self.keep_awake.want(state != ("paused", "manual") and not self.stopped)
+                sig = (state, self.llm_ok, self.keep_awake.held)   # (the LLM or keep-awake changing: told at once)
                 if sig != last_state:
                     if last_state is not None and state != last_state[0]:
                         log.info("state: %s%s", state[0], f" ({state[1]})" if state[1] else "")
@@ -3768,7 +3921,7 @@ class Worker:
         doc = {"pid": os.getpid(), "worker": self.cfg.worker_id, "state": state, "reason": reason, "hub": self.link,
                "pool_on": self.pool_on, "model": self.cfg.model, "gpu": self.gpu.info, "jobs": dict(self.counts),
                "last_job_at": self.last_job_at, "started": self.started_at, "updated": time.time(),
-               "version": VERSION, "update": self.updater.report(),
+               "version": VERSION, "update": self.updater.report(), "keep_awake": self.keep_awake.report(),
                "models": {**self.stt_models.report(), "catalog": self.stt_models.cat_status,
                           "llm_room": self.stt_models.llm_room_ok}}
         if self.logship is not None:
@@ -3887,7 +4040,10 @@ class Worker:
         except KeyboardInterrupt:
             log.info("stopping (Ctrl-C)")
         finally:
-            self.shutdown()
+            try:
+                self.shutdown()
+            finally:
+                self.keep_awake.close()    # (an error in the shutdown too: never left set)
 
     def _jobs_loop(self) -> None:
         while not self.stopped:
@@ -4301,6 +4457,7 @@ class Worker:
         self.stop()
         for t in self._threads:
             t.join(5)
+        self.keep_awake.close()            # (before the last word: the hub hears it released)
         job = self.job
         if job and job.get("lease"):
             self._release(str(job["lease"]), "shutdown")
@@ -4359,6 +4516,10 @@ def _status_text(cfg: Config, now: float | None = None) -> str:
         if isinstance(up, dict):
             lines.append(f"update: {up.get('state')}; running {str(up.get('sha256') or '?')[:12]}"
                          + (f" (commit {str(up.get('commit'))[:12]})" if up.get("commit") else ""))
+        ka = st.get("keep_awake")
+        if isinstance(ka, dict):
+            lines.append(f"keep awake: {'on' if ka.get('on') else 'off'}"
+                         + (", held (no idle sleep)" if ka.get("held") else ", not held (Windows may sleep)"))
         lg = st.get("logs")
         if isinstance(lg, dict):
             last = lg.get("last_ok")

@@ -19,7 +19,8 @@ own Access application scoped to /api/station/stt/*, so a worker's service token
 token_revoked); 409 {error} for a lease that is gone.
 
     POST /api/station/stt/hello                   {worker?, version, model, gpu?, state} -> {ok, worker, poll_s, classes, pool_on}
-    POST /api/station/stt/state                   {state: online|gaming|paused, model, gpu, version} -> {ok, pool_on}
+    POST /api/station/stt/state                   {state: online|gaming|paused, model, gpu, version, keep_awake?}
+                                                  -> {ok, pool_on}
     POST /api/station/stt/claim                   {wait <= 25, state, model} -> {job: {lease, id, kind, channel, class,
                                                   prompt, seconds, lease_s, cap_at, fast, audio} | null}; fast: one
                                                   greedy pass (temperature_inc 0), the short-lease classes
@@ -49,6 +50,11 @@ STT workers sets it per worker (hub.sqlite meta "stt_update"). The hub only name
 GitHub itself, only from main of actualsecurity/sizeup, and only a file with exactly that hash (its url is never used).
 A worker from before the move to deploy/ knows only tools/stt_worker/worker.py: the copy there is byte-identical (a test
 checks), so it finds the same hash at the same commit, and the version it updates to knows the new path.
+
+Keeping the PC awake (deploy/stt-worker/worker.py KeepAwake): a GPU worker on Windows says keep_awake {on, held} in its
+hello and state. Health shows "keeps PC awake" while held, and a worker gone silent as "offline since HH:MM", with
+"(asleep?)" when its last word said keep_awake off or not held, or its heartbeats just stopped while online (no pause,
+gaming or clean stop first: sttpool.Pool.asleep). A hub from before ignores the key.
 
 Its log (deploy/stt-worker/worker.py LogShip): POST /api/station/stt/logs, gzipped {v, worker, batch, lines: [[ms,
 level, msg]]} -> {ok, accepted, n | retry_s, reason}; a GPU worker's own token only. Into CloudWatch Logs
@@ -171,6 +177,17 @@ def clean_self_update(v) -> dict | None:
             "auto": v.get("auto") if isinstance(v.get("auto"), bool) else None,
             "state": " ".join(str(v.get("state") or "").split())[:80],
             "bad": [b for b in bad[:5] if isinstance(b, str) and SHA256.fullmatch(b)]}
+
+
+def clean_keep_awake(v) -> dict:
+    """A GPU worker's keep_awake {on, held, why} (deploy/stt-worker/worker.py KeepAwake): the booleans, and why it isn't
+    held (40 characters); {} when it sent none (a worker from before, or not on Windows)."""
+    if not isinstance(v, dict):
+        return {}
+    out = {k: v[k] for k in ("on", "held") if isinstance(v.get(k), bool)}
+    if isinstance(v.get("why"), str) and v["why"].strip():
+        out["why"] = " ".join(v["why"].split())[:40]
+    return out
 
 
 class WorkerRegistry:
@@ -673,15 +690,18 @@ class WorkerApi:
             # the self-update: a GPU worker that says its version is told the one it should run (never a station's)
             su = clean_self_update(d.get("self_update")) if gpu else None
             told = {"worker_update": self.wanted(wid)} if su is not None else {}
+            # keep_awake {on, held} and a clean stop's reason "shutdown": Health's "keeps PC awake" / "(asleep?)"
+            ka = clean_keep_awake(d.get("keep_awake")) if gpu else None
+            why = d.get("reason") if isinstance(d.get("reason"), str) else ""
             if path == API + "hello":
                 self.pool.seen(wid, state, model, d.get("gpu"), d.get("version") if isinstance(d.get("version"), str) else None,
-                               kind=kind, load=load, update=su)
+                               kind=kind, load=load, update=su, keep_awake=ka, reason=why)
                 s = self.reg.pool_settings()
                 return _json(200, {"ok": True, "worker": wid, "poll_s": POLL_S, "pool_on": self._pool_on(),
                                    "classes": [k for k, v in s["classes"].items() if v], **told})
             if path == API + "state":
                 self.pool.seen(wid, state, model, d.get("gpu"), d.get("version") if isinstance(d.get("version"), str) else None,
-                               kind=kind, load=load, update=su)
+                               kind=kind, load=load, update=su, keep_awake=ka, reason=why)
                 return _json(200, {"ok": True, "pool_on": self._pool_on(), **told})
             if path == API + "claim":
                 wait = _num(d.get("wait")) or 0.0
