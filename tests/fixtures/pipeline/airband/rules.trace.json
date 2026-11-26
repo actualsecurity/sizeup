@@ -98,7 +98,27 @@
       "do": "air",
       "t": 0,
       "id": "brush-fire-quiet-1"
-     }
+     },
+     "decisions": [
+      {
+       "watch": "atc",
+       "id": "brush-fire-quiet-1",
+       "ch": "HPN Tower",
+       "fed": "Westchester information bravo is current, wind 160 at eight, visibility 10, altimeter 2992, notams: brush fire burning north of the field, advise on initial contact you have information bravo",
+       "hits": [],
+       "row": null
+      },
+      {
+       "watch": "talkers",
+       "id": "brush-fire-quiet-1",
+       "record": null
+      },
+      {
+       "watch": "airport_watch",
+       "id": "brush-fire-quiet-1",
+       "row": null
+      }
+     ]
     }
    ]
   },

@@ -106,7 +106,7 @@ REASON_MAX = 120               # the hub may cut it here, mid-word: shown with a
 NO_ADDRESS = frozenset({"", "none", "unknown", "n/a", "na", "null"})
 WHYS = ("ok", "no_worker", "gaming", "deadline", "invalid")
 COUNTS = ("asked", *WHYS, "events", "evidence", "capped", "unavailable", "uncued")
-# What the model's answer alone is worth (the 60 Control column's "high 95%" from one looped transcript, 2026-11-25):
+# What the model's answer alone is worth (a model category shown "high" from one garbled transmission and its context):
 # an event the trigger row doesn't back (_corroborated) is at most ALONE_MAX ("medium": never "high", never pushed), and
 # at most SHORT_MAX ("low") when that row is short (under SHORT_WORDS words or SHORT_S seconds): one odd transmission.
 # A category with "model_cues" (rules.py) is raised only when the trigger says one of them, or CUE_CONTEXT of the

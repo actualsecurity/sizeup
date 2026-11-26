@@ -739,11 +739,11 @@ def test_the_real_hub_module_with_a_worker_answers_through_its_lane():
         ln._results.shutdown(wait=False)
 
 
-# -- an unclear transcript, a category's cues, the model alone (the 60 Control column's "Water rescue · high 95%" from
-# one looped transcript, 2026-11-25: invented shapes of it) ------------------------------------------------------------
+# -- an unclear transcript, a category's cues, the model alone (a model category raised "high" from one looped
+# transcript and a short row of context: invented shapes) --------------------------------------------------------------
 
 LOOPED = "So then we were" + " out of the" * 60      # whisper's decoder loop on a 2 s clip
-WATERY = "Water. 10-6, copy."                         # a short row of another radio that says the word, nothing more
+WATERY = "Boat ramp lot, copy."                       # a short row of another radio that says a cue, nothing more
 NO_CUE = "she says he went out past the rocks a while ago and has not come back yet to the house"
 CUED = "a kayak flipped over out past the rocks and she cannot see him anymore from where she is"
 
@@ -793,3 +793,15 @@ def test_a_garbled_answer_is_invalid_never_a_category():
         e, sink, b = setup(B.FakeBackend(bad))
         assert e.feed(row("t1", CUED, 1000)) == [] and e.events.all() == [], bad
         assert e.backing.today["invalid"] == 1 and e.backing.today["events"] == 0
+
+
+def test_an_unclear_row_is_never_the_models_context_either():
+    e, sink, b = setup(B.FakeBackend(water()))
+    e.feed(row("t1", LOOPED, 1000, end=1002))                                      # a loop
+    e.feed(row("t2", "Yo creo que el barco está por aquí pero no sé dónde", 1004))  # not English
+    e.feed(row("t3", "Boat ramp lot, copy.", 1008, end=1010))                      # a clean short row: context
+    e.feed(row("t4", CUED, 1012))
+    assert len(b.asked) == 1                                                     # only the clean trigger was asked
+    user = b.asked[0][-1]["content"]
+    assert "out of the out of the" not in user and "barco" not in user and "Boat ramp lot" in user
+    assert e.unclear == 2

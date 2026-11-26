@@ -1068,6 +1068,7 @@ class HubApp(App):
         self._aws_asked: dict[str, float] = {}         # id -> when the station's whisper was asked instead
         self._aws_late_wait: set[str] = set()          # timed out, not a priority channel: AWS's late answer is the text
         self._unclear_tried: dict[str, float] = {}     # id -> when its unclear transcript went to another engine (once)
+        self._unclear_lock = threading.Lock()
         self._pending_seen: dict[str, float] = {}      # page id -> when the sweep first saw it waiting for whisper
         self._aws_was_ok: bool | None = None           # AWS could take audio at the last sweep (_aws_resend)
         self._stt_cond = threading.Condition()          # an STT input stored (read_stt_audio's wait_s)
@@ -1460,16 +1461,19 @@ class HubApp(App):
         """An unclear transcript (sizeup/stt_quality.py): said (App._unclear), then the clip asked ONCE of another engine
         that can take it now: a whisper's to Amazon Transcribe (its budget allowing), else (or AWS's) to the station's
         whisper as a re-run. Its answer is checked the same way; still unclear, it stays so. Never for a catch-up or a
-        late call (old words), a "both" channel (AWS is asked already) or a standby."""
+        late call (old words), a "both" channel (AWS is asked already), a standby, or whisper's stock phrase on noise
+        (stt_quality.REQUEUE: only a loop or too many words). AWS's answer is no person's re-run (AwsJob.requeue)."""
         super()._unclear(item, key, quiet)
         cid = str(getattr(item, "id", "") or "")
-        if quiet or not cid or cid in self._unclear_tried or not self._may_write_audio():
-            return
-        if self.channel_pref(key)["engine"] == "both":
-            return
-        self._unclear_tried[cid] = time.time()
-        while len(self._unclear_tried) > UNCLEAR_TRIED_MAX:
-            self._unclear_tried.pop(next(iter(self._unclear_tried)))
+        if (quiet or not cid or getattr(item, "quality", "") not in stt_quality.REQUEUE or not self._may_write_audio()
+                or self.channel_pref(key)["engine"] == "both"):
+            return                             # (whisper's stock phrase on noise: no speech, nothing to ask again)
+        with self._unclear_lock:
+            if cid in self._unclear_tried:
+                return
+            self._unclear_tried[cid] = time.time()
+            while len(self._unclear_tried) > UNCLEAR_TRIED_MAX:
+                self._unclear_tried.pop(next(iter(self._unclear_tried)))
         engine = stt_quality.engine_of(str(getattr(item, "model", "") or ""))
         page = None if isinstance(item, Traffic) else item
         if engine != "aws" and self.aws is not None:
@@ -1477,7 +1481,8 @@ class HubApp(App):
             ok, why = self.aws.available(key if is_context(key) else None)
             pcm = self._rerun_pcm(item) if ok else None
             if pcm is not None:
-                self.aws.submit(key, AwsJob("traffic" if page is None else "page", cid, key, page=page, rerun=True), pcm)
+                self.aws.submit(key, AwsJob("traffic" if page is None else "page", cid, key, page=page, rerun=True,
+                                            requeue=True), pcm)
                 self.hub.log(f"speech-to-text {cid}: unclear from {engine}: asked of Amazon Transcribe")
                 return
             self.hub.log(f"speech-to-text {cid}: unclear from {engine}: AWS can't take it "
@@ -1530,6 +1535,8 @@ class HubApp(App):
             self._aws_asked[job.id] = time.time()  # (the sweep: no late answer in FALLBACK_WAIT_S -> failed)
             self._aws_late_wait.add(job.id)
             return
+        if job.requeue:                            # an unclear transcript's second try (_unclear): it stays unclear,
+            return self.sync()                     # no re-run result on a row nobody re-ran
         if job.rerun:                              # re-transcribe: the station's whisper instead, said so
             self._rerun_note[job.id] = f"AWS failed ({why[:80]})"
             threading.Thread(target=self._rerun_station, args=([job.id],), name="aws-fallback", daemon=True).start()
@@ -1925,7 +1932,8 @@ class HubApp(App):
             page.vocab_v = vocab_v  # type: ignore[attr-defined]
             self._transcribed(page)
         else:
-            self._retext(job.id, text, status, conf, model, why="pool worker", vocab_v=vocab_v)
+            self._retext(job.id, text, status, conf, model, why="pool worker", vocab_v=vocab_v,
+                         language=str(res.get("language") or ""))
         self._aws_since.pop(job.id, None)
         self._aws_asked.pop(job.id, None)
         self.sync()

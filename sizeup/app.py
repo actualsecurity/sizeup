@@ -444,6 +444,7 @@ class AwsJob:
     recovered: bool = False   # left waiting by a restart (the hub): its fallback waits for the station to reconnect
     catchup: bool = False     # a shed clip caught up (sizeup/sttcatchup.py): quiet (no alerts), a failed try on its row
     vocab_v: str = ""         # the vocabulary its stream used (AwsTranscriber sets it): the transcript's vocab_v
+    requeue: bool = False     # (with rerun) an unclear transcript asked again by the hub itself: no re-run result said
 
 
 @dataclass
@@ -2090,8 +2091,8 @@ class App:
             if not getattr(item, "system", ""):      # another system's traffic (#409) raises none of our alarms
                 self._alarm(item, getattr(item, "unclear_text", None) if item.status == stt_quality.UNCLEAR else None)
             self._atc(item)
-            if item.status == stt_quality.UNCLEAR:
-                self._unclear(item, traffic_key(item))
+            if item.status == stt_quality.UNCLEAR:      # (a late call's old words: never asked again, #747)
+                self._unclear(item, traffic_key(item), quiet=bool(getattr(item, "late", False)))
             if item.status != "no_speech" and other:
                 log(f"{item.source}: transmission {item.id} ({item.status})")     # (#419: its words never in a log)
             elif item.status != "no_speech":
@@ -2831,7 +2832,7 @@ class App:
             return None
         return s if s > 0 else None
 
-    def _screen(self, item, text: str, status: str) -> tuple[str, str, dict]:
+    def _screen(self, item, text: str, status: str, language: str = "") -> tuple[str, str, dict]:
         """Any engine's words on the CAD of record (a station forwarding to a hub leaves it to the hub, which sees every
         engine's words): (text, status, {}) as they stand, or ("", "unclear", {quality, unclear_text}) for a loop, more
         words than the clip holds or whisper's stock phrase on noise (sizeup/stt_quality.py). The words are kept on the
@@ -2845,7 +2846,7 @@ class App:
                                   "unclear_text": str(getattr(item, "unclear_text", "") or "")}
         if status != "done" or not text or self.forwarding():
             return text, status, {}
-        why = stt_quality.assess(text, self._clip_seconds(item) if item is not None else None)
+        why = stt_quality.assess(text, self._clip_seconds(item) if item is not None else None, language)
         if not why:
             return text, status, {}
         if item is not None:
@@ -2860,7 +2861,7 @@ class App:
         why = stt_quality.assess(str(alt["text"]), self._clip_seconds(item) if item is not None else None)
         if not why:
             return alt
-        return {**alt, "text": "", "model": f"{alt.get('model') or ''} · {stt_quality.label(why).lower()}"[:120]}
+        return {**alt, "text": ""}            # (its model kept as it is: an engine's name, sttfix keys on it)
 
     def _unclear(self, item, key: str, quiet: bool = False) -> None:
         """An unclear transcript on the CAD of record: said in the log (which engine, why; never its words). The hub asks
@@ -2870,7 +2871,7 @@ class App:
 
     def _retext(self, cid: str, text: str, status: str, confidence: float | None, model: str,
                 alt: dict | None = None, why: str = "re-run", quiet: bool = False, vocab_v: str = "",
-                prompted: bool = False, late: bool = False) -> bool:
+                prompted: bool = False, late: bool = False, language: str = "") -> bool:
         """New text for a page or transmission already on screen (a re-run here, or one the station
         sent the hub, or Amazon Transcribe's), the old text kept in its history. True = the text changed.
         alt {text, model}: the other engine's transcript, kept to compare ("both"). quiet: a shed clip caught up
@@ -2881,13 +2882,13 @@ class App:
         call from while sizeup was down (#747; the row's own t.late says so too): no pre-alert either (no ATC, and
         Comms.retext late: only the per-incident radio log), but its words still go to the alarms (a mayday that only
         AWS heard alarms, labelled late; the same transmission's alarm is updated, never raised twice); "late" on the
-        retext event."""
+        retext event. language: the engine's detected language, when it said (sizeup/stt_quality.py)."""
         changed = False
         with self._lock:
             page = next((p for p in self.pages if p.id == cid), None)
         item = page if page is not None else next(
             (x for x in list(self.store.loose) + [x for i in self.store.incidents for x in i.traffic] if x.id == cid), None)
-        text, status, unclear = self._screen(item, text, status)      # (sizeup/stt_quality.py: any engine's words)
+        text, status, unclear = self._screen(item, text, status, language)    # (sizeup/stt_quality.py)
         alt = self._screen_alt(item, alt)
         if page is not None:
             if page.raw != text and (page.raw or page.status not in ("pending", "remote")):
@@ -3093,14 +3094,14 @@ class App:
     def _has_text(self, cid: str, item=None) -> bool:
         """This clip has its transcript already (a page read, a row with text or "no speech"): a saved entry for it is
         stale (whisper finished it while the station stopped)."""
-        if item is not None and getattr(item, "status", "") in ("done", "no_speech") and (
-                getattr(item, "raw", "") or getattr(item, "status", "") == "no_speech"):
+        if item is not None and getattr(item, "status", "") in ("done", "no_speech", stt_quality.UNCLEAR) and (
+                getattr(item, "raw", "") or getattr(item, "status", "") != "done"):
             return True
         try:
             r = self.cad.store.one("SELECT status FROM radio_traffic WHERE id = ?", (cid,))
         except Exception:  # noqa: BLE001 - no log here: not known
             return False
-        return bool(r) and r.get("status") in ("done", "no_speech")
+        return bool(r) and r.get("status") in ("done", "no_speech", stt_quality.UNCLEAR)
 
     def _stt_resume(self) -> int:
         """Starting: the clips a stop saved (_stt_handoff) queued again at their own class, each with its saved
@@ -3675,6 +3676,8 @@ class App:
         if job.rerun:
             changed = self._retext(job.id, text, status, conf, channels_model(), why="AWS Transcribe re-run",
                                    quiet=job.catchup, vocab_v=job.vocab_v)
+            if job.requeue:
+                return None                    # (nobody asked: no result on the row)
             return self._rerun_finish(job.id, "changed" if changed else "same", channels_model())
         if job.kind == "page" and job.alt is None:
             page = job.page

@@ -1365,7 +1365,10 @@ function radioRow(t, ctx = {}) {
     const fixes = (t.atc_snaps || []).map((x) => `“${x.from}” → ${x.to} (on ADS-B)`);
     txt.title = `As transcribed: ${t.text}` + (fixes.length ? `\nCallsign matched to ADS-B: ${fixes.join(", ")}` : "");
   }
-  if (!shown && t.status === "unclear" && t.unclear_text) txt.title = `Heard (${t.model || "unknown"}): ${t.unclear_text}`;
+  if (!shown && t.status === "unclear" && t.unclear_text) {
+    const w = t.unclear_text;
+    txt.title = `Heard (${t.model || "unknown"}): ${w.length > 300 ? w.slice(0, 299) + "…" : w}`;
+  }
   if (!txt.title && t.model && t.status !== "off") txt.title = (shown ? "Transcribed by " : "Speech-to-text: ") + t.model;
   if (t.atc_weak) {                      // a marginal AM carrier (#257): transcribed, but the words may be wrong
     const w = el("span", "atc-weak", "weak signal");
