@@ -1409,6 +1409,7 @@ function sNotifRules() {
     ol.append(li);
   });
   if (!d.rules.length) ol.append(el("li", "s-row dim small", "None"));
+  if (d.broken) ol.append(el("li", "s-row warn small", `${d.broken} saved rule${d.broken === 1 ? "" : "s"} not read: edit by settings import`));
   const dr = S.nrDraft || {};
   const f = el("form", "s-add nf-form");
   const name = sInput(dr.name || "", 60, "Name");
@@ -1433,6 +1434,7 @@ function sNotifRules() {
   // the test box: what the rules make of a text (nothing saved, nothing changed)
   const t = el("form", "row s-add nf-test");
   const tin = sInput("", 4000, "Test a comment");
+  tin.title = "What the saved rules make of this text (nothing is changed)";
   const tout = el("span", "small nf-test-out");
   const go = el("button", "", "Test");
   go.type = "submit";

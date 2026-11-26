@@ -1834,7 +1834,7 @@ window.CadMap = (() => {
       empty: "None",
     });
     if (BOARD) syncList($("#ov-nonemerg"), ne, {
-      key: (o) => String(o.id), sig: (o) => JSON.stringify([o.number, o.type, o.subtype, o.address, o.location_qualifier, o.units.map((u) => u.name)]),
+      key: (o) => String(o.id), sig: (o) => JSON.stringify([o.number, o.type, o.subtype, o.address, o.location_qualifier, o.units.map((u) => u.name), o.notif]),
       make: () => {
         const li = el("li", "ov-ne item");
         li.tabIndex = 0;
@@ -1843,10 +1843,12 @@ window.CadMap = (() => {
         return li;
       },
       fill: (li, o) => {
-        const t = el("span", "qt", typeLabel(o.type, o.subtype));
+        const base = typeLabel(o.type, o.subtype);
+        const t = el("span", "qt", window.Notif ? Notif.label(o, base) : base);   // "· Hydrants OOS" (notif.js)
         t.style.setProperty("--c", typeColor(o.type) || "#8fb8d8");
         li.replaceChildren(el("b", "", incTitle(o)), t, el("span", "ov-addr-s", locText(o) || "No location"),
                            el("span", "spacer"), since(el("span", "dim small"), o.created_at));
+        if (o.notif && o.notif.oos) li.append(el("span", "chip warn", `${o.notif.oos} hydrant${o.notif.oos === 1 ? "" : "s"} OOS`));
         if (o.units.length) li.append(el("span", "dim small", o.units.map((u) => u.name).join(", ")));
       },
       empty: "None",

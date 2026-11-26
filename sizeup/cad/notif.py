@@ -60,6 +60,9 @@ TEXT_MAX = 4000                              # each text read at most this long
 CANDS = 5                                    # hydrants elsewhere offered per number
 AUTO = "Hydrants · auto"                     # who closes a notification when the last hydrant is back (auto_close)
 STATES = ("proposed", "linked", "back", "done", "dismissed")
+# a group with a repeat inside, itself repeated ("(a+)+", "(\\d+,?)*", "(?:x|y*){2,}"): catastrophic backtracking on a long
+# text (Python's re holds the GIL: one such rule would stall the hub on every comment), refused when saved
+NESTED = re.compile(r"\((?:[^()\\]|\\.)*(?:[+*]|\{\d*,\d*\})(?:[^()\\]|\\.)*\)(?:[+*]|\{\d*,\d*\})")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS notif_incidents (
@@ -104,6 +107,8 @@ def _regex(v, name: str, n: int = PATTERN_MAX) -> str:
         raise ValueError(f"{name}: {e}") from None
     if rx.search("") is not None:
         raise ValueError(f"{name}: matches nothing at all (empty text): too broad")
+    if NESTED.search(v):
+        raise ValueError(f"{name}: a repeated group that repeats inside, as (a+)+: could take forever on a long comment")
     return v
 
 
@@ -344,7 +349,7 @@ class Notif:
                 auto.setdefault(r["name"], []).append(rid)
         for name, ids in auto.items():
             rows = {x["id"]: x for x in self.rows(self.store.incident(iid))}
-            sure = [i for i in ids if rows.get(i, {}).get("match") in ("near", "linked")
+            sure = [i for i in ids if rows.get(i, {}).get("match") in ("near", "linked")      # (both near this one)
                     and rows[i]["next"] in ("mark", "link", "back")]
             if sure:
                 self.apply(iid, {"items": [{"id": i} for i in sure], "operator": f"{name} · auto"})
@@ -385,8 +390,8 @@ class Notif:
         elif r["state"] == "proposed" and hy is not None:
             cands = hy.by_number(r["number"])
             held = self._held_keys([c["key"] for c in cands]) if r["action"] == "in" else {}
-            mine = [c for c in cands if c["key"] in held]
             near = [c for c in cands if here and _metres(here[0], here[1], c["lat"], c["lon"]) <= NEAR_M]
+            mine = [c for c in near if c["key"] in held]           # held by an open notification, near this one
             if r["action"] == "in" and len(mine) == 1:
                 out["match"], out["h"] = "linked", self._brief(hy, mine[0], here)   # the one a notification holds
             elif len(near) == 1:
@@ -396,7 +401,8 @@ class Notif:
             else:
                 out["match"] = "ambiguous" if near else "elsewhere"
                 pool = near or cands
-                pool = sorted(pool, key=lambda c: (_metres(here[0], here[1], c["lat"], c["lon"]) if here else 0, c["key"]))
+                pool = sorted(pool, key=lambda c: (c["key"] not in held,       # a held one first ("in")
+                                                   _metres(here[0], here[1], c["lat"], c["lon"]) if here else 0, c["key"]))
                 out["cands"] = [self._brief(hy, c, here) for c in pool[:CANDS]]
                 out["more"] = max(0, len(pool) - CANDS)
         h = out["h"]
@@ -553,6 +559,10 @@ class Notif:
                     it = idx["by_key"].get(key)
                     if it is None:
                         continue
+                    took = db.execute("UPDATE notif_hydrants SET state = ?, hydrant_key = ? WHERE id = ? AND state = 'proposed'",
+                                      ("linked" if nxt in ("mark", "link") else "done", key, r["id"])).rowcount
+                    if not took:                             # done meanwhile (another click, an auto-apply, a dismiss)
+                        continue
                     if nxt == "mark":
                         wrote |= bool(hy._write(db, it, {"status": "oos", "status_reason": self._reason(inc)[:200],
                                                          "status_since": today, "status_until": None}, op, now))
@@ -664,13 +674,15 @@ class Notif:
         r = self.store.one("SELECT * FROM notif_hydrants WHERE id = ? AND incident_id = ?", (rid, iid))
         if r is None:
             raise CadError("no such row")
-        if r["state"] not in ("proposed", "linked"):
-            raise CadError(f"{r['number']}: {r['state']} already")
         now = self.cad.clock()
-        with self.store.tx() as db:
-            db.execute("UPDATE notif_hydrants SET state = 'dismissed' WHERE id = ?", (rid,))
-            self.store._event(db, iid, "edit", f"Hydrant {r['number']}: " + ("unlinked" if r["state"] == "linked" else "set aside"),
-                              op, at=now)
+        with self._lock:
+            with self.store.tx() as db:
+                took = db.execute("UPDATE notif_hydrants SET state = 'dismissed' WHERE id = ? AND state = ?",
+                                  (rid, r["state"])).rowcount if r["state"] in ("proposed", "linked") else 0
+                if not took:
+                    raise CadError(f"{r['number']}: {r['state']} already")
+                self.store._event(db, iid, "edit", f"Hydrant {r['number']}: "
+                                  + ("unlinked" if r["state"] == "linked" else "set aside"), op, at=now)
         return {"ok": True}
 
     def on_status(self, key: str, old: str, new: str, op: str) -> None:
@@ -700,11 +712,16 @@ class Notif:
             inc = self.store.incident(iid)
             if inc["status"] not in ("pending", "active") or self.held(iid):
                 continue
+            auto = getattr(self.cad, "auto", None)
+            if (auto is not None and auto._manual(iid, "close")) or self.store.one(
+                    "SELECT 1 AS x FROM assignments WHERE incident_id = ? AND cleared_at IS NULL LIMIT 1", (iid,)):
+                continue                                     # reopened by a person, or a unit on it: theirs to close
             self.store.close(iid, disp, AUTO)
             self.cad.log(f"CAD: {inc['number'] or iid}: every hydrant back in service: closed")
 
     def close_check(self, iid: int, body: dict) -> None:
-        """Cad.close: a notification holding hydrants closes only when the person confirms (confirm: true)."""
+        """Cad.close, Cad.dismiss: a notification holding hydrants ends only when the person confirms (confirm: true). Its
+        links stay (why those hydrants are out of service; their cards say it is closed)."""
         n = self.held(iid)
         if n and body.get("confirm") is not True:
             raise CadError(f"{_plural(n, 'hydrant')} still OOS on this notification: confirm to close")

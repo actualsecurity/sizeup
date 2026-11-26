@@ -4240,7 +4240,9 @@ function accPicked() {
 $("#d-accept").addEventListener("click", () => act("accept", accPicked() ? { type: $("#d-acc-type").value, subtype: $("#d-acc-sub").value } : {}));
 $("#d-dismiss").addEventListener("click", () => {
   const why = prompt("Dismiss this page: why? (optional)");
-  if (why !== null) act("dismiss", { reason: why });
+  if (why === null) return;
+  const ok = window.Notif ? Notif.confirmClose(selected()) : Promise.resolve({});   // hydrants held OOS by it: asked
+  ok.then((c) => { if (c) act("dismiss", { reason: why, ...c }); });
 });
 $("#d-close").addEventListener("click", () => {
   const f = $("#close-form");

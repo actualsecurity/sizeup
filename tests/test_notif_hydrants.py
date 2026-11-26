@@ -79,6 +79,8 @@ def texts(cad, iid):
     ({**ROAD_RULE, "auto_apply": True}, "only for a hydrants rule"),
     ({**OOS_RULE, "numbers": "("}, "numbers:"),
     ({**OOS_RULE, "match": "A" * 400}, "at most 300"),
+    ({**OOS_RULE, "match": r"HYD (\d+,?)+ OOS"}, "could take forever"),          # nested repeats: backtracking
+    ({**OOS_RULE, "numbers": r"(\d+,)+\d"}, "could take forever"),
 ])
 def test_settings_refuses_a_bad_rule(cad, rule, err):
     with pytest.raises(CadError, match=re.escape(err)):
@@ -256,6 +258,8 @@ def test_apply_marks_them_oos_with_the_notification_as_the_reason_and_audits(cad
     inc = state_inc(cad, iid)
     assert inc["notif"]["oos"] == 2 and inc["notif"]["linked"] == ["c990001", "c990002"]
     assert inc["hydrants"]["linked"] == ["c990001", "c990002"]                    # (c) the call's list marks them
+    ov = next(o for o in cad.state()["overview"] if o["id"] == iid)               # the wall board's Non-emergency list
+    assert ov["notif"] == {"kind_name": "Hydrants OOS", "oos": 2}
     assert {r["number"]: r["state"] for r in inc["notif"]["rows"]} == {"9001": "linked", "9002": "linked", "9099": "proposed"}
     t = texts(cad, iid)
     assert "Hydrants 9001: Marked OOS" in t and "Hydrants 9002: Linked (already OOS)" in t
@@ -340,11 +344,16 @@ def test_a_back_in_service_notification_proposes_and_releases_the_first(cad):
     rules(cad, OOS_RULE, IN_RULE)
     first = notification(cad, "HYD 9001, 9002 OOS")
     cad.notif.apply(first, {"operator": "Casey"})
-    later = notification(cad, "HYD 9001 BACK IN SERVICE", lat=LAT0 + 60 * DLAT)  # placed far off: the held one still
+    later = notification(cad, "HYD 9001 BACK IN SERVICE")                        # at the same place
     inc = state_inc(cad, later)
     assert inc["notif"]["kind"] == "HYD-IS"
     r = rows(cad, later)["9001"]
     assert (r["action"], r["match"], r["h"]["key"], r["next"]) == ("in", "linked", "c990001", "back")
+    # one placed far off never takes the held one by itself: a person confirms (the held one offered first)
+    far = notification(cad, "HYD 9002 BACK IN SERVICE", lat=LAT0 + 60 * DLAT)
+    f = rows(cad, far)["9002"]
+    assert (f["match"], f["next"], f["cands"][0]["key"]) == ("elsewhere", "confirm", "c990002")
+    assert cad.notif.apply(far, {"operator": "Casey"}) == {"ok": True, "done": []}
     cad.notif.apply(later, {"operator": "Casey"})
     assert cad.hydrants.one("c990001")["hydrant"]["status"] == "in_service"
     assert rows(cad, later)["9001"]["state"] == "done"
@@ -378,6 +387,36 @@ def test_auto_apply_takes_only_the_one_near_it(cad):
     r = rows(cad, iid)
     assert r["9001"]["state"] == "linked" and r["9099"]["state"] == "proposed"
     assert cad.store.q("SELECT operator FROM settings_audit WHERE section = 'hydrants'")[0]["operator"] == "Hydrants OOS · auto"
+
+
+def test_a_row_is_applied_once_and_a_set_aside_one_never(cad):
+    rules(cad, OOS_RULE)
+    iid = notification(cad, "HYD 9001, 9003 OOS")
+    r = rows(cad, iid)
+    cad.notif.apply(iid, {"items": [{"id": r["9001"]["id"]}], "operator": "Casey"})
+    with pytest.raises(CadError, match="linked already"):
+        cad.notif.apply(iid, {"items": [{"id": r["9001"]["id"]}], "operator": "Casey"})
+    cad.notif.dismiss(iid, {"id": r["9003"]["id"], "operator": "Casey"})
+    with pytest.raises(CadError, match="dismissed already"):
+        cad.notif.apply(iid, {"items": [{"id": r["9003"]["id"]}], "operator": "Casey"})
+    with pytest.raises(CadError, match="dismissed already"):
+        cad.notif.dismiss(iid, {"id": r["9003"]["id"], "operator": "Casey"})
+    assert texts(cad, iid).count("Hydrants 9001: Marked OOS") == 1
+    assert cad.hydrants.one("c990003")["hydrant"]["status"] == "unknown"
+
+
+def test_a_queued_notification_holding_hydrants_is_dismissed_only_when_confirmed(cad):
+    rules(cad, {**OOS_RULE, "auto_apply": True})
+    iid = cad.store.create_incident(type="NOTIF", address="10 Sample St", lat=LAT0, lon=LON0, remarks="HYD 9001 OOS",
+                                    source="CAD feed", status="queued")
+    iid = iid["id"] if isinstance(iid, dict) else iid
+    cad.notif.scan(iid)
+    assert cad.notif.held(iid) == 1
+    with pytest.raises(CadError, match="confirm"):
+        cad.dismiss(iid, {"operator": "JD"})
+    cad.dismiss(iid, {"operator": "JD", "confirm": True})
+    assert cad.store.incident(iid)["status"] == "dismissed"
+    assert cad.hydrants.one("c990001")["notifications"][0]["status"] == "dismissed"   # still why it is out of service
 
 
 def test_dismiss_sets_a_row_aside_or_unlinks(cad):

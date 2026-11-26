@@ -827,8 +827,6 @@ class AutoDispatch:
             return
         if self.store.one("SELECT 1 AS x FROM auto_steps WHERE incident_id = ? AND kind = 'close'", (iid,)):
             return                                       # closed by automation before (and reopened since): a person's
-        if self._hydrants_hold(iid, t, op, label):
-            return
         ours = self._ours()
         L = self.store.lists
         keys = {_key(n) for n in listed or []}
@@ -848,6 +846,8 @@ class AutoDispatch:
                 sid = self._unit_step(iid, self.store.unit(r["id"]), "free", t, op, "county", "in_service")
                 if sid:
                     released.append(sid)
+        if self._hydrants_hold(iid, t, op, label):      # the units it lists released; the call itself stays open
+            return
         blocking = self._blocking(iid)
         if blocking:
             if not self.store.one("SELECT 1 AS x FROM auto_steps WHERE incident_id = ? AND kind = 'close?' AND ref = ?",

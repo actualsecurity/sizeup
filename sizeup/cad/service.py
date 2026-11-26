@@ -1197,6 +1197,7 @@ class Cad:
         return out
 
     def dismiss(self, iid: int, body: dict) -> dict:
+        self.notif.close_check(iid, body)          # hydrants held OOS by it (an auto-applied rule): confirmed first
         return self.store.dismiss(iid, _text(body, "operator", OPERATOR_MAX), _text(body, "reason", 200))
 
     def close(self, iid: int, body: dict) -> dict:
@@ -1223,7 +1224,8 @@ class Cad:
         for d in done:
             until = datetime.fromtimestamp(d["until_at"], TZ).strftime("%m/%d %H:%M")
             self.log(f"CAD: {d['number'] or d['id']}: until {until} passed: "
-                     + ("closed (Expired)" if d["closed"] else f"kept open, {', '.join(d['units'])} on it"))
+                     + ("closed (Expired)" if d["closed"] else f"kept open ({d['held']})" if d.get("held")
+                        else f"kept open, {', '.join(d['units'])} on it"))
         return done
 
     def reopen(self, iid: int, body: dict) -> dict:

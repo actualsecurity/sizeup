@@ -1860,7 +1860,7 @@ class Store:
                 return None
             on = kept(db, iid)
             d = {"id": iid, "number": inc["number"], "until_at": inc["until_at"], "closed": not on,
-                 "units": [u if isinstance(u, str) else u[0] for u in on]}
+                 "units": [u for u in on if isinstance(u, str)], "held": next((u[0] for u in on if isinstance(u, tuple)), "")}
             if on:                                       # said once per set of units, then left to them
                 text = held_line(inc, on)
                 if said(db, inc, text):

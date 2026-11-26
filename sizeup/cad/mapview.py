@@ -530,5 +530,7 @@ def overview(incidents: list[dict], tactical=("FG1",)) -> list[dict]:
                      "units": [x for x in (note.get("units") or "").split(",") if x]} if note else None,
             "channels": channels,
             **({k: i.get(k) for k in airport.FIELDS} if i.get("type") == airport.TYPE else {}),   # the tower's facts (#105)
+            # a notification's sub-type and its hydrants held OOS (sizeup/cad/notif.py): the wall board's list
+            **({"notif": {"kind_name": i["notif"].get("kind_name", ""), "oos": i["notif"].get("oos", 0)}} if i.get("notif") else {}),
         })
     return out

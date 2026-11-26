@@ -333,7 +333,7 @@ window.Hydrants = (() => {
   function notifRows(list) {
     return (list || []).map((n) => {
       const row = el("div", "row hy-notif");
-      const b = el("button", "sm quiet ro-ok", `Notification ${n.number || n.id}`);
+      const b = el("button", "sm quiet ro-ok", `Notification ${n.number || n.id}${n.status === "closed" ? " · closed" : ""}`);
       b.type = "button";
       b.title = `Holds it OOS${n.status === "closed" ? " (closed)" : ""}: open it`;
       b.addEventListener("click", () => { if (typeof selectIncident === "function") selectIncident(n.id); });
