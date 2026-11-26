@@ -110,9 +110,10 @@ COUNTS = ("asked", *WHYS, "events", "evidence", "capped", "unavailable", "uncued
 # an event the trigger row doesn't back (_corroborated) is at most ALONE_MAX ("medium": never "high", never pushed), and
 # at most SHORT_MAX ("low") when that row is short (under SHORT_WORDS words or SHORT_S seconds): one odd transmission.
 # A category with "model_cues" (rules.py) is raised only when the trigger says one of them, or CUE_CONTEXT of the
-# context transmissions do (a clear sequence), or the row aired just before the trigger does and is a dispatch (the dispatcher
-# or the pack's dispatch cue, within the pack's window_s: "units respond, two males fighting" then "copy, en route");
-# else the answer is kept, used "uncued", nothing raised.
+# context transmissions do (a clear sequence), or the row aired just before the trigger does and is a dispatch (the
+# dispatcher or the pack's dispatch cue, within the pack's window_s: "units respond, two males fighting" then "copy, en
+# route"); else the answer is kept, used "uncued", nothing raised. The cues cover every wording of the category's rules
+# (tests/test_intel_backing.py, CUE_EXEMPT the exceptions).
 ALONE_MAX = 0.6
 SHORT_MAX = 0.45
 SHORT_WORDS = 10
