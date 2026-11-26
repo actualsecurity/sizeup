@@ -1634,9 +1634,17 @@ Settings > Radios > Channels picks each channel's engine (a group heading's "Eng
   while it holds nothing and no other job waits. A pre-alert clip never queues behind them: with the GPU busy it goes
   to AWS at once, and its route says "busy (background)".
 - **Latency guard (#878):** Health lists each engine's live latency (transmission end to text) and failures. A GPU
-  worker trips when its priority clips' p50 is over 5 s, or a third of them fail (at least 4 clips in 10 min). Every
-  Auto and pinned channel then goes to AWS and says so on the route, and the dropdown shows "guard". After 5 min it
-  gets one probe clip a minute; 3 quick probes in a row clear it.
+  worker trips when its priority clips' p50 is over 5 s, or a third of its priority jobs fail (at least 4 clips in
+  10 min; RERUN, LOW and background failures never count). Every Auto and pinned channel (a channel pinned to it too)
+  then goes to AWS and says so on the route, and the dropdown shows "guard". After the hold (5 min, doubling for each
+  trip within an hour, up to 1 h) it gets one probe a minute: a shadow copy of a priority clip, pinned to it, its text
+  never used (never a live clip). 3 probes decoded within 3 s in a row clear it. Its state is kept in hub.sqlite (meta
+  `stt_guard`) across a restart.
+- **The pool's pre-alert speed gate** (a worker slow on pre-alert clips lately gets none) holds for Auto and pinned
+  channels too. Only when AWS can't take the clip either may a pre-alert clip wait for a slow or busy GPU, rather than
+  go back to the station.
+- **A worker decodes one clip at a time:** one holding background work is busy for every priority class, LIVE
+  included (the clip goes to AWS, never behind it).
 - **Route:** each transcript records the way it went in `stt_runs.route` and on its row (`stt_route`), for example
   "auto·priority: gpu-pc → AWS (gpu-pc: went gaming)". The Radio page shows it in the transcript's hover.
 - **Later:** the shadow-evidence summary (a channel's GPU candidates against AWS on the same clips), so an admin can

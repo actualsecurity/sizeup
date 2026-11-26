@@ -11,7 +11,8 @@ One model for the FM channels (FG1, FG2, South 2) and every P25 talkgroup, keyed
     transcribe   run speech-to-text on it at all (off: the clip is kept, no text)
     engine       "local": whisper.cpp on the station (small.en-q5_1 by default) (whisper-server, :8179)
                  "aws":   Amazon Transcribe streaming from the hub (sizeup/transcribe.py); the station
-                          skips whisper and forwards the clip with transcript_pending "aws"
+                          skips whisper and forwards the clip with transcript_pending "aws" (Settings: "AWS · GPU by
+                          class", legacy: a GPU worker first where the pool's class switch is on; "pin:aws" is AWS only)
                  "both":  whisper on the station and Transcribe on the hub: Transcribe's text is the
                           transcript, whisper's is kept as the alternative to compare (Settings: "Compare")
                  "auto", "auto_bg", "pin:<id>": the engine selector (#875, sizeup/sttroute.py): Auto · priority,

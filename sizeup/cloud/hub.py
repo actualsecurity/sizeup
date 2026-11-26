@@ -124,7 +124,7 @@ from sizeup.radio.page import page_from_dict
 from sizeup.sources import SourceError
 from sizeup import stt_time, sttpool, sttroute, sttruns
 from sizeup.cloud import infer as infer_mod
-from sizeup.stt import CATCHUP, CATCHUP_NOTE, LIVE as LIVE_CLS, judge, wav_bytes
+from sizeup.stt import CATCHUP, CATCHUP_NOTE, LIVE as LIVE_CLS, RERUN as RERUN_CLS, judge, wav_bytes
 from sizeup.transcribe import RESERVE_CHANNELS, deadline_for
 
 JSON = "application/json"
@@ -152,6 +152,7 @@ RECOVER_S = 3600.0       # after a restart: what waited for AWS less than this g
 RECOVER_WAIT_S = 120.0   # ... to whisper: waiting this long for the station to reconnect first
 CATCHUP_STATUS_S = 30.0  # shed clips caught up: the station's whisper judged idle only on a report this fresh
 POOL_CAP = "stt_pool"    # the hub takes clips a station hands to the pool (#639 phase 2: transcript_pending "pool")
+GUARD_META = "stt_guard"  # the GPU workers' latency guard (#878, sizeup/sttroute.py EngineBook.state), kept across a restart
 POOL_AUDIO_WAIT_S = 10.0  # a pool job's audio: the station's STT input waited for this long before the listening clip
 CATCHUP_REFUSED_S = 600.0  # ... and a station that refuses the call (an older build) isn't asked again for this long
 JOB_PATH = re.compile(r"/api/station/jobs/([0-9a-f]{16})")
@@ -1109,7 +1110,11 @@ class HubApp(App):
         # the engine selector (#875, sizeup/sttroute.py): each clip's way while its text is coming, and each engine's
         # live latency with the GPU workers' guard (#878)
         self.stt_routes = sttroute.Routes()
-        self.stt_engines = sttroute.EngineBook(log=log)
+        self.stt_engines = sttroute.EngineBook(log=log, on_change=self._guard_keep)
+        try:                                       # (the guard's state from before a restart: #878)
+            self.stt_engines.restore(json.loads(self.mdb.get(GUARD_META, "") or "{}"))
+        except (ValueError, TypeError, AttributeError) as e:
+            log(f"stt guard: the kept state can't be read ({type(e).__name__}): none")
         # a station's whisper is a pool worker under its own station identity (#639 phase 2): no token more to issue,
         # rotate or revoke; revoking the station ends its worker too
         self.stt_api = WorkerApi(reg, self.sttpool, self._may_write_audio, log, station=self.hub.station_of)
@@ -1822,35 +1827,54 @@ class HubApp(App):
             pin = ""
         if eng == sttroute.AUTO_BG:               # (a station's stale map: background's own way, never AWS first)
             return self._bg_first(item, pcm, key, cls)
-        avoid = self._guard_avoid()
-        # a tripped worker due a probe (#878) gets this clip, pinned to it (its answer is the probe's); any other
-        # tripped worker stays aside
-        due = "" if pin and pin in avoid else pin if pin and self.stt_engines.due(pin) else \
-            next((w for w in avoid if not pin and self.stt_engines.due(w)), "")
+        avoid = self._guard_avoid()               # (a tripped worker stays aside, a pinned one too: #878)
+        self._guard_probe(item, pcm, key, cls, avoid)
         aws_ok = self.aws is not None and self.aws.available(key)[0]
-        # (a pinned engine, then any GPU worker: Auto · priority's order; AWS out: a busy GPU may still be waited for
-        # its class's claim time rather than the clip going back to the station)
-        tries = ([(due, True)] if due else []) + ([(pin, False)] if pin and pin != due else []) + [("", False)] + \
-            ([("", "queue")] if not aws_ok else [])
+        # (a pinned engine, then any GPU worker: Auto · priority's order; AWS out: a busy or slow GPU may still be
+        # waited for its class's claim time rather than the clip going back to the station)
+        tries = ([(pin, False)] if pin else []) + [("", False)] + ([("", True)] if not aws_ok else [])
         seconds = len(pcm) / 8000.0
-        for p, how in tries:
+        for p, queue in tries:
             gpu_job = not p.startswith(STATION_PREFIX)
-            aside = {w: why for w, why in avoid.items() if w != p} if gpu_job else {}
+            aside = avoid if gpu_job else {}
             ok, why = self.sttpool.ready_forced(cls, pin=p, avoid=aside, seconds=seconds, origin=self.clip_origin,
-                                                queue_ok=how == "queue")
+                                                queue_ok=queue)
             if not ok:
                 self.stt_routes.note(item.id, p.removeprefix(STATION_PREFIX) or "GPU", why)
                 continue
-            extra = {"probe": p} if how is True else {}
-            if how == "queue":
-                extra["queue_ok"] = True
-            if self._pool_submit(item, pcm, key, cls, forced=True, pin=p, gpu_only=gpu_job, avoid=aside, more=extra):
-                if how is True:
-                    self.stt_engines.probe(p)
-                    self.hub.log(f"stt guard: {p}: a probe clip ({item.id})")
+            if self._pool_submit(item, pcm, key, cls, forced=True, pin=p, gpu_only=gpu_job, avoid=aside,
+                                 more={"queue_ok": True} if queue else None):
                 return True
             self.stt_routes.note(item.id, p.removeprefix(STATION_PREFIX) or "GPU", "couldn't take it")
         return False
+
+    def _guard_probe(self, item, pcm, key: str, cls, avoid: dict) -> None:
+        """A tripped GPU worker due a probe (#878) gets a shadow copy of this priority clip, pinned to it, after every
+        live clip (RERUN): its decode time is measured, its text never used. The clip itself goes its own way."""
+        due = next((w for w in avoid if self.stt_engines.due(w)), "")
+        if not due:
+            return
+        page = None if isinstance(item, Traffic) else item
+        job = sttpool.Job(f"{item.id}~probe", RERUN_CLS, key, "page" if page is not None else "traffic", len(pcm) / 8000.0,
+                          audio_wait=True, audio=self._pool_audio_of(item.id, page, pcm), on_done=self._probe_done,
+                          on_fallback=self._probe_fell, pin=due, forced=True, extra={"probe": due, "shadow": True})
+        if self.sttpool.submit(job):
+            self.stt_engines.probe(due)
+            self.hub.log(f"stt guard: {due}: a probe (a shadow copy of {item.id})")
+
+    def _probe_done(self, job: sttpool.Job, res: dict) -> None:
+        run = (self.sttpool.clock() - job.claimed_at) if job.claimed_at else None
+        self.stt_engines.add(job.worker or job.pin, run, ok=run is not None, gpu=True, probe=True, priority=False)
+
+    def _probe_fell(self, job: sttpool.Job, why: str) -> None:
+        if job.extra.get("fell") in ("unclaimed", "no_worker") or re.search(r"went (gaming|paused)", why):
+            return                                 # (nobody took it, or the GPU is the game's: no word on its speed)
+        self.stt_engines.add(job.worker or job.pin, None, ok=False, gpu=True, probe=True, priority=False)
+
+    def _guard_keep(self, state: dict) -> None:
+        """The guard's state kept across a restart (hub.sqlite meta), by the leader only."""
+        if self._may_write_audio():
+            self.mdb.put(GUARD_META, json.dumps(state, sort_keys=True))
 
     def _bg_first(self, item, pcm, key: str, cls) -> bool:
         """An Auto · background clip that came the AWS way (a station's map from before the change): a GPU free for
@@ -2073,7 +2097,7 @@ class HubApp(App):
                       wait_s=job.claimed_at - job.queued_at if job.claimed_at else None,
                       run_s=done_at - job.claimed_at if job.claimed_at else None,
                       prompt_v=sttruns.prompt_version(job.prompt), cls=job.cls, clip_end=job.clip_end, vocab_v=vocab_v,
-                      bg=job.bg, probe=bool(job.worker) and job.extra.get("probe") == job.worker)
+                      bg=job.bg)
 
     def _pool_fallback(self, job: sttpool.Job, why: str) -> None:
         """No text from the pool in time: an AWS-channel clip the AWS way (and the station's whisper if AWS can't). A
@@ -2091,7 +2115,7 @@ class HubApp(App):
         if job.worker and job.extra.get("kind") == "gpu" and not job.bg and job.extra.get("fell") in (
                 "lease", "error", "released") and not re.search(r"went (gaming|paused)|shutdown|stopping", why):
             self.stt_engines.add(job.worker, None, ok=False, gpu=True,      # (the latency guard's failures: #878)
-                                 probe=job.extra.get("probe") == job.worker)
+                                 priority=job.cls in sttruns.TARGET_CLASSES + (LIVE_CLS,))
         if job.extra.get("handed"):               # a station handed it over (busy, or restarting): the next way on
             return self._pool_elsewhere(job, why)
         self.stt_routes.note(job.id, job.worker or job.pin.removeprefix(STATION_PREFIX) or "GPU", _short_why(why, job.worker))
@@ -2161,7 +2185,7 @@ class HubApp(App):
                  prompted: bool | None = None,
                  role: str = "text", words=None, queued_at=None, engine_start=None, worker: str = "", prompt_v: str = "",
                  cls=None, clip_end=None, wait_s=None, run_s=None, vocab_v: str | None = None, bg: bool = False,
-                 probe: bool = False) -> None:
+                 ) -> None:
         """A transcript as an engine wrote it, kept (sizeup/sttruns.py), and its latency (transmission end -> text
         here) counted for Health when it is the text of record, per channel and per engine (the GPU workers' latency
         guard: sizeup/sttroute.py; bg: background work, never the guard's). The text of record's way (its route:
@@ -2188,7 +2212,7 @@ class HubApp(App):
                                                                if engine == "station-whisper" and self.clip_origin else ""))
                 route = self.stt_routes.finish(cid, name)
                 if clip_end is not None:
-                    self.stt_engines.add(name, now - clip_end, ok=True, gpu=engine == "gpu-worker", probe=probe,
+                    self.stt_engines.add(name, now - clip_end, ok=True, gpu=engine == "gpu-worker",
                                          priority=not bg and cls is not None and cls in sttruns.TARGET_CLASSES + (LIVE_CLS,))
                 if route:
                     self._stt_route_row(cid, route)

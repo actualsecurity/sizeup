@@ -33,10 +33,12 @@ holds for all of it.
 
 Every transcript the hub routes records the way it went (Route): "auto·priority: gpu-pc → AWS (gpu-pc: gaming)".
 
-Guard (#878): a GPU worker whose live latency (transmission end -> text, priority clips) or failure rate (leases lost,
-handed back, results refused) crosses GUARD_P50_S / GUARD_FAIL_RATE over GUARD_WINDOW_S is skipped by every Auto and
-pinned channel (they go to AWS and say why) until GUARD_RECOVER_N probe clips in a row, one per GUARD_PROBE_S after
-GUARD_HOLD_S, come back within the threshold. Health shows each engine's live latency and the guard's state.
+Guard (#878): a GPU worker whose live latency (transmission end -> text, priority clips) or failure rate (its priority
+jobs' leases lost, handed back, results refused) crosses GUARD_P50_S / GUARD_FAIL_RATE over GUARD_WINDOW_S is skipped by
+every Auto and pinned channel (they go to AWS and say why) until GUARD_RECOVER_N probes in a row come back quick: after
+GUARD_HOLD_S (doubling on each trip within GUARD_RESET_S), one per GUARD_PROBE_S, each a shadow copy of a priority clip
+(never a live clip on a known-slow worker). Its state survives a restart (the hub keeps it: EngineBook.state/restore).
+Health shows each engine's live latency and the guard's state.
 Later (#878): the shadow-evidence summary (a channel's GPU candidates scored against AWS on the same clips) for an
 admin switching a channel off AWS; nothing here switches a channel by itself."""
 
@@ -64,8 +66,11 @@ GUARD_MIN_N = 4           # ... at least this many before it can trip
 GUARD_P50_S = 5.0         # its median transmission end -> text over this (sttruns.TARGET_P50_S): tripped
 GUARD_FAIL_RATE = 0.34    # ... or this share of its priority jobs failed (at least GUARD_FAIL_MIN of them)
 GUARD_FAIL_MIN = 2
-GUARD_HOLD_S = 300.0      # tripped: no priority clip for this long, then ...
-GUARD_PROBE_S = 60.0      # ... one probe clip this often ...
+GUARD_HOLD_S = 300.0      # tripped: no priority clip for this long (doubling each trip within GUARD_RESET_S, up to
+GUARD_HOLD_MAX_S = 3600.0  # GUARD_HOLD_MAX_S: a borderline worker never cycles), then ...
+GUARD_RESET_S = 3600.0
+GUARD_PROBE_S = 60.0      # ... one probe this often: a shadow copy of a priority clip (its text never used; the clip
+GUARD_PROBE_RUN_S = 3.0   # itself goes its own way), decoded within this (claim -> text: sttpool PREALERT_MAX_SERVICE_S)
 GUARD_RECOVER_N = 3       # ... and this many good ones in a row: back
 LATENCY_WINDOW_S = 7200.0  # Health's live latency per engine
 
@@ -149,6 +154,8 @@ class Route:
         del self.hops[:-6]
 
     def text(self, final: str) -> str:
+        if not self.hops and self.mode.lower() == final.lower():
+            return self.mode                                  # ("AWS", not "AWS: AWS")
         names = [e for e, _w in self.hops if e != final] + [final]
         whys = [f"{e}: {w}" if w and not w.startswith(e) else w for e, w in self.hops if w and e != final]
         return (f"{self.mode}: " + " → ".join(names) + (f" ({'; '.join(whys)})" if whys else ""))[:300]
@@ -203,10 +210,13 @@ class EngineBook:
     add(engine, latency_s, ok, priority): a live transcript (latency: transmission end -> text on the hub) or a failure
     (ok False: no latency). Only priority samples count for the guard; every one counts for Health."""
 
-    def __init__(self, clock: Callable[[], float] = time.time, log: Callable[[str], None] = print):
-        self.clock, self.log = clock, log
+    def __init__(self, clock: Callable[[], float] = time.time, log: Callable[[str], None] = print,
+                 on_change: Callable[[dict], None] | None = None):
+        """on_change(state): the guard tripped, held again or cleared (the hub keeps it across a restart)."""
+        self.clock, self.log, self.on_change = clock, log, on_change
         self._rows: dict[str, deque] = {}          # engine -> (at, latency_s | None, ok, priority)
-        self._trip: dict[str, dict] = {}           # GPU worker -> {at, why, probe_at, good}
+        self._trip: dict[str, dict] = {}           # GPU worker -> {at, why, probe_at, good, hold}
+        self._trips: dict[str, list] = {}          # GPU worker -> [trips in a row, the last one's time] (the backoff)
         self._cleared: dict[str, float] = {}       # GPU worker -> when it recovered (older samples no longer count)
         self._lock = threading.Lock()
 
@@ -223,26 +233,56 @@ class EngineBook:
             q.append((at, lat, bool(ok), bool(priority)))
             while q and at - q[0][0] > LATENCY_WINDOW_S:
                 q.popleft()
-            if gpu and (priority or probe):
-                self._judge(engine, at, lat, bool(ok), probe)
+            changed = self._judge(engine, at, lat, bool(ok), probe) if gpu and (priority or probe) else False
+        if changed:
+            self._changed()
 
-    def _judge(self, wid: str, now: float, lat: float | None, ok: bool, probe: bool = False) -> None:
-        """(lock held) A priority sample on a GPU worker: trip the guard, or (a probe clip's: the job the hub sent it as
-        one) count towards its recovery."""
+    def _changed(self) -> None:
+        if self.on_change is not None:
+            try:
+                self.on_change(self.state())
+            except Exception as e:  # noqa: BLE001 - kept in memory all the same
+                self.log(f"stt guard: not kept: {type(e).__name__}: {e}")
+
+    def state(self) -> dict:
+        """What survives a restart: the tripped workers and the backoff."""
+        with self._lock:
+            return {"trip": {w: dict(t) for w, t in self._trip.items()},
+                    "trips": {w: list(v) for w, v in self._trips.items()}}
+
+    def restore(self, state) -> None:
+        """A state from before a restart (state()); anything unreadable: none."""
+        if not isinstance(state, dict):
+            return
+        with self._lock:
+            for w, t in (state.get("trip") or {}).items() if isinstance(state.get("trip"), dict) else ():
+                if isinstance(t, dict) and all(isinstance(t.get(k), (int, float)) for k in ("at", "probe_at", "good", "hold")):
+                    self._trip[str(w)] = {"at": float(t["at"]), "why": str(t.get("why") or "")[:80],
+                                          "probe_at": float(t["probe_at"]), "good": int(t["good"]), "hold": float(t["hold"])}
+            for w, v in (state.get("trips") or {}).items() if isinstance(state.get("trips"), dict) else ():
+                if isinstance(v, list) and len(v) == 2 and all(isinstance(x, (int, float)) for x in v):
+                    self._trips[str(w)] = [int(v[0]), float(v[1])]
+
+    def _judge(self, wid: str, now: float, lat: float | None, ok: bool, probe: bool = False) -> bool:
+        """(lock held) A priority sample on a GPU worker: trip the guard; a probe's (lat: its decode, claim -> text)
+        counts towards its recovery. True when the guard's state changed."""
         t = self._trip.get(wid)
         if t is not None:
             if not probe:                            # (a clip in flight when it tripped, any other: no probe's answer)
-                return
-            if ok and lat is not None and lat <= GUARD_P50_S:
+                return False
+            if ok and lat is not None and lat <= GUARD_PROBE_RUN_S:
                 t["good"] += 1
                 if t["good"] >= GUARD_RECOVER_N:
                     self._trip.pop(wid, None)
                     self._cleared[wid] = now
-                    self.log(f"stt guard: {wid}: {GUARD_RECOVER_N} probe clips in time: priority clips go to it again")
-            else:
-                t["good"], t["at"] = 0, now          # (a bad probe: held again)
-                t["why"] = "probe failed" if not ok else f"probe {lat:.1f} s"
-            return
+                    self.log(f"stt guard: {wid}: {GUARD_RECOVER_N} probes in time: priority clips go to it again")
+                    return True
+                return False
+            t["good"], t["at"] = 0, now              # (a bad probe: held again, its hold as it was)
+            t["why"] = "probe failed" if not ok else f"probe {lat:.1f} s"
+            return True
+        if probe:
+            return False
         live = [x for x in self._rows.get(wid, ()) if x[3] and now - x[0] <= GUARD_WINDOW_S
                 and now - x[0] >= 0 and x[0] >= self._cleared.get(wid, 0.0)]
         if len(live) < GUARD_MIN_N:
@@ -255,10 +295,16 @@ class EngineBook:
             why = f"{fails} of {len(live)} failed"
         elif p50 is not None and p50 > GUARD_P50_S:
             why = f"p50 {p50:.1f} s"
-        if why:
-            self._trip[wid] = {"at": now, "why": why, "probe_at": 0.0, "good": 0}
-            self.log(f"stt guard: {wid}: {why} over {GUARD_WINDOW_S / 60:.0f} min: its priority clips go to AWS "
-                     f"until it is quick again")
+        if not why:
+            return False
+        n, last = self._trips.get(wid, [0, 0.0])
+        n = 1 if now - last > GUARD_RESET_S else n + 1
+        self._trips[wid] = [n, now]
+        hold = min(GUARD_HOLD_MAX_S, GUARD_HOLD_S * 2 ** (n - 1))
+        self._trip[wid] = {"at": now, "why": why, "probe_at": 0.0, "good": 0, "hold": hold}
+        self.log(f"stt guard: {wid}: {why} over {GUARD_WINDOW_S / 60:.0f} min: its priority clips go to AWS "
+                 f"for {hold / 60:.0f} min at least, until it is quick again")
+        return True
 
     def tripped(self, wid: str, now: float | None = None) -> str:
         """Why this GPU worker is kept off priority clips now ("" for not): its guard is tripped (a probe due or not:
@@ -272,7 +318,7 @@ class EngineBook:
         now = self.clock() if now is None else now
         with self._lock:
             t = self._trip.get(wid)
-            return t is not None and now - t["at"] >= GUARD_HOLD_S and now - t["probe_at"] >= GUARD_PROBE_S
+            return t is not None and now - t["at"] >= t.get("hold", GUARD_HOLD_S) and now - t["probe_at"] >= GUARD_PROBE_S
 
     def probe(self, wid: str, now: float | None = None) -> bool:
         """A probe clip went to this tripped worker: the next one waits GUARD_PROBE_S. True when it was one."""

@@ -397,6 +397,10 @@ class Pool:
         except Exception:  # noqa: BLE001 - a setting that can't be read: off
             return False
 
+    def _holds_bg(self, w: Worker) -> bool:
+        """(lock held) This worker holds background work now (it decodes one clip at a time)."""
+        return any(getattr(self._leases.get(lease), "bg", False) for lease in w.leases)
+
     def _bg_free(self, w: Worker, now: float, seconds: float | None = None) -> bool:
         """(lock held) May this GPU worker take background work now (#878): it holds nothing and is in a claim, no
         other job waits, no priority clip came in the last BG_QUIET_S, and the clip is short (it is back at once)."""
@@ -419,8 +423,11 @@ class Pool:
             if j.seconds > float(w.load.get("max_s", 1e9)):
                 return False                       # (only what it decodes in a few seconds: its own pages never wait long)
             return not (now - j.queued_at < STATION_DEFER_S and self._gpu_idle(now)) or j.pin == w.id
-        if j.cls in FAST_CLASSES and j.forced:
-            return w.polling > 0 and not w.leases and self._ready(w, now)
+        if not j.bg and self._holds_bg(w):
+            return False                           # (#878: never queued behind its background decode)
+        if j.cls in FAST_CLASSES and j.forced:     # (the pre-alert speed gate too; AWS out: any free worker)
+            return w.polling > 0 and not w.leases and self._ready(w, now) and (
+                bool(j.extra.get("queue_ok")) or self._fast_ok(w, now))
         return j.cls not in FAST_CLASSES or self._fast_ok(w, now)
 
     def ready(self, cls: float, now: float | None = None, gpu_only: bool = False, origin: str = "",
@@ -502,20 +509,33 @@ class Pool:
                     return True, ""
                 return False, "busy with priority work" if gpu else "no worker free"
             idle = [w for w in ready if w.polling > 0 and not w.leases]
+
+            def busy_why(w: Worker) -> str:
+                held = [self._leases.get(lease) for lease in w.leases]
+                return f"{_short(w.id)} busy" + (" (background)" if held and all(j is not None and j.bg
+                                                                                for j in held) else "")
             if cls in FAST_CLASSES:
                 if any(j.cls in FAST_CLASSES and not j.bg for j in self._queue):
                     return False, "a pre-alert clip waits already"
-                if idle or queue_ok:
+                if queue_ok:
                     return True, ""
-                w = ready[0]
-                held = [self._leases.get(lease) for lease in w.leases]
-                return False, f"{_short(w.id)} busy" + (" (background)" if held and all(j is not None and j.bg
-                                                                                     for j in held) else "")
-            if idle and not any(not j.bg and j.cls <= cls for j in self._queue):
+                if not idle:
+                    return False, busy_why(ready[0])
+                # the pool's pre-alert speed gate holds for a channel's engine too (_fast_ok: quick lately, or due a probe)
+                if not any(self._fast_ok(w, now) for w in idle):
+                    svc = min(self._fast_s(w, now) or 0.0 for w in idle)
+                    return False, f"{_short(idle[0].id)} slow on pre-alert clips lately ({svc:.1f} s)"
+                return True, ""
+            # a worker decodes one clip at a time: one holding background work is busy for a priority clip (#878: never
+            # queued behind it; AWS instead)
+            free = [w for w in ready if not self._holds_bg(w)]
+            if not free:
+                return False, busy_why(ready[0])
+            if any(w in idle for w in free) and not any(not j.bg and j.cls <= cls for j in self._queue):
                 return True, ""
             ahead = sum(1 for j in self._queue if not j.bg and j.cls <= cls) + sum(
-                1 for j in self._leases.values() if not j.bg)
-            est = ahead * self._service_s() / len(ready)
+                1 for w in free for _lease in w.leases)
+            est = ahead * self._service_s() / len(free)
         if est > BUDGETS[cls][0]:
             return False, f"busy (about {est:.0f} s of work ahead)"
         return True, ""

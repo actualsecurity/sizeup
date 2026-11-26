@@ -73,17 +73,25 @@ def test_a_route_says_the_way_the_text_went():
 # -- the pool: forced, pinned, background -----------------------------------------------------------------------------
 
 
-def test_auto_priority_is_taken_whatever_the_class_switch_and_the_quick_record_but_the_pool_switch_holds():
+def test_auto_priority_is_taken_whatever_the_class_switch_but_the_speed_gate_and_the_pool_switch_hold():
     clk = Clock()
     p = pool(clk, on=False)                                 # (every class switch off)
     jobs = Jobs()
     w = online(p, "gpu-1")
-    w.fast.extend([(clk.t, 7.0)] * 3)                       # slow on pre-alerts lately: the quick gate would refuse
-    assert not p.ready(HIGH, gpu_only=True)[0]
-    assert p.ready_forced(HIGH) == (True, "")
+    assert not p.ready(HIGH, gpu_only=True)[0] and p.ready_forced(HIGH) == (True, "")
     assert p.submit(jobs.job("c1", HIGH, gpu_only=True, forced=True))
     j = p.claim("gpu-1", 0)
     assert j.id == "c1" and j.public()["fast"] is True and j.expires - clk.t <= 4.0    # (the 4 s pre-alert lease)
+    assert p.complete("gpu-1", j.lease, {"text": "x"})
+    # the pool's pre-alert speed gate holds for a channel's engine too: a worker at 6 s lately gets no page
+    w.fast.extend([(clk.t, 6.0)] * 3)
+    assert p.ready(URGENT, gpu_only=True)[0] is False
+    assert p.ready_forced(URGENT) == (False, "gpu-1 slow on pre-alert clips lately (6.0 s)")
+    assert not p.submit(jobs.job("page", URGENT, forced=True))
+    # ... except AWS can't take it either (queue_ok): the slow GPU still beats sending it back to the station
+    assert p.ready_forced(URGENT, queue_ok=True) == (True, "")
+    assert p.submit(jobs.job("page2", URGENT, forced=True, extra={"queue_ok": True}))
+    assert p.claim("gpu-1", 0).id == "page2"
     off = sttpool.Pool(enabled=lambda c: True, clock=clk, log=lambda s: None, on=lambda: False)
     online(off, "gpu-1")
     assert off.ready_forced(HIGH) == (False, "pool off")
@@ -195,7 +203,7 @@ def test_the_latency_guard_trips_on_slow_or_failing_and_recovers_on_probes_by_it
         assert b.due("gpu-pc") and b.probe("gpu-pc")
         b.add("gpu-pc", 1.5, gpu=True, probe=True)
         clk.t += sttroute.GUARD_PROBE_S
-    assert b.tripped("gpu-pc") == "" and not b.guard() and "probe clips in time" in said[-1]
+    assert b.tripped("gpu-pc") == "" and not b.guard() and "probes in time" in said[-1]
     b.add("gpu-pc", 1.5, gpu=True)                          # the old slow ones no longer count
     assert b.tripped("gpu-pc") == ""
     # failures: leases lost, handed back
@@ -327,7 +335,7 @@ def test_pinned_aws_is_aws_and_the_legacy_aws_keeps_its_gpu_first_by_class(tmp_p
     token = hub.app.hub.workers.add("gpu-1")
     w = FakeWorker(hub.url, token, wait_s=20.0).start()
     try:
-        assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)      # every class on (the default)
+        assert wait(lambda: hub.app.sttpool.ready(URGENT, gpu_only=True)[0], 5)   # every class on (the default)
         # the legacy "aws" (FG1's default, never rewritten): a GPU first where its class is on, as before the selector
         assert hub.app.channel_pref("FG1")["engine"] == "aws"
         send(hub, pending_event("FG1-4"))
@@ -477,7 +485,7 @@ def test_the_radio_page_shows_the_route_in_the_transcripts_hover():
     assert 'op.className = o.ok === false ? "off" : ""' in rc        # greyed, still selectable (never disabled)
 
 
-def test_a_tripped_gpu_gets_its_probe_pinned_and_steady_traffic_never_holds_it_off(tmp_path, monkeypatch):
+def test_a_tripped_gpu_is_probed_with_shadow_copies_never_live_clips(tmp_path):
     fake = FakeTranscribe(phrases={500: AWS_TEXT})
     hub = _hub(tmp_path, fake)
     token = hub.app.hub.workers.add("gpu-1")
@@ -491,16 +499,87 @@ def test_a_tripped_gpu_gets_its_probe_pinned_and_steady_traffic_never_holds_it_o
             send(hub, pending_event(f"FG1-h{i}", seq=i + 1))
             assert wait(lambda i=i: _row(hub, f"FG1-h{i}").get("text") == AWS_TEXT + ".", 30)
         assert not w.jobs
-        t = hub.app.stt_engines._trip["gpu-1"]
-        t["at"] -= sttroute.GUARD_HOLD_S                       # (the hold over: a probe is due)
-        send(hub, pending_event("FG1-probe", seq=9))
-        assert wait(lambda: _row(hub, "FG1-probe").get("text") == GPU_TEXT, 30), _row(hub, "FG1-probe")
+        hub.app.stt_engines._trip["gpu-1"]["at"] -= sttroute.GUARD_HOLD_S     # (the hold over: a probe is due)
+        send(hub, pending_event("FG1-live", seq=9))
+        # the live clip goes its own way (AWS); a shadow copy of it, pinned to the tripped worker, is the probe
+        assert wait(lambda: _row(hub, "FG1-live").get("text") == AWS_TEXT + ".", 30), _row(hub, "FG1-live")
+        assert wait(lambda: [j["id"] for j in w.jobs] == ["FG1-live~probe"], 10), w.jobs
         assert wait(lambda: hub.app.stt_engines.guard().get("gpu-1", {}).get("good") == 1, 5), hub.app.stt_engines.guard()
+        assert _row(hub, "FG1-live")["text"] == AWS_TEXT + "."                  # (the probe's text never used)
+        assert not hub.app.stt_engines.due("gpu-1")                             # (the next one a minute on)
     finally:
         w.close()
         hub.close()
         fake.close()
 
+
+def test_a_channel_pinned_to_a_tripped_gpu_goes_to_aws_and_says_why(tmp_path):
+    fake = FakeTranscribe(phrases={500: AWS_TEXT})
+    hub = _hub(tmp_path, fake)
+    token = hub.app.hub.workers.add("gpu-1")
+    w = FakeWorker(hub.url, token, wait_s=20.0).start()
+    try:
+        _set(hub, "FG1", "pin:gpu-1")
+        assert wait(lambda: hub.app.sttpool.ready_forced(URGENT)[0], 5)
+        for _ in range(sttroute.GUARD_MIN_N):
+            hub.app.stt_engines.add("gpu-1", 12.0, gpu=True)
+        send(hub, pending_event("FG1-p1"))
+        assert wait(lambda: _row(hub, "FG1-p1").get("text") == AWS_TEXT + ".", 30), _row(hub, "FG1-p1")
+        assert not w.jobs
+        assert wait(lambda: _row(hub, "FG1-p1").get("stt_route", "").startswith(
+            "pinned gpu-1: gpu-1 → GPU → AWS (gpu-1 latency guard: p50 12.0 s"), 5), _row(hub, "FG1-p1")
+    finally:
+        w.close()
+        hub.close()
+        fake.close()
+
+
+def test_the_guard_backs_off_counts_priority_failures_only_and_survives_a_restart(tmp_path):
+    clk = Clock()
+    b = EngineBook(clock=clk, log=lambda s: None)
+    for _ in range(6):
+        b.add("gpu-1", None, ok=False, gpu=True, priority=False)    # (RERUN, LOW failures: never the guard's)
+    assert b.tripped("gpu-1") == ""
+    for _ in range(4):
+        b.add("gpu-1", 9.0, gpu=True)
+    assert b._trip["gpu-1"]["hold"] == sttroute.GUARD_HOLD_S
+    clk.t += sttroute.GUARD_HOLD_S
+    for _ in range(sttroute.GUARD_RECOVER_N):
+        assert b.due("gpu-1") and b.probe("gpu-1")
+        b.add("gpu-1", 1.0, gpu=True, probe=True, priority=False)
+        clk.t += sttroute.GUARD_PROBE_S
+    assert b.tripped("gpu-1") == ""
+    clk.t += 60
+    for _ in range(4):
+        b.add("gpu-1", 9.0, gpu=True)                               # tripped again within the hour: twice as long
+    assert b._trip["gpu-1"]["hold"] == 2 * sttroute.GUARD_HOLD_S
+    clk.t += sttroute.GUARD_HOLD_S
+    assert not b.due("gpu-1")
+    # across a restart: the hub keeps it (hub.sqlite meta) and the next start reads it
+    fake = FakeTranscribe(phrases={500: AWS_TEXT})
+    hub = _hub(tmp_path, fake)
+    try:
+        for _ in range(4):
+            hub.app.stt_engines.add("gpu-9", 9.0, gpu=True)
+        assert hub.app.stt_engines.tripped("gpu-9")
+    finally:
+        hub.close()
+    hub = _hub(tmp_path, fake)
+    try:
+        assert hub.app.stt_engines.tripped("gpu-9") == "latency guard: p50 9.0 s"
+    finally:
+        hub.close()
+        fake.close()
+
+
+def test_a_live_clip_never_queues_behind_background_work_on_a_gpu():
+    clk, jobs = Clock(), Jobs()
+    p = pool(clk)
+    online(p, "gpu-1")
+    assert p.submit(jobs.job("bg", LOW, seconds=25.0, forced=True, bg=True))
+    assert p.claim("gpu-1", 0).id == "bg"                   # a 25 s context clip decoding (one clip at a time)
+    assert p.ready_forced(LIVE) == (False, "gpu-1 busy (background)")      # a Fire/EMS main clip: AWS, never behind it
+    assert not p.submit(jobs.job("live", LIVE, forced=True))
 
 def test_resend_after_aws_returns_skips_what_is_in_flight_or_done_on_every_engine(tmp_path):
     fake = FakeTranscribe(phrases={500: AWS_TEXT})
