@@ -689,7 +689,15 @@ class Corrector:
 
     def _build_one(self, own: str) -> None:
         got = self.version(own)
-        if got is None:
+        if got is None:                                  # its list gone (deleted, emptied): its matcher goes too, once
+            store = self.terms()                         # the lists were read (never on a store not loaded yet)
+            if store is not None and hasattr(store, "get") and getattr(store, "loaded", True):
+                with self._lock:
+                    gone = self._vocab.pop(own, None)
+                    if gone is not None:
+                        self._cache.clear()
+                if gone is not None:
+                    self.log(f"stt correct: {own}: its list is gone: no correction")
             return
         ts, secs, names, v = got
         old = self._vocab.get(own)

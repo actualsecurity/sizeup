@@ -342,6 +342,23 @@ def test_pending_until_the_first_build_and_never_built_on_a_transcript():
     assert c.builds == 1                                                           # the same version: nothing built
 
 
+def test_a_deleted_list_stops_correcting_once_the_lists_are_read_again():
+    log = []
+    store = FakeStore()
+    c = corrector(log=log, store=store)
+    assert c.correct("Engine ninety seven", "tg:307").text == "Engine 97"
+    del store._sets["county_fire"]                                                 # the channel's list is gone
+    c.warm(["tg:307"])
+    assert c.correct("Engine ninety seven", "tg:307") is None and c.vocab("tg:307") is None
+    assert any("its list is gone" in m for m in log) and not any("ninety" in m for m in log)
+    store.loaded = False                                                           # lists not read yet: nothing dropped
+    store._sets["county_fire"] = FakeStore()._sets["county_fire"]
+    c.warm(["tg:307"])
+    del store._sets["county_fire"]
+    c.warm(["tg:307"])
+    assert c.vocab("tg:307") is not None
+
+
 def test_one_build_at_a_time_and_the_one_before_serves_meanwhile(monkeypatch):
     import threading
     store = FakeStore()
