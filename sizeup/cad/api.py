@@ -213,8 +213,10 @@ POST /api/cad/runcards                    {type (TYPE or TYPE/SUBTYPE), slots, s
 POST /api/cad/runcards/delete             {type}
 GET  /api/cad/radios                      the radio registry (radio ID -> rig), conflicts, units not fitting
                                           the ID pattern, the edit log
-POST /api/cad/radios                      {system: mdc|fleetsync|p25|mrrs, radio_id, unit?, label?, source?, notes?, operator?}
-                                          add / edit (mrrs: a label, never a unit)
+POST /api/cad/radios                      {system: mdc|fleetsync|p25|mrrs, radio_id, unit?, label?, source?, notes?, operator?,
+                                          fix_past? (default false)} add / edit (mrrs: a label, never a unit); a unit
+                                          changed or cleared with fix_past true moves the radio's rows of the last 30 days
+                                          off the old unit (Comms.rerig, #977): the answer's "past" says how many
 POST /api/cad/radios/delete               {system, radio_id, operator?}
 POST /api/cad/radios/range                {system: mrrs, lo, hi, label, notes?, id? (edit), operator?}  another system's
                                           ID block -> a label (never overlapping another; an ID's own label wins)

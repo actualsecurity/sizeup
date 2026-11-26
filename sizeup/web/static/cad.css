@@ -1071,6 +1071,7 @@
   .rp-table td.rp-u { font-weight: 700; color: var(--ok-text); }
   .rp-table td.rp-u.dim { color: var(--dim); font-weight: 400; }
   .rp-table td.rp-act { white-space: nowrap; text-align: end; }
+  .rp-table .rp-past { margin-inline-end: 6px; color: var(--dim); cursor: pointer; }   /* "Past too" (#977) */
   .rp-table tr.guessed td:first-child { box-shadow: inset var(--bw-mark) 0 0 var(--warn); }
   .rp-table tr.confirmed td:first-child { box-shadow: inset var(--bw-mark) 0 0 var(--ok); }
   .rp-table tr.heard td:first-child { box-shadow: inset var(--bw-mark) 0 0 var(--info); }

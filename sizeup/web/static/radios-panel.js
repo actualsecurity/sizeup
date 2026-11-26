@@ -113,10 +113,20 @@ window.RadiosPanel = (() => {
     notes.maxLength = 300;
     const save = el("button", "primary mini", "Save"), cancel = el("button", "mini", "Cancel"), del = el("button", "mini danger-quiet", "Remove");
     [save, cancel, del].forEach((b) => { b.type = "button"; });
+    // "Also fix past transmissions" (#977): asked each time, off by default (the admins' choice): ticked, a unit changed
+    // or cleared takes the radio's recent rows with it
+    const past = el("label", "rp-past small");
+    const pastBox = el("input");
+    pastBox.type = "checkbox";
+    pastBox.checked = false;
+    past.append(pastBox, " Past too");
+    past.title = "Also fix past transmissions: tick it to move this radio's rows of the last 30 days (and their links) "
+      + "off the old unit when you change or clear its unit. Unticked, past rows keep the unit they were logged with.";
     save.addEventListener("click", async () => {
       try {
         await post("/api/cad/radios", Object.assign({ system: r.system, radio_id: r.radio_id, label: label.value,
-                                                      source: src.value, notes: notes.value }, named ? {} : { unit: unit.value }));
+                                                      source: src.value, notes: notes.value },
+                                                    named ? {} : { unit: unit.value, fix_past: pastBox.checked }));
         p.editing = null;
         await load();
       } catch (e) { p.error = e.message; render(); }
@@ -133,7 +143,7 @@ window.RadiosPanel = (() => {
               td(el("span", "dim", r.alias || "")), td(el("span", "dim small", fmt(r.last_heard))),
               td(el("span", "dim small", r.last_channel || "")), td(notes));
     const act = el("td", "rp-act");
-    act.append(save, cancel, del);
+    act.append(...(named ? [] : [past]), save, cancel, del);
     tr.append(act);
     return tr;
   }

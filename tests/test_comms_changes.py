@@ -115,6 +115,8 @@ def writers(c):
         ("unlink", lambda: c.comms.unlink("fg-2", iid, "Lt. Sample"), "fg-2", lambda: iid not in links("fg-2")),
         ("link_pages", lambda: c.comms.link_pages(iid, ["pg-1"]), "pg-1", lambda: iid in links("pg-1")),
         ("relink", lambda: c.comms.relink("mdc", "4100099", "E63"), "fg-x", lambda: row(c, "fg-x")["rig"] == "E63"),
+        # (#977: "Also fix past transmissions": the radio taken off its rig, its rows with it)
+        ("rerig", lambda: c.comms.rerig("mdc", "4100099", "E63", ""), "fg-x", lambda: row(c, "fg-x")["rig"] == ""),
         ("retag_pages", lambda: c.comms.retag_pages(lambda a, b: ["Sample FD"], lambda names: True), "pg-1",
          lambda: "Sample FD" in row(c, "pg-1")["tones"]),
         ("fix_air", lambda: c.comms.fix_air(["Tower"]), "reset", lambda: row(c, "tw-1")["system"] == "airband"),
@@ -139,7 +141,7 @@ def writers(c):
     ]
 
 
-WRITERS = {"record", "retext", "set_alt", "set_stt", "set_route", "rerun_done", "link", "unlink", "link_pages", "relink", "retag_pages", "fix_air",
+WRITERS = {"record", "retext", "set_alt", "set_stt", "set_route", "rerun_done", "link", "unlink", "link_pages", "relink", "rerig", "retag_pages", "fix_air",
            "retag", "prune"}
 # Public methods of Comms that write nothing a row of the Radio page shows (activity: the per-minute counts)
 READERS = {"activity", "activity_rows", "audio_per_day", "context_clips", "corrections_kept", "noted_kept", "emergencies", "events_of", "facets", "for_incidents",
