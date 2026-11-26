@@ -841,6 +841,77 @@ def test_a_catch_up_asks_is_push_source_with_the_channels_key_and_kind(tmp_path,
         app.stop()
 
 
+def test_a_late_row_recorded_transcribed_on_a_push_source_reaches_intel_and_the_late_hook(tmp_path, monkeypatch):
+    """A #747 late row that reaches Comms.record with its words: on a push source, the intel hook (ours on_intel_text,
+    another system's on_context_text) once, same id, its air start and late = 1, beside on_late_text for ours; on any
+    other source, on_late_text only; empty or unclear words reach no intel hook. The check runs off store.lock."""
+    from sizeup import intel
+    from sizeup.app import App
+    locked = []
+
+    def push(key, kind=""):
+        locked.append(app.cad.store.lock.locked() if hasattr(app.cad.store.lock, "locked") else False)
+        return key in (PD, "Chan")
+
+    monkeypatch.setattr(intel, "is_push_source", push)
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    try:
+        comms, now = app.cad.comms, time.time()
+        assert comms.intel_pushes == app._intel_source
+        heard = {"text": [], "context": [], "intel": [], "late": []}
+        comms.on_text, comms.on_context_text, comms.on_intel_text, comms.on_late_text = (
+            heard["text"].append, heard["context"].append, heard["intel"].append, heard["late"].append)
+        words = {"status": "done", "model": "m.bin", "text": "Car 12 out with one at the plaza", "late": True}
+        record(app, "fm-late", now - 900, **words)                                            # ours, a push source
+        record(app, "pd-late", now - 880, tg=9211, system="mrrs", tier="alert", **words)    # another system's, one
+        assert heard == {"text": [], "context": ["pd-late"], "intel": ["fm-late"], "late": ["fm-late"]}
+        rows = {r["id"]: r for r in app.cad.store.q("SELECT id, start, late FROM radio_traffic")}
+        assert (rows["fm-late"]["start"], rows["fm-late"]["late"]) == (now - 900, 1)
+        assert (rows["pd-late"]["start"], rows["pd-late"]["late"]) == (now - 880, 1)
+        # not a push source: on_late_text only (another system's late row: nothing at all, as before)
+        record(app, "txt-late", now - 860, tg=9570, system="mrrs", tier="text", **words)
+        record(app, "county-late", now - 850, tg=307, system="westchester", **words)
+        assert heard == {"text": [], "context": ["pd-late"], "intel": ["fm-late"], "late": ["fm-late", "county-late"]}
+        # no words, or unclear ones: no intel hook
+        record(app, "fm-empty", now - 840, status="no_speech", model="m.bin", late=True)
+        record(app, "fm-unclear", now - 830, status="unclear", model="m.bin", late=True, quality="loop",
+               unclear_text="thank you thank you")
+        record(app, "pd-empty", now - 820, tg=9211, system="mrrs", tier="alert", status="unclear", model="m.bin",
+               late=True, quality="loop", unclear_text="thank you thank you")
+        assert heard["intel"] == ["fm-late"] and heard["context"] == ["pd-late"] and heard["text"] == []
+        assert heard["late"] == ["fm-late", "county-late", "fm-empty", "fm-unclear"]
+        assert locked and not any(locked)                                             # never under store.lock
+    finally:
+        app.stop()
+
+
+def test_a_context_row_re_recorded_without_its_words_reaches_intel_to_withdraw(tmp_path):
+    """Another system's row recorded again (replace=True) with no text, or unclear: on_context_text if it had words,
+    so intel withdraws what it scored; a row that never had words (a late one too) hears nothing."""
+    from sizeup.app import App
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    try:
+        comms, now = app.cad.comms, time.time()
+        heard = {"text": [], "context": [], "late": []}
+        comms.on_text, comms.on_context_text, comms.on_late_text = (heard["text"].append, heard["context"].append,
+                                                                    heard["late"].append)
+        pd = {"tg": 9211, "system": "mrrs", "tier": "alert", "model": "m.bin"}
+        record(app, "pd-1", now - 900, status="done", text="Car 12 out with one at the plaza", **pd)
+        record(app, "pd-2", now - 880, status="done", text="Car 14 on scene", **pd)
+        assert heard["context"] == ["pd-1", "pd-2"]
+        record(app, "pd-1", now - 900, status="no_speech", **pd)                              # its words gone
+        record(app, "pd-2", now - 880, status="unclear", quality="loop", unclear_text="thank you thank you", **pd)
+        assert heard["context"] == ["pd-1", "pd-2", "pd-1", "pd-2"]
+        # never had words: nothing, late or not, again or not
+        record(app, "pd-3", now - 860, status="no_speech", **pd)
+        record(app, "pd-4", now - 850, status="skipped", late=True, **pd)
+        record(app, "pd-4", now - 850, status="no_speech", late=True, **pd)
+        record(app, "pd-1", now - 900, status="no_speech", **pd)                              # (already empty)
+        assert heard == {"text": [], "context": ["pd-1", "pd-2", "pd-1", "pd-2"], "late": []}
+    finally:
+        app.stop()
+
+
 def test_the_late_column_is_added_to_an_old_database(tmp_path):
     from tests.test_cad import make_cad
     cad, now = make_cad(tmp_path), time.time()

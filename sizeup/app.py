@@ -684,6 +684,7 @@ class App:
         # A page that isn't ours naming our units is flagged (#115's safety net): the feed's unit matcher, for the
         # Radio view's rows too.
         self.cad.comms.names_ours = self.cad.feed.names_ours
+        self.cad.comms.intel_pushes = self._intel_source      # a late row already transcribed on a push source: intel
         self.cad.main_tg = self.tg.main
         # the Radio page's source tree (#415, Cad.comms_sources): the talkgroups as Settings > Radios lists them, and each
         # system's label (the county's is its name: it has none of its own)
@@ -2869,13 +2870,16 @@ class App:
         in memory; else the row's text before this retext). False for a page, or when it can't be told."""
         try:
             r = self.cad.store.one("SELECT channel, talkgroup, system, text FROM radio_traffic WHERE id = ?", (cid,))
-            if not r or not (scored or r["text"]):
-                return False
-            if r["talkgroup"] is None:
-                return self.is_push_source(r["channel"] or "", getattr(self, "_kind", {}).get(r["channel"] or "", ""))
-            return self.is_push_source(sources.channel_key(r["system"] or "", int(r["talkgroup"])))
+            return bool(r) and bool(scored or r["text"]) and self._intel_source(r)
         except Exception:  # noqa: BLE001 - a source that fails: quiet, as before
             return False
+
+    def _intel_source(self, r) -> bool:
+        """A radio_traffic row's source ({channel, talkgroup, system}) is one the pre-alerts push from: is_push_source
+        with its speech-to-text key and, for an analog channel, its kind (Comms.intel_pushes too)."""
+        if r["talkgroup"] is None:
+            return self.is_push_source(r["channel"] or "", getattr(self, "_kind", {}).get(r["channel"] or "", ""))
+        return self.is_push_source(sources.channel_key(r["system"] or "", int(r["talkgroup"])))
 
     def _unclear(self, item, key: str, quiet: bool = False) -> None:
         """An unclear transcript on the CAD of record: said in the log (which engine, why; never its words). The hub asks
