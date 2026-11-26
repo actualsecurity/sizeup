@@ -1151,6 +1151,14 @@
               "tier": {
                 "type": ["string", "null"],
                 "description": "Another system's talkgroup: its tier (`alert`, `text`, `record`, ...); null for the county system's own switches. The hub adds `tier_set` (tier is not null) when the row has none."
+              },
+              "transcribe": {
+                "type": "boolean",
+                "description": "Its Transcribe switch: another system's, its tier (`alert` or `text`); the county's, its channel choice. The hub adds it from the tier when the row has none."
+              },
+              "alerts": {
+                "type": ["boolean", "null"],
+                "description": "Its Alerts switch: another system's, its tier is `alert`; null for the county's (its pre-alerts are the intel packs'). The hub adds it from the tier when the row has none."
               }
             }
           }

@@ -71,6 +71,51 @@ def derived(record: bool, transcribe: bool, encrypted: bool) -> str:
     return TRANSCRIBE if transcribe else RECORD
 
 
+# Settings > Radios shows every talkgroup with the same switches (Record, Transcribe, Alerts, Main): another system's
+# tier is presented as them and a switch is written back as the tier (the stored model is unchanged). The chain:
+# Alerts needs Transcribe, Transcribe needs Record. The county's talkgroups keep their own Record / Main / Transcribe;
+# they have no Alerts switch: their pre-alerts are the intel packs' (scope by service and source, Settings > System >
+# Intel), never a per-talkgroup choice, so their `alerts` is None.
+SWITCHES = ("record", "transcribe", "alerts")
+NEVER_MAIN = "another system: never Main"
+COUNTY_ALERTS = "county: pre-alerts by the intel packs (Settings > System > Intel)"
+ENCRYPTED = "encrypted: activity only"
+BOTH = "send tier or switches, not both"
+
+
+def switches(tier) -> dict:
+    """Another system's tier as the switches: {record, transcribe, alerts, activity} (activity: encrypted, only that
+    it was active)."""
+    t = clean(tier)
+    return {"record": t in RECORDED, "transcribe": t in TRANSCRIBED, "alerts": t == ALERT, "activity": t == ACTIVITY}
+
+
+def from_switches(current, encrypted: bool, record=None, transcribe=None, alerts=None) -> tuple[str | None, str | None]:
+    """The tier the switches given (None: as they are) make of `current`: (tier, None), or (None, why). The chain: a
+    switch turned on turns on what it needs (Alerts: Transcribe and Record; Transcribe: Record), one turned off turns
+    off what needs it (Record: both; Transcribe: Alerts). Both at once (Record off, Alerts on) is refused. An
+    encrypted talkgroup is activity only: Record off is `off`, any switch on is refused."""
+    if encrypted:
+        if record or transcribe or alerts:
+            return None, ENCRYPTED
+        return (IGNORE if record is False else current), None
+    if (record is False and (transcribe or alerts)) or (transcribe is False and alerts):
+        return None, "Alerts needs Transcribe, Transcribe needs Record"
+    s = switches(current)
+    r = s["record"] if record is None else bool(record)
+    t = s["transcribe"] if transcribe is None else bool(transcribe)
+    a = s["alerts"] if alerts is None else bool(alerts)
+    if alerts:
+        t = r = True
+    if transcribe:
+        r = True
+    if record is False:
+        t = a = False
+    if transcribe is False:
+        a = False
+    return (ALERT if a else TRANSCRIBE if t else RECORD if r else IGNORE), None
+
+
 def keep_days(raw=None) -> dict[str, float]:
     """[storage] tier_keep_days over the defaults. ValueError with the reason."""
     out = dict(KEEP_DAYS)
