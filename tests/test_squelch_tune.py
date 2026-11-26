@@ -289,25 +289,21 @@ def test_key_ups_by_tone_reach_the_squelch_page(tmp_path):
     assert "keyups" in row and "keyups" not in next(r for r in app.radio_status() if r["label"] == "South 2")
 
 
-# -- review: paging read-only, import, the station's own values, empty entries -------------------------------------
+# -- review: paging's Min, import, the station's own values, empty entries -------------------------------------
 
 
-def test_a_paging_channels_squelch_is_read_only(tmp_path):
+def test_a_paging_channels_min_is_never_set(tmp_path):
+    """A paging channel takes Open / Close only, inside its guard (tests/test_paging_squelch.py); its Min stays."""
     app = App(base(clips_dir=str(tmp_path / "clips")))
     rows = {c["key"]: c for c in app.cad.settings.squelch_page()["channels"]}
-    assert (rows["South 2"]["kind"], rows["South 2"]["editable"]) == ("paging", False) and rows["FG1"]["editable"]
-    for body in ({"open_db": 30}, {"min_open_s": 2.0}, {"open_db": 11}):
-        with pytest.raises(CadError, match="read-only"):
-            app.cad.settings.post("squelch", {"action": "set", "key": "South 2", **body, "operator": "admin@example.org"})
+    assert (rows["South 2"]["kind"], rows["South 2"]["editable"]) == ("paging", True) and rows["FG1"]["editable"]
+    with pytest.raises(CadError, match="Open and Close only"):
+        app.cad.settings.post("squelch", {"action": "set", "key": "South 2", "min_open_s": 2.0, "operator": "admin@example.org"})
     with pytest.raises(CadError):
         app.cad.settings.post("squelch", {"action": "set", "key": "NOPE", "open_db": 12, "operator": "admin@example.org"})
     assert app.cad.settings.squelch_overrides() == {} and app._receiver("South 2").squelch.params == (10.0, 6.0, 6)
-    app.set_channel_prefs({}, None, None, {"South 2": {"open_db": 30.0}})   # nor from a hub: left out
+    app.set_channel_prefs({}, None, None, {"South 2": {"min_open_s": 1.0}})   # nor from a hub: left out
     assert app._receiver("South 2").squelch.params == (10.0, 6.0, 6) and app.cad.settings.squelch_overrides() == {}
-    data = app.cad.settings.export()                         # nor from an imported file: skipped, said so
-    data["overrides"]["squelch"] = {"South 2": {"open_db": 30.0}}
-    r = app.cad.settings.post("import", {"action": "apply", "settings": data})
-    assert any("read-only" in n for n in r["notes"]) and app.cad.settings.squelch_overrides() == {}
 
 
 def test_an_import_applies_the_squelch_live_and_drops_empty_entries(tmp_path):
@@ -386,7 +382,7 @@ def test_a_stale_squelch_entry_never_blocks_the_channel_push(tmp_path):
     tab lists it to delete."""
     app = App(base(clips_dir=str(tmp_path / "clips")))
     res = app.set_channel_prefs({"FG1": {"engine": "local"}}, None, None,
-                                {"FG2": {"open_db": 12.0}, "South 2": {"open_db": 30.0}, "FG1": {"close_db": 12.0},
+                                {"FG2": {"open_db": 12.0}, "South 2": {"min_open_s": 1.0}, "FG1": {"close_db": 12.0},
                                  "FG1x": {}})
     assert app.channel_pref("FG1")["engine"] == "local"                      # the channel choices still applied
     assert app.cad.settings.squelch_overrides() == {} and res["squelch"] == {}
@@ -411,7 +407,7 @@ def test_a_stale_squelch_entry_never_blocks_the_channel_push(tmp_path):
         assert hub.get("/api/cad/squelch")["orphans"] == []
         bad = dict(data, overrides={**data["overrides"], "squelch": {"South 2": {"open_db": 30.0}, "FG1": {"open_db": 99}}})
         r = hub.app.cad.settings.post("import", {"action": "dry_run", "settings": bad})       # never the whole backup refused
-        assert any("South 2" in n and "read-only" in n for n in r["notes"]) and any("FG1" in n and "skipped" in n
+        assert any("South 2" in n and "skipped (paging" in n for n in r["notes"]) and any("FG1" in n and "skipped" in n
                                                                                    for n in r["notes"])
     finally:
         if st is not None:

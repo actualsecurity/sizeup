@@ -415,10 +415,12 @@ class PageHold:
         self._pieces: dict[str, dict[float, tuple[str, str]]] = {}
         self._lock = threading.Lock()
 
-    def add(self, label: str, mhz: float, seg: Segment) -> tuple[list[Page], list[tuple[Page, bool]]]:
+    def add(self, label: str, mhz: float, seg: Segment,
+            decoded: tuple[list[ToneEvent], list[dict]] | None = None) -> tuple[list[Page], list[tuple[Page, bool]]]:
         """-> (pages finished now, in order; [(page, joined)] for each piece of this transmission:
-        joined = appended to the held page, else a new page, held or in the finished list)."""
-        tones, seq = _tones(seg, self.plan)
+        joined = appended to the held page, else a new page, held or in the finished list). decoded: its tones as
+        decode_tones gave them already (App._page_segment), else decoded here."""
+        tones, seq = decoded if decoded is not None else _tones(seg, self.plan)
         pieces = split_pages(seg, tones, seq)
         done: list[Page] = []
         touched: list[tuple[Page, bool]] = []

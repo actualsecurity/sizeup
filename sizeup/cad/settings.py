@@ -130,7 +130,7 @@ from datetime import datetime
 from pathlib import Path
 
 from sizeup import channels as channels_mod
-from sizeup import radionames
+from sizeup import radionames, tz
 from sizeup.cad import alarms as alarms_mod
 from sizeup.cad import commonplaces, dispatcher, eta, feedtypes, mapview, radiofolders, radioviews, reminders, runcards, tonelist
 from sizeup.cad import lists as lists_mod
@@ -174,6 +174,13 @@ PAGE_SECTION[HYD_SECTION] = "system"
 # 60 s after their dongle went, only when the station marks the swap "auto" (App._auto_ok: one new dongle fits, in the
 # old one's USB port, first seen after it went, the job running nowhere, the same tuner; a push says so). Off by
 # default: a person's "Use it" only.
+# A paging channel's squelch (Settings > Radios > Squelch, admins, audited as Radios; Settings._paging_guard): its Open
+# at least PAGING_IDLE_GAP_DB over the recent idle max, at most the pages' ceiling (metricsinsight open_ceiling); with
+# under GUARD_PAGES pages to check against, at most PAGING_BLIND_RAISE_DB over the receiver's default.
+# A raise: at most PAGING_STEP_DB over the lowest Open of the last PAGING_STEP_S (the metrics only see pages that opened
+# the squelch: steps a day apart keep the weak tail in view). Close: under the pages' close-side tail.
+PAGING_IDLE_GAP_DB, PAGING_BLIND_RAISE_DB = 2.0, 6.0
+PAGING_STEP_DB, PAGING_STEP_S = 3.0, 24 * 3600.0
 SWAP_SECTION, SWAP_KEYS = "dongle_swap", {"auto_critical": "Auto-replace a gone dongle for Fire/EMS 15 and paging"}
 PAGE_SECTION[SWAP_SECTION] = "radios"
 # What flashes when a call or a unit is left too long (sizeup/cad/reminders.py): Settings > Dispatch, audited as Dispatch.
@@ -2697,7 +2704,7 @@ class Editor:
         """set {key, open_db?, close_db?, min_open_s?} (null: back to the receiver's default; expect {open_db, close_db}:
         the squelch the suggestion was worked out for: refused unless that is what runs now and, on the hub, the
         channel's suggestion still offers Apply for it: a suggestion applied from Settings > Radios > Squelch, #606,
-        #686) | reset {key}. Audited."""
+        #686) | reset {key}. Audited. A paging channel: Open / Close only, guarded (_paging_squelch_set)."""
         ctx = self.cad.radio_ctx
         locked = ctx.channels_locked() if ctx is not None else ""
         if locked:
@@ -2706,7 +2713,11 @@ class Editor:
         key = body.get("key")
         dflt = ctx.squelch_defaults(key) if ctx is not None and isinstance(key, str) else {}
         if action == "set":
-            self._squelch_editable(key)
+            if self._squelch_editable(key) == "paging":
+                out = self._paging_squelch_set(key, body, op, ov, dflt)
+                if ctx is not None:
+                    ctx.channels_changed()
+                return out
             exp = body.get("expect")
             if exp is not None:                       # #606: applied from a suggestion worked out for what ran then
                 rows = {c["key"]: c for c in ctx.squelch_state()["channels"]} if ctx is not None else {}
@@ -2756,17 +2767,139 @@ class Editor:
             ctx.channels_changed()
         return out
 
-    def _squelch_editable(self, key) -> None:
-        """Only a traffic channel's squelch is set here, one the station has reported (with its own defaults). A paging
-        channel's (South 2: the tone-outs, 60 Control) is read-only: an Open over the pages' quieting mutes them."""
+    def _squelch_editable(self, key) -> str:
+        """A traffic channel's squelch is set here, or a paging channel's Open / Close (_paging_squelch_set: guarded),
+        one the station has reported (with its own defaults). -> its kind."""
         ctx = self.cad.radio_ctx
         rows = {c["key"]: c for c in ctx.squelch_state()["channels"]} if ctx is not None else {}
         row = rows.get(key) if isinstance(key, str) else None
         if row is None:
             ed = [k for k, c in rows.items() if c.get("editable")]
-            raise CadError(f"key: one of {', '.join(ed)}" if ed else "no traffic channel's squelch reported yet")
+            raise CadError(f"key: one of {', '.join(ed)}" if ed else "no FM channel's squelch reported yet")
         if not row.get("editable"):
             raise CadError(f"{key}: {row.get('kind') or 'not a traffic'} channel: its squelch is read-only")
+        return str(row.get("kind") or "")
+
+    def _paging_levels(self, key: str) -> dict:
+        ins = getattr(self.cad, "station_metrics_insight", None)
+        try:
+            return (ins.paging_levels(key) if ins is not None else None) or {}
+        except Exception:  # noqa: BLE001 - no numbers: the blind limits
+            return {}
+
+    def _paging_step(self, key: str, base: float, cur_open: float, now: float) -> tuple[float, float | None]:
+        """The highest Open a raise may set now: PAGING_STEP_DB over the lowest Open the channel ran in the last
+        PAGING_STEP_S (its audit rows, read by key; an Open not given, "" or null in a row: the receiver's default, as
+        an import's row has no old value), and when that rises (None: only with a change)."""
+        def open_of(raw) -> float:
+            try:
+                v = json.loads(raw) if isinstance(raw, str) and raw[:1] in "{[" else raw
+            except ValueError:
+                v = raw
+            if isinstance(v, dict) and isinstance(v.get("open_db"), (int, float)) and not isinstance(v["open_db"], bool):
+                return float(v["open_db"])
+            return base                                  # "default", "", None, an entry with no Open of its own
+        seen: list[tuple[float, float | None]] = [(cur_open, None)]
+        for r in self.store.q("SELECT at, old, new FROM settings_audit WHERE section = ? AND key = ? AND at >= ? "
+                              "ORDER BY at", ("radios", f"squelch/{key}", now - PAGING_STEP_S)):
+            seen += [(open_of(r.get("old")), r["at"]), (open_of(r.get("new")), r["at"])]
+        low = min(v for v, _t in seen)
+        when = [t for v, t in seen if t is not None and v <= low]
+        return low + PAGING_STEP_DB, (max(when) + PAGING_STEP_S if when and cur_open > low else None)
+
+    def _paging_guard(self, key: str, open_db: float, dflt: dict, close_db: float | None = None,
+                      cur_open: float | None = None) -> dict:
+        """A paging channel's Open / Close checked against what it hears (sizeup/cloud/metricsinsight.py paging_levels,
+        the hub's signal metrics, from GUARD_PAGES pages: fewer, the blind limits):
+            Open    at least PAGING_IDLE_GAP_DB over the recent idle max (under it the squelch opens on the idle noise);
+                    at most open_ceiling = min(the weakest page, their median - 6 dB) - 3 dB (over it weak pages go
+                    unheard). No idle numbers: never under the receiver's default; no pages: at most
+                    PAGING_BLIND_RAISE_DB over it.
+            raise   (cur_open: what runs now) at most PAGING_STEP_DB over the lowest Open of the last 24 h: the metrics
+                    only see the pages that opened the squelch, so after a raise the weak ones under it are gone from
+                    them, and the next ceiling would be higher (a ratchet); a day at each step keeps it slow and seen
+            Close   (when given) at most close_ceiling = the pages' quieting at close, p10 - 3 dB (Close also re-opens a
+                    fading page's continuation: over its tail the page is cut).
+        CadError, else the levels."""
+        lv = self._paging_levels(key)
+        idle, ceil, cceil = lv.get("idle_max"), lv.get("open_ceiling"), lv.get("close_ceiling")
+        base = float(dflt.get("open_db") or 10.0)
+        if idle is not None and open_db < idle + PAGING_IDLE_GAP_DB:
+            raise CadError(f"Open {open_db:g} dB is under the idle max {idle:g} + {PAGING_IDLE_GAP_DB:g} dB: "
+                           "it would open on the noise")
+        if idle is None and open_db < base:
+            raise CadError(f"no idle numbers to check a lower Open against (default {base:g} dB)")
+        if ceil is not None and open_db > ceil:
+            raise CadError(f"Open {open_db:g} dB is over {ceil:g} dB (the weakest page {lv.get('page_min')} dB, "
+                           f"median {lv.get('page_db')} dB): pages could be missed")
+        if ceil is None and open_db > base + PAGING_BLIND_RAISE_DB:
+            raise CadError(f"under {metricsinsight.GUARD_PAGES} recent pages to check against: Open "
+                           f"{base + PAGING_BLIND_RAISE_DB:g} dB at most")
+        if cur_open is not None and open_db > cur_open:
+            now = self.store.clock()
+            top, until = self._paging_step(key, base, cur_open, now)
+            if open_db > top:
+                if until is None:
+                    raise CadError(f"Open up to {top:g} dB now ({PAGING_STEP_DB:g} dB a day): raise it in steps")
+                day = "" if tz.clock(until, "%Y-%m-%d") == tz.clock(now, "%Y-%m-%d") else " tomorrow"
+                raise CadError(f"Open up to {top:g} dB until {tz.hhmm(until)}{day} ({PAGING_STEP_DB:g} dB a day)")
+        if close_db is not None and cceil is not None and close_db > cceil:
+            raise CadError(f"Close {close_db:g} dB is over {cceil:g} dB (the pages' tails): pages would be cut")
+        return {k: lv.get(k) for k in ("idle_max", "page_db", "page_min", "open_ceiling", "close_ceiling", "untagged")} | {
+            "pages": int(lv.get("pages") or 0)}
+
+    def _paging_squelch_set(self, key: str, body: dict, op: str, ov: dict, dflt: dict) -> dict:
+        """A paging channel's squelch (admins, audited as Radios): Open, and Close, inside _paging_guard; open_db null:
+        back to the default. Close not given: the one set if it still fits under the new Open and the pages' tails,
+        else Open less the default hysteresis (never over the tails). Min stays the receiver's."""
+        if body.get("min_open_s") is not None or body.get("expect") is not None:
+            raise CadError("paging channel: Open and Close only")
+        before = {**{f: dflt.get(f) for f in channels_mod.PAGING_FIELDS}, **(ov.get(key) or {})}
+        if "open_db" in body and body["open_db"] is None:
+            if key not in ov:
+                return {"ok": True}
+            out = self._commit([(channels_mod.SQUELCH_SECTION, key, REMOVE)], op,
+                               [("radios", f"squelch/{key}", before, "default")])
+        else:
+            o = body.get("open_db", (ov.get(key) or {}).get("open_db"))
+            if o is None:
+                raise CadError("open_db: required")
+            raw = {"open_db": o, "close_db": body.get("close_db")}
+            try:
+                vals = channels_mod.clean_squelch(key, {f: v for f, v in raw.items() if v is not None})
+            except ValueError as e:
+                raise CadError(str(e)) from None
+            given = "close_db" in vals
+            if not given:
+                cceil = self._paging_levels(key).get("close_ceiling")
+                had = (ov.get(key) or {}).get("close_db")
+                if had is not None and had < vals["open_db"] and (cceil is None or had <= cceil):
+                    vals["close_db"] = had                  # (a Close set before, still fitting: kept)
+                else:
+                    hyst = float(dflt.get("open_db") or 10.0) - float(dflt.get("close_db") or 6.0)
+                    c = vals["open_db"] - (hyst if hyst > 0 else 4.0)
+                    if cceil is not None:
+                        c = min(c, cceil)
+                    # never under the Close running now (heavy fading must not drag it down to hold static open),
+                    # and under the Open
+                    running = before.get("close_db")
+                    if isinstance(running, (int, float)) and not isinstance(running, bool):
+                        c = max(c, float(running))
+                    c = min(c, vals["open_db"] - channels_mod.SQUELCH["close_db"][2])
+                    vals["close_db"] = max(channels_mod.SQUELCH["close_db"][0], c)
+            if vals["close_db"] >= vals["open_db"]:
+                raise CadError(f"close {vals['close_db']:g} dB: under open ({vals['open_db']:g} dB)")
+            guard = self._paging_guard(key, vals["open_db"], dflt, vals["close_db"] if given else None,
+                                       cur_open=float(before.get("open_db") or 10.0))
+            if vals == (ov.get(key) or {}):
+                return {"ok": True, "guard": guard}
+            out = self._commit([(channels_mod.SQUELCH_SECTION, key, vals)], op,
+                               [("radios", f"squelch/{key}", before, dict(vals))])
+            out = {**out, "guard": guard} if isinstance(out, dict) else out
+        ins = getattr(self.cad, "station_metrics_insight", None)
+        if ins is not None:
+            ins.forget(key)
+        return out
 
     def _import_squelch(self, sq: dict) -> tuple[dict, list[str]]:
         """An imported squelch section: invalid entries and a channel the station reports as paging (read-only)
@@ -2787,6 +2920,19 @@ class Editor:
             if row is not None and not row.get("editable"):
                 notes.append(f"squelch {k}: skipped ({row.get('kind') or 'not a traffic'} channel: read-only)")
                 continue
+            if row is not None and row.get("kind") == "paging":
+                # a paging channel's Open / Close only, and only inside its guard (as on the card)
+                c = {f: x for f, x in c.items() if f in channels_mod.PAGING_FIELDS}
+                try:
+                    if not c or "open_db" not in c:
+                        raise CadError("Open / Close only")
+                    d = ctx.squelch_defaults(k) if ctx is not None else {}
+                    cur = (self.squelch_overrides().get(k) or {}).get("open_db", d.get("open_db"))
+                    self._paging_guard(k, c["open_db"], d, c.get("close_db"),
+                                       cur_open=float(cur) if isinstance(cur, (int, float)) else None)
+                except CadError as e:
+                    notes.append(f"squelch {k}: skipped (paging: {e})")
+                    continue
             if row is None:
                 notes.append(f"squelch {k}: kept, not applied until a traffic channel {k} is reported")
             kept[k] = c

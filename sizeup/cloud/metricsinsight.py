@@ -23,8 +23,20 @@ never make a channel worse: when in doubt, the running Open stays and Apply isn'
                more the idle reads low (an excursion over the Open opens it, so that minute isn't idle), so it is never
                suggested lower, and +1 dB. For SETTLING_S after a squelch change: no chatter rule, no Apply
     close      open minus the running hysteresis (Open - Close), in its range, under the open
-    paging     the same numbers, information only: its squelch is read-only (a high Open would mute the pages); never
-               above the running Open, and capped PAGING_GAP_DB (not WEAK_GAP_DB) under its weak pages
+    paging     the same numbers, advisory only (no Apply: an admin sets its Open on the card, inside the guard that
+               idle_max / open_ceiling / close_ceiling give: sizeup/cad/settings.py _paging_guard); capped PAGING_GAP_DB
+               (not WEAK_GAP_DB) under its weak pages and at open_ceiling; above the running Open only when static opens
+               are frequent (PAGING_STATIC_PER_DAY a day, or chattering): then over the static's p90 peak + 1 dB. Its
+               pages are "page" records only: never "noise" (static, a silent carrier) or "tones_other" (a tone pair none
+               of ours with nothing said, #973); once GUARD_PAGES of them are sorted by the station (App._page_metric_kind,
+               "pc"), only sorted ones; one from before that matches the static gate (channels.real_page) is static
+    idle_max   (also before 24 h: from GUARD_IDLE_MIN idle minutes) the p90 of the idle minutes' max. With GUARD_PAGES
+               pages of their own (never a continuation: it re-opened at Close, so it opens low): page_db their median
+               quieting at open, page_min the weakest, open_ceiling = min(page_min, page_db - PAGE_GAP_DB) -
+               PAGING_GAP_DB; close_ceiling = every page's (continuations too) quieting at close, p10 - PAGING_GAP_DB (a
+               Close over the tails' cuts them, and re-opens a fading page's continuation later); fewer: all None.
+               untagged: older, unsorted readings still among them (the ceiling moves once GUARD_PAGES sorted ones are in).
+               The paging guard reads them (Insight.paging_levels)
     Apply      sends what it was worked out for (expect: the suggestion's own cur_open / cur_close); the hub refuses it
                if another runs now, or if the channel's suggestion no longer offers Apply (Insight.applicable())
     restart    a station squelch event within SETTLE_S of its restart that only puts back what ran before it is no
@@ -74,6 +86,7 @@ from urllib.parse import quote
 import time
 from typing import Callable
 
+from sizeup import channels as channels_mod
 from sizeup import tz
 
 SECTION = "signal_metrics"     # the CAD settings section (sizeup/cad/settings.py), audited as Radios
@@ -97,7 +110,11 @@ CHATTER_PER_MIN = 2.0          # noise opens a minute: chattering (sizeup/channe
 MAX_LOWER_DB = 2.0             # a lower Open: at most this much a step
 SETTLING_S = 6 * 3600.0        # after a squelch change: no Apply, no chatter rule, this long
 RF_EVENTS = ("sdr", "gain")   # what changes what a channel hears: its suggestion starts after (and rf_events())
-REAL_KINDS = ("voice", "burst", "page")
+REAL_KINDS = ("voice", "burst", "page")   # never "noise" (a paging channel's static too: App._static_open)
+GUARD_IDLE_MIN = 30            # idle minutes before idle_max is given (the paging guard; under 24 h too)
+PAGE_GAP_DB = 6.0              # a paging Open stays this far under the pages' median (the guard's, sizeup/cad/settings.py)
+GUARD_PAGES = 10               # pages before page_db / the ceilings are given (fewer: the guard's blind limit)
+PAGING_STATIC_PER_DAY = 12.0   # static opens a day on a paging channel: frequent (a raise may be suggested)
 STEP = 0.5                     # the Squelch card's step (sizeup/channels.py SQUELCH)
 OPEN_RANGE, CLOSE_RANGE = (4.0, 30.0), (2.0, 28.0)
 CACHE_S = 600.0
@@ -215,10 +232,19 @@ def suggest(floor: list[dict], tx: list[dict], cfg: dict, now: float, span_s: fl
     idle = [d for d in floor if _num(d.get("q90")) is not None and not d.get("open_s")]
     q90 = [float(d["q90"]) for d in idle]
     qmax = [float(d["qmax"]) for d in idle if _num(d.get("qmax")) is not None]
-    real = [d for d in tx if d.get("kind") in REAL_KINDS]
+    # (a paging channel's static recorded as a "page" before App._static_open: static, never a page)
+    real = [d for d in tx if d.get("kind") in REAL_KINDS and (d.get("kind") != "page" or channels_mod.real_page(d, cur_o))]
+    sorted_ = paging and sum(1 for d in real if d.get("pc") and not d.get("cont")) >= GUARD_PAGES
+    if sorted_:
+        real = [d for d in real if d.get("pc")]          # (sorted by the station: no unknown tones, no silent carrier)
+    # the Open side: a page's own opening, never a continuation (it re-opened at Close, so its level at open is low)
+    ro = [v for d in real if not d.get("cont") and (v := _num(d.get("qo") if d.get("qo") is not None else d.get("q")))
+          is not None] if paging else []
     rq = [v for d in real if (v := _num(d.get("qo") if d.get("qo") is not None else d.get("q"))) is not None]
     rc = [v for d in real if (v := _num(d.get("qc"))) is not None]
     nq = [v for d in tx if d.get("kind") == "noise" and (v := _num(d.get("q"))) is not None]
+    static = [v for d in tx if (d.get("kind") == "noise" or (d.get("kind") == "page" and not channels_mod.real_page(d, cur_o)))
+              and (v := _num(d.get("qx") if d.get("qx") is not None else d.get("q"))) is not None] if paging else []
     sq_from = (squelch_at + SETTLE_S) if squelch_at is not None else None
     opens = [v for d in floor if (sq_from is None or d["at"] >= sq_from) and (v := _num(d.get("noise"))) is not None]
     days = round(min(span_s, now - since["at"]) / 86400.0 if since else span_s / 86400.0, 1)
@@ -227,6 +253,17 @@ def suggest(floor: list[dict], tx: list[dict], cfg: dict, now: float, span_s: fl
                  "miss_pct": cfg["miss_pct"], "days": days, "warn": "", "info": "", "apply": False,
                  "since": {"at": since["at"], "ev": since["ev"]} if since else None,
                  "hist": {"idle": _hist(q90), "real": _hist(rq), "noise": _hist(nq)}}
+    # the paging guard's numbers (Insight.paging_levels), before 24 h too: what the window has since its event
+    out["idle_max"] = _r(pct(qmax, 90)) if len(idle) >= GUARD_IDLE_MIN and qmax else None
+    enough = paging and len(ro) >= GUARD_PAGES
+    out["page_db"] = _r(median(ro)) if enough else None
+    out["page_min"] = _r(min(ro)) if enough else None
+    out["open_ceiling"] = _step_down(min(min(ro), median(ro) - PAGE_GAP_DB) - PAGING_GAP_DB) if enough else None
+    out["close_ceiling"] = _step_down(pct(rc, 10) - PAGING_GAP_DB) if paging and len(rc) >= GUARD_PAGES else None
+    if paging:
+        out["pages"], out["static"] = len(ro), len(static)
+        # older readings (from before the station sorted its pages) still in what sets the ceiling
+        out["untagged"] = enough and not sorted_ and any(not d.get("pc") for d in real)
     if len(floor) < MIN_FLOOR_MIN or len(idle) < MIN_IDLE_MIN:
         hrs = len(floor) / 60.0
         out.update(state="short", why=(f"not enough data since {EVENTS.get(since['ev'], since['ev'])} {_when(since['at'], now)}"
@@ -249,6 +286,13 @@ def suggest(floor: list[dict], tx: list[dict], cfg: dict, now: float, span_s: fl
     if chattering and cur_o is not None and want < cur_o + 1:
         want = cur_o + 1.0
         notes.append(f"chattering {chatter:g}/min: idle reads low; +1 dB, look again")
+    per_day = len(static) / max(days, 1 / 24.0)
+    static_often = paging and (per_day >= PAGING_STATIC_PER_DAY or chattering)
+    if static_often and static:
+        sp = pct(static, 90)
+        if sp is not None and _step_up(sp + 1.0) > want:
+            want = _step_up(sp + 1.0)
+            notes.append(f"static {per_day:.0f}/day, p90 peak {sp:.1f} dB: over it")
     lo, hi = OPEN_RANGE
     want = min(max(want, lo), hi)
     capped = False
@@ -280,12 +324,16 @@ def suggest(floor: list[dict], tx: list[dict], cfg: dict, now: float, span_s: fl
                 elif want > base:
                     notes.append(f"lowered at most {MAX_LOWER_DB:g} dB a step, over the idle max {nmax:.1f}")
         elif want > cur_o:
-            if paging:
-                notes.append("paging: never above the running Open")
+            if paging and not (static_often and len(rq) >= PAGES_MIN):
+                notes.append("paging: never above the running Open" + (f" ({len(rq)} pages to check a raise)"
+                                                                         if static_often else ""))
                 want = cur_o
             elif len(rq) < MIN_REAL_TX:
                 notes.append(f"{len(rq)} real tx: too few to check a raise")
                 want = cur_o
+    if paging and out["open_ceiling"] is not None and want > out["open_ceiling"]:
+        want = max(out["open_ceiling"], lo)
+        notes.append(f"under the pages (weakest {out['page_min']:g}, median {out['page_db']:g})")
     out["under"] = sum(1 for v in rq if v < want)
     if not warn and cur_o is not None and want > cur_o and out["under"] > allowed:
         warn = f"a raise to {want:g} would miss {out['under']} of {len(rq)} real transmissions"
@@ -302,7 +350,7 @@ def suggest(floor: list[dict], tx: list[dict], cfg: dict, now: float, span_s: fl
     out["cut_tails"] = sum(1 for v in rc if v < close) if cur_c is not None and close > cur_c else 0
     out.update(state="ok", open=_r(want), close=_r(close), capped=capped,
                same=cur_o is not None and abs(want - cur_o) < STEP / 2 and (cur_c is None or abs(close - cur_c) < STEP / 2))
-    out["info"] = "paging: read-only" if paging else "AM: no squelch setting here" if am else \
+    out["info"] = "paging: advisory" if paging else "AM: no squelch setting here" if am else \
         "" if kind in ("traffic", "") else f"{kind}: read-only"
     if settling and not warn:
         warn = f"settling: squelch changed {_when(squelch_at, now)}"
@@ -501,6 +549,9 @@ def check_levels(btx: list[dict], atx: list[dict], cfg: dict, paging: bool) -> l
     of half-hour medians, over OPENS_BINS half hours each side at least (an hour of portables on a working fire is two
     half hours, never the median, #686); pages are few: their median."""
     kinds, key, n_min = (("page",), "qo", PAGES_MIN) if paging else (("voice", "burst"), "q", TXQ_MIN)
+    if paging:      # (static recorded as a page before App._static_open: never a page's level; "tones_other" never is)
+        btx = [d for d in btx if channels_mod.real_page(d)]
+        atx = [d for d in atx if channels_mod.real_page(d)]
     b, nb, hb = _level(btx, kinds, key, not paging)
     a, na, ha = _level(atx, kinds, key, not paging)
     if not paging and nb >= n_min and na >= n_min and (hb < OPENS_BINS or ha < OPENS_BINS):
@@ -656,6 +707,18 @@ class Insight:
             if e is None or c is None or abs(e - c) > 0.01:
                 return f"{subject}: the suggestion is now Open {s.get('open')} / Close {s.get('close')}, look again"
         return ""
+
+    def paging_levels(self, subject: str, now: float | None = None) -> dict | None:
+        """The paging guard's numbers for a channel (sizeup/cad/settings.py _paging_guard): {idle_max, page_db,
+        page_min, open_ceiling, close_ceiling, untagged, pages}, each None when its window has too little; None when no one
+        station reports the channel."""
+        now = self.clock() if now is None else now
+        rows = [r for r in (self.suggestion(st, s, now) for st, s in self._live(now) if s == subject) if r.get("minutes")]
+        if len(rows) != 1:
+            return None
+        s = rows[0]
+        return {**{k: s.get(k) for k in ("idle_max", "page_db", "page_min", "open_ceiling", "close_ceiling", "untagged")},
+                "pages": int(s.get("pages") or 0)}
 
     def forget(self, subject: str) -> None:
         """A channel's squelch changed (Settings): its suggestion worked out again at the next look."""

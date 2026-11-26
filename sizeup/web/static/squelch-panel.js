@@ -8,7 +8,10 @@
 // GET /api/cad/squelch (polled while the tab is on screen), POST /api/cad/settings/squelch.
 // Suggested (#606, admins: GET /api/cad/metrics?view=squelch, every SUGG_MS): the Open the station's own 7 days of
 // metrics suggest (sizeup/cloud/metricsinsight.py), its numbers on hover; Apply sets Open and Close (keeping the
-// hysteresis) like an edit here, audited the same. Paging: the numbers only (read-only).
+// hysteresis) like an edit here, audited the same. Paging: the numbers only (advisory).
+// Paging (South 2): Open / Close set by admins inside a guard the hub checks (sizeup/cad/settings.py _paging_guard:
+// over the idle max + 2 dB, under the pages' weak tail, +3 dB a day); Min stays the receiver's. Open within 6 dB of the
+// pages: amber.
 //   SquelchPanel.mount(box)   when its tab opens (settings.js)
 "use strict";
 
@@ -106,7 +109,7 @@ window.SquelchPanel = (() => {
     const near = (a, b) => a !== null && a !== undefined && b !== null && b !== undefined && Math.abs(a - b) < 0.25;
     const same = known ? near(run.open_db, s.open) && (run.close_db == null || near(run.close_db, s.close)) : s.same;
     const stale = known && !(near(run.open_db, s.cur_open) && (run.close_db == null || near(run.close_db, s.cur_close)));
-    if (!c.editable) {
+    if (!c.editable || paging(c)) {        // (paging: advisory, set by hand inside the guard)
       td.append(" ", el("span", "dim small", "info"));
     } else if (s.warn) {                   // (first: "= now" would hide why the running one stays)
       const w = el("span", "warn small", s.warn.split(":")[0]);
@@ -128,11 +131,24 @@ window.SquelchPanel = (() => {
     return td;
   }
 
-  async function save(key, field, raw) {
+  const PAGE_GAP_DB = 6;           // sizeup/cloud/metricsinsight.py PAGE_GAP_DB
+  const paging = (c) => c.kind === "paging";
+
+  // paging: the pages' level and the idle max (the hub's metrics, admins), for the guard's hover and the warning
+  function guard(c) {
+    const s = st.sugg && st.sugg[c.key];
+    return s ? { idle: s.idle_max ?? null, page: s.page_db ?? null, min: s.page_min ?? null, ceil: s.open_ceiling ?? null,
+      old: !!s.untagged } : { idle: null, page: null, min: null, ceil: null, old: false };
+  }
+
+  async function save(c, field, raw) {
+    const key = c.key;
     const v = raw === "" ? null : Number(raw);
+    const body = { action: "set", key, [field]: v, operator: typeof operator === "function" ? operator() : "" };
+    // paging: Close goes with the Open it is under (one not set yet: the running one)
+    if (paging(c) && field === "close_db") body.open_db = c.set.open_db ?? c.running.open_db;
     try {
-      await api("POST", "/api/cad/settings/squelch", { action: "set", key, [field]: v,
-        operator: typeof operator === "function" ? operator() : "" });
+      await api("POST", "/api/cad/settings/squelch", body);
       st.error = "";
     } catch (e) {
       st.error = `${key}: ${e.message}`;
@@ -157,18 +173,27 @@ window.SquelchPanel = (() => {
     const [key, , unit, help] = f;
     const [lo, hi, step] = ranges[key] || [0, 100, 0.1];
     const i = el("input", "sq-in");
-    const locked = !c.editable;            // paging (South 2): read-only, a high Open would mute the pages
+    const locked = !c.editable || (paging(c) && key === "min_open_s");   // paging: Min stays the receiver's
     Object.assign(i, { type: "number", min: lo, max: hi, step, disabled: ro() || locked });
     const set = c.set[key];
     const dflt = c.default[key];
     i.value = set === undefined ? "" : set;
     i.placeholder = dflt === undefined || dflt === null ? "" : String(dflt);
     const run = c.running[key];
+    const g = paging(c) ? guard(c) : null;
+    const near = g && key === "open_db" && g.page !== null && run !== undefined && run !== null
+      && run > g.page - PAGE_GAP_DB;
+    if (near) i.classList.add("warn");
     i.title = `${help}\nDefault ${dflt ?? "—"} ${unit}` + (run !== undefined && run !== null ? ` · running ${run} ${unit}` : "")
-      + (locked ? `\nRead-only: ${c.kind || "not a traffic"} channel. A high Open would mute its pages; stays at the default.`
-        : "\nEmpty: the default");
+      + (locked ? (paging(c) ? "\nPaging: stays at the default" : `\nRead-only: ${c.kind || "not a traffic"} channel`)
+        : "\nEmpty: the default")
+      + (g && key === "open_db" ? `\nGuard: idle max ${g.idle ?? "?"} + 2 dB to `
+        + (g.ceil !== null ? `${g.ceil} dB (pages: weakest ${g.min}, median ${g.page})` : `${(dflt ?? 10) + 6} dB (under 10 pages)`)
+        + (g.old ? "\nFrom older readings: tightens until 10 new pages" : "")
+        + "; +3 dB a day at most" : "")
+      + (near ? `\nWithin ${PAGE_GAP_DB} dB of the pages: pages could be missed` : "");
     i.setAttribute("aria-label", `${c.key} ${f[1]}`);
-    i.addEventListener("change", () => save(c.key, key, i.value.trim()));
+    i.addEventListener("change", () => save(c, key, i.value.trim()));
     return i;
   }
 
@@ -232,7 +257,7 @@ window.SquelchPanel = (() => {
       const act = el("td");
       if (!c.editable) {
         const lk = el("span", "dim small", "Read-only");
-        lk.title = "Paging channel: its squelch stays at the receiver's default (a high Open would mute pages)";
+        lk.title = `${c.kind || "This"} channel: its squelch stays at the receiver's default`;
         act.append(lk);
       } else if (Object.keys(c.set || {}).length && !ro()) {
         const b = el("button", "mini", "Default");
@@ -247,6 +272,11 @@ window.SquelchPanel = (() => {
     const kids = [];
     if (!(d.channels || []).length) kids.push(el("div", "empty", "No FM channels reported"));
     else kids.push(t);
+    for (const c of (d.channels || []).filter((c) => paging(c) && guard(c).old)) {   // the ceiling from pre-sorting readings
+      const n = el("div", "dim small", `${c.key}: Open ceiling from older readings; tightens until 10 new pages`);
+      n.title = "Pages recorded before the station sorted its transmissions (unknown tones, silent carriers) still set it";
+      kids.push(n);
+    }
     for (const o of d.orphans || []) {     // set for a channel that is gone, renamed or paging: not applied
       const r = el("div", "row small warn");
       const what = FIELDS.filter((f) => o.set[f[0]] !== undefined).map((f) => `${f[1]} ${o.set[f[0]]}`).join(" · ");

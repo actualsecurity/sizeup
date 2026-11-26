@@ -985,8 +985,8 @@ class StationHealth:
             short = r.get("short_per_min")
             if isinstance(short, (int, float)) and short >= CHATTER_PER_MIN and r.get("state") == "ok":
                 # the squelch opening on noise (sizeup/radio/fm.py): nothing kept, never shown as talking
-                # only a traffic channel's Open is set there; paging stays at the default (a high Open mutes pages)
-                fix = ("raise Open in Settings > Radios > Squelch" if r.get("channel_kind") == "traffic"
+                # a traffic channel's Open is set there, and a paging channel's inside its guard (under the pages)
+                fix = ("raise Open in Settings > Radios > Squelch" if r.get("channel_kind") in ("traffic", "paging")
                        else "noise on the channel: check antenna and dongle")
                 hint = (hint + " · " if hint else "") + f"squelch chattering: {short:g} short opens/min · {fix}"
             chans.append({"label": label, "name": r.get("name") or label, "usual_now_s": usual,

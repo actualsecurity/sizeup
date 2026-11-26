@@ -41,6 +41,9 @@ Squelch (Settings > Radios > Squelch): an FM channel's noise squelch, open_db / 
 hiss) and min_open_s (carrier shorter than this: nothing kept, never "talking"; sizeup/radio/fm.py). Its own
 section ("squelch", key the channel's label, value only what differs from the receiver's default), audited, and
 sent to the station with the channel choices (set_channel_prefs' squelch, in the same signature), applied live.
+A paging channel's (South 2) takes open_db / close_db only, set by an admin inside a guard (sizeup/cad/settings.py
+_paging_guard: over the idle max, under the pages), and only to a station that says it takes them
+(squelch_paging_ok): one from before leaves a paging entry out, so the hub leaves it out for it too.
 
 An "aws" or "both" channel uses the local model whenever AWS can't take audio (no AWS here or on the
 hub, no credentials, the monthly limit reached): effective(). Another P25 system's talkgroup ("p25:mrrs:9211", police
@@ -66,6 +69,20 @@ SQUELCH_SECTION = "squelch"
 # field -> (low, high, step): what Settings takes. Defaults: the receiver's (radio/fm.py OPEN_DB, CLOSE_DB, MIN_OPEN_S)
 SQUELCH = {"open_db": (4.0, 30.0, 0.5), "close_db": (2.0, 28.0, 0.5), "min_open_s": (0.1, 2.0, 0.05)}
 CHATTER_PER_MIN = 2.0      # short opens (nothing kept) per minute, over 5 min: the squelch chattering on noise (a hint)
+PAGING_FIELDS = ("open_db", "close_db")   # what a paging channel's squelch takes (min_open_s stays the receiver's)
+# A paging squelch open that is static, not a page (App._static_open): no tone heard at all (no pair, no lone tone),
+# under PAGING_SPEECH_S of speech, shorter than PAGING_STATIC_MAX_S, and its strongest quieting under the running Open +
+# PAGING_STATIC_OVER_DB, never over PAGING_STATIC_MAX_DB (raising the Open never widens the gate). A real page carries
+# tones, runs 10-60 s and sits ~20 dB over the Open; anything with a tone or speech in it, 2 s or longer, or quieted past
+# that line is kept as a page as before. Conservative both ways: only short, weak, silent, tone-less opens are dropped.
+# (Synthetic static measures 0.0 s of speech; a short spoken "disregard" ~0.6 s, a 0.6 s weak word 0.26-0.28 s.)
+PAGING_STATIC_MAX_S = 2.0
+PAGING_STATIC_OVER_DB = 4.0
+PAGING_STATIC_MAX_DB = 15.0
+PAGING_SPEECH_S = 0.15
+# A paging open whose only content is a tone pair none of ours (no speech after it): its own metric kind (#973: a weak
+# transmitter's periodic tone, kept for learning, would otherwise read as a weak page). Never a page's level.
+TONES_OTHER = "tones_other"
 
 
 def tg_key(tg: int) -> str:
@@ -229,15 +246,23 @@ def norm_squelch(m) -> dict:
     return out
 
 
-def fit_squelch(m, kinds: dict, defaults) -> tuple[dict, list[str]]:
-    """What of a squelch map applies to a station: its traffic channels only (a channel renamed, gone or now paging:
-    left out, never an error that would stop the rest of the channel push), close under open with the station's
-    own defaults (defaults(key) -> {open_db, close_db, min_open_s}). The hub (against what the station reported)
-    and the station (against its own) leave out the same entries, so their signatures agree. -> (kept, why not)."""
+def fit_squelch(m, kinds: dict, defaults, paging: bool = False) -> tuple[dict, list[str]]:
+    """What of a squelch map applies to a station: its traffic channels (a channel renamed, gone or of another kind:
+    left out, never an error that would stop the rest of the channel push), and with paging (a station that takes
+    them: squelch_paging_ok) its paging channels' open_db / close_db (PAGING_FIELDS); close under open with the
+    station's own defaults (defaults(key) -> {open_db, close_db, min_open_s}). The hub (against what the station
+    reported) and the station (against its own) leave out the same entries, so their signatures agree. -> (kept, why
+    not)."""
     kept, why = {}, []
     for k, v in norm_squelch(m).items():
-        if kinds.get(k) != "traffic":
-            why.append(f"{k}: {kinds.get(k) or 'no such'} channel")
+        kind = kinds.get(k)
+        if kind == "paging" and paging:
+            v = {f: x for f, x in v.items() if f in PAGING_FIELDS}
+            if not v:
+                why.append(f"{k}: paging channel takes Open / Close only")
+                continue
+        elif kind != "traffic":
+            why.append(f"{k}: {kind or 'no such'} channel")
             continue
         eff = {**(defaults(k) or {}), **v}
         if eff.get("open_db") is not None and eff.get("close_db") is not None and eff["close_db"] >= eff["open_db"]:
@@ -245,6 +270,25 @@ def fit_squelch(m, kinds: dict, defaults) -> tuple[dict, list[str]]:
             continue
         kept[k] = v
     return kept, why
+
+
+def real_page(d: dict, open_db: float | None = None) -> bool:
+    """A paging channel's "page" metric (sizeup/cloud/metrics.py tx) that is not the static App._static_open drops
+    now: one recorded before that gate (or by a station from before it) as short and as weak counts as noise (its
+    strongest quieting "qx", else its median "q", under the Open it ran at + PAGING_STATIC_OVER_DB)."""
+    if d.get("kind") != "page":
+        return False
+    if d.get("pc"):
+        return True                     # (sorted by the station: its gate already kept it, a spoken word, a lone tone)
+    dur, q = d.get("dur"), d.get("qx") if d.get("qx") is not None else d.get("q")
+    if not isinstance(dur, (int, float)) or not isinstance(q, (int, float)) or d.get("cont"):
+        return True
+    return not (dur < PAGING_STATIC_MAX_S and q < static_db(open_db))
+
+
+def static_db(open_db: float | None) -> float:
+    """The static gate's line: the running Open + PAGING_STATIC_OVER_DB, never over PAGING_STATIC_MAX_DB."""
+    return min((10.0 if open_db is None else open_db) + PAGING_STATIC_OVER_DB, PAGING_STATIC_MAX_DB)
 
 
 def check_squelch(m) -> dict:

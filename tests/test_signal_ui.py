@@ -215,8 +215,10 @@ def squelch_data(admin=True, status=200):
     sugg = mi.suggest(floor_minutes(NOW - 7 * DAY, 7 * 1440), transmissions(NOW - 7 * DAY, 7 * DAY, [20.0] * 212),
                       mi.DEFAULTS, NOW)
     page = mi.suggest(floor_minutes(NOW - 7 * DAY, 7 * 1440, kind="paging"),
-                      transmissions(NOW - 7 * DAY, 7 * DAY, [22.0] * 30, kind="page"), mi.DEFAULTS, NOW)
-    row = lambda key, kind, run=(10.0, 6.0): {"key": key, "kind": kind, "editable": kind == "traffic", "set": {}, "state": "ok",
+                      [dict(d, pc=1) for d in transmissions(NOW - 7 * DAY, 7 * DAY, [22.0] * 30, kind="page")],
+                      mi.DEFAULTS, NOW)
+    row = lambda key, kind, run=(10.0, 6.0): {"key": key, "kind": kind, "editable": kind in ("traffic", "paging"), "set": {},
+                             "state": "ok",
                              "default": {"open_db": 10.0, "close_db": 6.0, "min_open_s": 0.3},
                              "running": {"open_db": run[0], "close_db": run[1], "min_open_s": 0.3}, "hiss_db": 2.4,
                              "quieting_db": 3.1, "short_per_min": 0.2, "keyups": None}
@@ -263,6 +265,53 @@ def test_no_suggestions_for_someone_who_isnt_an_admin_or_off_the_hub(tmp_path):
     assert "Suggested" not in out["head"] and out["applies"] == 0 and out["fetched"] == []    # never even asked
     out = run(tmp_path, SQUELCH, squelch_data(status=403))
     assert "Suggested" not in out["head"] and out["applies"] == 0
+
+
+PAGING_ROW = r"""
+load("squelch-panel.js");
+global.canDo = () => data.admin;
+global.operator = () => "KM";
+global.posted = [];
+global.api = async (m, p, b) => { if (m === "POST") { posted.push([p, b]); return { ok: true }; } return data.squelch; };
+const box = new N("div");
+SquelchPanel.mount(box);
+for (let i = 0; i < 10; i++) await flush();
+const south = all(box, (n) => n.tag === "input" && (n.attrs["aria-label"] || "").startsWith("South 2"));
+const inputs = south.map((n) => ({ l: n.attrs["aria-label"], disabled: n.disabled, warn: n.className.includes("warn"),
+                                   title: n.title }));
+const close = south.find((n) => n.attrs["aria-label"] === "South 2 Close");
+close.value = "13"; close.on.change[0]();
+for (let i = 0; i < 10; i++) await flush();
+const notes = all(box, (n) => (n.textContent || "").includes("older readings")).map((n) => n.textContent);
+console.log(JSON.stringify({ inputs, posted, notes }));
+"""
+
+
+def test_paging_open_and_close_are_editable_for_an_admin_with_the_guard_on_hover(tmp_path):
+    """Paging (sizeup/cad/settings.py _paging_guard): Open / Close inputs for an admin, Min stays the receiver's; an Open
+    within 6 dB of the pages is amber; a Close goes up with the Open it sits under."""
+    data = squelch_data()
+    data["squelch"]["channels"][1]["running"] = {"open_db": 17.0, "close_db": 13.0, "min_open_s": 0.3}   # pages at 22
+    out = run(tmp_path, PAGING_ROW, data)
+    o, c, m = out["inputs"]
+    assert (o["l"], o["disabled"], c["disabled"], m["disabled"]) == ("South 2 Open", False, False, True)
+    assert o["warn"] and "Guard: idle max" in o["title"] and "to 13 dB (pages: weakest 22, median 22)" in o["title"]
+    assert "+3 dB a day at most" in o["title"]
+    assert "pages could be missed" in o["title"] and not c["warn"]
+    assert out["posted"] == [["/api/cad/settings/squelch", {"action": "set", "key": "South 2", "close_db": 13,
+                                                            "open_db": 17, "operator": "KM"}]]
+    assert out["notes"] == []
+    out = run(tmp_path, PAGING_ROW, squelch_data(admin=False))
+    assert all(i["disabled"] for i in out["inputs"])                  # not an admin: read only
+
+
+def test_a_paging_ceiling_from_older_readings_says_so_on_the_card(tmp_path):
+    data = squelch_data()
+    chans = data["fetch"]["/api/cad/metrics?view=squelch"]["body"]["channels"]
+    chans[1]["untagged"] = True
+    out = run(tmp_path, PAGING_ROW, data)
+    assert out["notes"] == ["South 2: Open ceiling from older readings; tightens until 10 new pages"]
+    assert "From older readings" in out["inputs"][0]["title"]
 
 
 # -- Health -----------------------------------------------------------------------------------------------------------

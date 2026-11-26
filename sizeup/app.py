@@ -96,7 +96,7 @@ from sizeup.radio import systems as p25_systems
 from sizeup.radio import groups as antenna
 from sizeup.radio import usbreset
 from sizeup.radio import replace as swap
-from sizeup.radio.page import Page, PageHold, assemble, decode_tones, page_from_dict, recording_note
+from sizeup.radio.page import VOICE_GUARD_S, Page, PageHold, assemble, decode_tones, page_from_dict, recording_note
 from sizeup.radio.tap import LiveTap
 from sizeup.cad import tonelist
 from sizeup.radio.tones import ToneEvent, TonePlan, base_name
@@ -188,6 +188,7 @@ OFFLOAD_WAIT_S = 60.0      # a context clip goes to the pool at once when its ow
 PUSH_CACHE_S = 5.0         # the pre-alerts' push sources read from the intel engine at most this often
 STT_QUEUE_FILE = "stt-queue.json"   # ... and what still waits, saved here for the next start (beside clips/)
 MIN_SPEECH_S = 0.15      # less sound than this above the dead-air floor (and no tones) = a mic click
+STATIC_LOG_S = 300.0     # a paging channel's dropped static opens (App._static_open): said at most this often
 LIVE_WATCH_S = 0.2       # FG1 talking watcher: how often the squelch is looked at (the MDC ID: radio/tap.py)
 ID_EDGE_S = 1.0          # an FG1 key-up with no ID: a burst is looked for this close to either end of the carrier (#163)
 NO_ID_MIN_QUIETING_DB = 20.0   # ... and "no ID sent" is said only of a carrier this strong (PCFD radios: ~40 dB at
@@ -726,6 +727,8 @@ class App:
         # each traffic channel's recent key-ups (end, s, quieting dB, CTCSS Hz, ID, speech): Settings > Radios > Squelch
         self._keyups: dict[str, deque] = {}
         self._keyup_pl: dict[str, tuple] = {}    # a kept key-up's PL estimate, for its "no speech" log line
+        self._static_n: dict[str, int] = {}      # each paging channel's static opens dropped since start (_static_open)
+        self._static_said: dict[str, float] = {}
         # the PL estimate's own thread: never on the close (the live entry's end, the ID flash, the clip)
         self._keyup_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="keyup-pl")
         self._apply_squelch()
@@ -1445,14 +1448,16 @@ class App:
         except OSError:
             pass
 
-    def _metric_tx(self, label: str, kind: str, seg: Segment, ids: bool = False, am: bool = False) -> None:
+    def _metric_tx(self, label: str, kind: str, seg: Segment, ids: bool = False, am: bool = False,
+                   classified: bool = False, cont: bool | None = None) -> None:
         """A transmission's numbers for the hub's signal metrics (sizeup/cloud/metrics.py): a dict queued, nothing else;
-        never in the way of the transmission."""
+        never in the way of the transmission. classified: a paging channel's, sorted by _page_metric_kind."""
         m = self.metrics
         if m is None:
             return
         try:
-            m.tx(label, kind, seg, ids=ids, am=am)
+            m.tx(label, kind, seg, ids=ids, am=am, **({"classified": True} if classified else {}),
+                 **({"cont": cont} if cont is not None else {}))
         except Exception:  # noqa: BLE001 - a metric, never the radio path's problem
             pass
 
@@ -1554,13 +1559,22 @@ class App:
     def _page_segment(self, ch: Channel, seg: Segment) -> None:
         """A transmission on a paging channel: a new page, or (after a fade) more of the one before.
         A page shows as pending at once; it is finalised (_page_done) when the squelch's continuation
-        window has passed (PageHold, GitHub #61), or at once when there is none."""
-        self._metric_tx(ch.label, "page", seg)
+        window has passed (PageHold, GitHub #61), or at once when there is none. Static (_static_open): a "noise"
+        metric only, as on a traffic channel: no page, no Radio row, no speech-to-text."""
+        decoded = decode_tones(seg.audio, self.plan)
+        if self._static_open(ch.label, seg, decoded):
+            self._metric_tx(ch.label, "noise", seg, classified=True)
+            self._static_dropped(ch.label, seg)
+            return
+        # (a new page keyed inside the last one's continuation window, its own tones: not a continuation, its level
+        # at open is a page's own: PageHold makes it a page of its own too)
+        self._metric_tx(ch.label, self._page_metric_kind(seg, decoded), seg, classified=True,
+                        cont=bool(seg.cont and not decoded[0]))
         if not self.channel_pref(ch.label)["record"]:   # Settings > Radios: not recorded (receiver keeps running)
-            log(f"{ch.label}: {assemble(ch.label, ch.mhz, seg, self.plan).kind} not recorded "
+            log(f"{ch.label}: {assemble(ch.label, ch.mhz, seg, self.plan, *decoded).kind} not recorded "
                 "(Record is off in Settings > Radios)")
             return
-        done, touched = self.pagehold.add(ch.label, ch.mhz, seg)
+        done, touched = self.pagehold.add(ch.label, ch.mhz, seg, decoded)
         if seg.split and touched and not touched[0][1]:
             # a unit's key-up cut from a page (radio/fm.py keyups): who keyed it, as on a traffic channel
             found = self.tap.ids(ch.label, seg.start, seg.end)
@@ -1582,6 +1596,53 @@ class App:
                 self._show_page(page)                   # pending until its window passes
         for page in done:
             self._page_done(page)
+
+    def _static_open(self, label: str, seg: Segment, decoded: tuple) -> bool:
+        """A paging squelch open that is static, not a page (sizeup/channels.py PAGING_STATIC_MAX_S): no tone heard at
+        all (decoded: decode_tones' pairs and every tone heard: a lone tone before a fade counts), under PAGING_SPEECH_S
+        of speech, shorter than PAGING_STATIC_MAX_S, and its strongest quieting under channels.static_db(the running
+        Open): Open + 4 dB, never over 15. Never a continuation (a page back after a fade), a piece cut at a key-up, or
+        one with an ID burst: those stay what they were."""
+        tones, heard = decoded
+        if tones or heard or seg.cont or seg.split or seg.bursts or seg.end - seg.start >= channels.PAGING_STATIC_MAX_S:
+            return False
+        r = self._receiver(label)
+        sq = getattr(r, "squelch", None)
+        open_db = sq.params[0] if sq is not None and hasattr(sq, "params") else self.squelch_defaults(label)["open_db"]
+        peak = seg.q_max if getattr(seg, "q_max", None) is not None else seg.quieting_db
+        if peak >= channels.static_db(open_db):
+            return False
+        return speech_seconds(seg.audio) < channels.PAGING_SPEECH_S      # (last: the costliest look)
+
+    def _page_metric_kind(self, seg: Segment, decoded: tuple) -> str:
+        """A paging transmission's kind in the signal metrics (the station's page level, sizeup/cloud/metricsinsight.py):
+        "tones_other" when its only content is a tone pair none of ours names (no speech after the last tone: a weak
+        transmitter's periodic tone, #973, kept for learning, is no weak page); "noise" when it has no tone and no
+        speech (a carrier or static kept as a row: 2 s or longer, or strong); else "page". A continuation with no tones of its own is "page"."""
+        tones, heard = decoded
+        if seg.cont and not tones:
+            return "page"
+        if tones:
+            if self.paging.is_ours([n for t in tones for n in t.names]):
+                return "page"
+            after = seg.audio[int(min(len(seg.audio), (max(t.end for t in tones) + VOICE_GUARD_S) * RATE)):]
+            return channels.TONES_OTHER if speech_seconds(after) < channels.PAGING_SPEECH_S else "page"
+        if not heard and not seg.bursts and speech_seconds(seg.audio) < channels.PAGING_SPEECH_S:
+            return "noise"
+        return "page"
+
+    def _static_dropped(self, label: str, seg: Segment) -> None:
+        """A static open dropped: counted, and said in the log at most every STATIC_LOG_S (static comes in bursts)."""
+        now = time.time()
+        with self._lock:
+            n = self._static_n[label] = self._static_n.get(label, 0) + 1
+            said = self._static_said.get(label, 0.0)
+            if now - said < STATIC_LOG_S:
+                return
+            self._static_said[label] = now
+        peak = seg.q_max if getattr(seg, "q_max", None) is not None else seg.quieting_db
+        log(f"{label}: static open dropped ({seg.end - seg.start:.1f} s, no tones, peak {peak:.1f} dB): "
+            f"{n} since start, not a page")
 
     def _show_page(self, page: Page) -> None:
         with self._lock:
@@ -4309,6 +4370,7 @@ class App:
         """What this station runs (its state push: the hub compares sig)."""
         return {"prefs": self._chan_ov, "aws": dict(self._hub_aws), "tones": len(self._tone_ov),
                 "squelch": self._sq_ov, "squelch_ok": True,       # (takes the squelch: a hub sends it)
+                "squelch_paging_ok": True,                        # (... a paging channel's Open / Close too)
                 "deny_ok": True,                                  # (takes aws.deny: radio-intel PR 3)
                 "promote_ok": True,                               # (takes aws.promote: sizeup/cad/opchannel.py)
                 "promote_p25_ok": True,                           # (... with another system's "p25:" keys: intel)
@@ -4325,10 +4387,11 @@ class App:
         return {"open_db": float(c.squelch_db) if c is not None else 10.0, "close_db": CLOSE_DB, "min_open_s": MIN_OPEN_S}
 
     def _check_squelch(self, m) -> dict:
-        """The hub's squelch map against this station's channels (channels.fit_squelch): traffic channels only (a
-        paging channel's squelch is never set: a high Open would mute a page), close under open with this station's
-        own defaults. What doesn't fit is left out and logged, never refused: the rest of the push still applies."""
-        kept, why = channels.fit_squelch(m, self._kind, self.squelch_defaults)
+        """The hub's squelch map against this station's channels (channels.fit_squelch): traffic channels, and a
+        paging channel's Open / Close (the hub guarded them: sizeup/cad/settings.py _paging_guard), close under open
+        with this station's own defaults. What doesn't fit is left out and logged, never refused: the rest of the push
+        still applies."""
+        kept, why = channels.fit_squelch(m, self._kind, self.squelch_defaults, paging=True)
         if why:
             log("squelch from the hub: left out " + "; ".join(why))
         return kept
@@ -4337,8 +4400,8 @@ class App:
         """Each FM receiver's squelch as set (else its default), on the running squelch: no restart."""
         for r in getattr(self, "receivers", []):
             label = r.channel.label
-            if self._kind.get(label) != "traffic" or isinstance(r, AmReceiver):
-                continue                    # paging (South 2): always the receiver's own; airband: its own squelch
+            if self._kind.get(label) not in ("traffic", "paging") or isinstance(r, AmReceiver):
+                continue                    # airband: its own squelch
             s = {**self.squelch_defaults(label), **(self._sq_ov.get(label) or {})}
             if r.set_squelch(s["open_db"], s["close_db"], s["min_open_s"]) and label in self._sq_ov:
                 log(f"{label}: squelch opens at {s['open_db']:g} dB, closes under {s['close_db']:g} dB, "
@@ -4385,7 +4448,7 @@ class App:
             key = r.get("label")
             kind = r.get("channel_kind") or ""
             rows.append({"key": key, "mhz": r.get("mhz"), "state": r.get("state"), "open": bool(r.get("open")),
-                         "kind": kind, "editable": kind == "traffic",
+                         "kind": kind, "editable": kind in ("traffic", "paging"),
                          "set": dict(self._sq_ov.get(key) or {}),
                          "default": r.get("squelch_default") or self.squelch_defaults(key),
                          "running": {f: r.get(f) for f in channels.SQUELCH},
@@ -6287,7 +6350,7 @@ class App:
             st = r.status()
             if "min_open_s" in st:                   # the noise squelch: its defaults, for Settings on the hub
                 st["squelch_default"] = self.squelch_defaults(r.channel.label)
-                st["channel_kind"] = self._kind.get(r.channel.label, "")    # only traffic squelch is editable
+                st["channel_kind"] = self._kind.get(r.channel.label, "")    # traffic: every field; paging: Open / Close
                 if self._kind.get(r.channel.label) == "traffic":
                     st["keyups"] = self.keyups(r.channel.label)
             if self.shared and r.channel.label not in self.assign.values():
