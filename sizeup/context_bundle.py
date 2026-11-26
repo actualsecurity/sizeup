@@ -120,7 +120,7 @@ def _tx(cad, r: dict) -> dict:
     its audio is still kept."""
     out = {k: r.get(k) for k in TX_KEYS if r.get(k) not in (None, "", [])}
     out["text"] = r.get("text") or ""
-    shown = r.get("atc_text") or r.get("fixed_text") or out["text"]
+    shown = r.get("atc_text") or r.get("fixed_text") or r.get("corr_text") or out["text"]
     if shown != out["text"]:
         out["shown"] = shown
     out["transcript_kept"] = True
@@ -425,8 +425,12 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
         raise NotFound(f"no radio pre-alert {pid}")
     raw = rows[0]
     fired = {str(r[0]) for r in e["rules"] or []}
-    ids = list(raw["traffic_ids"])[-CAP["trigger"]:]
-    found = _by_ids(cad, ids)
+    # the evidence in AIR-TIME order (traffic_ids is the order the transcripts were read in: a late one is last), the
+    # newest CAP["trigger"] by air time; one gone from the radio log first, in the order read
+    found = _by_ids(cad, list(raw["traffic_ids"]))
+    ids = sorted(raw["traffic_ids"], key=lambda t: (t in found, float(found[t]["start"]) if t in found else 0.0))
+    ids = list(dict.fromkeys(ids))[-CAP["trigger"]:]
+    found = {t: found[t] for t in ids if t in found}
     hits: dict[str, list[dict]] = {}
     for h in (cad.store.q(f"SELECT traffic_id, rule_id, weight FROM intel_hits WHERE traffic_id IN "
                           f"({','.join('?' * len(ids))})", ids) if ids else []):
@@ -452,7 +456,8 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
         t["rules"] = sorted((h for h in hits.get(tid, []) if shown_rule(h["id"])), key=lambda h: -h["weight"])
         if admin and r is not None:
             t["matched"] = list(dict.fromkeys(p for h in t["rules"] if h["id"] in by_rule
-                                              for p in _matched_phrases(by_rule[h["id"]], r.get("text") or "")))
+                                              for p in _matched_phrases(by_rule[h["id"]],
+                                                                        r.get("corr_text") or r.get("text") or "")))
         trigger.append(t)
     if not found and ids:
         why = "its transmissions are gone from the radio log"

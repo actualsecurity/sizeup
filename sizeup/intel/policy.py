@@ -23,7 +23,9 @@ test pre-alert topic from day one, caps generous for testing):
     place_repush_min   5        the place first heard within this long after the first push pushes once more,
                                 whatever repush_min says (the read-back follows the call-out by a minute or two)
     max_age_min        15       a transmission older than this (a startup backfill, a late re-record) is never a
-                                pre-alert: a restart doesn't replay old pushes
+                                pre-alert: a restart doesn't replay old pushes. A younger one is read (its air-time
+                                neighbours' context), but pushes only while fresh: an event whose newest transmission
+                                aired over engine.LATE_S (5 min) ago is recorded at log ("late")
     quiet_from / quiet_to  ""   "HH:MM" local: no pushes in between (log and map go on); "" = none
     fd_window_min      60       a fire-related event (rules.py "fire_related") is checked against our open fire
                                 incidents and those closed this long before it (engine.py _fire) ...

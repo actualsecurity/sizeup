@@ -868,10 +868,11 @@ def test_a_startup_backfill_of_old_rows_pushes_nothing(live):
         cad.comms.record(ctx_row(tid, text, now - 3600 - i))          # an hour old: the backfill replays them (the hook)
     cad.intel.drain()
     assert n.sent == [] and cad.intel.events.open_events() == [] and cad.intel.stale == len(TRIGGER)
-    cad.intel_admin.settings_op("set", {"key": "max_age_min", "value": 120}, "test")     # configurable
+    cad.intel_admin.settings_op("set", {"key": "max_age_min", "value": 120}, "test")     # configurable: read ...
     cad.comms.on_context_text("old0-t0")
     cad.intel.drain()
-    assert len(n.sent) == 1
+    [ev] = cad.intel.events.open_events()                       # ... but an hour after it aired: recorded, never pushed
+    assert n.sent == [] and (ev.suppressed, ev.mode) == ("late", "log") and ev.first_at == now - 3600
 
 
 def test_the_hook_firing_again_for_the_same_text_does_nothing(live):
