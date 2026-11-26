@@ -3,14 +3,19 @@ and why one wasn't pushed. Admin decision, 2026-11-25: "a page in the app where 
 they do not trigger". Anyone signed in reads it, as the console's intel card (sourcekeys.may_see_context, the API's
 gate); names and PII as the events have them; nothing here leaves the hub.
 
-    GET /api/cad/intel/list?from=&to=&level=&category=&source=&system=&decided=&held=&status=&q=&tag=&review=&page=&size=
-        from / to: a date (2026-11-01, the CAD's time zone; "to" a whole day) or unix seconds; none: the last 24 h (the
-        review queue: every event kept). q: words in its notes; tag: a note's tag; review=1: a note tagged for a rule
-        or model change (notes.REVIEW_TAGS) not yet done (sizeup/intel/notes.py).
-        {events: [row], total, page, size, since, until, facets: {categories, sources, systems}, held: [{key, label,
-        tip}], map_rev}. Newest first (first_at, then id), PAGE_SIZE a page (at most PAGE_MAX), on intel_events_first.
-        map_rev: an event saved or dismissed (events.py; never a vote or a delivery): the page's map reads again only
-        when it or the total moved.
+    GET /api/cad/intel/list?from=&to=&range=&level=&category=&source=&system=&decided=&held=&status=&q=&tag=&review=&page=&size=&upto=
+        from / to: a date (2026-11-01, the CAD's time zone; "to" a whole day) or unix seconds; no from: the range back
+        from to (or now): range 24h (the default) | 7d | 30d | all (every event kept: SPAN_MAX_S); the review queue:
+        every event kept. q: words in its notes; tag: a note's tag; review=1: a note tagged for a rule or model change
+        (notes.REVIEW_TAGS) not yet done (sizeup/intel/notes.py). upto: an event id, the newest a page may hold (the
+        first page's answer's, sent with the pages after it: an event saved while paging never shifts a row onto the
+        next page twice).
+        {events: [row], total, page, size, since, until, range, older, upto, facets: {categories, sources, systems},
+        held: [{key, label, tip}], map_rev}. Newest first (first_at, then id), PAGE_SIZE a page (at most PAGE_MAX), on
+        intel_events_first. range: the range applied ("" with a from date or the notes' filters); older: the
+        filters' events kept before since (what a longer range would add; 0 for the review queue); upto: the id given,
+        else the newest event's. map_rev: an event saved or dismissed (events.py; never a vote or a delivery): the
+        page's map reads again only when it or the total moved.
     GET /api/cad/intel/list?map=1&<the same filters>
         the Intel page's map (#937): every placed event of the filters, all pages, newest first, at most MAP_MAX;
         {pins: [{id, lat, lon, precision, radius_m, confirmed, level, category, label, held}], placed, unplaced,
@@ -74,6 +79,7 @@ DEFAULT_S = 24 * 3600
 FACET_S = 300                      # the filters' choices: read again when the range moved this far (or the events changed)
 SPAN_MAX_S = 92 * 86400            # events are kept 90 days (events.py KEEP_EVENTS_S)
 NOTES_SPAN_S = 367 * 86400         # ... and a year with a note (KEEP_NOTES_S): the review queue's default range
+RANGES = {"24h": DEFAULT_S, "7d": 7 * 86400, "30d": 30 * 86400, "all": SPAN_MAX_S}    # ?range= (no from date)
 LEVELS = ("push", "held", "map", "log", "shadow")
 DECIDED = ("rules", "model", "both")
 STATUSES = ("open", "ended", "expired", "dismissed")
@@ -340,8 +346,12 @@ class IntelLog:
         until = _when(one("to", 40), True)
         since = _when(one("from", 40), False)
         until = now + 60 if until is None else until
+        rng = one("range", 8) or "24h"
+        if rng not in RANGES:
+            raise CadError(f"range: {' | '.join(RANGES)}")
+        applied = "" if since is not None or noted else rng
         if since is None:
-            since = until - (span if noted else DEFAULT_S) if one("to") or noted else now - DEFAULT_S
+            since = until - (span if noted else RANGES[rng]) if one("to") or noted else now - RANGES[rng]
         if until <= since:
             raise CadError("to: after from")
         if until - since > span:
@@ -349,8 +359,9 @@ class IntelLog:
         try:
             page = max(0, int(one("page", 6) or 0))
             size = min(PAGE_MAX, max(1, int(one("size", 4) or PAGE_SIZE)))
+            upto = int(one("upto", 20)) if one("upto", 20) else None
         except ValueError:
-            raise CadError("page, size: numbers") from None
+            raise CadError("page, size, upto: numbers") from None
         levels, statuses = many("level", LEVELS), many("status", STATUSES)
         decided = many("decided", DECIDED)
         tags = many("tag", TAGS)
@@ -390,11 +401,20 @@ class IntelLog:
                          "n.updated_at >= :since AND n.updated_at < :until AND t.value IN "
                          f"({', '.join(':rv%d' % i for i in range(len(REVIEW_TAGS)))}))")
             args.update({f"rv{i}": s for i, s in enumerate(REVIEW_TAGS)})
-        inner = (f"SELECT {', '.join('e.' + c.strip() for c in COLS.split(','))}, {HELD_SQL} AS held, "
-                 f"{DECIDED_SQL} AS decided FROM intel_events e WHERE "
-                 + ("1" if review else "e.first_at >= :since AND e.first_at < :until"))
+        head = (f"SELECT {', '.join('e.' + c.strip() for c in COLS.split(','))}, {HELD_SQL} AS held, "
+                f"{DECIDED_SQL} AS decided FROM intel_events e WHERE ")
+        snap = ""
+        if upto is not None:
+            snap = " AND e.id <= :upto"
+            args["upto"] = upto
+        inner = head + ("1" if review else "e.first_at >= :since AND e.first_at < :until") + snap
+        # the filters' events kept before since (what a longer range adds): none for the review queue (every date)
+        older = None
+        if not review and since > until - span:
+            older = head + "e.first_at >= :floor AND e.first_at < :since" + snap
+            args["floor"] = until - span
         return {"inner": inner, "outer": " AND ".join(where) or "1", "args": args, "since": since, "until": until,
-                "page": page, "size": size, "now": now}
+                "page": page, "size": size, "now": now, "range": applied, "older": older, "upto": upto}
 
     def list(self, q: dict, operator: str = "") -> dict:
         f = self.query(q)
@@ -405,12 +425,16 @@ class IntelLog:
         fkey = json.dumps([sorted((k, v) for k, v in q.items() if k not in ("page", "poll")), self.classes()])
         hit = self._totals.get(fkey)
         if str((q.get("poll") or [""])[0]) == "1" and hit is not None and hit[0] == rev:
-            total = hit[1]
+            total, older = hit[1], hit[2]
         else:
             total = store.one(f"SELECT COUNT(*) AS n FROM ({inner}) WHERE {outer}", args)["n"]
+            older = store.one(f"SELECT COUNT(*) AS n FROM ({f['older']}) WHERE {outer}", args)["n"] if f["older"] else 0
             if len(self._totals) > 64:
                 self._totals.clear()
-            self._totals[fkey] = (rev, total)
+            self._totals[fkey] = (rev, total, older)
+        upto = f["upto"]
+        if upto is None:
+            upto = int(store.one("SELECT COALESCE(MAX(id), 0) AS n FROM intel_events", {})["n"])
         rows = store.q(f"SELECT * FROM ({inner}) WHERE {outer} ORDER BY first_at DESC, id DESC LIMIT :lim OFFSET :off",
                        {**args, "lim": size, "off": page * size})
         names = source_names(self.cad)
@@ -421,7 +445,7 @@ class IntelLog:
                 "notes": notes.get(r["id"], {"n": 0, "tags": [], "review": 0})} for r in rows]
         from sizeup.intel.notes import REVIEW_TAGS, TAGS
         return {"events": out, "total": total, "page": page, "size": size, "since": f["since"], "until": f["until"],
-                "now": f["now"], "facets": self.facets(f["since"], f["until"], names), "held": held_options(),
+                "now": f["now"], "range": f["range"], "older": older, "upto": upto, "facets": self.facets(f["since"], f["until"], names), "held": held_options(),
                 "levels": list(LEVELS), "decided": list(DECIDED), "statuses": list(STATUSES), "tags": list(TAGS),
                 "review_tags": list(REVIEW_TAGS), "map_rev": int(getattr(self.engine.events, "map_rev", rev))}
 

@@ -288,6 +288,13 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       <div class="view-head">
         <h2 class="view-title">Intel</h2>
         <span id="il-count" class="dim small" aria-live="polite"></span>
+        <span id="il-range" class="chip il-range"></span>
+        <span id="il-picks" class="seg il-picks" role="group" aria-label="Range">
+          <button type="button" class="sm" data-range="24h" aria-pressed="true" title="The last 24 hours">24 h</button>
+          <button type="button" class="sm" data-range="7d" aria-pressed="false" title="The last 7 days">7 d</button>
+          <button type="button" class="sm" data-range="30d" aria-pressed="false" title="The last 30 days">30 d</button>
+          <button type="button" class="sm" data-range="all" aria-pressed="false" title="Every event kept (90 days)">All</button>
+        </span>
         <button id="il-refresh" type="button" class="sm quiet" title="Read it again (a long or filtered view isn't refreshed on its own)" hidden>Refresh</button>
         <button id="il-map-btn" type="button" class="sm quiet" aria-pressed="true" title="These filters' placed events on a map, every page">Map</button>
         <span class="spacer"></span>
@@ -307,12 +314,13 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <input id="il-q" type="search" placeholder="Notes" aria-label="Words in the notes" spellcheck="false" maxlength="200">
         <select id="il-tag" aria-label="Note tag"><option value="">Any tag</option></select>
         <button id="il-review" type="button" aria-pressed="false" title="Review queue: notes tagged for a rule or model change, not done yet (every date)">Review</button>
-        <label class="inline" title="From this day (default: the last 24 h)"><span class="dim">From</span> <input id="il-from" type="date"></label>
+        <label class="inline" title="From this day (none: the range by the count)"><span class="dim">From</span> <input id="il-from" type="date"></label>
         <label class="inline" title="To the end of this day"><span class="dim">To</span> <input id="il-to" type="date"></label>
         <button id="il-clear" type="button">Clear</button>
       </form>
       <div id="il-mapbox" class="il-mapwrap" hidden>
-        <div class="il-mapbox"><div id="il-map" class="il-map"></div><div id="il-nomap" class="nomap dim" hidden>No placed events</div></div>
+        <div id="il-mapbox-in" class="il-mapbox"><div id="il-map" class="il-map"></div><div id="il-nomap" class="nomap dim" hidden>No placed events</div>
+          <div id="il-map-h" class="dmap-handle dmap-h"></div></div>
         <div class="il-map-foot"><span id="il-map-n" class="dim small" title="Colour: level · glyph: category · hollow: place unconfirmed, the ring how far off · unplaced: counted, not pinned"></span>
           <a id="il-map-sel" class="nav sm" href="#" hidden title="The selected pin's event isn't on this page">More info</a></div>
       </div>
