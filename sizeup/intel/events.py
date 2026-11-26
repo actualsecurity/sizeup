@@ -5,7 +5,8 @@ Tables (created IF NOT EXISTS here; no SCHEMA_VERSION bump):
 
     intel_events   one per event (sizeup/intel/model.py Event): no transcript text, ever; traffic_ids are references
     intel_hits     one per (traffic id, rule): every hit, shadow and below-threshold too (recall), 30 days
-    intel_feedback a person's verdict on an event (useful | noise | wrong_place | wrong_type | late | missed), a year
+    intel_feedback a person's verdict on an event (useful | noise | wrong_place | wrong_type | late | missed |
+                   should_push: the Intel page's "should have pushed", a held event that was worth a push), a year
 
 Events are kept 90 days (the radio log's own default for context traffic), hits 30.
 
@@ -27,7 +28,7 @@ from sizeup.intel.model import Event
 KEEP_EVENTS_S = 90 * 86400
 KEEP_HITS_S = 30 * 86400
 KEEP_FEEDBACK_S = 366 * 86400
-VERDICTS = ("useful", "noise", "wrong_place", "wrong_type", "late", "missed")
+VERDICTS = ("useful", "noise", "wrong_place", "wrong_type", "late", "missed", "should_push")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS intel_events (
@@ -57,6 +58,7 @@ CREATE TABLE IF NOT EXISTS intel_events (
 CREATE INDEX IF NOT EXISTS intel_events_status ON intel_events(status, until);
 CREATE INDEX IF NOT EXISTS intel_events_source ON intel_events(source_key, last_at);
 CREATE INDEX IF NOT EXISTS intel_events_cat ON intel_events(domain, category, first_at);
+CREATE INDEX IF NOT EXISTS intel_events_first ON intel_events(first_at);   -- the Intel page (eventlog.py): newest first
 CREATE TABLE IF NOT EXISTS intel_hits (
   traffic_id TEXT NOT NULL, rule_id TEXT NOT NULL, rule_rev INTEGER NOT NULL, weight REAL NOT NULL,
   category TEXT NOT NULL, pack TEXT NOT NULL, event_id INTEGER, at REAL NOT NULL,

@@ -21,7 +21,8 @@ POST /api/cad/settings/intel {action, ...}:
 Every change compiles the packs with it first (a bad phrase, an unknown category: 400 with the reason).
 
 Who sees intel: everyone signed in (user, 2026-11-12), never anyone else: sourcekeys.may_see_context() (the
-verified sign-in gate, the same as context traffic), on the API and in the console's state.
+verified sign-in gate, the same as context traffic), on the API and in the console's state. The Intel page's list
+(GET /api/cad/intel/list, sizeup/intel/eventlog.py): every event at every level and status, the same gate.
 """
 
 from __future__ import annotations
@@ -111,8 +112,10 @@ def _model_status(eng) -> dict:
 
 class IntelAdmin:
     def __init__(self, cad, engine):
+        from sizeup.intel.eventlog import IntelLog
         self.cad, self.engine = cad, engine
         self._state = None
+        self.eventlog = IntelLog(cad, engine)
 
     # -- reading ----------------------------------------------------------------------------------------------------
 
@@ -200,6 +203,12 @@ class IntelAdmin:
             args += [s, n, w, e]
         rows = self.engine.events.rows(" AND ".join(where), args, limit) if hasattr(self.engine.events, "rows") else []
         return {"events": [self.shown(r) for r in rows], "now": now, "ruleset_hash": self.engine.ruleset_hash()}
+
+    def listing(self, q: dict, operator: str = "") -> dict:
+        """GET /api/cad/intel/list: the Intel page (sizeup/intel/eventlog.py), anyone signed in."""
+        if not sourcekeys.may_see_context(self.cad.comms.context_broadcast) or not hasattr(self.engine.events, "rows"):
+            raise CadError("intel needs a sign-in")
+        return self.eventlog.list(q, operator)
 
     def shown(self, e: dict) -> dict:
         """An event as the console and the map read it (no transcript text: the rows play from their ids)."""

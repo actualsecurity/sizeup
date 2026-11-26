@@ -421,8 +421,8 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
     if not rows:
         raise NotFound(f"no radio pre-alert {pid}")
     e = cad.intel_admin.shown(rows[0])
-    if not admin and e["mode"] not in ("map", "push"):          # shadow and log: rules being tuned, the admins' only
-        raise NotFound(f"no radio pre-alert {pid}")
+    # every level for anyone signed in (the Intel page's rows open here: admin, 2026-11-25, "view these intel events
+    # even if they do not trigger"); the rule phrases and the hits of rules being tuned stay the admins' (shown_rule)
     raw = rows[0]
     fired = {str(r[0]) for r in e["rules"] or []}
     ids = list(raw["traffic_ids"])[-CAP["trigger"]:]
@@ -540,7 +540,7 @@ def _model(cad, eid) -> dict | None:
 
 def build(cad, kind: str, pid: int, *, admin: bool = False, may: str = "viewer", now: float | None = None,
           windows: dict | None = None) -> dict:
-    """The bundle for one pre-alert (the module doc). admin: rule phrases and shadow / log events; may: the reader's
+    """The bundle for one pre-alert (the module doc). admin: rule phrases and every rule's hits; may: the reader's
     standing for address notes and pre-plan points (premise.py / preplan.py visibility)."""
     if kind not in KINDS:
         raise NotFound(f"kind: one of {', '.join(KINDS)}")

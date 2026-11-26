@@ -28,6 +28,8 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
     <button id="dispatch-open" class="tab" type="button" title="The open incident"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-dispatch"/></svg><span class="lbl">Incident</span></button>
     <a id="radio-open" class="tab" href="#radio" title="All transmissions"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-radio"/></svg><span class="lbl">Radio</span></a>
     <a id="search-open" class="tab" href="#search" title="Past calls: address, type, unit, words; address notes"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-search"/></svg><span class="lbl">Search</span></a>
+    <!-- every radio intel event, pushed or not, and why (intel-page.js): signed-in viewers (cad.js shows it with the state's intel) -->
+    <a id="intel-open" class="tab" href="#intel" title="Radio intel events: every level, pushed or not, and why" hidden><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-intel"/></svg><span class="lbl">Intel</span></a>
     <a id="settings-open" class="tab" href="#settings" title="Settings"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-settings"/></svg><span class="lbl">Settings</span></a>
   </nav>
   <span id="conn" class="pill warn">Connecting</span>
@@ -70,7 +72,8 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
   <aside class="queue">
     <button id="new-incident" class="primary wide lg" title="New incident (N)"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-plus"/></svg>New incident</button>
     <section>
-      <div class="q-head"><h2 title="Pages to accept or dismiss">60 Control</h2><span id="tapout" class="tapout" hidden></span></div>
+      <div class="q-head"><h2 title="Pages to accept or dismiss">60 Control</h2><span id="tapout" class="tapout" hidden></span>
+        <a id="q-intel-all" class="nav mini quiet q-intel-all" href="#intel" title="Every intel event, pushed or not (the Intel page)" hidden><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-intel"/></svg><span class="lbl">Intel</span></a></div>
       <ol id="q-incoming" class="pa-list" hidden aria-live="assertive" aria-label="Possible incoming"></ol>
       <ol id="q-intel" class="pa-list" hidden aria-live="polite" aria-label="Radio pre-alerts"></ol>
       <ol id="q-airport" class="pa-list" hidden aria-live="assertive" aria-label="Airport pre-alerts"></ol>
@@ -269,6 +272,32 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
           <div id="sv-pp-docs" class="pp-box" hidden aria-label="Site documents"></div>
         </div>
       </div>
+    </div>
+
+    <!-- Intel (intel-page.js, /cad#intel?level=&category=&source=&system=&decided=&held=&status=&from=&to=&page=): every
+         radio intel event at every level and status, and why it didn't push; paged on the hub (GET /api/cad/intel/list) -->
+    <div id="intel-view" class="il-view" hidden>
+      <div class="view-head">
+        <h2 class="view-title">Intel</h2>
+        <span id="il-count" class="dim small" aria-live="polite"></span>
+      </div>
+      <form id="il-filters" class="rv-filters il-filters" autocomplete="off" role="search">
+        <select id="il-level" aria-label="Level" title="Level: pushed, held at push, map, log, shadow"><option value="">Any level</option>
+          <option value="push">push</option><option value="held">held</option><option value="map">map</option><option value="log">log</option><option value="shadow">shadow</option></select>
+        <select id="il-category" aria-label="Category"><option value="">Any category</option></select>
+        <select id="il-source" aria-label="Source or system"><option value="">Any source</option></select>
+        <select id="il-decided" aria-label="Decided by" title="Decided by its rules, the model, or both"><option value="">Rules or model</option>
+          <option value="rules">Rules</option><option value="model">Model</option><option value="both">Rules + model</option></select>
+        <select id="il-held" aria-label="Not pushed because" title="Why it didn't push"><option value="">Any reason</option></select>
+        <select id="il-status" aria-label="Status"><option value="">Any status</option>
+          <option value="open">open</option><option value="ended">ended</option><option value="expired">expired</option><option value="dismissed">dismissed</option></select>
+        <label class="inline" title="From this day (default: the last 24 h)"><span class="dim">From</span> <input id="il-from" type="date"></label>
+        <label class="inline" title="To the end of this day"><span class="dim">To</span> <input id="il-to" type="date"></label>
+        <button id="il-clear" type="button">Clear</button>
+      </form>
+      <div class="tscroll"><table class="evtable db il-table"><thead><tr><th>Time</th><th>Category</th><th>Level</th><th>Source</th><th>Place</th><th>Score</th><th>Not pushed</th><th><span class="sr-only">Feedback</span></th></tr></thead>
+        <tbody id="il-rows"></tbody></table></div>
+      <div class="sv-pager row"><button id="il-prev" type="button" class="sm">Newer</button><span id="il-page" class="dim small"></span><button id="il-next" type="button" class="sm">Older</button></div>
     </div>
 
     <!-- A pre-alert's More info (prealert-info.js, /cad#prealert/<kind>/<id>): its context bundle (sizeup/context_bundle.py):
@@ -840,6 +869,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/addr-history.js"></script>
 <script src="/static/search-view.js"></script>
 <script src="/static/prealert-info.js"></script>
+<script src="/static/intel-page.js"></script>
 <script src="/static/preplan.js"></script>
 <script src="/static/bldg-highlight.js"></script>
 <script src="/static/hydrants.js"></script>
