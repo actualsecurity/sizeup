@@ -268,6 +268,9 @@ def test_a_restarting_station_hands_everything_waiting_to_the_pool_and_nothing_i
         st = station(station_cfg(tmp_path, hub.url), {3: "whisper heard this"})
         hold = Hold()
         st.stt.client = hold
+        assert call(hub.url + "/api/cad/settings/channels", "POST", {"action": "set", "key": "FG1", "engine": "local"},
+                    token=None)[0] == 200                   # (FG1 on the station's whisper, #896: its engine says so)
+        assert wait(lambda: st.channel_pref("FG1")["engine"] == "local", 15)
         st._hub_aws = {"ok": False}                         # (FG1 on the station's whisper: AWS can't)
         # the station has heard the hub's word that one GPU worker is idle and quick (the hand-over's budget is that
         # word, not the room for context clips: waiting for the room alone let it hand over none)

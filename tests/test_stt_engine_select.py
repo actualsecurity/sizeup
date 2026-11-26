@@ -5,6 +5,7 @@ only, never AWS."""
 
 from __future__ import annotations
 
+import json
 import time
 import pytest
 
@@ -47,8 +48,8 @@ def test_migration_rewrites_nothing_and_an_old_station_gets_the_nearest_old_engi
                    "tg:301": {"engine": "both", "transcribe": True}}
     channels.check_map(old)                                                 # (what an old station's check takes)
     assert all(sttroute.legacy(e) == e for e in ("local", "aws", "both"))   # the old ones: untouched
-    # the defaults stay today's (South 2, FG1, FG2, Fire/EMS 15 on the legacy AWS): nothing moves until an admin picks
-    assert channels.defaults("FG1")["engine"] == "aws" and channels.defaults("tg:999")["engine"] == "local"
+    # the [stt] aws_channels default is pinned AWS (#896: "aws" is never the default nor stored again)
+    assert channels.defaults("FG1")["engine"] == "pin:aws" and channels.defaults("tg:999")["engine"] == "local"
     assert sttroute.mode_label("aws") == "AWS" and sttroute.mode_label("pin:aws") == "pinned AWS"
     assert sttroute.mode_label("auto") == "auto·priority" and sttroute.mode_label("pin:station:north") == "pinned north"
 
@@ -62,7 +63,7 @@ def test_a_route_says_the_way_the_text_went():
     r2.note("AWS", "the monthly limit reached")
     assert r2.text("station north") == ("auto·priority: GPU → AWS → station north (GPU: no GPU worker online; "
                                         "AWS: the monthly limit reached)")
-    assert Route("pinned gpu-pc").text("gpu-pc") == "pinned gpu-pc: gpu-pc"
+    assert Route("pinned gpu-pc").text("gpu-pc") == "pinned gpu-pc"
     rs = Routes()
     rs.start("c1", "auto·priority")
     rs.note("c1", "gpu-pc", "gpu-pc busy (background)")
@@ -295,8 +296,6 @@ def test_auto_priority_gpu_first_then_aws_then_the_station_each_said_on_its_rout
     try:
         _set(hub, "FG1", "auto")
         token = hub.app.hub.workers.add("gpu-1", "Test box")
-        # every class switch off: Auto · priority goes to the GPU whatever they say (the channel's choice wins)
-        hub.app.hub.workers.set_pool(classes={sttpool.class_key(c): False for c in sttpool.CLASSES})
         w = FakeWorker(hub.url, token, wait_s=20.0).start()
         assert wait(lambda: hub.app.sttpool.ready_forced(URGENT)[0], 5)
         send(hub, pending_event("FG1-1"))
@@ -329,24 +328,20 @@ def test_auto_priority_gpu_first_then_aws_then_the_station_each_said_on_its_rout
         fake.close()
 
 
-def test_pinned_aws_is_aws_and_the_legacy_aws_keeps_its_gpu_first_by_class(tmp_path):
+def test_pinned_aws_is_aws_and_the_default_is_pinned_aws(tmp_path):
     fake = FakeTranscribe(phrases={500: AWS_TEXT})
     hub = _hub(tmp_path, fake)
     token = hub.app.hub.workers.add("gpu-1")
     w = FakeWorker(hub.url, token, wait_s=20.0).start()
     try:
-        assert wait(lambda: hub.app.sttpool.ready(URGENT, gpu_only=True)[0], 5)   # every class on (the default)
-        # the legacy "aws" (FG1's default, never rewritten): a GPU first where its class is on, as before the selector
-        assert hub.app.channel_pref("FG1")["engine"] == "aws"
-        send(hub, pending_event("FG1-4"))
-        assert wait(lambda: _row(hub, "FG1-4").get("text") == GPU_TEXT, 30), _row(hub, "FG1-4")
-        # pinned AWS: AWS, with that same worker idle and every class on
-        _set(hub, "FG1", "pin:aws")
-        time.sleep(0.2)
+        assert wait(lambda: hub.app.sttpool.ready_forced(URGENT)[0], 5)
+        # FG1's default ([stt] aws_channels): pinned AWS (#896): AWS with a GPU worker idle, no class switch to say else
+        assert hub.app.channel_pref("FG1")["engine"] == "pin:aws"
         send(hub, pending_event("FG1-5", seq=2))
         assert wait(lambda: _row(hub, "FG1-5").get("text") == AWS_TEXT + ".", 30), _row(hub, "FG1-5")
-        assert len(w.jobs) == 1
-        assert wait(lambda: _row(hub, "FG1-5").get("stt_route") == "pinned AWS: AWS", 5)
+        assert not w.jobs
+        assert wait(lambda: _row(hub, "FG1-5").get("stt_route") == "pinned AWS", 5), _row(hub, "FG1-5")
+        assert hub.app.stt_chosen("FG1-5") == "AWS"
         # pinned AWS with AWS out: the GPU then (never dropped)
         assert hub_post(hub, "stt", {"action": "set", "key": "aws_monthly_limit_usd", "value": 0})[0] == 200
         time.sleep(0.2)
@@ -354,11 +349,70 @@ def test_pinned_aws_is_aws_and_the_legacy_aws_keeps_its_gpu_first_by_class(tmp_p
         assert wait(lambda: _row(hub, "FG1-6").get("text") == GPU_TEXT, 30), _row(hub, "FG1-6")
         assert wait(lambda: _row(hub, "FG1-6").get("stt_route", "").startswith("pinned AWS: AWS → gpu-1 (AWS: "), 5), \
             _row(hub, "FG1-6")
+        assert hub.app.stt_chosen("FG1-6") == "GPU"
     finally:
         w.close()
         hub.close()
         fake.close()
 
+
+def test_no_class_switch_decides_where_a_clip_goes_only_its_channels_engine(tmp_path):
+    fake = FakeTranscribe(phrases={500: AWS_TEXT})
+    hub = _hub(tmp_path, fake)
+    token = hub.app.hub.workers.add("gpu-1")
+    w = FakeWorker(hub.url, token, wait_s=20.0).start()
+    try:
+        reg = hub.app.hub.workers
+        with pytest.raises(Exception, match="classes: gone"):
+            reg.set_pool(classes={"urgent": False})
+        reg.mdb.put("stt_pool", '{"on": true, "classes": {"urgent": false, "high": false, "live": false}}')  # (an old one)
+        assert set(reg.pool_settings()) == {"on", "stations"}
+        assert reg.enabled(sttpool.URGENT) and reg.enabled(sttpool.CATCHUP)     # (the same for every class)
+        assert wait(lambda: hub.app.sttpool.ready_forced(URGENT)[0], 5)
+        _set(hub, "FG1", "auto")                                 # Auto: the GPU, whatever an old saved switch said
+        send(hub, pending_event("FG1-a"))
+        assert wait(lambda: _row(hub, "FG1-a").get("text") == GPU_TEXT, 30), _row(hub, "FG1-a")
+        _set(hub, "FG1", "pin:aws")                              # pinned AWS: AWS, whatever a switch once said
+        time.sleep(0.2)
+        send(hub, pending_event("FG1-b", seq=2))
+        assert wait(lambda: _row(hub, "FG1-b").get("text") == AWS_TEXT + ".", 30), _row(hub, "FG1-b")
+        assert [j["id"] for j in w.jobs] == ["FG1-a"]
+        # a Settings write of "aws" is pinned AWS: "aws" is never stored again
+        assert hub_post(hub, "channels", {"action": "set", "key": "tg:325", "engine": "aws"})[0] == 200
+        assert hub.app.channel_pref("tg:325")["engine"] == "pin:aws"
+    finally:
+        w.close()
+        hub.close()
+        fake.close()
+
+
+def test_the_migration_moves_aws_to_pinned_aws_once_audited(tmp_path):
+    fake = FakeTranscribe(phrases={500: AWS_TEXT})
+    hub = _hub(tmp_path, fake)
+    try:
+        ed = hub.app.cad.settings
+        first = json.loads(ed.cad.store.meta_get(ed.ENGINE_MIGRATION))       # (the hub's start ran it: the defaults)
+        assert first["migrated"] == [] and "FG1" in first["default"]
+        before = len([r for r in ed.audit_log("radios") if "#896" in json.dumps(r)])
+        ed.cad.store.meta_put(ed.ENGINE_MIGRATION, "")                  # (as on a hub from before it)
+        from sizeup.cad.settings import REMOVE  # noqa: F401
+        ed._commit([("channels", "tg:325", {"engine": "aws"}), ("channels", "FG2", {"engine": "aws", "transcribe": True}),
+                    ("channels", "tg:400", {"engine": "local"}), ("channels", "tg:401", {"engine": "both"})], "test", [])
+        got = hub.app.migrate_engines()
+        assert got["migrated"] == ["FG2", "tg:325"] and got["default"] == ["FG1", "South 2", "p25:mrrs:9211", "tg:307"]
+        ov = ed.channel_overrides()
+        assert ov["tg:325"] == {"engine": "pin:aws"} and "FG2" not in ov       # (FG2: pinned AWS is its default now)
+        assert ov["tg:400"] == {"engine": "local"} and ov["tg:401"] == {"engine": "both"}     # (already pinned, Compare)
+        assert hub.app.channel_pref("FG2")["engine"] == "pin:aws" and hub.app.channel_pref("tg:325")["engine"] == "pin:aws"
+        audit = [r for r in ed.audit_log("radios") if "#896" in json.dumps(r)]
+        keys = sorted(str(r.get("key") or r.get("target") or "") for r in audit)
+        assert len(audit) - before == 6 and any("tg:325" in k for k in keys) and any("FG1" in k for k in keys), audit
+        assert hub.app.migrate_engines() is None                              # once
+        assert len([r for r in ed.audit_log("radios") if "#896" in json.dumps(r)]) - before == 6
+        assert json.loads(ed.cad.store.meta_get(ed.ENGINE_MIGRATION))["migrated"] == ["FG2", "tg:325"]
+    finally:
+        hub.close()
+        fake.close()
 
 def test_a_pinned_gpu_worker_falls_back_through_the_auto_order(tmp_path):
     fake = FakeTranscribe(phrases={500: AWS_TEXT})
@@ -462,11 +516,10 @@ def test_the_dropdown_shows_each_engine_by_id_with_its_live_state(tmp_path):
         e = hub.app.channels_state()["engines"]
         opts = {o["value"]: o for o in e["options"]}
         assert [o["value"] for o in e["options"]] == ["auto", "auto_bg", "local", "pin:gpu-2", "pin:gpu-pc", "pin:aws",
-                                                      "aws", "both"]
+                                                      "both"]                     # (no legacy "aws": #896)
         assert (opts["pin:gpu-pc"]["label"], opts["pin:gpu-pc"]["state"], opts["pin:gpu-pc"]["ok"]) == ("gpu-pc", "gaming", False)
         assert (opts["pin:gpu-2"]["state"], opts["pin:gpu-2"]["ok"]) == ("online", True)
         assert opts["pin:aws"]["label"] == "AWS" and opts["pin:aws"]["state"] == "$25 left" and opts["pin:aws"]["ok"]
-        assert opts["aws"]["legacy"] and opts["aws"]["label"] == "AWS · GPU by class"
         assert opts["auto"]["state"] == "gpu-2" and opts["local"]["state"] == "offline"
         assert opts["both"]["label"] == "Compare"
         hub.app.hub.status = {"health": {"stt_queue": {"queued": 3}}}

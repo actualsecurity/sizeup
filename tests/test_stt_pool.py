@@ -21,7 +21,7 @@ from sizeup.stt import CATCHUP, CONTEXT, HIGH, LIVE, LOW, RERUN, URGENT
 from sizeup.sttpool import BUDGETS, Job, Pool
 from tests.fake_transcribe import FakeTranscribe
 from tests.test_app import voice, wait
-from tests.test_channels import AWS_TEXT, aws_cfg, fake_aws  # noqa: F401 (the fixture: test credentials only)
+from tests.test_channels import AWS_TEXT, aws_cfg, fake_aws, hub_post  # noqa: F401 (the fixture: test credentials only)
 from tests.test_cloud import TOKEN, HubRun, all_traffic, call, fm_segment, hub_cfg, station, station_cfg
 
 GPU_TEXT = "Engine 99 on location per the GPU"
@@ -437,6 +437,13 @@ def pending_event(tid, seq=1, source="FG1", seconds=3.0):
             "audio": base64.b64encode(wav_bytes((voice(seconds)[::2] * 32767).astype(np.int16), 8000)).decode()}
 
 
+def auto(hub, *keys):
+    """These channels on Auto · priority (#875): a GPU worker first. Since #896 a channel's engine alone sends its clips
+    to the pool (FG1, South 2: pinned AWS by default)."""
+    for k in keys:
+        assert hub_post(hub, "channels", {"action": "set", "key": k, "engine": "auto"})[0] == 200
+
+
 def row(hub, tid):
     return hub.app.cad.store.one("SELECT text, status, model, alt_text FROM radio_traffic WHERE id = ?", (tid,)) or {}
 
@@ -463,7 +470,7 @@ def test_with_no_worker_added_an_aws_clip_goes_to_aws_as_before_and_the_pool_is_
         send(hub, pending_event("FG1-1"))
         assert wait(lambda: row(hub, "FG1-1").get("text") == AWS_TEXT + ".", 20)
         assert row(hub, "FG1-1")["model"] == "aws-transcribe"
-        assert hub.app.sttpool.submitted == 0 and asked and hub.app.hub.workers.any() is False
+        assert hub.app.sttpool.submitted == 0 and not asked and hub.app.hub.workers.any() is False
         db = sqlite3.connect(Path(hub.app.cfg.cad_db).parent / "hub.sqlite")
         assert "stt_workers" not in {r[0] for r in db.execute("SELECT name FROM sqlite_master")}   # nothing made
         assert wait(lambda: hub.app.stt_runs.of("FG1-1"), 5)   # (written just after the text)
@@ -482,7 +489,8 @@ def test_a_ready_worker_transcribes_an_aws_clip_and_the_run_is_kept_with_its_wor
     token = hub.app.hub.workers.add("gpu-1", "Test box")
     w = FakeWorker(hub.url, token).start()
     try:
-        assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
+        auto(hub, "FG1")
+        assert wait(lambda: hub.app.sttpool.ready_forced(URGENT)[0], 5)
         send(hub, pending_event("FG1-2"))
         assert wait(lambda: row(hub, "FG1-2").get("text") == GPU_TEXT, 30), row(hub, "FG1-2")
         r = row(hub, "FG1-2")
@@ -522,7 +530,8 @@ def test_a_worker_that_vanishes_mid_job_costs_seconds_and_aws_gives_the_text(tmp
     token = hub.app.hub.workers.add("gpu-1")
     w = FakeWorker(hub.url, token, mode="vanish", wait_s=20.0).start()
     try:
-        assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
+        auto(hub, "FG1")
+        assert wait(lambda: hub.app.sttpool.ready_forced(URGENT)[0], 5)
         send(hub, pending_event("FG1-3"))
         assert wait(lambda: w.jobs, 5)
         assert row(hub, "FG1-3")["status"] == "pending"
@@ -564,7 +573,8 @@ def test_a_worker_handing_back_goes_to_aws_at_once(tmp_path, quick):
     token = hub.app.hub.workers.add("gpu-1")
     w = FakeWorker(hub.url, token, mode="release").start()
     try:
-        assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
+        auto(hub, "FG1")
+        assert wait(lambda: hub.app.sttpool.ready_forced(URGENT)[0], 5)
         send(hub, pending_event("FG1-5"))
         assert wait(lambda: row(hub, "FG1-5").get("text") == AWS_TEXT + ".", 20)
         assert w.answers[0][0] == 200 and hub.app.sttpool.stats()["fallbacks"]["released"] == 1
@@ -637,7 +647,7 @@ def test_worker_routes_refuse_bad_tokens_and_station_tokens_and_a_worker_token_o
         hub.close()
 
 
-def test_the_pool_switches_turn_classes_off_and_the_pool_off(tmp_path):
+def test_the_pool_has_its_on_switch_and_no_class_switches_any_more(tmp_path):
     hub = HubRun(hub_cfg(tmp_path))
     try:
         reg = hub.app.hub.workers
@@ -645,16 +655,14 @@ def test_the_pool_switches_turn_classes_off_and_the_pool_off(tmp_path):
         reg.add("gpu-1")
         assert reg.enabled(URGENT) and reg.enabled(CATCHUP)
         notes = []
-        reg.act({"action": "pool", "classes": {"urgent": False}}, "admin", lambda k, o, n: notes.append((k, o, n)))
-        assert not reg.enabled(URGENT) and reg.enabled(LIVE)
+        with pytest.raises(ValueError, match="classes: gone"):   # (#896: a channel's engine decides where its clips go)
+            reg.act({"action": "pool", "classes": {"urgent": False}}, "admin", lambda k, o, n: notes.append((k, o, n)))
+        assert reg.enabled(URGENT) and notes == []
         reg.act({"action": "pool", "on": False}, "admin", lambda k, o, n: notes.append((k, o, n)))
-        assert not reg.enabled(LIVE) and notes == [("stt workers/pool/urgent", "on", "off"), ("stt workers/pool", "on", "off")]
-        assert reg.pool_settings()["stations"] == {}
-        with pytest.raises(ValueError):
-            reg.act({"action": "pool", "classes": {"nope": True}})
+        assert not reg.enabled(LIVE) and notes == [("stt workers/pool", "on", "off")]
+        assert reg.pool_settings() == {"on": False, "stations": {}}
     finally:
         hub.close()
-
 
 def test_admins_add_rotate_and_revoke_workers_audited_without_a_token(tmp_path):
     from sizeup.cad.api import ADMIN_READS, CadApi, needs
@@ -886,7 +894,8 @@ def test_a_page_goes_through_a_worker_end_to_end_and_its_dispatch_is_read(tmp_pa
     token = hub.app.hub.workers.add("gpu-1")
     w = FakeWorker(hub.url, token, text="Port Chester engine 99 respond to a structure fire").start()
     try:
-        assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
+        auto(hub, "South 2")
+        assert wait(lambda: hub.app.sttpool.ready_forced(URGENT)[0], 5)
         send(hub, _page_event("South_2-900"))
         page = lambda: next((p for p in hub.app.pages if p.id == "South_2-900"), None)   # noqa: E731
         assert wait(lambda: page() is not None and page().status == "done", 20)
@@ -908,7 +917,8 @@ def test_a_hub_restart_with_a_job_out_sends_it_the_aws_way(tmp_path):
     token = hub.app.hub.workers.add("gpu-1")
     w = FakeWorker(hub.url, token, mode="vanish", wait_s=20.0).start()
     try:
-        assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
+        auto(hub, "FG1")
+        assert wait(lambda: hub.app.sttpool.ready_forced(URGENT)[0], 5)
         send(hub, pending_event("FG1-77"))
         assert wait(lambda: w.jobs, 10)                        # a worker has it ... and the hub goes down
         w.close()

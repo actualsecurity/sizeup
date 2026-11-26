@@ -16,7 +16,7 @@ from tests.fake_transcribe import FakeTranscribe
 from tests.test_app import wait
 from tests.test_channels import AWS_TEXT, aws_cfg, fake_aws  # noqa: F401 (the fixture: test credentials only)
 from tests.test_cloud import HubRun, hub_cfg
-from tests.test_stt_pool import FakeWorker, pending_event, send
+from tests.test_stt_pool import FakeWorker, auto, pending_event, send
 
 # whisper's decoder stuck on a phrase: a few words, then the same three again and again (a 2 s clip)
 LOOP = "So then we were" + " out of the" * 60
@@ -129,7 +129,8 @@ def test_a_gpu_workers_loop_is_unclear_never_the_text_and_aws_is_asked_once(tmp_
     real = hub.app.aws.submit
     hub.app.aws.submit = lambda key, job, pcm: asked.append((job.id, job.rerun)) or real(key, job, pcm)
     try:
-        assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
+        auto(hub, "FG1")                                   # (a GPU worker first: Auto · priority, #896)
+        assert wait(lambda: hub.app.sttpool.ready_forced(URGENT)[0], 5)
         send(hub, pending_event("FG1-9", seconds=2.0))
         # the worker's loop lands unclear: no text, its words apart, then AWS's answer (asked once) is the text
         assert wait(lambda: row(hub, "FG1-9").get("text") == AWS_TEXT + ".", 30), row(hub, "FG1-9")

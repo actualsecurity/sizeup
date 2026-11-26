@@ -1459,6 +1459,7 @@ class HubApp(App):
     def _aws_start(self, item, pcm, key: str) -> None:
         if self._pool_first(item, pcm, key):       # a GPU worker ready (#639): it first, AWS if it can't
             return
+        self.stt_routes.choose(item.id, "AWS" if self.aws is not None and self.aws.available(key)[0] else "station")
         self._aws_since[item.id] = time.time()
         self._aws_asked.pop(item.id, None)
         super()._aws_start(item, pcm, key)
@@ -1563,6 +1564,7 @@ class HubApp(App):
             return
         if not why.startswith(("GPU worker: ", "pool: ")):     # (said on its route already)
             self.stt_routes.note(job.id, "AWS", why)
+        self.stt_routes.choose(job.id, "station")
         self._aws_asked[job.id] = time.time()      # (the sweep: no text from the station either -> failed)
         self._stt_state(job.page if job.kind == "page" and job.page is not None else self._find(job.id)[0], job.id,
                         "pending", f"{WHISPER_FALLBACK_STATION} (AWS failed: {why[:80]})")
@@ -1796,14 +1798,14 @@ class HubApp(App):
     def _hub_engine(self, key: str) -> str:
         """The channel's engine as the hub routes a clip the station handed over (sizeup/sttroute.py): its choice, a
         promoted channel's (sizeup/cad/opchannel.py, an intel pre-alert's) Auto · background as Auto · priority and its
-        Local as AWS (App.stt_engine)."""
+        Local as AWS (App.stt_engine). "aws" (an old station's word, a promoted Local) is pinned AWS (#896)."""
         try:
             eng = str(self.channel_pref(key).get("engine") or "local")
-        except Exception:  # noqa: BLE001 - a channel the hub can't place: AWS, as before
-            return "aws"
+        except Exception:  # noqa: BLE001 - a channel the hub can't place: pinned AWS
+            return sttroute.PIN_AWS
         if eng in ("local", sttroute.AUTO_BG) and key in self.promoted_keys():
-            return "aws" if eng == "local" else sttroute.AUTO
-        return eng
+            eng = "aws" if eng == "local" else sttroute.AUTO
+        return sttroute.PIN_AWS if eng == "aws" else eng
 
     def _guard_avoid(self) -> dict:
         """{GPU worker: why} the latency guard keeps priority clips off now (#878; a probe due: not in it)."""
@@ -1815,42 +1817,19 @@ class HubApp(App):
         return out
 
     def _pool_first(self, item, pcm, key: str) -> bool:
-        """An AWS-channel clip to a GPU worker first (it is shown as transcribing; AWS, then the station's whisper, if
-        no worker gives its text in time). False: the pool can't take it now (no worker ready, off for its class, too
-        busy to beat its wait): the caller goes the AWS way, nothing changed. A channel on the engine selector's own
-        engines (Auto, pinned: sizeup/sttroute.py) goes its own order (_engine_first)."""
+        """A clip the station handed over the AWS way, routed by its channel's engine alone (#896, sizeup/sttroute.py:
+        _engine_first). True: on its way (a GPU worker, its station's whisper); False: the caller goes on to AWS (its
+        budget and reserve rules), then the station's whisper. The pool's per-class switches are gone: no second
+        place decides where a clip goes."""
         if getattr(self, "sttpool", None) is None:
             return False
         eng = self._hub_engine(key)
-        if sttroute.is_new(eng):
-            return pcm is not None and self._engine_first(item, pcm, key, eng)
-        self.stt_routes.start(item.id, sttroute.mode_label("aws"))
+        if not sttroute.is_new(eng):              # ("local" or "both" can't come this way: AWS as pinned)
+            eng = sttroute.PIN_AWS
         if pcm is None:
+            self.stt_routes.start(item.id, sttroute.mode_label(eng))
             return False
-        cls = self._pool_class(item, key)
-        if not self.sttpool.ready(cls, gpu_only=True)[0]:     # (an AWS channel's: never a station's slower whisper)
-            return False
-        page = None if isinstance(item, Traffic) else item
-        item.status, item.raw, item.confidence, item.model = "pending", "", None, sttpool.PENDING_MODEL
-        item.stt = "aws"                          # (still waiting for the AWS path: the sweep and a restart know it)
-        if page is None:
-            item.__dict__.pop("transcript_pending", None)
-            self._transcribed(item)
-        else:
-            self._save_page(item)
-            self._stt_row(item.id, "pending", sttpool.PENDING_MODEL)
-        try:                                      # (its vocab_v: the term list in this very prompt, or none)
-            prompt, vocab_v = self._prompt_v(item)
-        except Exception:  # noqa: BLE001 - no prompt is still a transcript
-            prompt, vocab_v = "", ""
-        job = sttpool.Job(item.id, cls, key, "page" if page is not None else "traffic", len(pcm) / 8000.0,
-                          audio_wait=True, audio=self._pool_audio_of(item.id, page, pcm), on_done=self._pool_done,
-                          on_fallback=self._pool_fallback, prompt=prompt, clip_end=self._hub_time(getattr(item, "end", None)),
-                          gpu_only=True, extra={"pcm": pcm, "page": page, "vocab_v": vocab_v})
-        if not self.sttpool.submit(job):          # not ready any more in between: the AWS way, the row shown already
-            self._pool_to_aws(job, "the GPU pool couldn't take it")
-        self.sync()
-        return True
+        return self._engine_first(item, pcm, key, eng)
 
     def _engine_first(self, item, pcm, key: str, eng: str) -> bool:
         """A clip of a channel on Auto · priority or a pinned engine (sizeup/sttroute.py), handed over by its station:
@@ -1942,6 +1921,7 @@ class HubApp(App):
         _bg_asked). The station can't: left for the catch-up (skipped, never dropped)."""
         from sizeup.stt import SHED
         self._bg_asked[cid] = time.time()
+        self.stt_routes.choose(cid, "station")
         while len(self._bg_asked) > 2000:
             self._bg_asked.pop(next(iter(self._bg_asked)))
 
@@ -1983,8 +1963,14 @@ class HubApp(App):
             self._stt_row(item.id, "pending", sttpool.PENDING_MODEL)
         if not self.sttpool.submit(job):
             return False
+        self.stt_routes.choose(item.id, (kw.get("pin") or "GPU").removeprefix(STATION_PREFIX))
         self.sync()
         return True
+
+    def stt_chosen(self, cid: str) -> str:
+        """The engine the route chose for this clip now (sizeup/sttroute.py Routes.chosen): a retext from another engine
+        is provisional while this one's text is still to come."""
+        return self.stt_routes.chosen(cid)
 
     def _pool_audio_of(self, cid: str, page, pcm):
         """A pool job's audio, read when its worker asks (on that request's thread, never the events'): the station's
@@ -2186,6 +2172,7 @@ class HubApp(App):
         self._aws_since[job.id] = time.time()
         self._aws_asked.pop(job.id, None)
         self._stt_state(item, job.id, "pending", channels_model())
+        self.stt_routes.choose(job.id, "AWS")
         self.aws.submit(job.channel, aws_job, job.extra["pcm"])
         self.sync()
 
@@ -2452,11 +2439,6 @@ class HubApp(App):
         opts.append({"value": sttroute.PIN_AWS, "label": "AWS", "state": aws_state, "ok": aws_ok,
                      "title": "Pinned: Amazon Transcribe; a GPU worker only once AWS can't take the clip, then the "
                               "station's whisper\n" + aws_title})
-        # today's "AWS" (legacy): kept as it was, shown only on a channel still on it (radio-controls.js)
-        opts.append({"value": "aws", "label": "AWS · GPU by class", "state": aws_state, "ok": aws_ok, "legacy": True,
-                     "title": "Legacy AWS, as before the selector: a GPU worker first where the pool's switch for the "
-                              "clip's class is on (Settings > Station > STT workers), else AWS, else the station's "
-                              "whisper. Pick AWS (pinned) for AWS only, or Auto\n" + aws_title})
         opts.append({"value": "both", "label": "Compare", "state": "station + AWS", "ok": True,
                      "title": "The station's whisper and AWS on every clip: AWS's text shown, whisper's kept (⇄)"})
         st_ch = _part(self.hub.status, "channels") or {}
@@ -3238,6 +3220,7 @@ class HubApp(App):
             self._renaming.release()
 
     def start(self) -> HubApp:
+        self.migrate_engines()                    # (#896: the engine selector's one-time migration, audited)
         threading.Thread(target=self._hub_janitor, name="hub-janitor", daemon=True).start()
         threading.Thread(target=self._audio_uploader, name="audio-uploader", daemon=True).start()
         threading.Thread(target=self._metrics_backup, name="metrics-backup", daemon=True).start()

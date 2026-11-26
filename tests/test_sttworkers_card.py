@@ -33,7 +33,7 @@ class FakeHealth:
 
     def panel(self):
         now = time.time()
-        pool = {"active": True, "settings": {"on": True, "classes": {}}, "ready": 1, "queued": 2, "leased": 1,
+        pool = {"active": True, "settings": {"on": True}, "ready": 1, "queued": 2, "leased": 1,
                 "queued_by_class": {"low": 2}, "done_h": 412, "p50_s": 0.7, "p90_s": 1.9,
                 "fallbacks": {"unclaimed": 3, "lease": 1, "released": 0, "no_worker": 0, "error": 0}, "refused_late": 1,
                 "workers": [{"id": "gpu-1", "state": "online", "model": "ggml-large-v3-turbo-q5_0.bin",
@@ -77,7 +77,7 @@ def shot(pg, sel, name):
         pg.locator(sel).screenshot(path=str(Path(SHOTS) / f"{name}.png"))
 
 
-def test_an_admin_adds_a_worker_sees_the_token_once_switches_a_class_and_revokes(site):
+def test_an_admin_adds_a_worker_sees_the_token_once_and_revokes_with_no_class_switches(site):
     pw, browser, pg = browser_page(site, CASEY)
     try:
         pg.goto(site.base + "/cad#settings/station/workers")
@@ -96,12 +96,9 @@ def test_an_admin_adds_a_worker_sees_the_token_once_switches_a_class_and_revokes
         pg.wait_for_function("!document.querySelector('#s-station-workers .notice.ok')")
         assert token not in pg.content()
         card.locator("td", has_text="online").wait_for()
-        card.locator("label", has_text="Shed clips (catch-up)").locator("input").uncheck()
-        pg.wait_for_function("() => true")
-        deadline = time.time() + 5
-        while site.reg.pool_settings()["classes"]["catchup"] and time.time() < deadline:
-            time.sleep(0.1)
-        assert site.reg.pool_settings()["classes"]["catchup"] is False
+        # no per-class switch any more (#896: a channel's engine decides where its clips go): the pool's own on alone
+        assert card.locator("label", has_text="Shed clips (catch-up)").count() == 0
+        assert card.locator("label.check").filter(has_text="Pool on").count() == 1
         shot(pg, "#s-station-workers", "sttworkers-list")
         card.locator("tr", has_text="Gaming PC").get_by_role("button", name="Revoke").click()
         pg.get_by_role("alertdialog").get_by_role("button", name="Revoke").click()

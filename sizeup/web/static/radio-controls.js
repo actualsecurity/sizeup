@@ -35,10 +35,10 @@ window.RadioControls = (() => {
                names: null, namesRev: null, namesBusy: false, renaming: "", namePending: new Map(),
                services: null, servicesRev: null, servicesBusy: false, svcPending: new Map(), svcWaiting: new Set() };
   // the engine selector (#875, sizeup/sttroute.py): the hub sends each option with its live state (channels.engines);
-  // this list without one (a station's own page, all-in-one). "aws": today's AWS (legacy), shown only on a channel on it
+  // this list without one (a station's own page, all-in-one). "aws" is never stored since #896: shown as pinned AWS
   const ENGINES = [["auto", "Auto · priority"], ["auto_bg", "Auto · background"], ["local", "Local"], ["pin:aws", "AWS"],
-                   ["aws", "AWS · GPU by class"], ["both", "Compare"]];
-  const LEGACY_ENGINES = new Set(["aws"]);
+                   ["both", "Compare"]];
+  const LEGACY_ENGINES = new Set();
   // Another P25 system's talkgroup has a tier instead of Record / Main / Transcribe (#409, sizeup/tiers.py)
   const TIERS = [["alert", "Alert"], ["text", "Transcribe"], ["record", "Record only"], ["off", "Off"], ["activity", "Activity only"]];
   const TIER_HELP = "Alert: recorded, transcribed, may raise a pre-alert.\nTranscribe: recorded and transcribed.\n"
@@ -47,7 +47,7 @@ window.RadioControls = (() => {
   const ENGINE_HELP = "Auto · priority: idle GPU worker → AWS → station whisper.\n"
     + "Auto · background: GPU with no priority work on it → station whisper → AWS last (its budget).\n"
     + "Pinned (a station, a GPU worker, AWS): that engine first, then Auto · priority's order.\n"
-    + "AWS · GPU by class: today's AWS (a GPU first where its class is on in the pool).\n"
+
     + "Compare: station whisper and AWS on every clip (\u21c4).\n"
     + "Grey: not available now (its fallback runs). Police: its own AWS limit.";
   const ro = () => typeof canDo === "function" && !canDo("admin");
@@ -1253,10 +1253,11 @@ window.RadioControls = (() => {
   function chan(key) {
     const c = (st.state && st.state.channels) || {};
     const p = { record: true, transcribe: !(c.record_only || []).includes(key),
-                engine: (c.aws_channels || []).includes(key) ? "aws" : "local",
+                engine: (c.aws_channels || []).includes(key) ? "pin:aws" : "local",
                 ...((c.prefs || {})[key] || {}) };
     const q = st.cpending.get(key);
     if (q) Object.assign(p, q.vals, { cpending: true });
+    if (p.engine === "aws") p.engine = "pin:aws";              // (#896: an "aws" not migrated yet is pinned AWS)
     // past the limit: the reserve channels keep AWS; police past its own limit: Local (radio-intel PR 3)
     const aws = (c.aws_ok || (c.aws_reserve || []).includes(key)) && !(c.aws_deny || []).includes(key);
     const own = !["local", "aws", "both"].includes(p.engine);    // the selector's: their own fallbacks
@@ -1276,7 +1277,7 @@ window.RadioControls = (() => {
     const c = (st.state && st.state.channels) || {};
     for (const [key, p] of st.cpending) {
       const saved = { record: true, transcribe: !(c.record_only || []).includes(key),
-                      engine: (c.aws_channels || []).includes(key) ? "aws" : "local",
+                      engine: (c.aws_channels || []).includes(key) ? "pin:aws" : "local",
                       ...((c.prefs || {})[key] || {}) };
       if (now > p.until || Object.entries(p.vals).every(([k, v]) => saved[k] === v)) st.cpending.delete(key);
     }

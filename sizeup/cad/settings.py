@@ -2445,6 +2445,37 @@ class Editor:
         f = getattr(ctx, "record_only", None)
         return tuple(f()) if callable(f) else channels_mod.DEFAULT_RECORD_ONLY
 
+    ENGINE_MIGRATION = "channels_engine_896"     # (cad meta) the one-time engine migration (#896) ran: when, what
+
+    def migrate_engines(self, op: str = "system: engine selector (#896)") -> dict | None:
+        """The one-time migration of #896, on the CAD of record's start: every channel's engine is the only thing that
+        decides where its audio goes. A stored "aws" (AWS, with a GPU worker first wherever the pool's class switch
+        was on) becomes "pin:aws" (AWS; a GPU worker only when AWS can't take a clip); a channel on the default
+        (the [stt] aws_channels: "aws" before, "pin:aws" now) is noted the same way. "local" is the channel's own
+        station pinned and "both" Compare already: unchanged. Each channel audited (Settings > Radios, operator op),
+        the counts kept in cad meta. Idempotent: once it ran (the meta says so), nothing. -> {migrated, default} the
+        first time, else None."""
+        store = self.cad.store
+        if store.meta_get(self.ENGINE_MIGRATION):
+            return None
+        ov = self.channel_overrides()
+        aws = self._aws_channels()
+        changes, audit = [], []
+        stored = sorted(k for k, v in ov.items() if isinstance(v, dict) and v.get("engine") == "aws")
+        for key in stored:
+            new = self._channel_value(key, {k: v for k, v in ov[key].items() if k != "engine"},
+                                      {"engine": channels_mod.PIN_AWS})
+            changes.append((channels_mod.SECTION, key, new))
+            audit.append(("radios", f"channel/{key}", {"engine": "aws"}, {"engine": channels_mod.PIN_AWS}))
+        default = sorted(k for k in aws if not (isinstance(ov.get(k), dict) and "engine" in ov[k]))
+        for key in default:
+            audit.append(("radios", f"channel/{key}", {"engine": "aws (default)"}, {"engine": "pin:aws (default)"}))
+        if audit:
+            self._commit(changes, op, audit)
+        out = {"migrated": stored, "default": default, "at": time.time()}
+        store.meta_put(self.ENGINE_MIGRATION, json.dumps(out))
+        return out
+
     def _channels_op(self, action: str, body: dict, op: str) -> dict:
         """set {key, record?, transcribe?, engine?} | set_many {keys, transcribe?, engine?} | reset {key}.
         A talkgroup's record goes to its own Record switch (the station's TalkgroupPrefs)."""
@@ -2458,6 +2489,8 @@ class Editor:
             keys = [body.get("key")] if action == "set" else body.get("keys")
             if not isinstance(keys, list) or not 1 <= len(keys) <= 2000:
                 raise CadError("keys: a list of channels")
+            if body.get("engine") == "aws":           # (#896: AWS is pinned AWS; "aws" is never stored again)
+                body = {**body, "engine": channels_mod.PIN_AWS}
             try:
                 vals = {k: channels_mod.clean(k, {f: body.get(f) for f in channels_mod.FIELDS}) for k in keys}
             except ValueError as e:

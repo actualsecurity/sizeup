@@ -11,8 +11,11 @@ Tokens
     Rotate              a new token; the old one works ROTATE_GRACE_S more (none after a revoke).
     Revoke              refused from its next request; what it holds falls back at once.
 
-The pool's switches (hub.sqlite meta "stt_pool", JSON): on (default on) and, per class, whether its clips go to the
-pool first (default all). With no active worker the pool is off whatever they say: nothing changes without one.
+The pool's switches (hub.sqlite meta "stt_pool", JSON): on (default on) and, per station, its whisper in the pool. With
+no active worker the pool is off whatever they say: nothing changes without one. Where a clip goes is its channel's
+engine alone (Settings > Radios > Channels, sizeup/sttroute.py, #896): the per-class switches that once sent a class to
+the pool first are gone (a saved one is ignored; a request to set one is refused), and no worker-side class opt-out
+replaces them.
 
 The worker API (every request: Authorization: Bearer sw1...; at the edge, a Cloudflare Access service token: best its
 own Access application scoped to /api/station/stt/*, so a worker's service token reaches nothing of the station's). JSON in and out; 401 {error, reason} for a token refused (no_token, token_unknown,
@@ -221,9 +224,8 @@ class WorkerRegistry:
     # -- the pool's switches --------------------------------------------------------------------------------------
 
     def pool_settings(self) -> dict:
-        """{on, stations, classes: {name: bool}}: the defaults (on, the stations' whisper in the pool, every class) with
-        what an admin changed."""
-        out = {"on": True, "stations": {}, "classes": {sttpool.class_key(c): True for c in sttpool.CLASSES}}
+        """{on, stations}: the defaults (on, no station's whisper in the pool) with what an admin changed."""
+        out = {"on": True, "stations": {}}
         try:
             saved = json.loads(self.mdb.get(META_POOL, "") or "{}")
         except ValueError:
@@ -233,16 +235,14 @@ class WorkerRegistry:
                 out["on"] = saved["on"]
             if isinstance(saved.get("stations"), dict):          # (station id -> its whisper in the pool; off by default)
                 out["stations"] = {str(k): v for k, v in saved["stations"].items() if isinstance(v, bool)}
-            for k, v in (saved.get("classes") or {}).items() if isinstance(saved.get("classes"), dict) else ():
-                if k in out["classes"] and isinstance(v, bool):
-                    out["classes"][k] = v
-        return out
+        return out                                            # (a saved "classes" from before #896: ignored)
 
-    def enabled(self, cls: float) -> bool:
-        """Do this class's clips go to the pool first now: the pool is on, the class is on, and a worker can be there (a
-        GPU worker added, or a station's whisper an admin put in the pool: #639 phase 2)."""
+    def enabled(self, cls: float = 0.0) -> bool:
+        """Can the pool take clips now: it is on and a worker can be there (a GPU worker added, or a station's whisper an
+        admin put in the pool: #639 phase 2). The same for every class (cls: kept for the pool's callers): a clip's
+        channel's engine decides whether it goes there (#896)."""
         s = self.pool_settings()
-        if not s["on"] or not s["classes"].get(sttpool.class_key(cls), False):
+        if not s["on"]:
             return False
         return any(s["stations"].values()) or self.any()
 
@@ -256,7 +256,9 @@ class WorkerRegistry:
 
     def set_pool(self, on=None, classes=None, stations=None) -> tuple[dict, dict]:
         old = self.pool_settings()
-        new = {"on": old["on"], "stations": dict(old["stations"]), "classes": dict(old["classes"])}
+        if classes is not None:
+            raise WorkerError("classes: gone: a channel's engine decides where its clips go (Settings > Radios > Channels)")
+        new = {"on": old["on"], "stations": dict(old["stations"])}
         if on is not None:
             if not isinstance(on, bool):
                 raise WorkerError("on: true or false")
@@ -266,13 +268,6 @@ class WorkerRegistry:
                                                          for k, v in stations.items()):
                 raise WorkerError("stations: {station id: true or false}")
             new["stations"] = {**old["stations"], **{k[:64]: v for k, v in stations.items()}}
-        if classes is not None:
-            if not isinstance(classes, dict):
-                raise WorkerError("classes: an object")
-            for k, v in classes.items():
-                if k not in new["classes"] or not isinstance(v, bool):
-                    raise WorkerError(f"classes: {', '.join(new['classes'])}, each true or false")
-                new["classes"][k] = v
         self.mdb.put(META_POOL, json.dumps(new, sort_keys=True))
         self._switched()
         return old, new
@@ -520,9 +515,6 @@ class WorkerRegistry:
                 was, now_ = bool(old["stations"].get(sid)), bool(new["stations"].get(sid))
                 if was != now_:
                     note(f"stt workers/pool/station {sid}", "on" if was else "off", "on" if now_ else "off")
-            for k, v in new["classes"].items():
-                if old["classes"].get(k) != v:
-                    note(f"stt workers/pool/{k}", "on" if old["classes"].get(k) else "off", "on" if v else "off")
             return {"ok": True, "pool": new}
         raise WorkerError("action: add, rename, rotate, revoke, llm, update or pool")
 
@@ -671,9 +663,8 @@ class WorkerApi:
             if path == API + "hello":
                 self.pool.seen(wid, state, model, d.get("gpu"), d.get("version") if isinstance(d.get("version"), str) else None,
                                kind=kind, load=load, update=su)
-                s = self.reg.pool_settings()
                 return _json(200, {"ok": True, "worker": wid, "poll_s": POLL_S, "pool_on": self._pool_on(),
-                                   "classes": [k for k, v in s["classes"].items() if v], **told})
+                                   "classes": [sttpool.class_key(c) for c in sttpool.CLASSES], **told})
             if path == API + "state":
                 self.pool.seen(wid, state, model, d.get("gpu"), d.get("version") if isinstance(d.get("version"), str) else None,
                                kind=kind, load=load, update=su)

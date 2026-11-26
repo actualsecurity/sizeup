@@ -3851,6 +3851,24 @@ class App:
                 log(f"channel choices: couldn't save the move from the old names ({type(e).__name__}: {e})")
         return out
 
+    def migrate_engines(self) -> dict | None:
+        """(the CAD of record's start) The engine selector's one-time migration (#896, Editor.migrate_engines): a
+        channel's engine alone decides where its audio goes, so "aws" becomes pinned AWS. Logged with its counts; never
+        in the way of starting."""
+        if self.forwarding():
+            return None
+        try:
+            got = self.cad.settings.migrate_engines()
+        except Exception as e:  # noqa: BLE001 - tried again at the next start
+            log(f"speech-to-text: the engine migration (#896) failed: {type(e).__name__}: {e}")
+            return None
+        if got is not None:
+            log(f"speech-to-text: engine migration (#896): {len(got['migrated'])} channel(s) set to AWS moved to pinned "
+                f"AWS ({', '.join(got['migrated']) or 'none'}); {len(got['default'])} on the default AWS, now pinned "
+                f"AWS ({', '.join(got['default']) or 'none'})")
+            self.channels_changed()
+        return got
+
     def channels_changed(self) -> None:
         self._chan_ov = self._channel_overrides()
         self._sq_ov = channels.norm_squelch(self.cad.settings.squelch_overrides())
@@ -5688,6 +5706,7 @@ class App:
                 "firehouses": fh, "categories": CATEGORIES}
 
     def start(self) -> App:
+        self.migrate_engines()                    # (#896: once, on the CAD of record; a station: nothing)
         self.whisper.start()
         if self.tts:
             self.tts.start()

@@ -1617,14 +1617,15 @@ Settings > Radios > Channels picks each channel's engine (a group heading's "Eng
 | Auto · background (`auto_bg`) | a GPU worker holding nothing, no priority work waiting, none in the last 3 s → the station's whisper (an idle one elsewhere when behind) → AWS last (the catch-up, within its budget) |
 | pinned (`pin:gpu-pc`, `pin:station:<id>`, `pin:aws`) | that engine → Auto · priority's order; pinned AWS uses a GPU worker only when AWS can't take the clip |
 | this station (`local`) | today's Local |
-| AWS · GPU by class (`aws`, legacy) | today's AWS: a GPU worker first where the pool's class switch is on, else AWS, else whisper |
 | Compare (`both`) | today's Both |
 
-- **Migration:** nothing is rewritten and nothing changes live. A channel on `aws` keeps today's behaviour and is
-  shown as the legacy option until an admin picks another.
-- **Precedence:** a channel's engine (Auto, pinned) wins over the pool's per-class switches. The class switches still
-  gate the legacy `aws` channels, the clips a station hands over when its whisper is behind, and the catch-up. The
-  pool's on/off switch holds for all of it.
+- **The engine alone decides (#896):** the pool's per-class switches (Settings > Station > STT workers) are gone, and
+  no worker-side class opt-out replaces them. A clip a station hands over when its whisper is behind goes its channel's
+  way; the catch-up goes Auto · background's way. The pool's on/off switch holds for all of it.
+- **Migration (once, audited):** on the CAD of record's first start with it (`Editor.migrate_engines`, cad meta
+  `channels_engine_896`), a stored `aws` becomes `pin:aws`, and the `[stt] aws_channels` default is `pin:aws`. Each
+  channel is in the Radios audit (operator "system: engine selector (#896)"); the log line has the counts. `aws` is
+  never stored again (a Settings write of it is `pin:aws`); a station from before the selector is still sent it.
 - **The station:** on Auto · priority or a pinned GPU worker it skips its whisper and sends the clip at once, as for
   AWS, while the hub's pool word says a GPU worker is ready (`gpu_ready`) or AWS can take it. Otherwise it runs its own
   whisper at once. On Auto · background it hands a clip over only while the hub says a GPU is free for it (`gpu_bg`).

@@ -16,20 +16,20 @@ A channel's engine (sizeup/channels.py ENGINES; the stored value, then what the 
                 whisper). Pinned AWS is AWS: a GPU worker only once AWS can't take the clip (its budget out, the
                 breaker), never ahead of it.
     local       pinned to the channel's own station (its whisper): today's "Local", unchanged.
-    aws         today's "AWS", unchanged (legacy): Amazon Transcribe, with a GPU worker first wherever the pool's
-                class switch for the clip's class is on (#639/#651), the station's whisper without AWS.
+    aws         never stored (#896): only what a station from before the selector is sent; the hub routes any "aws" it
+                meets as "pin:aws".
     both        Compare: the station's whisper and AWS on every clip (today's "Both", unchanged).
 
-Migration: nothing is rewritten and nothing changes live. "local" is the pinned station, "both" is Compare, and a
-channel on "aws" keeps today's behaviour exactly (GPU first only for the classes ticked in the pool's switches); it
-is shown as "AWS · GPU by class (legacy)" until an admin picks pinned AWS (AWS only), Auto or another engine. A station
-from before the selector never sees a new value (legacy(): the hub sends it the nearest old one; the hub still routes
-the clip by its own choice).
+Migration (#896, the admin: "two places shouldn't set what goes where"): on the CAD of record's first start with it,
+once and audited (Editor.migrate_engines), a stored "aws" becomes "pin:aws", and the [stt] aws_channels default is
+"pin:aws". "local" already is the channel's own station pinned and "both" Compare. A station from before the selector
+never sees a new value (legacy(): the hub sends it the nearest old one; the hub still routes the clip by its own choice).
 
-Precedence: a channel's own engine (Auto, pinned) wins over the pool's per-class switches (Settings > Station > STT
-workers); those still decide, per class, what the pool takes for everything else: legacy "aws" channels' GPU-first, the
-clips a station hands over when its whisper is behind (#639 phase 2) and the catch-up. The pool's own on/off switch
-holds for all of it.
+The channel's engine is the only thing that decides where its audio goes: the pool's per-class switches are gone, and
+no worker-side class opt-out replaces them. A clip a station hands over when its whisper is behind goes its channel's
+way (a pinned station's: Auto · priority's order after it); the catch-up goes Auto · background's way (a GPU with no
+priority work, the station's whisper, AWS last for another P25 system's talkgroups within the context budget). The
+pool's own on/off switch holds for all of it.
 
 Every transcript the hub routes records the way it went (Route): "auto·priority: gpu-pc → AWS (gpu-pc: gaming)".
 
@@ -154,8 +154,8 @@ class Route:
         del self.hops[:-6]
 
     def text(self, final: str) -> str:
-        if not self.hops and self.mode.lower() == final.lower():
-            return self.mode                                  # ("AWS", not "AWS: AWS")
+        if not self.hops and self.mode.lower().endswith(final.lower()):
+            return self.mode                                  # ("pinned AWS", not "pinned AWS: AWS")
         names = [e for e, _w in self.hops if e != final] + [final]
         whys = [f"{e}: {w}" if w and not w.startswith(e) else w for e, w in self.hops if w and e != final]
         return (f"{self.mode}: " + " → ".join(names) + (f" ({'; '.join(whys)})" if whys else ""))[:300]
@@ -168,7 +168,22 @@ class Routes:
 
     def __init__(self):
         self._d: dict[str, Route] = {}
+        self._chosen: dict[str, str] = {}         # clip id -> the engine its text of record is expected from now
         self._lock = threading.Lock()
+
+    def choose(self, cid: str, engine: str) -> None:
+        """The engine this clip's route sends it to now ("GPU", "gpu-pc", "AWS", "station"): its text is the text of
+        record; another engine's earlier text is provisional (the hook for a station's early text, #896)."""
+        with self._lock:
+            self._chosen.pop(cid, None)
+            self._chosen[cid] = str(engine or "")[:40]
+            while len(self._chosen) > self.MAX:
+                self._chosen.pop(next(iter(self._chosen)))
+
+    def chosen(self, cid: str) -> str:
+        """The engine the route chose for this clip ("" for a clip the hub didn't route: the station's own text)."""
+        with self._lock:
+            return self._chosen.get(cid, "")
 
     def start(self, cid: str, mode: str) -> Route:
         with self._lock:
