@@ -104,8 +104,9 @@ def test_writes_are_readable_sentences_with_the_incident_number(api):
     assert api.cad.store.q("SELECT operator FROM events WHERE incident_id = ? AND kind = 'created'", (iid,))[0]["operator"] \
         == "Jordan <jordan@example.org>"
     assert api.cad.settings.audit_log("users")[0]["operator"] == "Casey <casey@example.org>"
-    assert f"CAD activity: jordan@example.org: Dispatched {n}: E60, L31 [{n}] (POST /api/cad/incident/{iid}/dispatch) ip=-" \
-        in api.logged
+    # the server log (CloudWatch) says "action" and the route: never the summary (a note's words, a nature, a name)
+    assert f"CAD activity: jordan@example.org: action [{n}] (POST /api/cad/incident/{iid}/dispatch) ip=-" in api.logged
+    assert not [m for m in api.logged if "Smoke showing" in m or "Dispatched" in m or "COMPLETE" in m]
 
 
 def test_refusals_are_logged(api):

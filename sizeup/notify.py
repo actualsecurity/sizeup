@@ -328,7 +328,7 @@ class Notifier:
         try:
             self._q.put_nowait((title, body, priority, tuple(tags), click, Who.of(who), tuple(actions or ()), done))
         except queue.Full:
-            self.log(f"notify: too many waiting: dropped ({self._what(title)})")
+            self.log(f"notify: too many waiting: a push dropped ({self._what(title)})")   # never its title
             return False
         with self._lock:
             if self._thread is None or not self._thread.is_alive():
@@ -382,7 +382,7 @@ class Notifier:
                     self.sleep(self.retries[attempt])
         self.failed += 1
         self.last_at, self.last_ok = time.time(), False
-        self.log(f"notify: not sent ({self.last_error}): {self._what(title)}")
+        self.log(f"notify: not sent ({self.last_error}): {self._what(title)}")   # never its title: an address, a name
         _done(done, {"ok": False, "at": self.last_at, "status": status, "error": self.last_error[:200]})
 
 

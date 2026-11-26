@@ -631,7 +631,7 @@ class StatusHints:
                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                        (t["id"], code, u["id"], status, f.intent, f.phrase, f.said, t["text"], who, t["channel"],
                         t["talkgroup"], t["start"], iid, cur, now, t["start"] + self.cfg.expire_s))
-        self.log(f"CAD: radio suggests {code} {L.status_phrase(status)} ({who}: “{f.said}”)")
+        self.log(f"CAD: radio suggests {code} {L.status_phrase(status)} ({who}, {f.intent}, {t['id']})")   # (never the words)
         return self.store.one("SELECT * FROM status_hints WHERE traffic_id = ? AND unit = ?", (t["id"], code))
 
     def _end(self, hid: int, outcome: str, operator: str = "") -> None:
