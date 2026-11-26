@@ -126,7 +126,7 @@
     }
    ],
    "log": [
-    "atc: atc: twr-1: held back (ADS-B: flying normally after (2,500 ft, 120 kt)): lost contact with"
+    "atc: atc: twr-1: held back (ADS-B: flying normally after (2,500 ft, 120 kt)): 1 rule hit(s)"
    ]
   },
   {

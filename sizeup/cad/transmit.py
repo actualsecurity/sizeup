@@ -53,7 +53,8 @@ class NullTransmitter(Transmitter):
             except (OSError, EOFError, wave.Error):
                 pass
         self.sent.append((channel, text, secs))
-        self.log(f"TRANSMIT OFF: would have keyed {channel or 'no channel'} for {secs:.1f} s: {text}")
+        self.log(f"TRANSMIT OFF: would have keyed {channel or 'no channel'} for {secs:.1f} s "
+                 f"({len(text or '')} characters)")      # (never the words: an address, a call's nature)
         return self.expect()
 
     def expect(self) -> TxResult:
