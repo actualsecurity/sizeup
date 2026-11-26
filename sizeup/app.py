@@ -1855,8 +1855,14 @@ class App:
         for r in rows:
             r["tier_set"] = r["tier"] is not None
             if r["tier"] is None:
-                r["tier"] = tiers.derived(r["record"], self.channel_pref(r["key"])["transcribe"],
-                                          r["encrypted"])
+                tx = bool(self.channel_pref(r["key"])["transcribe"])
+                r["tier"] = tiers.derived(r["record"], tx, r["encrypted"])
+                # the switches beside the tier (Settings > Radios): the county's Transcribe is its channel choice and
+                # it has no Alerts (None: its pre-alerts are the intel packs', tiers.COUNTY_ALERTS)
+                r["transcribe"], r["alerts"] = tx, None
+            else:
+                sw = tiers.switches(r["tier"])
+                r["transcribe"], r["alerts"] = sw["transcribe"], sw["alerts"]
         return rows
 
     def p25_systems_state(self) -> list[dict]:
@@ -5370,9 +5376,12 @@ class App:
         return None
 
     def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None,
-                      tier: str | None = None, system: str = "") -> str | None:
+                      tier: str | None = None, system: str = "", transcribe: bool | None = None,
+                      alerts: bool | None = None) -> str | None:
         """POST /api/talkgroup: record = keep its calls; main = main list + attach to our incident. Another system's
-        talkgroup (#409: `system`, "" = the county's): tier = alert | text | record | off | activity."""
+        talkgroup (#409: `system`, "" = the county's): tier = alert | text | record | off | activity, or the switches
+        transcribe / alerts (with record), written as the tier they make (tiers.from_switches). The county's
+        Transcribe is its channel choice (/api/cad/settings/channels) and it has no Alerts: refused here."""
         if not self.p25:
             return "no P25 configured"
         qualified = system == self.tg.county             # sent as the county's source ("p25:westchester:<n>"): no doubt
@@ -5381,6 +5390,13 @@ class App:
             return f"no talkgroup {tg} on {system}"
         if tier is not None:
             return self.set_talkgroup_tier(tg, tier, system)
+        if transcribe is not None or alerts is not None:
+            if not system:
+                return (tiers.COUNTY_ALERTS if alerts is not None
+                        else "the county's Transcribe is its channel choice: /api/cad/settings/channels")
+            t, why = tiers.from_switches(self.tg.tier(int(tg), system), bool(self.tg.info[(system, int(tg))].get(
+                "encrypted")), record, transcribe, alerts)
+            return why or self.set_talkgroup_tier(tg, t, system)
         if not system and not qualified and (owners := self.tg.elsewhere(int(tg))):
             # a bare number is the county's: this one is another system's talkgroup (its Main / Record would have
             # landed on a county talkgroup that doesn't exist, an "Unknown" card): never written

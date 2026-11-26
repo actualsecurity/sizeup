@@ -104,7 +104,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
-from sizeup import channels, sourcekeys, stt_terms
+from sizeup import channels, sourcekeys, stt_terms, tiers
 from sizeup import tz
 from sizeup import app as app_mod
 from sizeup import fence as fence_mod
@@ -736,6 +736,11 @@ class Hub:
         # Record / Main / Transcribe) as its own page has it (App.talkgroups_state), from the tier each carries
         self.talkgroups = [dict(r, tier_set=r.get("tier") is not None) if isinstance(r, dict) and "tier_set" not in r
                            else r for r in tgs]
+        # the switches beside the tier (App.talkgroups_state): from its tier when a station from before them sent none
+        self.talkgroups = [r if not isinstance(r, dict) or "alerts" in r else
+                           dict(r, transcribe=r.get("tier") in tiers.TRANSCRIBED,
+                                alerts=r.get("tier") == tiers.ALERT if r.get("tier_set") else None)
+                           for r in self.talkgroups]
         if self.talkgroups:     # a source's re-tag that waited for what the station lists (its automatic service)
             getattr(getattr(self.app, "cad", None), "retag_resume", lambda **k: None)(rows_came=True)
 
@@ -2480,7 +2485,22 @@ class HubApp(App):
             self._switch("set_antenna_groups", groups)
 
     def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None,
-                      tier: str | None = None, system: str = "") -> str | None:
+                      tier: str | None = None, system: str = "", transcribe: bool | None = None,
+                      alerts: bool | None = None) -> str | None:
+        if tier is None and (transcribe is not None or alerts is not None):
+            # the switches: written as the tier they make of the one the station last said (App.set_talkgroup), so a
+            # station from before the switches takes them too
+            if not system or system == sourcekeys.COUNTY:
+                return (tiers.COUNTY_ALERTS if alerts is not None
+                        else "the county's Transcribe is its channel choice: /api/cad/settings/channels")
+            src = sourcekeys.p25(system, int(tg))
+            row = next((r for r in self.hub.talkgroups if isinstance(r, dict) and r.get("source") == src), None)
+            if row is None or not row.get("tier_set"):
+                return f"no talkgroup {tg} on {system}"
+            tier, why = tiers.from_switches(row.get("tier"), bool(row.get("encrypted")), record, transcribe, alerts)
+            if why:
+                return why
+            record = None
         if system == sourcekeys.COUNTY and tier is None and "p25_systems" not in (self.hub.status or {}):
             system = ""                                # the county's, to a station from before #409: as it always went
         if tier is not None or system:                 # (#409: a station from before this refuses the extra arguments)
