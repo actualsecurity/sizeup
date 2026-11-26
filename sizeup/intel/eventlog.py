@@ -21,8 +21,10 @@ gate); names and PII as the events have them; nothing here leaves the hub.
         label, the place or a transcript of the event (only the scanned events' transmissions, by id). The range's
         newest SEARCH_SCAN events looked through (intel_events_first; none given: every event kept), the newest
         SEARCH_MAX matches returned. {events: [{id, at, status, category, label, pack_label, level, held, place,
-        precision, confirmed, town, lat, lon, radius_m, matched}], total, limit, scanned, capped, since, until}.
-        matched: where the words were (category, place, radio); never the words heard.
+        precision, confirmed, town, lat, lon, radius_m, matched}], total, more, limit, scanned, capped, since, until}.
+        matched: where the words were (category, place, radio); never the words heard. With words, the transcripts are
+        read only for the words the label and place leave open, WORD_CHUNK events at a time, and no further once past
+        SEARCH_MAX matches (more: the total is a floor).
 
 A row (terse; the page shows it as is):
 
@@ -66,6 +68,7 @@ MAP_MAX = 2000                     # the map's pins: the newest of the filters (
 SEARCH_MAX = 100                   # Search's intel matches returned (the rest counted)
 SEARCH_SCAN = 5000                 # ... out of the range's newest this many events
 SEARCH_WORDS = 8
+WORD_CHUNK = 500                   # ... looked through for words this many at a time, newest first
 DEFAULT_S = 24 * 3600
 FACET_S = 300                      # the filters' choices: read again when the range moved this far (or the events changed)
 SPAN_MAX_S = 92 * 86400            # events are kept 90 days (events.py KEEP_EVENTS_S)
@@ -173,10 +176,15 @@ def _wordset(text: str) -> set[str]:
     return out
 
 
+AREA_PUNCT = (",", "&", ".", "#", "-", "/", "''", "(", ")", ";", ":", "@")      # ("''": a quote, as SQL writes it)
+
+
 def _area_sql(words: list[str]) -> tuple[str, dict]:
     """Search's area box over an event's place and town: each word whole, a street type in either form."""
-    col = ("(' ' || lower(replace(replace(replace(replace(e.label_full || ' ' || e.town, ',', ' '), '&', ' '), '.', ' '), "
-           "'#', ' ')) || ' ')")
+    col = "e.label_full || ' ' || e.town"
+    for ch in AREA_PUNCT:                      # (as _words splits: "I-95 NB", "Main St/Elm St", "O'Neil Ave (rear)")
+        col = f"replace({col}, '{ch}', ' ')"
+    col = f"(' ' || lower({col}) || ' ')"
     conds, args = ["e.precision != 'none'"], {}
     for i, w in enumerate(words[:SEARCH_WORDS]):
         alts = {w}
@@ -478,8 +486,9 @@ class IntelLog:
             args.update(a)
         rows = self.cad.store.q(
             "SELECT e.id, e.pack, e.category, e.first_at, e.status, e.mode, e.pushed_at, e.precision, e.lat, e.lon, "
-            f"e.radius_m, e.confirmed, e.label_full, e.town, e.traffic_ids, {HELD_SQL} AS held FROM intel_events e "
-            f"WHERE {where} ORDER BY e.first_at DESC, e.id DESC LIMIT :scan", args)
+            "e.radius_m, e.confirmed, e.label_full, e.town, e.traffic_ids FROM intel_events e "
+            f"WHERE {where} ORDER BY e.first_at DESC, e.id DESC LIMIT :scan",
+            {k: v for k, v in args.items() if k not in ("packs", "cats", "corr")})
         capped = len(rows) > SEARCH_SCAN
         rows = rows[:SEARCH_SCAN]
         packs = {p.name: p for p in getattr(self.engine, "packs", []) or []}
@@ -490,54 +499,72 @@ class IntelLog:
             if k not in labels:
                 p = packs.get(r["pack"])
                 labels[k] = category_label(p.category(r["category"]) if p else {}, p.label if p else "", r["category"])
-        matched: dict[int, set] = {r["id"]: set() for r in rows}
+        matched: dict[int, set] = {}
         words = _words(one("text", 200))[:SEARCH_WORDS]
+        more = False
         if words:
-            heard = self._heard(rows, words)
+            # newest first, a chunk at a time: the label and the place first, the transcripts only for the words they
+            # left open, and no further once past SEARCH_MAX (the total then a floor: "more")
             keep = []
-            for r in rows:
-                cat = _wordset(f"{labels[(r['pack'], r['category'])]} {r['category'].replace('_', ' ')}")
-                place = _wordset(f"{r['label_full']} {r['town']}") if r["precision"] != "none" else set()
-                ok = True
-                for w in words:
-                    hit = False
-                    if any(x.startswith(w) for x in cat):
-                        matched[r["id"]].add("category")
-                        hit = True
-                    if any(x.startswith(w) for x in place):
-                        matched[r["id"]].add("place")
-                        hit = True
-                    if r["id"] in heard.get(w, ()):
-                        matched[r["id"]].add("radio")
-                        hit = True
-                    if not hit:
-                        ok = False
-                        break
-                if ok:
-                    keep.append(r)
+            for i in range(0, len(rows), WORD_CHUNK):
+                chunk = rows[i:i + WORD_CHUNK]
+                open_: dict[int, set] = {}
+                for r in chunk:
+                    cat = _wordset(f"{labels[(r['pack'], r['category'])]} {r['category'].replace('_', ' ')}")
+                    place = _wordset(f"{r['label_full']} {r['town']}") if r["precision"] != "none" else set()
+                    m = matched[r["id"]] = set()
+                    left = set()
+                    for w in words:
+                        c, pl = any(x.startswith(w) for x in cat), any(x.startswith(w) for x in place)
+                        if c:
+                            m.add("category")
+                        if pl:
+                            m.add("place")
+                        if not (c or pl):
+                            left.add(w)
+                    open_[r["id"]] = left
+                need = [r for r in chunk if open_[r["id"]]]
+                heard = self._heard(need, sorted(set().union(*open_.values()))) if need else {}
+                for r in chunk:
+                    left = open_[r["id"]]
+                    if all(r["id"] in heard.get(w, ()) for w in left):
+                        if left:
+                            matched[r["id"]].add("radio")
+                        keep.append(r)
+                if len(keep) > SEARCH_MAX:
+                    more = i + WORD_CHUNK < len(rows)
+                    break
             rows = keep
         out = []
-        for r in rows[:SEARCH_MAX]:
+        page = rows[:SEARCH_MAX]
+        helds = {}
+        if page:                                   # why each didn't push: for the rows returned only
+            helds = {h["id"]: h["held"] for h in self.cad.store.q(
+                f"SELECT e.id, {HELD_SQL} AS held FROM intel_events e WHERE e.id IN (SELECT value FROM json_each(:ids))",
+                {**self.classes(), "ids": json.dumps([r["id"] for r in page])})}
+        for r in page:
             p = packs.get(r["pack"])
             pushed = r["pushed_at"] is not None
             held = None
             if not pushed:
-                label, tip = held_label(r["held"] or "", r["mode"])
-                held = {"key": r["held"] or "", "label": label, "tip": tip}
+                key = helds.get(r["id"]) or ""
+                label, tip = held_label(key, r["mode"])
+                held = {"key": key, "label": label, "tip": tip}
             placed = r["precision"] != "none" and r["lat"] is not None and r["lon"] is not None
             out.append({"id": r["id"], "at": r["first_at"], "status": r["status"], "category": r["category"],
                         "label": labels[(r["pack"], r["category"])], "pack_label": p.label if p else r["pack"],
                         "level": "push" if pushed else "held" if r["mode"] == "push" else r["mode"], "held": held,
                         "place": r["label_full"] if r["precision"] != "none" else "", "precision": r["precision"],
                         "confirmed": bool(r["confirmed"]), "town": r["town"],
-                        "lat": r["lat"] if placed else None, "lon": r["lon"] if placed else None,
+                        "lat": round(r["lat"], 6) if placed else None, "lon": round(r["lon"], 6) if placed else None,
                         "radius_m": round(r["radius_m"] or 0), "matched": sorted(matched.get(r["id"], ()))})
-        return {"events": out, "total": len(rows), "limit": SEARCH_MAX, "scanned": min(len(matched), SEARCH_SCAN),
-                "capped": capped, "since": since, "until": until}
+        return {"events": out, "total": len(rows), "more": more, "limit": SEARCH_MAX,
+                "scanned": min(len(matched) if words else len(rows), SEARCH_SCAN), "capped": capped, "since": since,
+                "until": until}
 
     def _heard(self, rows: list[dict], words: list[str]) -> dict[str, set]:
-        """{word: the event ids one of whose transmissions has a word starting so}: the scanned events' transmissions
-        only, read by rowid (never the whole log). Not fts_radio: another system's transcripts are never indexed there
+        """{word: the event ids one of whose transmissions has a word starting so}: these events' transmissions only,
+        read by their ids (never the whole log). Not fts_radio: another system's transcripts are never indexed there
         (history.py, #419), and these are mostly theirs; this is for the Intel page's readers only (the API's gate)."""
         owner: dict[str, set] = {}
         for r in rows:

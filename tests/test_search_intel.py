@@ -79,6 +79,19 @@ def test_the_area_is_the_place_and_town_a_street_type_either_way(site):
     assert ids(search(cad, where="Exampl")) == []                      # whole words (the address box's own rule)
 
 
+def test_the_area_splits_a_label_as_its_words_do(site):
+    """#944 review: the places.py shapes ("I-95 NB exit 21", a corner with "/", a name with a quote, "(rear)")."""
+    cad, _clock = site
+    made = {}
+    for i, label in enumerate(("I-95 NB exit 21, Rye", "Main St/Elm St, Rye", "O'Neil Ave, Rye", "12 Example Road (rear), Rye")):
+        made[label] = save(cad, first_at=T0 - i, precision="landmark", label_full=label, lat=41.0, lon=-73.7).id
+    assert ids(search(cad, where="I-95")) == ids(search(cad, where="95 nb")) == [made["I-95 NB exit 21, Rye"]]
+    assert ids(search(cad, where="elm street")) == [made["Main St/Elm St, Rye"]]
+    assert ids(search(cad, where="o'neil")) == ids(search(cad, where="neil")) == [made["O'Neil Ave, Rye"]]
+    assert ids(search(cad, where="rear")) == [made["12 Example Road (rear), Rye"]]
+    assert ids(search(cad, text="neil")) == [made["O'Neil Ave, Rye"]]               # the words agree
+
+
 def test_words_in_the_category_the_place_or_what_was_heard(site):
     cad, _clock = site
     heard(cad, "c1-t0", "shots fired at Sample St and Test Rd", T0)
@@ -88,7 +101,7 @@ def test_words_in_the_category_the_place_or_what_was_heard(site):
     d = search(cad, text="fired")
     assert ids(d) == [shots["id"]] and d["events"][0]["matched"] == ["radio"]
     assert ids(search(cad, text="weap")) == [shots["id"]]              # the category's label, a word's start
-    assert search(cad, text="shots")["events"][0]["matched"] == ["category", "radio"]
+    assert search(cad, text="shots")["events"][0]["matched"] == ["category"]     # settled: its transcripts not read
     assert ids(search(cad, text="example road")) == [edp] and search(cad, text="example")["events"][0]["matched"] == ["place"]
     assert ids(search(cad, text="edp example")) == [edp]               # each word somewhere
     assert ids(search(cad, text="fired example")) == []
@@ -103,6 +116,31 @@ def test_another_systems_transcripts_are_searched_though_never_indexed(site):
     assert cad.store.q("SELECT rowid FROM fts_radio WHERE fts_radio MATCH ?", ('"fired"*',)) == []
     assert search(cad, text="fired")["events"][0]["matched"] == ["radio"]
     assert search(cad, text="ired")["events"] == []                    # a word's start, as Search's words
+
+
+def test_the_second_transcript_and_the_corrected_one_count_too(site):
+    cad, _clock = site
+    heard(cad, "c1-t0", "shots fired at Sample St and Test Rd", T0)
+    with cad.store.tx() as db:
+        db.execute("UPDATE radio_traffic SET alt_text = 'units responding', corr_text = 'perimeter set' WHERE id = 'c1-t0'")
+    assert search(cad, text="respond")["events"][0]["matched"] == ["radio"]
+    assert search(cad, text="perimeter")["events"][0]["matched"] == ["radio"]
+
+
+def test_words_stop_reading_transcripts_once_past_the_matches_returned(site, monkeypatch):
+    cad, _clock = site
+    for i in range(12):
+        cad.comms.record(__import__("tests.test_intel", fromlist=["ctx_row"]).ctx_row(f"w{i}", "units responding", T0 - i))
+        save(cad, first_at=T0 - i, traffic_ids=[f"w{i}"])
+    monkeypatch.setattr(eventlog, "SEARCH_MAX", 2)
+    monkeypatch.setattr(eventlog, "WORD_CHUNK", 4)
+    read = []
+    real = cad.intel_admin.eventlog._heard
+    monkeypatch.setattr(cad.intel_admin.eventlog, "_heard", lambda rows, words: (read.append(len(rows)), real(rows, words))[1])
+    d = search(cad, text="responding")
+    assert len(d["events"]) == 2 and d["total"] == 4 and d["more"] is True and read == [4]
+    w = search(cad, text="weapon")
+    assert (w["total"], w["more"], len(read)) == (4, True, 1)          # the label settles it: no transcript read
 
 
 def test_a_result_is_marked_with_its_level_category_and_why_it_didnt_push(site):
@@ -138,7 +176,7 @@ def test_it_reads_the_first_at_index(site, monkeypatch):
     search(cad, where="example road")
     sql, args = next(x for x in seen if "LIMIT :scan" in x[0])
     plan = " ".join(r["detail"] for r in real(f"EXPLAIN QUERY PLAN {sql}", args))
-    assert "intel_events_first" in plan
+    assert "intel_events_first" in plan and "TEMP B-TREE" not in plan
 
 
 # -- the choice: off unless turned on, the person's own --------------------------------------------------------------------
@@ -172,7 +210,13 @@ global.L = () => ({});
 global.canDo = () => false;
 global.typeLabel = () => ""; global.typeColor = () => ""; global.nameOf = () => ""; global.openFromRecords = () => {};
 global.history = { replaceState() {} };
-global.api = (m, path) => { calls.get.push(path); return Promise.resolve(JSON.parse(JSON.stringify(path.startsWith("/api/cad/intel/search") ? IN.intel : { rows: [], total: 0, page: 0, size: 50 }))); };
+let UNTIL = 0;
+global.api = (m, path) => {                    // (the hub's range ends a minute from its clock: never the same twice)
+  calls.get.push(path);
+  const d = JSON.parse(JSON.stringify(path.startsWith("/api/cad/intel/search") ? IN.intel : { rows: [], total: 0, page: 0, size: 50 }));
+  if (d.until) d.until += ++UNTIL;
+  return Promise.resolve(d);
+};
 const flush = () => new Promise((r) => setTimeout(r, 5));
 const $0 = global.$;
 global.$ = (sel) => { const n = $0(sel); if (!n.style) n.style = { setProperty() {}, removeProperty() {} }; return n; };

@@ -23,7 +23,7 @@ window.SearchView = (() => {
   const INPUT = { where: "#sv-where", text: "#sv-text", type: "#sv-type", unit: "#sv-unit", disposition: "#sv-disp",
                   from: "#sv-from", to: "#sv-to" };
   const st = { q: {}, page: 0, tab: "calls", seq: 0, data: null, map: null, mapReady: false, listsSig: "", notes: null, hyTimer: null,
-               intel: false, iseq: 0, idata: null, isig: "", ipins: null };
+               intel: false, iseq: 0, idata: null, isig: "", ipins: null, iq: null };
   const IKEY = "sizeup.searchIntel";
   const TABS = ["notes", "preplan", "hydrants"];
   const HY_LIMIT = 50;
@@ -101,6 +101,7 @@ window.SearchView = (() => {
     }
     if (name !== "preplan" && window.Preplan) Preplan.closeSearch();
     intelButton();
+    if (name !== "calls") st.iseq++;           // (an intel answer still on its way: not drawn on another tab)
     if (name === "calls") run(); else if (name === "notes") runNotes(); else if (name === "hydrants") runHydrants();
     else if (window.Preplan) Preplan.search(st.q.where);   // #456
   }
@@ -205,7 +206,11 @@ window.SearchView = (() => {
         st.map.addSource("sv-calls", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
         st.map.addLayer({ id: "sv-calls", type: "circle", source: "sv-calls", paint: {
           "circle-radius": 7, "circle-color": ["get", "c"], "circle-stroke-width": 2, "circle-stroke-color": "#0B0F14" } });
-        st.map.on("click", "sv-calls", (e) => { const f = e.features && e.features[0]; if (f) openFromRecords(f.properties.id); });
+        st.map.on("click", "sv-calls", (e) => {
+          const f = e.features && e.features[0];
+          if (!f || (st.ipins && st.map.queryRenderedFeatures(e.point, { layers: ["sv-intel-pin"] }).length)) return;   // an intel pin on top: its own
+          openFromRecords(f.properties.id);
+        });
         st.map.on("mouseenter", "sv-calls", () => { st.map.getCanvas().style.cursor = "pointer"; });
         st.map.on("mouseleave", "sv-calls", () => { st.map.getCanvas().style.cursor = ""; });
         if (window.IntelMap) st.ipins = IntelMap.attach(st.map, "sv-intel", { pick: openIntel });
@@ -260,26 +265,30 @@ window.SearchView = (() => {
     if (CALL_ONLY.some((k) => st.q[k])) { renderIntel({ events: [], total: 0, calls_only: true }); return; }
     const p = new URLSearchParams();
     for (const k of ["where", "text", "from", "to"]) if (st.q[k]) p.set(k, st.q[k]);
-    if (!st.idata) setText($("#sv-intel-n"), "Searching…");
+    if (p.toString() !== st.iq || !st.idata) setText($("#sv-intel-n"), "Searching…");    // (the same search: as it is)
+    st.iq = p.toString();
     try {
       const d = await api("GET", `/api/cad/intel/search?${p}`);
       if (seq === st.iseq) renderIntel(d);
     } catch (e) {
       if (seq !== st.iseq) return;
       st.isig = "";
+      st.idata = null;                         // never the last search's pins under the error
+      intelPins();
       setText($("#sv-intel-n"), "");
       $("#sv-intel-rows").replaceChildren(row0(`Intel: ${e.message}`, 5));
     }
   }
   function renderIntel(d) {
-    const sig = JSON.stringify(d);
+    const sig = JSON.stringify([d.events, d.total, d.more, d.capped, d.calls_only]);    // (never its clock's range)
     st.idata = d;
     if (sig === st.isig) return;               // the same answer: nothing redrawn
     st.isig = sig;
     const n = $("#sv-intel-n");
     setText(n, d.calls_only ? "Not with a type, unit or disposition" : d.total
-      ? `${d.total} event${d.total === 1 ? "" : "s"}` + (d.total > d.events.length ? ` · newest ${d.events.length}` : "") : "None");
-    n.title = d.capped ? `The newest ${d.scanned} events of the range looked through` : "";
+      ? `${d.total}${d.more || d.capped ? "+" : ""} event${d.total === 1 ? "" : "s"}`
+        + (d.total > d.events.length ? ` · newest ${d.events.length}` : "") : "None");
+    n.title = d.capped ? `The newest ${d.scanned} events of the range looked through` : d.more ? "Counted to past the newest shown" : "";
     const body = $("#sv-intel-rows");
     if (!d.events.length) body.replaceChildren(row0(d.calls_only ? "Calls only" : "No intel events", 5));
     else body.replaceChildren(...d.events.map(intelRow));
