@@ -995,7 +995,8 @@ class Editor:
         now = self.store.clock()
         on = health_mod.active_mutes((self.section(MUTE_SECTION) if ov is None else (ov.get(MUTE_SECTION) or {})), now)
         return {"kinds": [{"key": k, "label": lab, "muted": k in on, "until": on.get(k),
-                           "timed_only": k in health_mod.MUTE_TIMED_ONLY}
+                           "timed_only": k in health_mod.MUTE_TIMED_ONLY,
+                           **({"hint": health_mod.MUTE_HINTS[k]} if k in health_mod.MUTE_HINTS else {})}
                           for k, lab in health_mod.MUTE_KINDS.items()], "hours_max": MUTE_HOURS_MAX}
 
     @staticmethod

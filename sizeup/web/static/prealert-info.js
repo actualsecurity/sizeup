@@ -35,6 +35,7 @@ window.PrealertInfo = (() => {
     const p = parse(rest);
     const key = p ? `${p.kind}/${p.id}` : "";
     if (key !== st.key) { st.key = key; st.data = null; st.sigs = {}; st.framed = ""; clear(); }
+    if (window.IntelNotes) IntelNotes.mount($("#pi-notes"), p && p.kind === "intel" ? p.id : null);   // read on a new id only
     if (!p) return fail("No such pre-alert");
     const seq = ++st.seq;
     try {
@@ -260,13 +261,16 @@ window.PrealertInfo = (() => {
       ["Near", o.near_incident ? incLink(o.near_incident, "Our call at its place (linked, never a radio link)") : ""],
       ["FD", o.fd || "", o.fd_state === "cleared" ? `${(o.fd || "").split(" · ")[0]} (cleared): pre-alert`
         : "The FD was already there: no pre-alert (an FYI only when the words added something)"],
-      ["Push", o.pushed_at ? tm(o.pushed_at) : o.suppressed ? `held: ${o.suppressed}` : o.pushed ? "pushed" : "",
-        o.suppressed ? "Not pushed, and why" : ""],
+      ["Push", o.pushed_at ? tm(o.pushed_at) : o.held && o.held.key ? `held: ${o.held.label}` : o.suppressed ? `held: ${o.suppressed}`
+        : o.pushed ? "pushed" : "", o.held && o.held.key ? [o.held.tip, o.held.detail].filter(Boolean).join("\n")
+        : o.suppressed ? "Not pushed, and why" : ""],
       // the last push at ntfy: "sent 16:21:27" / "not sent: 429" (sizeup/intel/events.py delivery)
       ["Delivery", o.pushed_at && window.IntelCard ? IntelCard.delivered(o, tm) : "",
         o.delivery ? (o.delivery.ok ? `ntfy took it (HTTP ${o.delivery.status}${o.delivery.id ? `, message ${o.delivery.id}` : ""})`
           : `ntfy didn't take it: ${o.delivery.error || o.delivery.status}`) : "Queued: no answer from ntfy yet"],
       ["Votes", fb.join("; ")],
+      ["Tags", Object.entries(o.note_tags || {}).map(([t, n]) => `${(window.IntelNotes && IntelNotes.TAGS[t]) || t}${n > 1 ? ` ×${n}` : ""}`).join(" · "),
+        "Its notes' tags (Notes)"],
     ]));
     return kids;
   }
