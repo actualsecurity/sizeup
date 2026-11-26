@@ -508,8 +508,8 @@ window.MapLayers = (() => {
       // a rebuild keeps the viewer's place (#111): the scroll, the focused control and each group's fold
       const scroll = panel.scrollTop;
       const active = document.activeElement && panel.contains(document.activeElement) ? document.activeElement.dataset.key || "" : "";
-      const folds = {};
-      for (const f of panel.querySelectorAll("details[data-fold]")) folds[f.dataset.fold] = f.open;
+      const folds = {};                // (a closed box's are stale: opened again, it is as the viewer's folds are now)
+      if (!panel.hidden) for (const f of panel.querySelectorAll("details[data-fold]")) folds[f.dataset.fold] = f.open;
       const head = h("div", "ml-head");
       head.append(h("b", "", this.perEvent() && this.override ? "Layers for this event" : "Layers"));
       const x = h("button", "icon quiet sm");
@@ -594,9 +594,9 @@ window.MapLayers = (() => {
       sum.append(...summary);
       const was = typeof folds[key] === "boolean" ? folds[key] : fold(key);
       det.open = was === true;
-      // a person's click or key (Enter on the summary sends no click): kept when it differs from what is kept; the
-      // toggle the open above queues never does
-      det.addEventListener("toggle", () => { if (det.open !== (fold(key) === true)) setFold(key, det.open); });
+      // a person's click or key (Enter on the summary sends no click) is kept; the toggle the open above queues is not
+      let last = det.open;
+      det.addEventListener("toggle", () => { if (det.open !== last) { last = det.open; setFold(key, det.open); } });
       det.append(sum, ...body);
       return det;
     }
@@ -610,12 +610,18 @@ window.MapLayers = (() => {
       const rest = [...head.childNodes].filter((n) => n !== title && !(n.classList && n.classList.contains("spacer")));
       if (rest.some((n) => n.textContent.trim())) {
         const line = h("div", "dim small ml-source");
-        line.append(`${name}: `, ...rest);
+        line.append(`${name}: `, ...rest.flatMap((n, i) => (i ? [" · ", n] : [n])));
         sources.push([name, line]);
       }
       head.remove();
-      const on = [...el.querySelectorAll('input[type="checkbox"]:checked')].filter((x) => !x.closest(".ml-sub-check")).length;
-      return this.foldBox(name, folds, [h("b", "", name), h("span", "ml-count dim small", on ? `${on} on` : "")], [el]);
+      // its layers on (not a sub-toggle such as Animate, nor the tilt), and a trouble mark when something in it failed
+      const on = [...el.querySelectorAll('input[type="checkbox"]:checked:not(:disabled)')]
+        .filter((x) => !x.closest(".ml-sub-check") && x.dataset.key !== "gis:3d").length;
+      const err = el.querySelector(".ml-err");
+      const summary = [h("b", "", name), " "];
+      if (err) { const e = h("span", "ml-err small", "error"); e.title = err.textContent; summary.push(e); }
+      summary.push(h("span", "ml-count dim small", on ? `${on} on` : ""));
+      return this.foldBox(name, folds, summary, [el]);
     }
     // every source in one line at the foot: their names on hover, each with its link and time when opened
     sourcesFold(sources, folds) {

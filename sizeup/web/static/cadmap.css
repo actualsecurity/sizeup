@@ -270,8 +270,9 @@
   .ml-gfold > .ml-group { border-block-start: 0; margin-block-start: 0; padding-block: 0 var(--s-1); }
   .ml-gsum { display: flex; align-items: center; gap: var(--s-2); min-block-size: var(--ctl-sm); cursor: pointer; list-style: none; }
   .ml-gsum::-webkit-details-marker { display: none; }
-  .ml-gsum::before { content: "▸"; color: var(--dim); font-size: var(--fs-2xs); }
-  .ml-gfold[open] > .ml-gsum::before { content: "▾"; }
+  .ml-gsum::before { content: "▸"; content: "▸" / ""; color: var(--dim); font-size: var(--fs-2xs); }   /* (not read out) */
+  .ml-gfold[open] > .ml-gsum::before { content: "▾"; content: "▾" / ""; }
+  .ml-gsum .ml-err + .ml-count { margin-inline-start: 0; }
   .ml-gsum .ml-count { margin-inline-start: auto; }
   .ml-sources > .ml-source { overflow-wrap: anywhere; padding-block-end: var(--s-0); }
   /* Road projects & closures (roadprojects.js, #185): the Today / This week / All filter, the key, the unplaced notices */
@@ -564,12 +565,7 @@
   @container (width < 60rem) {
     .ov-grid:is([data-layout="map"], [data-layout="cameras"]) { grid-template-columns: minmax(0, 1fr); }
     .ov-grid[data-layout="map"] .ov-view { position: relative; block-size: 46vh; min-block-size: var(--map-h); }
-    /* the console's wide screen: nothing under the map (#217), so it keeps the screen's height */
-    @media (min-width: 1101px) {
-      html:not(.board) .ov-grid[data-layout="map"] .ov-view {
-        position: sticky; min-block-size: var(--map-h-min); block-size: calc(100dvh - var(--hdr-h) - 2 * var(--gutter) - var(--ctl) - var(--gutter));
-      }
-    }
+    /* (the console's wide screen: the Overview fills its column, below) */
     .ov-grid[data-layout="cameras"] .ov-view { position: relative; block-size: auto; min-block-size: 0; }
     .ov-grid[data-layout="cameras"] .cw-wall { flex: 0 0 auto; overflow: visible; }
     /* side by side and stacked keep the events on the right down to a narrower middle column (the user's ask; the

@@ -65,12 +65,18 @@ def test_the_layers_box_folds_its_groups_and_its_sources():
     fold = re.search(r"    foldBox\(name, folds, summary, body\) \{(.*?)\n    \}\n", ml, re.S).group(1)
     assert 'const key = `layers:${name}`;' in fold and "sum.dataset.key = key;" in fold          # focus kept on a redraw
     assert 'typeof folds[key] === "boolean" ? folds[key] : fold(key);' in fold and "det.open = was === true;" in fold
-    assert 'det.addEventListener("toggle", () => { if (det.open !== (fold(key) === true)) setFold(key, det.open); });' in fold
+    # only a person's toggle is kept: not the one the open above queues (it would put back a stale fold)
+    assert 'let last = det.open;' in fold
+    assert 'det.addEventListener("toggle", () => { if (det.open !== last) { last = det.open; setFold(key, det.open); } });' in fold
+    assert 'if (!panel.hidden) for (const f of panel.querySelectorAll("details[data-fold]"))' in body
     group = re.search(r"    foldGroup\(el, folds, sources\) \{(.*?)\n    \}\n", ml, re.S).group(1)
     assert 'el.querySelector(":scope > .ml-ghead")' in group and "if (!title) return el;" in group
-    assert '!x.closest(".ml-sub-check")' in group and '`${on} on`' in group
+    assert '!x.closest(".ml-sub-check") && x.dataset.key !== "gis:3d"' in group and '`${on} on`' in group
+    assert "checkbox\"]:checked:not(:disabled)" in group and 'el.querySelector(".ml-err")' in group      # trouble shows folded
+    assert '[" · ", n]' in group                                       # two links in a head: apart
     css = text("cadmap.css")
     assert ".ml-gsum { display: flex; align-items: center; gap: var(--s-2); min-block-size: var(--ctl-sm);" in css
+    assert '.ml-gsum::before { content: "▸"; content: "▸" / "";' in css          # the arrow isn't read out
 
 
 # ---- in a browser ----------------------------------------------------------------------------------------------------
@@ -102,7 +108,12 @@ def data(now):
                          "stale": False, "text": "Cloudy"}}
     trains = {"configured": True, "note": "", "trains": [], "stations": [], "line": [], "lanes": {}, "tracks": {},
               "railref": {}, "at": now, "label": "Metro-North", "disclaimer": "Estimated", "bbox": AREA, "now": now}
-    return {"/api/cad/roads": roads, "/api/cad/gis": gis, "/api/cad/weather": wx, "/api/cad/trains": trains}
+    cams = {"configured": True, "highway": None, "down": [],
+            "cameras": [{"id": f"cam-{i}", "name": f"Example Ave at Sample St {i}", "road": "Example Pkwy", "dir": "Northbound",
+                         "lat": 41.0 + i / 1000, "lon": -73.67, "source": "511NY", "rel": "nearby", "miles": None, "side": "",
+                         "facing": False} for i in range(20)]}
+    return {"/api/cad/roads": roads, "/api/cad/gis": gis, "/api/cad/weather": wx, "/api/cad/trains": trains,
+            "/api/cad/cameras": cams}
 
 
 class Console:
@@ -135,7 +146,8 @@ class Console:
         pg.route(lambda url: "/api/cad/comms/sources" in url, j({**SOURCES, "now": now}))
         pg.route(lambda url: "/api/me/prefs" in url, air.me)
         for path, body in data(now).items():
-            pg.route(self.base + path, j(body))
+            pg.route(lambda url, p=path: url.startswith(self.base + p) and url[len(self.base + p):][:1] in ("", "?"), j(body))
+        pg.route(lambda url: "/api/cad/cameras/" in url, lambda route: route.fulfill(status=404, body="{}"))
         pg.route(lambda url: "/api/cad/gis/" in url, j({"type": "FeatureCollection", "features": []}))
         pg.route(lambda url: url.startswith(self.base + "/api/cad/trains/"), j(data(now)["/api/cad/trains"]))
         pg.errors = []
@@ -203,7 +215,7 @@ def fits(m, what):
         assert m["map"]["b"] <= d["b"] + 1, what
 
 
-@pytest.mark.parametrize("width,height", [(2400, 1500), (1600, 1000), (1280, 800)])
+@pytest.mark.parametrize("width,height", [(2400, 1500), (1600, 1000), (1280, 800), (1200, 800)])
 @pytest.mark.parametrize("layout", ["map", "side", "stacked", "cameras"])
 def test_in_a_browser_the_overview_fits_with_banners_the_strip_and_the_layers_open(console, width, height, layout):
     pg = console.page(width, height, layout)
@@ -214,7 +226,9 @@ def test_in_a_browser_the_overview_fits_with_banners_the_strip_and_the_layers_op
         m = pg.evaluate(MEASURE)
         fits(m, what)
         if layout == "cameras":
-            assert m["wall"]["b"] <= m["detail"]["b"] + 1, what
+            # twenty cameras: the wall scrolls inside itself, the column doesn't
+            assert m["wall"]["b"] <= m["detail"]["b"] + 1 and m["wall"]["sh"] > m["wall"]["ch"], what
+            assert pg.errors == []
             return
         p, mp = m["panel"], m["map"]
         assert p["t"] >= mp["t"] and p["b"] <= mp["b"] + 1, f"{what}: the Layers box runs out of the map"
@@ -241,11 +255,14 @@ def test_in_a_browser_a_group_opens_by_keyboard_stays_open_on_a_redraw_and_is_re
     try:
         open_layers(pg)
         gis = pg.locator('.ov-mapbox .ml-panel summary[data-key="layers:County GIS"]')
-        assert gis.get_attribute("aria-expanded") in (None, "false")
         assert pg.evaluate("document.querySelector('.ov-mapbox .ml-panel details[data-fold=\"layers:County GIS\"]').open") is False
         assert "1 on" in gis.inner_text()                           # the county's default (fire districts) on, folded
         assert pg.locator(".ov-mapbox .ml-panel .ml-sources .ml-source").count() >= 3       # 511NY, Thruway, the county, ...
         assert not pg.locator(".ov-mapbox .ml-panel .ml-sources .ml-source").first.is_visible()   # folded
+        srcs = pg.locator(".ov-mapbox .ml-panel .ml-sources").text_content()
+        assert "powered by 511NY" in srcs and "County GIS: Westchester County GIS" in srcs and "Trains: MTA" in srcs
+        assert "Aircraft: adsb.lol · adsb.fi" in srcs                                   # a head's two links, apart
+        assert pg.locator(".ov-mapbox .ml-panel .ml-sources > summary").get_attribute("title").startswith("511NY · ")
         gis.focus()
         pg.keyboard.press("Enter")
         pg.wait_for_function("document.querySelector('.ov-mapbox .ml-panel details[data-fold=\"layers:County GIS\"]').open")
@@ -270,6 +287,14 @@ def test_in_a_browser_a_group_opens_by_keyboard_stays_open_on_a_redraw_and_is_re
         assert pg.locator(".ov-mapbox .ml-panel").is_hidden()
         open_layers(pg)
         assert pg.evaluate("document.querySelector('.ov-mapbox .ml-panel details[data-fold=\"layers:County GIS\"]').open")
+        # folded again elsewhere (another map's box, the hub's copy) while this box is closed: opened, it follows that,
+        # and never puts back what it showed before
+        pg.keyboard.press("Escape")
+        pg.evaluate("MapLayers.setFold('layers:County GIS', false)")
+        open_layers(pg)
+        pg.wait_for_timeout(100)                                       # (a queued toggle would have run by now)
+        assert pg.evaluate("document.querySelector('.ov-mapbox .ml-panel details[data-fold=\"layers:County GIS\"]').open") is False
+        assert pg.evaluate("MapLayers.fold('layers:County GIS')") is False
         assert pg.errors == []
     finally:
         pg.context.close()
