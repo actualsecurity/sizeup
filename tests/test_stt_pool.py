@@ -487,7 +487,7 @@ def test_a_ready_worker_transcribes_an_aws_clip_and_the_run_is_kept_with_its_wor
     fake = FakeTranscribe(phrases={500: AWS_TEXT})
     hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
     token = hub.app.hub.workers.add("gpu-1", "Test box")
-    w = FakeWorker(hub.url, token).start()
+    w = FakeWorker(hub.url, token, wait_s=20.0).start()   # (in a claim: a pre-alert clip needs one idle now)
     try:
         auto(hub, "FG1")
         assert wait(lambda: hub.app.sttpool.ready_forced(URGENT)[0], 5)
