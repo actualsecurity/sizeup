@@ -1763,21 +1763,26 @@ class HubApp(App):
     def _pool_audio_of(self, cid: str, page, pcm):
         """A pool job's audio, read when its worker asks (on that request's thread, never the events'): the station's
         own whisper input (#671's stt-src, waited for up to POOL_AUDIO_WAIT_S: it comes on its own lane) at 16 kHz with
-        0.5 s of silence each side, exactly what whisper-server would get on the station; else the listening clip."""
+        0.5 s of silence each side, exactly what whisper-server would get on the station; else the listening clip.
+        audio.input: which it gave last ("stt-src" | "listening-8k" | ""), stamped on the run (#678)."""
         def audio(wait_s: float = 0.0) -> bytes | None:
             import numpy as np
             sa = None
+            audio.input = ""
             try:
                 sa = self.read_stt_audio(cid, float(getattr(page, "voice_offset_s", 0.0) or 0.0) if page is not None
                                          else 0.0, wait_s=min(POOL_AUDIO_WAIT_S, wait_s))
             except Exception as e:  # noqa: BLE001 - the listening clip then
                 self.hub.log(f"stt pool: {cid}: no STT input ({type(e).__name__})")
-            if sa is not None and sa.input == "stt-src" and sa.rate == 16000:
+            if sa is not None and sa.input == sttinput.INPUT_SRC and sa.rate == 16000:
                 pad = np.zeros(8000, dtype=np.float32)
+                audio.input = sttinput.INPUT_SRC
                 return wav_bytes(np.concatenate([pad, np.asarray(sa.pcm, dtype=np.float32) / 32768.0, pad]), 16000)
-            if pcm is not None:
-                return self._pool_wav(pcm)
-            return self._pool_wav(sa.pcm) if sa is not None and sa.rate == 8000 else None
+            if pcm is not None or (sa is not None and sa.rate == 8000):
+                audio.input = sttinput.INPUT_LISTENING
+                return self._pool_wav(pcm if pcm is not None else sa.pcm)
+            return None
+        audio.input = ""
         return audio
 
     def pool_word(self, sid: str = "") -> dict:
@@ -1900,7 +1905,8 @@ class HubApp(App):
                       prompted=stt_time.prompted(job.prompt, job.clip_end),     # (#727)
                       wait_s=job.claimed_at - job.queued_at if job.claimed_at else None,
                       run_s=done_at - job.claimed_at if job.claimed_at else None,
-                      prompt_v=sttruns.prompt_version(job.prompt), cls=job.cls, clip_end=job.clip_end, vocab_v=vocab_v)
+                      prompt_v=sttruns.prompt_version(job.prompt), cls=job.cls, clip_end=job.clip_end, vocab_v=vocab_v,
+                      stt_input=str(getattr(job.audio, "input", "") or ""))
 
     def _pool_fallback(self, job: sttpool.Job, why: str) -> None:
         """No text from the pool in time: an AWS-channel clip the AWS way (and the station's whisper if AWS can't). A
@@ -1980,9 +1986,11 @@ class HubApp(App):
     def _stt_ran(self, cid: str, engine: str, model: str, text: str, status: str, conf, *, key: str = "", item=None,
                  prompted: bool | None = None,
                  role: str = "text", words=None, queued_at=None, engine_start=None, worker: str = "", prompt_v: str = "",
-                 cls=None, clip_end=None, wait_s=None, run_s=None, vocab_v: str | None = None) -> None:
+                 cls=None, clip_end=None, wait_s=None, run_s=None, vocab_v: str | None = None,
+                 stt_input: str | None = None) -> None:
         """A transcript as an engine wrote it, kept (sizeup/sttruns.py), and its latency (transmission end -> text
-        here) counted for Health when it is the text of record. Never in the way of the transcript."""
+        here) counted for Health when it is the text of record. Never in the way of the transcript. stt_input: the
+        audio it heard (#678; None: the engine's own, sttruns.engine_input)."""
         try:
             if item is None:
                 item = self._find(cid)[0]
@@ -2006,7 +2014,7 @@ class HubApp(App):
                               run_s=run_s if run_s is not None else (now - engine_start if engine_start else None),
                               keyup=getattr(item, "keyup", None),     # (a cut transmission's piece, the radio's split)
                               call_id=str(getattr(item, "call_id", "") or ""), turn=getattr(item, "turn", None),
-                              check=check)
+                              check=check, input=sttruns.engine_input(engine) if stt_input is None else stt_input)
             if role == "text" and clip_end is not None:
                 self.stt_latency.add(key, engine, now - clip_end, target=cls in sttruns.TARGET_CLASSES)
         except Exception as e:  # noqa: BLE001 - bookkeeping

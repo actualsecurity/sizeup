@@ -159,6 +159,40 @@ def _fire_first(st, hub):
     assert st.link.stt_stats()["dropped_pre"] == 0
 
 
+class TimedHub(FakeHub):
+    """FakeHub that notes when the events were taken and when each STT post came."""
+
+    def __init__(self, caps):
+        super().__init__(caps)
+        self.events_at, self.stt_at = [], []
+
+    def request(self, method, path, body=None, timeout=None, gzip_body=False, raw_gzip=None):
+        out = super().request(method, path, body, timeout, gzip_body, raw_gzip)
+        if path == "/api/station/events":
+            self.events_at.append(time.monotonic())
+        elif path == "/api/station/stt":
+            self.stt_at.append(time.monotonic())
+        return out
+
+
+def test_the_stt_input_follows_its_event_at_once_not_at_the_lanes_next_look(tmp_path):
+    """The lane waits while an event is in the outbox; the events' ack wakes it. Before, it looked again only every
+    2 s, so a clip's STT input reached the hub ~2.0 s after its event (production p50 2.0 s for the pre-alert classes)
+    and a GPU worker's audio request waited out the hub's 2 s for it (#678)."""
+    hub = TimedHub(["p25_systems", "stt_input"])
+    st = offline_station(tmp_path, client=hub)
+    try:
+        t = _transmission(st, "FG1-1790000000777", "FG1", voice(1.0, seed=3), True, eng="aws")
+        assert wait(lambda: stt_rows(st, t.id), 10)
+        time.sleep(0.3)                              # the lane is in its wait now (an event in the outbox)
+        assert hub.stt_posts == []
+        hub.down = False
+        assert wait(lambda: hub.stt_at, 15)
+        assert hub.events_at and hub.stt_at[0] - hub.events_at[0] < 0.5, hub.stt_at[0] - hub.events_at[0]
+    finally:
+        st.link.stop()
+
+
 def test_the_airband_never_costs_a_fireground_clip(tmp_path):
     """FG1 and HPN ATC alternating over a pressed lane: the airband's go, never the fireground's (#677 review)."""
     ob = Outbox(tmp_path / "o.sqlite", max_audio_bytes=10_000)                 # the lane's budget: 3000 (6 inputs)

@@ -805,6 +805,9 @@ class StationLink:
                 self.outbox.released([x["qid"]])
                 self.log(f"hub link: the hub took the {x['type']} it had refused")
         self.outbox.ack(acked)
+        # the STT lane waits while an event is in the outbox: wake it now the events went, so a clip's STT input
+        # follows its event at once instead of at the lane's next 2 s look (that look was the hub's ~2 s wait, #678)
+        self._stt_wake.set()
         self.sent += sum(1 for x in rows if x["seq"] <= acked and x["seq"] not in bad)
         if iso and acked >= iso["hi"]:
             self._isolate = None                    # past every event of the batch it refused: whole batches again

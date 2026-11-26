@@ -95,8 +95,10 @@ TEXT_MAX = 20000
 SEGMENTS_MAX = 1000
 WORDS_MAX = 4000
 POLL_S = 25.0
-AUDIO_WAIT_MAX_S = 2.0          # a job's audio: the station's STT input waited for this long at most (it usually comes a
-                                # moment after its event; one that doesn't come costs the worker this much of its lease)
+AUDIO_WAIT_MAX_S = 3.0          # a job's audio: the station's STT input waited for this long at most; per class far less
+                                # (sttpool.SRC_WAIT_S, counted from when the job was queued: a pre-alert clip 0.75 s), then
+                                # the listening clip (#678: a flat 2 s was every pre-alert job's fetch while the input came
+                                # ~2 s after its event)
 STATION_PREFIX = "station:"     # a station's whisper as a pool worker: "station:<station id>" (never a token's id)
 STATION_ROUTES = (API + "hello", API + "state", API + "claim")            # what a station's identity may reach here
 STATION_LEASE_ROUTES = ("audio", "extend", "complete", "release")
@@ -719,9 +721,9 @@ class WorkerApi:
         if job is None:
             return _json(409, {"error": "lease lost"})
         try:
-            # (waiting for the station's own STT input, #671: half of what is left of the lease at most, so the clip is
-            # still transcribed in time; else the listening clip)
-            wait = max(0.0, min(AUDIO_WAIT_MAX_S, (job.expires - self.pool.clock()) / 2.0))
+            # (waiting for the station's own STT input, #671: its class's budget from when it was queued, half of what
+            # is left of the lease at most, so the clip is still transcribed in time; else the listening clip, #678)
+            wait = min(AUDIO_WAIT_MAX_S, sttpool.src_wait_s(job, self.pool.clock()))
             wav = job.audio(wait) if job.audio_wait else job.audio()
         except Exception as e:  # noqa: BLE001 - a store that can't be read now: the next engine takes it
             wav = None
