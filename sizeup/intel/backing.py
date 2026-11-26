@@ -531,10 +531,14 @@ class ModelBacking:
         text = str(row.get("text") or "")
         with self._lock:
             src = self.sources.setdefault(key, deque(maxlen=SOURCE_KEEP))
-            if text.strip() and not any(x["tid"] == tid for x in src):
+            mine = next((x for x in src if x["tid"] == tid), None)
+            if mine is not None:
+                mine["text"] = text           # a re-text (#901's correction, a re-ask): its words now, never the old
+            elif text.strip():
                 src.append({"tid": tid, "at": at, "text": text})
         out = self._due(engine, at)
-        if (suppressed or changed or ruled or tid in self.asked or any(r.category == "routine" for r, _w in hits)
+        late = row.get("late") or getattr(win.entries.get(tid), "late", False)      # context only, never asked
+        if (suppressed or changed or ruled or late or tid in self.asked or any(r.category == "routine" for r, _w in hits)
                 or len(rules_mod.words(text)) < int(c["infer_pd_min_words"]) or not self.needs(pack, text)
                 or any(tid in e.traffic_ids for e in engine.events.open_events()
                        if e.pack == pack.name and e.source_key == key)):      # a re-feed of a row already in an event
@@ -629,16 +633,36 @@ class ModelBacking:
             except Exception as e:  # noqa: BLE001 - the thread goes on
                 self.log(f"intel: model: {type(e).__name__}")
 
+    def forget(self, tid: str) -> None:
+        """A row withdrawn (engine._withdraw: its text emptied or unclear since): out of every source's context, its
+        held question dropped and an asked one never applied."""
+        with self._lock:
+            for src in self.sources.values():
+                for x in [x for x in src if x["tid"] == tid]:
+                    src.remove(x)
+            self.asked.pop(tid, None)          # its words back after a re-ask: asked afresh
+        self.pending = [j for j in self.pending if j["tid"] != tid]
+        with self._q.mutex:                   # a question already queued for the model thread: never asked (_ask)
+            for item in self._q.queue:
+                if isinstance(item, tuple) and len(item) > 2 and isinstance(item[2], dict) and item[2].get("tid") == tid:
+                    item[2]["dead"] = True
+        for job in list(self.open.values()):
+            if job.get("tid") == tid:
+                job["dead"] = True
+
     def context(self, key: str, tid: str, at: float) -> list[dict]:
-        """Up to CONTEXT_MAX of the source's transmissions within CONTEXT_S of the trigger (the nearest), oldest first."""
+        """Up to CONTEXT_MAX of the source's transmissions within CONTEXT_S of the trigger (the nearest), oldest first:
+        by AIR time (each row's start), whatever order their transcripts arrived in."""
         with self._lock:
             have = list(self.sources.get(key, ()))
-        near = [x for x in have if x["tid"] != tid and abs(float(x["at"]) - at) <= CONTEXT_S]
+        near = [x for x in have if x["tid"] != tid and x["text"].strip() and abs(float(x["at"]) - at) <= CONTEXT_S]
         near = sorted(near, key=lambda x: abs(float(x["at"]) - at))[:CONTEXT_MAX]
         return sorted(near, key=lambda x: float(x["at"]))
 
     def _ask(self, engine, job: dict) -> list:
         """The model thread (live): the backend's availability, the site history, the messages, the question."""
+        if job.get("dead"):
+            return []                          # its row withdrawn since it was queued (forget)
         c = self.cfg()
         pack = engine.pack(job["pack"])
         if pack is None:

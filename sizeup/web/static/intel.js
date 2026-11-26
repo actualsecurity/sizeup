@@ -332,6 +332,7 @@ window.IntelSettings = (() => {
         field("mode", modeSel(d.modes, p.mode, pset("mode"), `${p.label} pack mode`), "in-w-mode"),
         field("threshold", num(p.threshold, 0, 1, 0.05, pset("threshold"), "Threshold: WHAT at least this", "Threshold, 0 to 1: WHAT at least this")),
         field("window s", num(p.window_s, 10, 1800, 10, pset("window_s"), "Seconds of one source merged into one candidate")),
+        field("late s", num(p.late_s, 30, 3600, 30, pset("late_s"), "Read this long after the clip ended: late, context only, never a push")),
       ], seen));
       // each category: its name, then its mode (and, once changed, the way back), in columns of one width
       const cats = el("div", "in-cats");
