@@ -110,7 +110,9 @@ COUNTS = ("asked", *WHYS, "events", "evidence", "capped", "unavailable", "uncued
 # an event the trigger row doesn't back (_corroborated) is at most ALONE_MAX ("medium": never "high", never pushed), and
 # at most SHORT_MAX ("low") when that row is short (under SHORT_WORDS words or SHORT_S seconds): one odd transmission.
 # A category with "model_cues" (rules.py) is raised only when the trigger says one of them, or CUE_CONTEXT of the
-# context transmissions do (a clear sequence); else the answer is kept, used "uncued", nothing raised.
+# context transmissions do (a clear sequence), or the row just before the trigger does and is a dispatch (the dispatcher
+# or the pack's dispatch cue, within the pack's window_s: "units respond, two males fighting" then "copy, en route");
+# else the answer is kept, used "uncued", nothing raised.
 ALONE_MAX = 0.6
 SHORT_MAX = 0.45
 SHORT_WORDS = 10
@@ -121,12 +123,18 @@ SITE_PRECISIONS = ("address", "intersection", "landmark")
 SYSTEM = ("You read police radio transcripts (speech-to-text, often misheard) for a fire department that wants an "
           "early warning of calls it may be sent to or must stage for. Answer only from the words given. "
           "category: the one listed category whose definition the trigger transmission (with its context) fits, else "
-          "\"none\". confidence: a number from 0 to 1 that the category is right. in_progress: the incident is "
-          "happening now. weapon: the weapon said, \"unknown\" when one is hinted but not named, else \"none\". "
+          "\"none\". confidence: a number from 0 to 1 that the category is right; below 0.5 when the transmission is "
+          "garbled, partial or only hints at the incident. Choose a category other than none only when the trigger "
+          "transmission, or a dispatch in its context, describes that incident; when in doubt, none. in_progress: "
+          "the incident is happening now. "
+          "weapon: the weapon said, \"unknown\" when one is hinted but not named, else \"none\". "
           "deescalation: the transmission says an incident is calming down or under control (a subject in custody, "
           "the scene secure, no injuries after all). address: the place as said in the TRIGGER transmission (at most "
           "80 characters), or null. reason: at most 120 characters, why.")
-NONE_LINE = "- none: anything else: routine traffic, a unit's status or location, a call already handled."
+NONE_LINE = ("- none: anything else: routine traffic, a unit's status or location, a call already handled or cleared, an "
+             "alarm cancelled, a theft, larceny or report taken after the fact, plate or vehicle checks, traffic and "
+             "parking conditions, a category word used in routine business (a parade barricade, a rifle at the range, a "
+             "CPR class), or a transmission too garbled or partial to tell what is happening.")
 
 
 # -- the schema and its check -----------------------------------------------------------------------------------------
@@ -682,6 +690,7 @@ class ModelBacking:
         ctx = self.context(job["key"], job["tid"], job["at"])
         msgs = messages(cats, {"at": job["at"], "text": job["row"].get("text")}, ctx, hist)
         job["context"] = [str(x.get("text") or "") for x in ctx]       # (the category's cues: _cued)
+        job["prior"] = next((str(x.get("tid") or "") for x in reversed(ctx) if float(x["at"]) < float(job["at"])), "")
         job.update(categories=list(cats), backend=b.name, sent=self.clock(), deadline=DEADLINE_S)
         now = self.clock()
         with self._lock:
@@ -793,7 +802,7 @@ class ModelBacking:
                 return []
             if near == "other":                # another call while one is open on the source: on the card, no push
                 mode = lowest(mode, "map")
-            if not self._cued(pack, cat, text, job.get("context") or []):
+            if not self._cued(pack, cat, text, job.get("context") or [], self._dispatch(pack, win, job, at)):
                 rec.update(event_id=None, used="uncued")   # "water rescue" with no word of water in what was said
                 self.count("uncued")
                 return []
@@ -827,9 +836,21 @@ class ModelBacking:
             self.count("events")
             return [ev]
 
-    def _cued(self, pack, cat: str, text: str, context: list[str]) -> bool:
-        """The category's "model_cues" (rules.py; none: any answer) in the trigger's words, or in CUE_CONTEXT of the
-        context transmissions."""
+    @staticmethod
+    def _dispatch(pack, win, job: dict, at: float) -> str:
+        """The text of the source's transmission just before the trigger when it is a dispatch (the dispatcher's voice
+        or a positive hit of the pack's dispatch cue, within the pack's window_s), else ""."""
+        from sizeup.intel import rules as rules_mod
+        e = win.entries.get(job.get("prior") or "") if win is not None else None
+        if e is None or e.suppressed or not 0.0 <= at - e.at <= pack.window_s:
+            return ""
+        if e.dispatcher or any(w > 0 and r.mode != "shadow" and r.category == rules_mod.WILD for r, w in e.hits):
+            return e.text or ""
+        return ""
+
+    def _cued(self, pack, cat: str, text: str, context: list[str], dispatch: str = "") -> bool:
+        """The category's "model_cues" (rules.py; none: any answer) in the trigger's words, in the dispatch just
+        before it (_dispatch), or in CUE_CONTEXT of the context transmissions."""
         src = pack.category(cat).get("model_cues") or []
         if not src:
             return True
@@ -841,7 +862,8 @@ class ModelBacking:
         def says(t: str) -> bool:
             ws = rules_mod.words(t)
             return any(p.found(t, ws) for p in self._needs[k])
-        return says(text) or sum(1 for t in context if t and says(t)) >= CUE_CONTEXT
+        return (says(text) or bool(dispatch and says(dispatch))
+                or sum(1 for t in context if t and says(t)) >= CUE_CONTEXT)
 
     @staticmethod
     def _short(row: dict, text: str) -> bool:
