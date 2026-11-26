@@ -289,7 +289,7 @@ def test_auto_priority_gpu_first_then_aws_then_the_station_each_said_on_its_rout
         token = hub.app.hub.workers.add("gpu-1", "Test box")
         # every class switch off: Auto · priority goes to the GPU whatever they say (the channel's choice wins)
         hub.app.hub.workers.set_pool(classes={sttpool.class_key(c): False for c in sttpool.CLASSES})
-        w = FakeWorker(hub.url, token).start()
+        w = FakeWorker(hub.url, token, wait_s=20.0).start()
         assert wait(lambda: hub.app.sttpool.ready_forced(URGENT)[0], 5)
         send(hub, pending_event("FG1-1"))
         assert wait(lambda: _row(hub, "FG1-1").get("text") == GPU_TEXT, 30), _row(hub, "FG1-1")
@@ -325,7 +325,7 @@ def test_pinned_aws_is_aws_and_the_legacy_aws_keeps_its_gpu_first_by_class(tmp_p
     fake = FakeTranscribe(phrases={500: AWS_TEXT})
     hub = _hub(tmp_path, fake)
     token = hub.app.hub.workers.add("gpu-1")
-    w = FakeWorker(hub.url, token).start()
+    w = FakeWorker(hub.url, token, wait_s=20.0).start()
     try:
         assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)      # every class on (the default)
         # the legacy "aws" (FG1's default, never rewritten): a GPU first where its class is on, as before the selector
@@ -357,7 +357,7 @@ def test_a_pinned_gpu_worker_falls_back_through_the_auto_order(tmp_path):
     hub = _hub(tmp_path, fake)
     token = hub.app.hub.workers.add("gpu-b")
     hub.app.hub.workers.add("gpu-pc")
-    w = FakeWorker(hub.url, token).start()
+    w = FakeWorker(hub.url, token, wait_s=20.0).start()
     try:
         _set(hub, "FG1", "pin:gpu-pc")
         assert wait(lambda: hub.app.sttpool.ready_forced(URGENT)[0], 5)
@@ -375,7 +375,7 @@ def test_the_guard_sends_a_slow_gpus_priority_clips_to_aws_and_says_so(tmp_path)
     fake = FakeTranscribe(phrases={500: AWS_TEXT})
     hub = _hub(tmp_path, fake)
     token = hub.app.hub.workers.add("gpu-1")
-    w = FakeWorker(hub.url, token).start()
+    w = FakeWorker(hub.url, token, wait_s=20.0).start()
     try:
         _set(hub, "FG1", "auto")
         assert wait(lambda: hub.app.sttpool.ready_forced(URGENT)[0], 5)
@@ -481,7 +481,7 @@ def test_a_tripped_gpu_gets_its_probe_pinned_and_steady_traffic_never_holds_it_o
     fake = FakeTranscribe(phrases={500: AWS_TEXT})
     hub = _hub(tmp_path, fake)
     token = hub.app.hub.workers.add("gpu-1")
-    w = FakeWorker(hub.url, token).start()
+    w = FakeWorker(hub.url, token, wait_s=20.0).start()
     try:
         _set(hub, "FG1", "auto")
         assert wait(lambda: hub.app.sttpool.ready_forced(URGENT)[0], 5)
@@ -575,7 +575,7 @@ def test_two_clips_of_one_channel_on_different_engines_stay_in_air_time_order_an
         r = hub.app.cad.store.one("SELECT status, text, start FROM radio_traffic WHERE id = 'FG1-old'")
         assert r["status"] == "pending" and r["text"] == "" and hub.app.audio.has("FG1-old")     # (at once, audio too)
         token = hub.app.hub.workers.add("gpu-1")
-        w = FakeWorker(hub.url, token).start()
+        w = FakeWorker(hub.url, token, wait_s=20.0).start()
         assert wait(lambda: hub.app.sttpool.ready_forced(URGENT)[0], 5)
         time.sleep(0.05)
         send(hub, pending_event("FG1-new", seq=2))
