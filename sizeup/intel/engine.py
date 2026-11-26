@@ -1837,8 +1837,10 @@ class IntelEngine:
         if ev is None and hasattr(self.events, "bound") and self.events.bound(tid, pack.name, cat):
             return None                       # already an event's (one expired, a re-feed after a restart): never two
         # its traffic: the rows that say this category (and this one when it ties), never another job's cue, never a
-        # row another open event holds (#923: no event takes another call's rows)
-        held = {t for e in self._open_for(pack, None, key, at, span) if ev is None or e.id != ev.id
+        # row of another call's open event (#923): another of this category, or one this row is apart from (_call);
+        # one call's events of other categories may share a row (a crash and its car fire)
+        held = {t for e in self._open_for(pack, None, key, at, span) if (ev is None or e.id != ev.id)
+                and (e.category == cat or (speaks and self._split(pack, e, entry) in SPLITS))
                 for t in e.traffic_ids} - {tid}
         tids = list(dict.fromkeys([*(t for t, r, _w in contrib if r.category == cat and _w > 0 and t not in held),
                                    *([tid] if speaks or (ev is not None and self._same_job(

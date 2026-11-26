@@ -76,6 +76,7 @@ PAGE_SIZE = 50
 PAGE_MAX = 100
 MAP_MAX = 2000                     # the map's pins: the newest of the filters (the rest counted)
 SEARCH_MAX = 100                   # Search's intel matches returned (the rest counted)
+CALL_WORDS = 4                     # console_calls(): a group is a call when one of its transmissions says this many words
 SIBLINGS_MAX = 20                  # a row's other calls in its window (siblings()): the nearest this many
 SEARCH_SCAN = 5000                 # ... out of the range's newest this many events
 SEARCH_WORDS = 8
@@ -177,8 +178,9 @@ def console_calls(txs: list[dict], event_tids: set, talker_of, gap_s: float) -> 
     """The calls on a source that are no intel event (the admin's "other calls in the window", #961): its labelled
     dispatch consoles' transmissions (talkers.py: talker_of(row) -> Talker | None) in none of the events, grouped
     while each is within gap_s of the one before, a group left out when any of its transmissions is within gap_s of
-    an event's own (that event's conversation). txs: [{id, start, system, radio_id}] by air time. [{at, n, consoles:
-    [labels]}], oldest first. No labels: none (as before)."""
+    an event's own (that event's conversation), or when none of them has CALL_WORDS words (a "yeah", a stray
+    "therefore": no call). txs: [{id, start, system, radio_id, words?}] by air time. [{at, n, consoles: [labels]}],
+    oldest first. No labels: none (as before)."""
     ev_at = [float(t["start"]) for t in txs if str(t["id"]) in event_tids]
     groups: list[dict] = []
     for t in txs:
@@ -195,10 +197,11 @@ def console_calls(txs: list[dict], event_tids: set, talker_of, gap_s: float) -> 
             groups.append(g)
         g["end"], g["n"] = at, g["n"] + 1
         g["times"].append(at)
+        g["words"] = max(g.get("words", 0), int(t.get("words", CALL_WORDS)))
         if tk.label not in g["consoles"]:
             g["consoles"].append(tk.label)
     return [{"at": g["at"], "n": g["n"], "consoles": g["consoles"]} for g in groups
-            if all(abs(x - y) > gap_s for x in g["times"] for y in ev_at)]
+            if g["words"] >= CALL_WORDS and all(abs(x - y) > gap_s for x in g["times"] for y in ev_at)]
 
 
 def _words(text: str) -> list[str]:
@@ -638,8 +641,10 @@ class IntelLog:
         if hit is not None:
             return hit
         lo, hi = float(r["first_at"]) - SIBLING_S, float(r["last_at"]) + SIBLING_S
-        txs = self.cad.store.q("SELECT id, start, system, radio_id FROM radio_traffic WHERE source = ? AND start >= ? "
-                               "AND start <= ? ORDER BY start, id LIMIT 2000", (r["source_key"], lo - gap, hi + gap))
+        txs = self.cad.store.q("SELECT id, start, system, radio_id, text FROM radio_traffic WHERE source = ? AND "
+                               "start >= ? AND start <= ? ORDER BY start, id LIMIT 2000", (r["source_key"], lo - gap, hi + gap))
+        for t in txs:                              # (how many words only: the text itself goes no further)
+            t["words"] = len(str(t.pop("text") or "").split())
         tids: set = set()
         for e in self.cad.store.q("SELECT traffic_ids FROM intel_events WHERE source_key = ? AND last_at >= ? AND "
                                   "first_at <= ?", (r["source_key"], lo - gap, hi + gap)):

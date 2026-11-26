@@ -319,6 +319,8 @@ def test_console_calls_are_the_consoles_transmissions_in_no_event_and_not_an_eve
     out = console_calls(txs, {"e1", "e2"}, lambda t: known.get(t["radio_id"]), 120)
     assert out == [{"at": 1220, "n": 3, "consoles": ["Example PD dispatch", "Testville PD dispatch"]}]
     assert console_calls(txs, {"e1", "e2"}, lambda t: None, 120) == []    # no labels: none, as before
+    short = [dict(t, words=1) for t in txs]                               # "yeah", "copy": no call
+    assert console_calls(short, {"e1", "e2"}, lambda t: known.get(t["radio_id"]), 120) == []
 
 
 def test_the_list_and_more_info_count_a_call_that_is_no_event(tmp_path):
@@ -334,7 +336,7 @@ def test_the_list_and_more_info_count_a_call_that_is_no_event(tmp_path):
     a = save(cad, first_at=T0, last_at=T0 + 60, traffic_ids=["c1-t0"])
     cad.comms.record({**ctx_row("c1-t0", "invented", T0), "radio_id": A_ID})
     for i, (at, rid) in enumerate([(T0 + 300, A_ID), (T0 + 310, B_ID), (T0 + 330, B_ID)]):
-        cad.comms.record({**ctx_row(f"c2-t{i}", "invented", at), "radio_id": rid})
+        cad.comms.record({**ctx_row(f"c2-t{i}", "car 7 respond to the invented place", at), "radio_id": rid})
     [row_] = [r for r in listing(cad)["events"] if r["id"] == a.id]
     assert row_["siblings"] == [] and row_["calls"] == [
         {"at": T0 + 300, "n": 3, "consoles": ["Example PD dispatch", "Testville PD dispatch"]}]
