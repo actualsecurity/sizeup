@@ -13,7 +13,8 @@ all-in-one), on its own thread, a few at a time:
                 clip of ours (urgent, high, live) nor an alert clip waiting and at most QUEUE_IDLE_MAX waiting in all;
                 an AWS channel with nothing of its own open
     how         the existing re-run path, quiet: the text, model, history and change log behave like any re-run, but
-                nothing that alerts hears words that may be hours old (App._retext quiet). AWS on a context channel
+                nothing that alerts hears words that may be hours old (App._retext quiet), except intel on a source it
+                pushes from: it scores them at their air time and pushes only while still fresh. AWS on a context channel
                 set to AWS while its own budget (police) has room and is under 80 % of its month, never ours nor its
                 reserve; otherwise the local model (the station's whisper: its catch_up call), in the CATCHUP class:
                 under every other clip, started only after a quiet spell with nothing of ours heard, one greedy pass,
