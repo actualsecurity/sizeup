@@ -110,7 +110,7 @@ COUNTS = ("asked", *WHYS, "events", "evidence", "capped", "unavailable", "uncued
 # an event the trigger row doesn't back (_corroborated) is at most ALONE_MAX ("medium": never "high", never pushed), and
 # at most SHORT_MAX ("low") when that row is short (under SHORT_WORDS words or SHORT_S seconds): one odd transmission.
 # A category with "model_cues" (rules.py) is raised only when the trigger says one of them, or CUE_CONTEXT of the
-# context transmissions do (a clear sequence), or the row just before the trigger does and is a dispatch (the dispatcher
+# context transmissions do (a clear sequence), or the row aired just before the trigger does and is a dispatch (the dispatcher
 # or the pack's dispatch cue, within the pack's window_s: "units respond, two males fighting" then "copy, en route");
 # else the answer is kept, used "uncued", nothing raised.
 ALONE_MAX = 0.6
@@ -132,7 +132,7 @@ SYSTEM = ("You read police radio transcripts (speech-to-text, often misheard) fo
           "the scene secure, no injuries after all). address: the place as said in the TRIGGER transmission (at most "
           "80 characters), or null. reason: at most 120 characters, why.")
 NONE_LINE = ("- none: anything else: routine traffic, a unit's status or location, a call already handled or cleared, an "
-             "alarm cancelled, a theft, larceny or report taken after the fact, plate or vehicle checks, traffic and "
+             "alarm cancelled, a theft or larceny reported after the fact, plate or vehicle checks, traffic and "
              "parking conditions, a category word used in routine business (a parade barricade, a rifle at the range, a "
              "CPR class), or a transmission too garbled or partial to tell what is happening.")
 
@@ -690,7 +690,6 @@ class ModelBacking:
         ctx = self.context(job["key"], job["tid"], job["at"])
         msgs = messages(cats, {"at": job["at"], "text": job["row"].get("text")}, ctx, hist)
         job["context"] = [str(x.get("text") or "") for x in ctx]       # (the category's cues: _cued)
-        job["prior"] = next((str(x.get("tid") or "") for x in reversed(ctx) if float(x["at"]) < float(job["at"])), "")
         job.update(categories=list(cats), backend=b.name, sent=self.clock(), deadline=DEADLINE_S)
         now = self.clock()
         with self._lock:
@@ -802,7 +801,7 @@ class ModelBacking:
                 return []
             if near == "other":                # another call while one is open on the source: on the card, no push
                 mode = lowest(mode, "map")
-            if not self._cued(pack, cat, text, job.get("context") or [], self._dispatch(pack, win, job, at)):
+            if not self._cued(pack, cat, text, job.get("context") or [], self._dispatch(pack, win, tid, at)):
                 rec.update(event_id=None, used="uncued")   # "water rescue" with no word of water in what was said
                 self.count("uncued")
                 return []
@@ -837,12 +836,16 @@ class ModelBacking:
             return [ev]
 
     @staticmethod
-    def _dispatch(pack, win, job: dict, at: float) -> str:
+    def _dispatch(pack, win, tid: str, at: float) -> str:
         """The text of the source's transmission just before the trigger when it is a dispatch (the dispatcher's voice
-        or a positive hit of the pack's dispatch cue, within the pack's window_s), else ""."""
+        or a positive hit of the pack's dispatch cue), else "". Just before: the newest of the window's rows, as the
+        answer is applied (a row aired in between whose text came in late counts), that AIRED before the trigger,
+        within the pack's window_s, not suppressed."""
         from sizeup.intel import rules as rules_mod
-        e = win.entries.get(job.get("prior") or "") if win is not None else None
-        if e is None or e.suppressed or not 0.0 <= at - e.at <= pack.window_s:
+        prior = [e for t, e in (win.entries.items() if win is not None else ())
+                 if t != tid and not e.suppressed and 0.0 < at - e.at <= pack.window_s]
+        e = max(prior, key=lambda x: x.at, default=None)
+        if e is None:
             return ""
         if e.dispatcher or any(w > 0 and r.mode != "shadow" and r.category == rules_mod.WILD for r, w in e.hits):
             return e.text or ""
