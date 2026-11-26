@@ -240,6 +240,7 @@ window.TrainLayer = (() => {
   // fix may go old (its train turns hollow): once a second; none with the layer off, every map off screen (an Expand
   // shut), the page hidden or all frozen (#887: it redrew every map ~10 times a second, zoomed in or out).
   let animT = 0, animAt = 0;
+  const fading = () => { for (const it of motion.items.values()) if (it.fade) return true; return false; };
   const live = (m) => m.isOn() && m.shown();
   const anyLive = () => { for (const m of maps) if (live(m)) return true; return false; };
   function animMode() {
@@ -708,7 +709,7 @@ window.TrainLayer = (() => {
     shown() { return this.screen.shown(); }
     // how often to redraw this map while a train moves: each time the fastest has moved STEP_PX on it, at its zoom
     frameMs() {
-      if (pace.v === null) return ANIMATE_MS;
+      if (pace.v === null || fading()) return ANIMATE_MS;     // a fade (#390) is opacity, not motion: every ANIMATE_MS
       try {
         const metresPerPx = 40075016.686 * Math.cos(this.map.getCenter().lat * Math.PI / 180) / (512 * 2 ** this.map.getZoom());
         const pxPerS = 1.25 * pace.v / metresPerPx;            // (a little ahead of a train speeding up)

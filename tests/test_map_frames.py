@@ -248,6 +248,28 @@ const ring = (hex) => { const s = rec.sets["ac-aircraft"] || []; const f = s.len
 
 
 @needs_node
+def test_a_chip_focuses_its_aircraft_on_a_map_just_opened_at_once(tmp_path):
+    """shownMap() reads the map's box now: a chip clicked with the Overview shut opens it and focuses the aircraft at
+    once, not ~400 ms later (the kept on-screen flag is only updated when the observer calls back)."""
+    d, ly, clock = hub_answer()
+    hx = next(a["hex"] for a in d["aircraft"] if a["alt"] != "ground")
+    o = run_node(tmp_path, ["motion.js", "glide.js", "mapfollow.js", "aircraft.js"], VSYNC + r"""
+laidOut(control.map.container, false);                     // the Overview shut
+""" + LOADED + r"""
+const ring = (hex) => { const s = rec.sets["ac-aircraft"] || []; const f = s.length ? s[s.length - 1].features.find((x) => x.properties.hex === hex) : null; return f ? f.properties.ring || "" : null; };
+(async () => {
+  await AircraftLayer.load();
+  await flush();
+  control.map.container.offsetParent = {};                 // opened (#overview-open): laid out, no observer call yet
+  AircraftLayer.focus(IN.hex);
+  out.ring = ring(IN.hex); out.eased = rec.eases.length;
+  console.log(JSON.stringify(out)); process.exit(0);
+})();
+""", {**map_input(d, layerOn=True), "hex": hx}, pre=MAP + SCREEN)
+    assert o["ring"] == "selected" and o["eased"] == 1      # centred and ringed now, not on a 400 ms retry
+
+
+@needs_node
 def test_vessels_ask_for_a_frame_only_when_a_draw_is_due(tmp_path):
     """vessels.js asked for a frame on every vsync while a vessel moved, to draw each map every frameMs (100 ms to 1 s).
     Now it sleeps on a timer between draws, as aircraft.js; a zoom, a follow, a map coming on screen and a new answer wake it."""
@@ -314,7 +336,10 @@ global.fetch = async () => ({ ok: true, json: async () => {
 let attach = null;
 global.MapLayers = { addGroup: (g) => { attach = g.attach; } };
 """ + SCREEN + r"""
-for (const f of ["motion.js", "mapfollow.js", "trains.js"]) eval(fs.readFileSync(IN.static + "/" + f, "utf8"));
+for (const f of ["motion.js", "mapfollow.js"]) eval(fs.readFileSync(IN.static + "/" + f, "utf8"));
+const mkTracker = Motion.railTracker; let TK = null;
+Motion.railTracker = (...a) => (TK = mkTracker(...a));     // the layer's tracker, to start a fade by hand
+eval(fs.readFileSync(IN.static + "/trains.js", "utf8"));
 function fakeMap(zoom, on, shown = true) {
   const sources = {}, layers = {}, h = {}, box = laidOut({}, shown);
   const map = {
@@ -379,6 +404,42 @@ const far = fakeMap(10, () => true), near = fakeMap(15, () => true), off = fakeM
     assert o["farMs"] == 500 and 8 <= o["far"] <= 11         # z10: every MAX_ANIMATE_MS (main: 50, like z15)
     assert o["showToDraw"] == 0
     assert 5 <= o["nearOut"] <= 7
+
+
+@needs_node
+def test_a_fading_train_is_drawn_through_its_fade_on_a_zoomed_out_map(tmp_path):
+    """A correction too far to glide is faded out where the train is drawn and in at the fix (motion.js, #390: FADE_MS,
+    800 ms): its opacity changes, not where it is drawn. At z10 the draws are timed by the motion (every 500 ms): the fade
+    got 2 or 3. While a train fades: every ANIMATE_MS."""
+    from tests.test_trains import provider
+    tr, clock, fetch = provider(tmp_path)
+    tr.get("/api/cad/trains", "")
+    tr.tick()
+    clock.t += 3
+    answer = json.loads(tr.get("/api/cad/trains", "")[1])
+    o = run_trains(tmp_path, r"""
+const out = {};
+const far = fakeMap(10, () => true);
+const ops = [];
+(async () => {
+  now = IN.got;
+  const m = attach(far);
+  await flush(); await flush();
+  await advance(1500);
+  out.ms = m.frameMs();
+  const src = far.map.getSource("tr-trains"), sd = src.setData;
+  const id = [...TK.items.keys()].find((k) => TK.items.get(k).shown && !TK.items.get(k).stale);
+  src.setData = (d) => { const f = d.features.find((x) => x.properties.id === id); if (f) ops.push(f.properties.op); sd(d); };
+  await TrainLayer.load(); await flush();                  // the answer that brought the far fix: drawn now
+  const it = TK.items.get(id); it.fade = { at: now, s: it.shown.s };
+  await advance(800);
+  out.draws = ops.length; out.ops = ops; out.msFading = m.frameMs();
+  console.log(JSON.stringify(out)); process.exit(0);
+})();
+""", {"answer": answer, "got": clock.t * 1000})
+    assert o["ms"] == 500                                    # z10, nothing fading: timed by the motion
+    assert o["draws"] >= 6, o                                # through the fade, ~every ANIMATE_MS (main of this PR: 2-3)
+    assert min(o["ops"]) < 0.5                               # faded out and in on the way
 
 
 def run_trains(tmp_path, body, data):

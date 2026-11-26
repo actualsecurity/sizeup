@@ -361,7 +361,7 @@ window.VesselLayer = (() => {
       if (!v) return;
       this.fol.start(id, where(v), FOLLOW_ZOOM);
       this.draw(true);
-      animate();
+      wake();                               // (zoomed in to follow: the draws timed again from now)
     }
     track(f, force) {
       if (f) this.fol.pan(f.geometry.coordinates);

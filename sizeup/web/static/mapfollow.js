@@ -230,9 +230,10 @@ window.MapFollow = (() => {
     }
   }
 
-  // the first of these maps on screen (each {map}: a MapLibre map)
+  // the first of these maps on screen (each {map}: a MapLibre map); read now, not screen()'s kept flag: on a click,
+  // just after the Overview was opened (its observer not yet called back)
   function shownMap(maps) {
-    return [...maps].find((m) => { try { return screen(m.map).shown(); } catch (_) { return false; } }) || null;
+    return [...maps].find((m) => { try { return !!m.map.getContainer().offsetParent; } catch (_) { return false; } }) || null;
   }
 
   // Whether a map is on screen (laid out: its box has an offsetParent; an Expand shut has none), kept, not read on every
