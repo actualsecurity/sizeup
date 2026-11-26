@@ -54,7 +54,9 @@ Diner"): an older note's free text alone, read as before. A picked place is:
         correction_candidates(since=None, unimported_only=True) -> [{id, note_id, clip_id, heard_phrase, real_phrase,
                               kind, source, who, when, imported_at}], by when then id: the pairs written or changed
                               AFTER since (epoch seconds, exclusive: pass the last "when" read; None: all), only those
-                              not taken yet unless unimported_only=False
+                              not taken yet unless unimported_only=False. "when" is taken under the store's lock, so it
+                              follows commit order; still, unimported_only=True (with mark_imported) is the robust
+                              read, since is only a shortcut
         mark_imported(pairs) -> n  taken by the speech-to-text side (imported_at: now): each pair as read (a row
                               above, or (id, heard_phrase, real_phrase)); one changed since it was read is not marked
                               (it comes back with its new words and when). ids are never reused (AUTOINCREMENT)
@@ -506,9 +508,9 @@ class IntelNotes:
         ev = self._event(eid)
         n = self._clean(body)
         op, email = str(body.get("operator") or "")[:160], str(body.get("_email") or "")[:160]
-        now = self.cad.clock()
         admin = body.get("_may") == "admin"
         with self.engine.events._w(placed=n["corrected_lat"] is not None) as db:
+            now = self.cad.clock()                     # under the lock: "when" in commit order (correction_candidates)
             cols = ("event_id", *FIELDS, "author", "author_email", "created_at", "updated_at")
             cur = db.execute(f"INSERT INTO intel_notes ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
                              (int(eid), *(n[k] for k in FIELDS), op, email, now, now))
@@ -522,9 +524,9 @@ class IntelNotes:
     def edit(self, nid: int, body: dict) -> dict:
         op, email = str(body.get("operator") or "")[:160], str(body.get("_email") or "")
         admin = body.get("_may") == "admin"
-        now = self.cad.clock()
         moved = False                                  # a picked place changed: the Intel page's map reads again
         with self.engine.events._w() as db:            # read and written in one transaction: never an older copy
+            now = self.cad.clock()                     # under the lock: "when" in commit order (correction_candidates)
             r = db.execute("SELECT * FROM intel_notes WHERE id = ?", (int(nid),)).fetchone()
             if r is None:
                 raise CadError(f"no note {nid}")
@@ -579,8 +581,8 @@ class IntelNotes:
         out = (st.remove_place_alias if remove else st.add_place_alias)(key, heard, op)
         changed = out["removed"] if remove else out["added"]
         if changed:                                    # before and after: the same entry (a site's primary)
-            now = self.cad.clock()
             with self.engine.events._w(listed=False) as db:
+                now = self.cad.clock()
                 self._audit(db, int(nid), cur["event_id"], "unalias" if remove else "alias", op, now,
                             {"place_key": out["key"], "aliases": out["had"]},
                             {"place_key": out["key"], "aliases": out["aliases"]})

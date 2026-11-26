@@ -1973,10 +1973,28 @@ class Editor:
         """A place name as people write it: the county's label, a hand-made one's name (its label is where)."""
         return (e.get("label") if commonplaces.is_imported(key, e) else "") or e.get("name") or key
 
+    def _names_town(self, toks: list[str]) -> bool:
+        """The words are a town's ("Port Chester", "Village of Rye Brook", "Harrison"), or town words alone ("Chester"):
+        the lists' towns and their aliases, the county's (data/westchester_towns.txt), the page locator's phrases."""
+        L = self.cad.lists
+        got = getattr(self, "_town_names", None)
+        if got is None or got[0] is not L:             # (built again when the lists change: a town alias added)
+            from sizeup.geo.gazetteer import MUNI_PHRASES
+            from sizeup.geo.pagegeo import TOWN_WORDS
+            from sizeup.intel.rules import town_names
+            phrases = {tuple(norm_tokens(t)) for t in (*L.geo_town_order, *L.geo_town_aliases,
+                                                        *L.geo_town_aliases.values(), *town_names().values())}
+            phrases |= {tuple(p) for p, _m, _n in MUNI_PHRASES}
+            words = set(TOWN_WORDS) | {w for p in phrases for w in p} | {"of", "city", "village", "town", "the"}
+            got = self._town_names = (L, phrases - {()}, words)
+        _L, phrases, words = got
+        return tuple(toks) in phrases or all(t in words for t in toks)
+
     def alias_problem(self, key: str, alias: str, cur: dict | None = None) -> tuple[str, str] | None:
-        """Why alias can't be another name of place key: ("taken", why) (another place's name or alias already: the
-        API's 409, PlaceNameTaken) | ("bad", why) (empty, too long, a number, a street's name, too short or common to
-        name a place on its own: 400); None: it may. cur: {key: entry} (local_places by key), else read."""
+        """Why alias can't be another name of place key: ("taken", why) (a town, a place on the map, or another
+        place's name or alias already: the API's 409, PlaceNameTaken) | ("bad", why) (empty, too long, a number, a
+        street's name; one word too short or too common unless an acronym, "KFC"; several with none but generic words:
+        400); None: it may. cur: {key: entry} (local_places by key), else read."""
         a = " ".join(str(alias or "").split())
         if not a:
             return ("bad", "alias: empty")
@@ -1985,13 +2003,22 @@ class Editor:
         toks = norm_tokens(a)
         if not toks or all(t.isdigit() for t in toks):
             return ("bad", "alias: a number names no place")
+        if self._names_town(toks):                     # the county feed's "<town>" alone would pin the place
+            return ("taken", f'"{a}" is a town')
         ix = self.cad.place_index() if hasattr(self.cad, "place_index") else None
         if ix is not None and getattr(ix, "names_street", None) and ix.names_street(a):
             return ("bad", "alias: a street's name")    # (the location box would offer the place for the street)
+        if ix is not None and getattr(ix, "names_place", None) and ix.names_place(a):
+            return ("taken", f'"{a}" is already a place on the map')
         from sizeup.geo.commonwords import COMMON_WORDS
         from sizeup.geo.pagegeo import GENERIC
-        own = [t for t in toks if not t.isdigit() and t not in GENERIC and t not in COMMON_WORDS]
-        if not (own and ((len(toks) > 1 and max(map(len, own)) >= 3) or len(own[0]) >= 4)):
+        if len(toks) == 1:                             # one word: an acronym ("KFC", "BJs"), else its own, not common
+            raw = a.replace("'", "").replace("’", "")
+            acronym = bool(re.fullmatch(r"[A-Z][A-Za-z&]{1,3}", raw)) and sum(c.isupper() for c in raw) >= 2
+            ok = acronym or (len(toks[0]) >= 4 and toks[0] not in GENERIC and toks[0] not in COMMON_WORDS)
+        else:                                          # several ("Golden Star Diner"): one of them not generic
+            ok = any(len(t) >= 3 and not t.isdigit() and t not in GENERIC for t in toks)
+        if not ok:
             return ("bad", "alias: too short or too common to name a place on its own")
         if cur is None:
             cur = {r["key"]: r for r in self.local_places()}

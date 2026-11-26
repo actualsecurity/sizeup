@@ -419,7 +419,8 @@ def test_an_alias_never_takes_another_places_name_or_alias(placed):
 @pytest.mark.parametrize("alias, why", [
     ("", "empty"), ("   ", "empty"), ("Sampel Diner by the old railroad bridge underpass", "at most 40"), ("12", "a number"),
     ("12 34", "a number"), ("King St", "a street's name"), ("N Main St", "a street's name"), ("Arbor", "a street's name"),
-    ("Joe", "too short"), ("the deli", "too common"), ("Market", "too common")])
+    ("Joe", "too short"), ("the deli", "too common"), ("Market", "too common"), ("Garden", "too common"),
+    ("Kfc", "too short")])
 def test_a_street_a_number_or_junk_is_never_an_alias(placed, alias, why):
     cad, _clock, _gaz = placed
     code, out = alias_by_settings(cad, "sample diner", alias)
@@ -552,3 +553,30 @@ global.api = async (m, p, b) => {{ if (m === "POST") {{ posts.push([p, b]); retu
     assert out["disabled"] is True and "already a name of Sample Market" in out["why"]
     assert "+ Alias of Sample Diner" not in out["second"] and "− Alias" in out["second"]
     assert out["posts"] == [[f"/api/cad/intel/notes/{nid}/alias", {"remove": True, "operator": ""}]]
+
+
+@pytest.mark.parametrize("alias", ["Port Chester", "port  chester", "Village of Rye Brook", "Rye", "Harrison", "Chester",
+                                   "Greenwich"])
+def test_a_town_is_never_an_alias(placed, alias):
+    """#960 re-review 1: "Port Chester" as the diner's alias would pin a county event located only by its town there."""
+    cad, _clock, _gaz = placed
+    code, out = alias_by_settings(cad, "sample diner", alias)
+    assert code == 409 and "town" in out["error"], out
+    assert commonplaces.Lookup(cad.local_places()).find("PORT CHESTER") is None
+
+
+@pytest.mark.parametrize("alias", ["Lyon Park", "lyon  park", "Rye Playland", "Playland"])
+def test_a_place_on_the_map_is_never_an_alias(placed, alias):
+    """#960 re-review 2: the map's own place names (and their aliases) stay theirs."""
+    cad, _clock, _gaz = placed
+    code, out = alias_by_settings(cad, "sample diner", alias)
+    assert code == 409 and "on the map" in out["error"], out
+
+
+@pytest.mark.parametrize("alias", ["Golden Star Diner", "Lucky Garden", "Royal Palace", "Grand Union", "King St Diner",
+                                   "Mobile Station", "CVS", "KFC", "BJs", "BJ's"])
+def test_business_names_and_acronyms_may_be_aliases(placed, alias):
+    """#960 re-review 3: common words refuse a single word only; several need one that isn't generic; an acronym."""
+    cad, _clock, _gaz = placed
+    code, out = alias_by_settings(cad, "sample diner", alias)
+    assert code == 200 and out["added"] is True, out
