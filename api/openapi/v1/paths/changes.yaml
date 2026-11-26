@@ -1,0 +1,99 @@
+get:
+  operationId: getChanges
+  summary: What changed since a cursor
+  description: >
+    References (kind, id, rev) to the objects that changed after `after`, oldest first, for the app coming back to the
+    foreground (then open `/api/v1/stream`). With no `after` it returns the log's head and epoch and no changes: where a
+    live app starts, next to its snapshot. A cursor older than the log (kept 7 days, at most 100,000 entries) is a 410
+    `cursor_too_old` with `oldest`, the smallest cursor still served; a different `epoch`, or an `after` beyond the head,
+    is a 409 `epoch_changed` with the current `epoch`. An `after` without its `epoch` is a 400 `bad_cursor` (a bare number
+    could be from any run of the hub). The epoch is new at every start of the hub, so a cursor never survives a restart or
+    a deploy: the app gets a 409 once and loads a snapshot again. Either way the app loads a snapshot again. Served only while
+    the `stream` feature is on; needs a signed-in device with at least the `read` role.
+  parameters:
+    - name: after
+      in: query
+      required: false
+      description: The cursor (a seq).
+      schema: {type: integer, minimum: 0}
+    - name: epoch
+      in: query
+      required: false
+      description: The epoch the cursor came from. Required with `after`.
+      schema: {type: string}
+    - name: limit
+      in: query
+      required: false
+      schema: {type: integer, minimum: 1, maximum: 500, default: 100}
+  responses:
+    "200":
+      description: The changes.
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Changes.yaml
+          example:
+            epoch: 9f3a1c6e2b4d
+            cursor: 42
+            head: 42
+            more: false
+            changes:
+              - {seq: 41, epoch: 9f3a1c6e2b4d, kind: incident, id: "1207", rev: 3b9c0d41aa7e5f12, at: 1767225601.2}
+              - {seq: 42, epoch: 9f3a1c6e2b4d, kind: unit, id: "14", rev: c1d2e3f4a5b60789, at: 1767225601.2}
+            server_time: 1767225603.5
+    "409":
+      description: The epoch changed (the log started over). The error code is epoch_changed and error.epoch is the new one.
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    "410":
+      description: The cursor is older than the log. The error code is cursor_too_old and error.oldest the smallest cursor served.
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    "400":
+      description: "Bad input: error.code is bad_cursor (after is digits only) or bad_limit."
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    "401":
+      description: "No signed-in device (unauthorized)."
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    "404":
+      description: "Mobile or the stream feature is off (not_found)."
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    "429":
+      description: "Rate limited (rate_limited)."
+      headers:
+        Retry-After:
+          description: Seconds to wait; the same as error.retry_after_s.
+          schema: {type: integer}
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    "503":
+      description: "Not available now: error.code is unavailable (the log is starting, there is none on this host, or no visibility is configured), busy or updating."
+      headers:
+        Retry-After:
+          description: Seconds to wait; the same as error.retry_after_s.
+          schema: {type: integer}
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
+    default:
+      description: An error.
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml

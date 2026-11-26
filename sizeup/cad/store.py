@@ -512,6 +512,9 @@ class Store:
         # after a transaction is committed / rolled back (tx()); touch(id, system): a row of the radio log changed in
         # the open transaction (the Radio page's change notes: set by Comms, sizeup/cad/comms.py)
         self.after_commit = self.after_rollback = self.touch = None
+        # fn() after each committed transaction (the mobile change log, #561); a list because `after_commit` above
+        # is Comms' single slot. Each is told with the lock held: it must only set an Event (a raising one is ignored).
+        self.commit_listeners: list = []
         self.migrated: list[str] = []      # what a migration did, for the log
         self.on_assigned = None            # fn(incident id, [unit names]): units just put on it (assign); never raises here
         self.on_unassigned = None          # fn(incident id): a unit just taken off it (cleared, moved); never raises here
@@ -955,6 +958,12 @@ class Store:
                     # What rides on a transaction without being part of it (the Radio page's change notes,
                     # sizeup/cad/comms.py): told only once the write is committed, or that it was not. Best effort:
                     # nothing it does or fails at reaches the caller, whose data is stored (or rolled back) by now.
+                    if done:
+                        for fn in store.commit_listeners:    # (a poke: it sets an Event and returns)
+                            try:
+                                fn()
+                            except Exception:  # noqa: BLE001
+                                pass
                     hook = store.after_commit if done else store.after_rollback
                     try:
                         if hook is not None:
@@ -2106,14 +2115,48 @@ class Store:
             r["joint_call"] = self.lists.joint_call(r)      # "Rye Brook": their call (their units first)
         return list(by.values())
 
-    def incidents(self, closed_s: float = CLOSED_HOURS * 3600, closed_max: int = CLOSED_MAX) -> list[dict]:
-        """Every open one (queued, pending, active: however old, a road closure can last days),
-        plus those closed or dismissed in the last closed_s."""
+    def incident_rows(self, closed_s: float = CLOSED_HOURS * 3600, closed_max: int = CLOSED_MAX) -> list[dict]:
+        """The rows incidents() starts from: every open one (queued, pending, active: however old, a road closure can
+        last days), plus those closed or dismissed in the last closed_s. No assignments, chronology or dispatches."""
         cutoff = self.clock() - closed_s
         rows = self.q("SELECT * FROM incidents WHERE status IN ('queued', 'pending', 'active') ORDER BY created_at DESC")
         rows += self.q("SELECT * FROM incidents WHERE status IN ('closed', 'dismissed') AND closed_at >= ? "
                        "ORDER BY closed_at DESC LIMIT ?", (cutoff, closed_max))
-        return self._attach(rows)
+        return rows
+
+    def incidents(self, closed_s: float = CLOSED_HOURS * 3600, closed_max: int = CLOSED_MAX) -> list[dict]:
+        """Every open one (queued, pending, active: however old, a road closure can last days),
+        plus those closed or dismissed in the last closed_s."""
+        return self._attach(self.incident_rows(closed_s, closed_max))
+
+    def incidents_lean(self, max_events: int = 300) -> list[dict]:
+        """incidents() with only what the app's summary reads (sizeup/api/v1/serialize.py incident_summary), without
+        loading the chronology or the dispatch log: `assignments` as _attach builds them (unit, name, status, times) and
+        `events` as just the newest id (the largest id among the last max_events by time, as _attach keeps). The change
+        log scans this on every flush (#561): its cost is the open calls, not their chronologies."""
+        rows = self.incident_rows()
+        if not rows:
+            return rows
+        ids = json.dumps([r["id"] for r in rows])
+        by = {r["id"]: dict(r, emergency=bool(r["emergency"]), assignments=[], events=[]) for r in rows}
+        for a in self.q("SELECT a.incident_id, a.unit_id, a.dispatched_at, a.enroute_at, a.onscene_at, a.cleared_at, "
+                        "u.name, u.status FROM assignments a JOIN units u ON u.id = a.unit_id "
+                        "WHERE a.incident_id IN (SELECT value FROM json_each(?)) ORDER BY a.id", (ids,)):
+            by[a["incident_id"]]["assignments"].append(a)
+        many = []
+        for e in self.q("SELECT incident_id, MAX(id) AS newest, COUNT(*) AS n FROM events "
+                        "WHERE incident_id IN (SELECT value FROM json_each(?)) GROUP BY incident_id", (ids,)):
+            if e["n"] <= max_events:                      # (all of them are kept: the largest id is the newest)
+                by[e["incident_id"]]["events"] = [{"id": e["newest"]}]
+            else:
+                many.append(e["incident_id"])
+        if many:                                          # more than are kept: the largest id of the newest by time
+            for e in self.q("SELECT incident_id, MAX(id) AS newest FROM (SELECT incident_id, id, ROW_NUMBER() OVER "
+                            "(PARTITION BY incident_id ORDER BY at DESC, id DESC) AS rn FROM events WHERE incident_id "
+                            "IN (SELECT value FROM json_each(?))) WHERE rn <= ? GROUP BY incident_id",
+                            (json.dumps(many), max_events)):
+                by[e["incident_id"]]["events"] = [{"id": e["newest"]}]
+        return list(by.values())
 
     def full(self, iid: int) -> dict:
         """One event with everything (the Incident Database opens old ones this way)."""
