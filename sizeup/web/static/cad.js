@@ -3400,6 +3400,12 @@ function suggestionHead(m, meet) {
   }
   return [el("b", "", meet ? m.name : m.label)];
 }
+const SURE_MIN = 0.9, SURE_LEAD = 0.3;
+function sureReading(a, b) {          // the location box's best match is the one sure reading (box.suggest)
+  return !!a && a.kind === "address" && a.lat != null && (a.confidence || 0) >= SURE_MIN
+    && (a.confidence || 0) - ((b && b.confidence) || 0) >= SURE_LEAD;
+}
+
 function placeKept(box, value) {       // the picked place still named at the end of the field ("... @ Sample Market")?
   const p = box.picked && box.picked.place;
   return !!p && value.trim().toLowerCase().endsWith(`@ ${p}`.toLowerCase());
@@ -3415,6 +3421,7 @@ function addressBox(input, geoNote, list, opts = {}) {
     if (p) {
       let t = `Map: ${p.label} (${p.kind}${p.confidence != null ? `, ${Math.round(p.confidence * 100)}%` : ""})`;
       if (p.moved) t += " · point moved on the map";
+      if (p.suggested) t += " · suggested: Save to place it";
       if (p.place && !p.street_address && !input.value.trim().replace(/@.*$/, "").trim()) {
         t += ` · ${p.lat.toFixed(5)}, ${p.lon.toFixed(5)} · no street address: type one before the @`;
       }
@@ -3526,9 +3533,26 @@ function addressBox(input, geoNote, list, opts = {}) {
     box.picked = picked;
     box.items = [];
     box.autoCross = "";
+    ++box.seq;                          // (a suggestion still being looked up is for the old value)
     close();
     note();
     if (map()) map().chosen(picked && picked.lat != null ? picked : null, "set");
+  };
+  // An event with no map point: the gazetteer's one sure reading of its address pre-selected (an exact address, >= 90%,
+  // 30 points ahead of the next), so Save places it; the address as it is. None sure: nothing picked, as before.
+  box.suggest = async () => {
+    const q = input.value.trim();
+    const my = ++box.seq;
+    if (box.picked || q.length < 3) return;
+    try {
+      const ms = ((await api("GET", `/api/cad/geocode?q=${encodeURIComponent(q)}`)).matches || []);
+      if (my !== box.seq || box.picked || input.value.trim() !== q) return;
+      const [a, b] = ms;
+      if (!sureReading(a, b)) return;
+      box.picked = { ...a, suggested: true };
+      note();
+      if (map()) map().chosen(box.picked, "set");
+    } catch (e) { /* no suggestion */ }
   };
   box.move = (lat, lon) => {            // the pin dragged: the point moves, the address stays as typed
     const p = box.picked || { label: input.value.trim() || "Point on the map", kind: "point", confidence: null };
@@ -3632,6 +3656,7 @@ function openEdit() {
   keepSubtype($("#e-subtype"), inc.type, inc.subtype);
   editAddr.set(inc.address, inc.lat != null ? { lat: inc.lat, lon: inc.lon, label: inc.geo_label || inc.address, kind: "current", confidence: 1,
                                                 place: inc.place || "", street_address: inc.place_address || "" } : null);
+  if (inc.lat == null && isOpen(inc)) editAddr.suggest();
   qualSelect($("#e-qual"), inc.location_qualifier || "");
   $("#e-cross").value = inc.cross_street || "";
   $("#e-name").value = inc.caller_name || "";

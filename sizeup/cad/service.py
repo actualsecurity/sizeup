@@ -1087,11 +1087,14 @@ class Cad:
         Sample Market"; "@ Sample Market" when the data has no street address), and the place and its street
         address are kept on their own (place, place_address). place given: the address made from it (place_address,
         else what the address says before the "@", else the address typed). An edit of the address alone keeps the place
-        while the address still ends with "@ <place>" (the street address typed in front of it); else the place goes."""
+        while the address still ends with "@ <place>" (the street address typed in front of it), or is as it was (a
+        feed's "12 Example Ave (Sample Complex), Town"); else the place goes."""
         if "place" not in f and ("address" not in f or not (old or {}).get("place")):
             if old is None:                                 # a new event without one
                 f["place"] = f["place_address"] = ""
             return
+        if "place" not in f and f["address"] == old["address"]:
+            return                                          # the address as it was: its place stays
         place = f["place"] if "place" in f else old["place"]
         addr = f.get("address", old["address"] if old else "") or ""
         tail = f"@ {place}"
