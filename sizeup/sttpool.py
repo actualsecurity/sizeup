@@ -562,7 +562,8 @@ class Pool:
         hourly caps (its channel's, the worker's)."""
         if w.kind != "gpu" or j.model not in w.models or w.polling <= 0 or w.leases or not self._ready(w, now):
             return False
-        if now - self._any_at < CHALL_QUIET_S or any(not o.chall for o in self._queue):
+        if now - self._any_at < CHALL_QUIET_S or any(not o.chall and not o.extra.get("station_only")
+                                                     for o in self._queue):
             return False
         if not self._chall_room(j.channel, w.id, now):
             return False
@@ -846,8 +847,8 @@ class Pool:
             job.queued_at = self.clock()
             if rank(job) == 0:
                 self._prio_at = job.queued_at      # (background work keeps off a GPU for BG_QUIET_S after it)
-            if not job.chall:                      # (#869: any other work takes the challengers' GPUs back at once)
-                self._any_at = job.queued_at
+            if not job.chall and not job.extra.get("station_only"):   # (#869: any other work a GPU could take
+                self._any_at = job.queued_at                              # takes the challengers' GPUs back at once)
                 self._preempt_locked("other work came")
             self._queue.append(job)
             self._open.add(job.id)

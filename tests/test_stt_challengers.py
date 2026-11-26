@@ -244,3 +244,13 @@ def test_a_challenger_handed_back_is_a_sample_less_never_a_pause(why):
     assert not app.__dict__.get("_chall_pause")
     HubApp._challenge_fell(app, SimpleNamespace(channel="FG1", extra={"fell": "lease"}), "no text in time")
     assert app.__dict__["_chall_pause"]["FG1"] > 0                  # (a failure on the worker: paused)
+
+
+def test_work_only_a_station_takes_never_takes_a_challenger_back():
+    _clk, p, jobs, w = _pool()
+    st = p.seen("station:north", "online", kind="station")
+    st.polling = 1
+    assert p.submit(chall(jobs))
+    j = p.claim("gpu-a", 0)
+    assert p.submit(jobs.job("s1", CATCHUP, bg=True, forced=True, extra={"station_only": True}))
+    assert p.watch("gpu-a", j.lease, 0) is True                      # (the GPU isn't wanted for it)
