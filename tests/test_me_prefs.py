@@ -511,7 +511,7 @@ def test_the_page_loads_it_before_the_map_scripts():
 
 LISTEN = {"rules": {"ours": "priority", "svc:police": "normal", "sys:metro": "off", "src:p25:westchester:2222": "priority",
                     "src:fm:FG1": "normal", "src:air:Tower": "off", "src:tg:3456": "normal", "mhz:118.6": "normal"},
-          "mode": "duck", "max_age": 90, "ours_only": False, "mute_police": True}
+          "mode": "duck", "max_age": 90, "ours_only": False}
 
 
 def test_listen_choices_in_their_known_shape():
@@ -523,7 +523,7 @@ def test_listen_choices_in_their_known_shape():
                 {"rules": {"src:nope:FG1": "off"}}, {"rules": {"src: fm:FG1": "off"}}, {"rules": {"src:fm:FG\n1": "off"}},
                 {"rules": {"src:fm:" + "x" * 130: "off"}}, {"rules": {"mhz:abc": "off"}}, {"rules": {"mhz:1": "off"}},
                 {"rules": {"everything": "priority"}}, {"mode": "loud"}, {"mode": None}, {"max_age": 5}, {"max_age": 601},
-                {"max_age": 60.5}, {"max_age": "60"}, {"max_age": True}, {"ours_only": 1}, {"mute_police": "true"},
+                {"max_age": 60.5}, {"max_age": "60"}, {"max_age": True}, {"ours_only": 1},
                 {"volume": 0.5}, {"rules": {"ours": "priority"}, "email": "someone@example.org"}):
         with pytest.raises(prefs_mod.PrefsError) as e:
             prefs_mod.validate("listen", bad)
@@ -531,6 +531,23 @@ def test_listen_choices_in_their_known_shape():
     with pytest.raises(prefs_mod.PrefsError) as e:
         prefs_mod.validate("listen", {"rules": {f"src:fm:Ch{i}": "normal" for i in range(prefs_mod.MAX_KEYS + 1)}})
     assert e.value.code == 413
+
+
+def test_an_earlier_pages_mute_police_is_taken_and_dropped(tmp_path):
+    """#895's Mute police is gone: a page from before it may still send it (taken, never kept) and a value kept before
+    is served without it; any other unknown key is still refused."""
+    assert json.loads(prefs_mod.validate("listen", {"mute_police": True, "ours_only": True})) == {"ours_only": True}
+    assert json.loads(prefs_mod.validate("listen", {"mute_police": "true"})) == {}
+    with pytest.raises(prefs_mod.PrefsError):
+        prefs_mod.validate("listen", {"mute_all": True})
+    cad = make_cad(tmp_path)
+    oid = cad.prefs.operator_id("casey@example.org", add=True) if cad.prefs.settings is not None else None
+    if oid is None:
+        cad.store.db.execute("INSERT INTO operators (name, email) VALUES ('Casey', 'casey@example.org')")
+        oid = cad.prefs.operator_id("casey@example.org")
+    cad.store.db.execute("INSERT INTO person_prefs (operator_id, ns, value, updated_at) VALUES (?, 'listen', ?, 0)",
+                         (oid, json.dumps({"mute_police": True, "mode": "queue"})))
+    assert cad.prefs.all(oid) == {"listen": {"mode": "queue"}}
 
 
 def test_listen_choices_are_each_persons_own(keys, hub):  # noqa: F811
