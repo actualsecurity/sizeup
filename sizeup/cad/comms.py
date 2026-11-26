@@ -235,6 +235,10 @@ class Comms:
         # text -> text as shown: a stored transcript's vocabulary phrases without AWS's hyphens (transcribe.Display),
         # at read time: the rows written before the hub did it on arrival are never rewritten
         self.display = None
+        # rows -> None: each row's talker label as Settings > Radios > Radio IDs names its radio IDs now
+        # (Registry.show_talkers), at read time like display: a label added, changed or removed shows on every row
+        # already logged. Set by the CAD; None: as stored
+        self.talkers = None
         self.names_ours = None  # text -> [our unit codes] (the feed's matcher, #115): a page not ours naming them
         self.on_text = None     # traffic id -> None: a transcript arrived or changed (status suggestions, #37)
         # {talkgroup, channel, system} -> whether the console's state shows such a row whatever its links (the 60 Control
@@ -1882,7 +1886,13 @@ class Comms:
                 self.fix(rows)                  # status words put back after our callsigns (statusrepair.py)
 
     def _display(self, rows) -> None:
-        """Each row's text and alternative as shown (display; in place, the stored row untouched)."""
+        """Each row's text and alternative as shown (display), and its talker label as the Radio IDs table gives it now
+        (talkers); in place, the stored row untouched."""
+        if self.talkers is not None:
+            try:
+                self.talkers(rows)
+            except Exception:  # noqa: BLE001 - the labels as stored
+                pass
         if self.display is None:
             return
         for r in rows:

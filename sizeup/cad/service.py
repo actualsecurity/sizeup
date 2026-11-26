@@ -50,7 +50,7 @@ from sizeup.cad.opchannel import OpChannels
 from sizeup.cad import scope as scope_mod
 from sizeup.cad.scope import Scope
 from sizeup.cad import radios as radios_mod
-from sizeup.cad.radios import Registry, RadioError, is_pcfd
+from sizeup.cad.radios import OTHER_P25, Registry, RadioError, is_pcfd
 from sizeup.cad import settings as settings_mod
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.dispatcher import AudioUnavailable
@@ -287,6 +287,11 @@ class Cad:
         self.comms = Comms(self.store, s.tactical, s.incident_talkgroups, clock=clock, paging=s.paging,
                            airport_tgs=s.airport_talkgroups)
         self.comms.log = self.log
+        # talker labels from Settings > Radios > Radio IDs as they are now, on every row read (radios.show_talkers); an
+        # edit there reloads the Radio pages' rows and rebuilds the state (_radio_labels_changed)
+        self.radios.say = self.log
+        self.comms.talkers = self.radios.show_talkers
+        self.radios.on_change(self._radio_labels_changed)
         self.comms.prune()
         self._comms_cache: dict = {}       # GET /api/cad/comms answers by (filters, revs), COMMS_CACHE_S (#284)
         self._sources_cache: dict = {}     # GET /api/cad/comms/sources: {may see context: (rev, the tree)}
@@ -549,6 +554,9 @@ class Cad:
                 "radio_views": radioviews.rev(self.radio_views),
                 # one name per source (sizeup/radionames.py): only its rev ("" none); every page asks the names again
                 "radio_names": radionames.rev(),
+                # Settings > Radios > Radio IDs' edits (Registry.labels_rev): every row's talker label is read through
+                # the table as it is now; the rows themselves come again with comms_rev (_radio_labels_changed)
+                "radio_labels": self.radios.labels_rev,
                 # the admins' service per source: only their rev ("" none); both pages ask again when it moves
                 "radio_services": services_rev(self.radio_services),
                 # the FM / airband channels' Main switches (Our calls): their rev; the rail and the player ask again
@@ -1998,6 +2006,18 @@ class Cad:
         with self._hints_lock:
             self._hints = (now, hints)
         return hints
+
+    def _radio_labels_changed(self, keys) -> None:
+        """Settings > Radios > Radio IDs changed (Registry.on_change: an entry, keys {(system, id)}; a range or the
+        seed, None). The rows already logged show the table's label at read time (Comms.talkers); here every page is
+        told: the state is built again (the incidents' Radio cards, radio_labels) and, for another system's radios,
+        the Radio pages of the readers who may see that system reload their rows (one change-log reset for that
+        system: comms_rev moves; never another reader's rev)."""
+        systems = set(OTHER_P25) if keys is None else {s for s, _rid in keys}
+        self._state = None
+        for system in sorted(systems & set(OTHER_P25)):
+            self.comms.rev += 1
+            self.comms.note_change("reset", system)
 
     def save_radio(self, body: dict) -> dict:
         """Settings > Radios: add / edit one; a radio given a unit takes its unnamed transmissions with it (#163)."""

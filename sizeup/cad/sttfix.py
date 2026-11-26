@@ -195,11 +195,21 @@ class SttCorrections:
     def _traffic(self, tid: str) -> dict:
         if not isinstance(tid, str) or not TID.fullmatch(tid):
             raise CadError("no such transmission")
-        r = self.store.one("SELECT id, start, end, channel, talkgroup, talker, text, model, alt_text, alt_model, source, "
-                           "system, service, status FROM radio_traffic WHERE id = ?", (tid,))
+        r = self.store.one("SELECT id, start, end, channel, talkgroup, talker, radio_id, text, model, alt_text, alt_model, "
+                           "source, system, service, status FROM radio_traffic WHERE id = ?", (tid,))
         if r is None or (sourcekeys.is_context(r) and not sourcekeys.may_see_context()):
             raise CadError("no such transmission")          # another system's: only behind a sign-in (#419)
+        self._talkers([r])
         return r
+
+    def _talkers(self, rows: list[dict]) -> None:
+        """Each row's talker label as Settings > Radios > Radio IDs names it now (Comms.talkers; in place)."""
+        fn = getattr(getattr(self.cad, "comms", None), "talkers", None)
+        if fn is not None:
+            try:
+                fn(rows)
+            except Exception:  # noqa: BLE001 - the labels as stored
+                pass
 
     @staticmethod
     def _public(c: dict | None) -> dict | None:
@@ -360,7 +370,7 @@ class SttCorrections:
             where.append("c.reference = 1")
         if not sourcekeys.may_see_context():
             where.append(f"t.system IN {sourcekeys.OURS_SQL}")
-        rows = self.store.q("SELECT t.id, t.channel, t.talkgroup, t.talker, t.start, t.end, t.text, t.model, t.alt_text, "
+        rows = self.store.q("SELECT t.id, t.channel, t.talkgroup, t.talker, t.radio_id, t.start, t.end, t.text, t.model, t.alt_text, "
                             "t.alt_model, t.dispatcher, t.rig, t.source, t.system, t.service, "
                             "t.corr_text, t.corr_rules, c.corrected, c.reference, "
                             "c.\"by\", c.at, c.based_on "
@@ -371,6 +381,7 @@ class SttCorrections:
         rows = rows[:limit]
         # the rest starts at the first clip left out (a clip sharing the last one's start is then sent again, never lost)
         next_since = more_start if more else None
+        self._talkers(rows)                    # the talker label as the Radio IDs table gives it now
         fix = getattr(getattr(self.cad, "hints", None), "decorate", None)
         if fix is not None:
             try:

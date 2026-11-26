@@ -448,6 +448,20 @@ window.LivePlayer = (() => {
     if (act === "interrupt" || act === "duck") priorityOver();
     pump();
   }
+  // A clip playing or waiting, come again (a label changed in Settings > Radios > Radio IDs: the hub's rows reload):
+  // its talker as the hub names it now, on the now-playing line too
+  function relabel(rows) {
+    const by = new Map(rows.filter((t) => t && t.id).map((t) => [t.id, t]));
+    let hit = false;
+    for (const it of [st.cur, st.over, ...st.q.pq, ...st.q.nq]) {
+      const t = it && it.row && by.get(it.id);
+      if (t && (t.talker !== it.row.talker || t.rig !== it.row.rig)) {
+        it.row = Object.assign({}, it.row, { talker: t.talker, rig: t.rig });
+        hit = true;
+      }
+    }
+    if (hit) paint(true);
+  }
   async function get(path) {
     const r = await fetch(path, { credentials: "same-origin", cache: "no-store", redirect: "manual" });
     if (!r.ok) throw new Error(String(r.status || r.type));
@@ -478,9 +492,10 @@ window.LivePlayer = (() => {
         if (gen === st.gen) {
           if (d.reload) {                          // too much changed, or a new hub: the newest page, only what is new
             const f = await get("/api/cad/comms?view=all&type=radio&limit=50");
-            if (gen === st.gen) { st.cursor = f.cursor || 0; offer(f.rows || []); }
+            if (gen === st.gen) { st.cursor = f.cursor || 0; relabel(f.rows || []); offer(f.rows || []); }
           } else {
             st.cursor = d.cursor || st.cursor;
+            relabel(d.rows || []);
             offer(d.rows || []);
           }
         }

@@ -1882,6 +1882,7 @@ function renderRadio(inc) {
   const one = {
     key: (x) => x.key,
     sig: (x) => x.kind === "radio" ? JSON.stringify([x.t.text, x.t.fixed_text, x.t.atc_text, x.t.atc_weak, x.t.atc_snaps, x.t.status, x.t.rig, x.t.why, x.t.link_kept, x.t.has_audio, talkSig(x.t.rig),
+                                                     x.t.talker, x.t.radio_id,      // a Radio IDs label, as named now
                                                      x.t.alt_text, x.t.rerun_at, (x.t.events || []).map((e) => [e.id, e.why]), cad.txRev,
                                                      emSig(x.t), atcSig(x.t)])
       : JSON.stringify([x.e.text, x.e.units]),

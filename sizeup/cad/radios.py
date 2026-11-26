@@ -20,6 +20,13 @@ ID's label always beats a range. name() / talker() give the talker label rows ca
 talker alias, else "unknown MRRS radio" (the raw ID stays in the row's radio_id). The keys from before stay as they
 were: "p25" is the county's system ("westchester"), "mdc" / "fleetsync" are the fireground's (FG1, FG2).
 
+Talker labels follow the table (#977): a row of another system keeps its radio IDs (radio_traffic.system and
+radio_id) and the label it was recorded with, but every reader is shown the label the table gives NOW
+(shown_talker / show_talkers: the same precedence as talker(), the radio's learned alias in place of the one its call
+sent), cached per `rev`. A label added, changed or removed, an ID range's too, calls the on_change() hooks after the
+commit (the CAD: every Radio page reloads its rows, the state push rebuilds; intel: its own cache). The one label
+function is name(system, radio_id): the entry's label, else its range's, else "".
+
 P25 needs no table to work: a talker alias that is a board code ("E60", "2398", "77A4") or starts
 with one ("E60 P2") names that unit. Every (radio ID, alias) pair heard is kept, so a radio heard
 once with its alias is known later without it.
@@ -72,6 +79,7 @@ def fm_system(radio_id: str) -> str:
     """The registry system of an ID decoded on an analog channel: FleetSync "167-1002", else MDC "0611"."""
     return "fleetsync" if FS_ID.fullmatch(str(radio_id or "").strip()) else "mdc"
 HEARD_WRITE_S = 60.0        # last-heard times are written at most this often per radio
+SHOWN_CACHE_MAX = 4096      # shown_talker's cache: cleared past this many rows' ID lists (and on every rev)
 
 
 def unknown_talker(system: str) -> str:
@@ -214,6 +222,12 @@ class Registry:
         self._ranges: dict[str, list[dict]] = {}      # system -> its ID ranges (radio_ranges), lo first
         self._written: dict[tuple[str, str], float] = {}
         self.rev = 0            # bumped when a row is added, named, edited or removed (not on a last-heard time)
+        # bumped by a person's edit only (a label, a unit, a range: on_change); the state push's radio_labels
+        self.labels_rev = 0
+        self._hooks: list = []                        # on_change callbacks
+        self._shown: dict[tuple[str, str], str] = {}  # (system, "id, id") -> the talker label shown, for _shown_rev
+        self._shown_rev = -1
+        self.say = lambda m: None                     # a line for the server log (set by the CAD; log() is the audit)
         self.refresh_units()
         try:
             self.seed_data = load_seed(self.seed_path)
@@ -301,6 +315,8 @@ class Registry:
                 audit(db, now, "", "radios", f"seed:{self.seed_path.name}", "",
                       f"v{p['version']}: {added} radio IDs added ({len(p['conflicts'])} conflicts left unmapped)")
         self._reload()
+        if added:
+            self._changed(None)
         return added
 
     # -- resolving ------------------------------------------------------------------------------
@@ -362,6 +378,70 @@ class Registry:
             if n and n not in out:
                 out.append(n)
         return ", ".join(out) or fallback
+
+    # -- talker labels as shown (a row's own radio IDs through the table as it is now) ----------------------------
+
+    def shown_talker(self, system: str, radio_id: str, stored: str = "") -> str:
+        """The talker label of another system's row as every reader is shown it: per radio ID of the row (radio_id
+        "a, b": one per key-up; a split part has its own), name() (the entry's label, else its range's), else the alias
+        the registry learned for that radio, else "unknown <system> radio": talker()'s order, the table as it is now.
+        stored (radio_traffic.talker, what it was recorded with) when the row has no radio ID, for an ID the registry
+        never keeps (0, -1, too long), and for a system with no talker labels (the county's and the fireground's
+        rows: their talker is the alias as heard; their rig follows the table through Comms.relink). Cached per rev."""
+        system = str(system or "")
+        ids = [x.strip() for x in str(radio_id or "").split(",") if x.strip()]
+        if system not in OTHER_P25 or not ids:
+            return stored
+        key = (system, ", ".join(ids))
+        rev = self.rev
+        with self._lock:
+            if self._shown_rev != rev or len(self._shown) > SHOWN_CACHE_MAX:
+                self._shown.clear()
+                self._shown_rev = rev
+            hit = self._shown.get(key)
+        if hit is not None:
+            return hit or stored
+        out: list[str] = []
+        for rid in ids:
+            if rid in ("0", "-1") or len(rid) > 12:     # never in the table (heard() skips it): as it was recorded
+                out = []
+                break
+            row = self.get(system, rid)
+            n = self.talker(system, rid, (row or {}).get("alias") or "")
+            if n and n not in out:
+                out.append(n)
+        got = ", ".join(out)
+        with self._lock:
+            if self._shown_rev == rev:                  # an edit landed meanwhile: never cache an answer from before it
+                self._shown[key] = got
+        return got or stored
+
+    def show_talkers(self, rows) -> None:
+        """Each row's `talker` as shown (shown_talker; in place, on the copies a reader is served: nothing stored
+        changes). Rows of the radio log ({system, radio_id, talker}); any other row is left as it is."""
+        for r in rows or ():
+            try:
+                if isinstance(r, dict) and r.get("system") in OTHER_P25 and r.get("radio_id"):
+                    r["talker"] = self.shown_talker(r["system"], r["radio_id"], r.get("talker") or "")
+            except Exception as e:  # noqa: BLE001 - the row as stored
+                self.say(f"radios: talker label not shown: {type(e).__name__}: {e}")
+
+    def on_change(self, callback) -> None:
+        """callback(keys): after a person's edit has committed (save, delete, an ID range saved or removed, the seed),
+        from that writer's thread. keys: the {(system, radio_id)} edited, or None for a range or the seed ("many: look
+        again at all"). Called after rev has moved. Keep it quick; whatever it raises is logged, never the edit's."""
+        with self._lock:
+            self._hooks.append(callback)
+
+    def _changed(self, keys) -> None:
+        self.labels_rev += 1
+        with self._lock:
+            hooks = list(self._hooks)
+        for cb in hooks:
+            try:
+                cb(set(keys) if keys is not None else None)
+            except Exception as e:  # noqa: BLE001 - a hook never breaks the edit (it is committed)
+                self.say(f"radios: a change hook failed: {type(e).__name__}: {e}")
 
     def rig_mdc(self, ids: list[str]) -> str:
         out: list[str] = []
@@ -523,6 +603,7 @@ class Registry:
                     audit(db, now, operator, "radios", f"{system}:{rid}/{k}", str(old[k] or ""), str(v or ""))
         self._reload_one((system, rid))
         self.rev += 1
+        self._changed({(system, rid)})
         return self.get(system, rid)
 
     def delete(self, system: str, radio_id: str, operator: str = "") -> None:
@@ -539,6 +620,7 @@ class Registry:
             audit(db, now, operator, "radios", f"{system}:{rid}", self._describe(old), "")
         self._reload_one((system, rid))
         self.rev += 1
+        self._changed({(system, rid)})
 
     # -- another system's ID ranges (an admin's, Settings > Radios > Radio IDs) ------------------------
 
@@ -582,6 +664,7 @@ class Registry:
                 raise RadioError(f"no {system} range {rid}")
         now = self.clock()
         new = {"lo": lo, "hi": hi, **out}
+        changed = False
         with self.store.tx() as db:
             # the overlap looked for in the same transaction as the write: two admins saving at once never both pass
             clash = db.execute("SELECT lo, hi, label FROM radio_ranges WHERE system = ? AND id != ? AND lo <= ? AND ? <= hi "
@@ -601,7 +684,10 @@ class Registry:
                     for k, v in ch.items():
                         audit(db, now, operator, "radios", f"{system}:{old['lo']}-{old['hi']}/{k}", str(old[k]), str(v))
                 rid = old["id"]
+                changed = bool(ch)
         self._reload()
+        if old is None or changed:
+            self._changed(None)
         return next(r for r in self.ranges() if r["id"] == rid)
 
     def delete_range(self, range_id, operator: str = "") -> None:
@@ -613,6 +699,7 @@ class Registry:
             db.execute("DELETE FROM radio_ranges WHERE id = ?", (old["id"],))
             audit(db, now, operator, "radios", f"{old['system']}:{old['lo']}-{old['hi']}", f"range · {old['label']}", "")
         self._reload()
+        self._changed(None)
 
     @staticmethod
     def _describe(f: dict) -> str:
