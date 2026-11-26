@@ -56,9 +56,9 @@ $PinsJson = @'
     },
     "worker_py": {
       "what": "worker.py (first install; it updates itself afterwards)",
-      "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/adec3bf2a9f51ff209c579188d7e06b78e4fff8f/deploy/stt-worker/worker.py",
-      "bytes": 289430,
-      "sha256": "C0643DFBA102DC0976400B95B96FE0661C3ADA6A17D6515BCA1E22EB61B90E68"
+      "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/5f2b90e5da55f057e1d7eb7bcba831a767e83bcd/deploy/stt-worker/worker.py",
+      "bytes": 306401,
+      "sha256": "6D2EB126AD02555C685390F44FB1FC988757CC0BECE5F671AD8A6F82C0019B22"
     },
     "llama_zip": {
       "what": "llama.cpp b12728, CUDA 12.4 (llama-server.exe; Qwen3-ASR's audio needs b12643 or later)",
