@@ -19,6 +19,7 @@ from sizeup.geo.pagegeo import locator, set_local_source
 from sizeup.geo.places import PlaceIndex
 from sizeup.intel import notes as notes_mod
 from sizeup.intel.events import SqlEvents
+from tests.log_sentinel import assert_no_sensitive, exception_text_in_logs
 from tests.test_intel import Clock as IntelClock
 from tests.test_intel import FakeNotifier, ctx_row, example_locate
 from tests.test_intel_page import STATIC, T0, needs_node, run_node, save
@@ -110,8 +111,11 @@ def test_bad_picks_are_refused_and_a_pick_cleared_keeps_the_text(placed):
                                                                          "kind": "address"}}, VAL)[1]["note"]["id"]
     n = cad.store.one("SELECT * FROM intel_notes WHERE id = ?", (nid,))
     assert (n["corrected_place"], n["corrected_precision"]) == ("12 Sample Rd", "address")     # the label as written
+    rev = cad.intel.events.map_rev                             # the Intel page's map reads again on a pick only
+    assert call(api, f"/api/cad/intel/notes/{nid}", {"text": "x"}, VAL)[0] == 200 and cad.intel.events.map_rev == rev
     code, out = call(api, f"/api/cad/intel/notes/{nid}", {"corrected_pick": None}, VAL)
     assert code == 200 and out["note"]["corrected"] is None and out["note"]["corrected_place"] == "12 Sample Rd"
+    assert cad.intel.events.map_rev > rev
 
 
 # -- what it feeds back -----------------------------------------------------------------------------------------------
@@ -250,18 +254,18 @@ def test_an_older_free_text_note_is_read_and_edited_after_the_columns_are_added(
     assert cad.store.one("SELECT COUNT(*) AS n FROM intel_notes")["n"] == 1
 
 
-def test_the_phrases_are_never_in_the_log(placed, capsys):
+def test_the_phrases_are_never_in_the_log(placed, log_sentinel):
     cad, _clock, _gaz = placed
-    said: list = []
-    cad.log = said.append
+    cad.log = log_sentinel.log
     api = CadApi(cad)
     m = suggestion(api, "@ Sample Diner")
     e = save(cad)
     nid = call(api, f"/api/cad/intel/{e.id}/notes", {"corrected_pick": pick_of(m), "heard": "Sampel Diner"},
                VAL)[1]["note"]["id"]
     call(api, f"/api/cad/intel/notes/{nid}/alias", {}, CASEY)
-    out = " ".join(map(str, said)) + capsys.readouterr().out
-    assert "Sampel" not in out and "sampel" not in out
+    notes_mod.mark_imported([c["id"] for c in notes_mod.correction_candidates(store=cad.store)], store=cad.store)
+    assert_no_sensitive(log_sentinel, ["Sampel Diner", "Sample Diner", "12 Sample Rd"])
+    assert exception_text_in_logs([notes_mod.__file__]) == []
 
 
 def test_the_candidates_table_is_made_at_start(tmp_path):

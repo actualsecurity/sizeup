@@ -481,7 +481,8 @@ class IntelNotes:
         op, email = str(body.get("operator") or "")[:160], str(body.get("_email") or "")
         admin = body.get("_may") == "admin"
         now = self.cad.clock()
-        with self.engine.events._w(placed=True) as db:   # read and written in one transaction: never an older copy
+        moved = False                                  # a picked place changed: the Intel page's map reads again
+        with self.engine.events._w() as db:            # read and written in one transaction: never an older copy
             r = db.execute("SELECT * FROM intel_notes WHERE id = ?", (int(nid),)).fetchone()
             if r is None:
                 raise CadError(f"no note {nid}")
@@ -496,16 +497,24 @@ class IntelNotes:
                 db.execute("DELETE FROM intel_feedback WHERE note_id = ?", (int(nid),))
                 db.execute("DELETE FROM intel_correction_candidates WHERE note_id = ? AND imported_at IS NULL", (int(nid),))
                 self._audit(db, int(nid), cur["event_id"], "delete", op, now, {**before, "author": cur["author"]}, None)
-                return {"ok": True, "deleted": int(nid)}
-            n = self._clean(body, cur)
-            if n == before:                            # nothing changed: no write, no audit row
-                return {"ok": True, "note": self.shown(cur, email, admin), "unchanged": True}
-            db.execute(f"UPDATE intel_notes SET {', '.join(f'{k} = ?' for k in FIELDS)}, updated_at = ? WHERE id = ?",
-                       (*(n[k] for k in FIELDS), now, int(nid)))
-            note = dict(db.execute("SELECT * FROM intel_notes WHERE id = ?", (int(nid),)).fetchone())
-            clip = self._feedback(db, note, ev, now)
-            self._candidates(db, note, clip, op, now)
-            self._audit(db, int(nid), cur["event_id"], "edit", op, now, before, {k: note[k] for k in FIELDS})
+                moved = before["corrected_lat"] is not None
+                out = {"ok": True, "deleted": int(nid)}
+            else:
+                n = self._clean(body, cur)
+                if n == before:                        # nothing changed: no write, no audit row
+                    return {"ok": True, "note": self.shown(cur, email, admin), "unchanged": True}
+                db.execute(f"UPDATE intel_notes SET {', '.join(f'{k} = ?' for k in FIELDS)}, updated_at = ? WHERE id = ?",
+                           (*(n[k] for k in FIELDS), now, int(nid)))
+                note = dict(db.execute("SELECT * FROM intel_notes WHERE id = ?", (int(nid),)).fetchone())
+                clip = self._feedback(db, note, ev, now)
+                self._candidates(db, note, clip, op, now)
+                self._audit(db, int(nid), cur["event_id"], "edit", op, now, before, {k: note[k] for k in FIELDS})
+                moved = any(before[k] != note[k] for k in PICK)
+                out = None
+        if moved:
+            self.engine.events.map_rev += 1
+        if out is not None:
+            return out
         return {"ok": True, "note": self._with_place(self.shown(note, email, admin), self._places(), admin)}
 
     def alias(self, nid: int, body: dict) -> dict:
