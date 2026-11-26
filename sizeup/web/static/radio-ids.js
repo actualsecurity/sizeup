@@ -21,7 +21,7 @@
   const board = () => typeof BOARD !== "undefined" && BOARD;
   const mayAnswer = () => !board() && (typeof canDo !== "function" || canDo("dispatch"));
   const hms = (t) => (typeof fmtTime === "function" ? fmtTime(t, true) : new Date(t * 1000).toLocaleTimeString());
-  const question = (a) => `Radio ${a.radio_id} (${a.kind}) · ${a.channel}: who?`;
+  const question = (a) => `Radio ${a.radio_id} (${a.kind}) · ${(typeof chName === "function" ? chName(a) : a.channel)}: who?`;
 
   function heard(a) {
     const n = `${a.count}×`;

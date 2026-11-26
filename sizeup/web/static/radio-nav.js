@@ -937,7 +937,7 @@ window.RadioNav = (() => {
     const on = st.open && !!t && (st.f.view !== "ours" || narrowed());
     show(box, on);
     if (!on) return;
-    const who = t.rig || t.talker || t.radio_id || t.channel;
+    const who = t.rig || t.talker || t.radio_id || (typeof chName === "function" ? chName(t) : t.channel);
     const n = st.src.filter((s) => s.ours).reduce((a, s) => a + unread(s, st.p.seen[s.key], now()), 0);
     box.replaceChildren(mark("fire"), el("b", "", "Our calls"), ...(n ? [count(n, true)] : []),
                         el("span", "t", fmtTime(t.start)), el("span", "trunc", `${who}: ${t.text || "—"}`));
@@ -972,20 +972,10 @@ window.RadioNav = (() => {
     fill($("#rn-event"), "Any incident", (d.events || []).map((e) => [e.number || String(e.id), `${e.number || "#" + e.id} ${e.type || ""} ${e.address || ""}`.trim()]),
          st.f.event);
   }
-  // the admins' name for its channel (#607) on the row's channel chip: display only (filters, menus and links keep the
-  // real one); the real one in the hover
-  const shownName = (t) => (st.layout && st.layout.names && t.source && st.layout.names[t.source]) || "";
-  function srcChip(n) {
-    if (n.classList && n.classList.contains("chip") && n.classList.contains("src")) return n;
-    for (const c of n.children || []) { const x = srcChip(c); if (x) return x; }
-    return null;
-  }
+  // (the channel chip: radioRow's, its one name from radio-names.js: the admins' short or name, system and talkgroup on
+  // hover; no name of the rail's own here)
   function fillRow(li, t) {
-    const n = RadioView.row(t), nm = shownName(t), chip = nm && srcChip(n);
-    if (chip) {
-      chip.textContent = nm;
-      chip.title = `${t.channel}${t.talkgroup !== undefined && t.talkgroup !== null ? ` (TG ${t.talkgroup})` : ""}`;
-    }
+    const n = RadioView.row(t);
     li.className = n.className;
     li.replaceChildren(...n.childNodes);
   }
@@ -997,7 +987,7 @@ window.RadioNav = (() => {
     renderChips();
     if (document.activeElement !== $("#rn-q")) $("#rn-q").value = st.f.q;
     setText($("#rv-count"), st.error ? `Load failed: ${st.error}` : `${st.rows.filter((t) => t.kind !== "note").length} TX${st.older ? "+" : ""}`);
-    syncList($("#rn-list"), st.rows, { key: (t) => t.id, sig: (t) => RadioView.rowSig(t) + shownName(t), make: () => el("li"), fill: fillRow,
+    syncList($("#rn-list"), st.rows, { key: (t) => t.id, sig: (t) => RadioView.rowSig(t), make: () => el("li"), fill: fillRow,
                                        empty: narrowed() ? "None match" : "None" });
     show($("#rn-older"), st.older);
   }

@@ -62,7 +62,7 @@ import time
 from datetime import datetime
 from typing import Callable
 
-from sizeup import logscrub
+from sizeup import logscrub, radionames
 from sizeup.cad.store import OPERATOR_MAX, TZ, CadError
 
 SECTION = "alarms"                         # settings_overrides section (audited under "system")
@@ -624,7 +624,8 @@ class Alarms:
             label, name = rig, alias if not name else f"{name}, {alias}"
         units = [(label, name)] if label else []
         rid = (a.get("radio_id") or "").strip()
-        channel = a.get("channel") or ""
+        # the admins' name for it (sizeup/radionames.py: one name everywhere), its talkgroup beside it
+        channel = radionames.name(a) if (a.get("channel") or a.get("talkgroup") is not None) else ""
         if a.get("talkgroup") is not None and f"TG {a['talkgroup']}" not in channel:
             channel = f"{channel} (TG {a['talkgroup']})" if channel else f"TG {a['talkgroup']}"
         return {"units": units, "talker": f"radio {rid}" if rid and rid != label else ("" if units else "an unidentified radio"),
