@@ -1076,8 +1076,7 @@ def test_a_tests_calls_are_counted_never_transcribed_or_logged_and_the_sample_is
     (d / f"{name}.json").write_text(json.dumps(meta))
     assert app.set_talkgroup_tier(9563, "off", "mrrs") is None     # a talkgroup a person switched Off
     assert start(app, keep_min=10) is None
-    rt.ingest.scan()
-    for c in rt.ingest.scan():                                 # the call as its ingest hands it over
+    for c in rt.ingest.scan() + rt.ingest.scan():              # the call as its ingest hands it over
         rt.ingest.on_call(c)
     for line in ("SIZEUP-UNIT mrrs 4100009 call 9213", "SIZEUP-UNIT mrrs 4100004 call 31999", "SIZEUP-UNIT mrrs 4100002 call 9211"):
         rt.recorder.on_line(line)

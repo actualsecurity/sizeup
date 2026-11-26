@@ -14,8 +14,11 @@
 #include <boost/make_shared.hpp>
 #include <gnuradio/blocks/vector_source.h>
 #include <gnuradio/top_block.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <dirent.h>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -206,6 +209,88 @@ static void same_as_stock(const char *name, const std::vector<Tag> &tags, int n)
   }
 }
 
+// SIZEUP_TR_PERTX=1 (#986): each transmission linked into <captureDir>/sizeup-tx/ with its sidecar as it ends, the WAV
+// whole then (its header's lengths written), the same file as the transmission's own; unset: nothing there.
+static std::vector<std::string> pertx_files() {
+  std::vector<std::string> out;
+  std::string dir = temp_dir + "/sizeup-tx";
+  DIR *d = opendir(dir.c_str());
+  if (!d) {
+    return out;
+  }
+  while (struct dirent *e = readdir(d)) {
+    if (e->d_name[0] != '.') {
+      out.push_back(dir + "/" + e->d_name);
+    }
+  }
+  closedir(d);
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+static void pertx_clear() {
+  for (const std::string &f : pertx_files()) {
+    std::remove(f.c_str());
+  }
+}
+
+static unsigned le32(const std::string &b, size_t at) {
+  return (unsigned char)b[at] | ((unsigned char)b[at + 1] << 8) | ((unsigned char)b[at + 2] << 16) |
+         ((unsigned)(unsigned char)b[at + 3] << 24);
+}
+
+static void pertx_case(const char *name, const char *mode, const std::vector<Tag> &tags, int n) {
+  pertx_clear();
+  setenv("SIZEUP_TR_PERTX", "1", 1);
+  Got got = run(mode, false, RA, n, tags);
+  unsetenv("SIZEUP_TR_PERTX");
+  std::vector<std::string> files = pertx_files();
+  bool ok = !got.txs.empty() && files.size() == 2 * got.txs.size();
+  std::string why;
+  for (size_t k = 0; ok && k < got.txs.size(); k++) {
+    std::string json, wav;
+    std::string suffix = "-t" + std::to_string(k) + ".json";
+    for (const std::string &f : files) {
+      if (f.size() > suffix.size() && f.compare(f.size() - suffix.size(), suffix.size(), suffix) == 0) {
+        json = f;
+        wav = f.substr(0, f.size() - 5) + ".wav";
+      }
+    }
+    std::string j = json.empty() ? "" : slurp(json);
+    std::string b = wav.empty() ? "" : slurp(wav);
+    const Transmission &t = got.txs[k];
+    ok = !json.empty() && j.find("\"k\": " + std::to_string(k) + ",") != std::string::npos &&
+         j.find("\"src\": " + std::to_string(t.source) + ",") != std::string::npos &&
+         j.find("\"samples\": " + std::to_string(t.sample_count) + ",") != std::string::npos &&
+         j.find("\"talkgroup\": 9211,") != std::string::npos && j.find("-call_1\"") != std::string::npos &&
+         j.find("\"start_time_ms\": " + std::to_string(t.start_time_ms) + ",") != std::string::npos;
+    // the WAV: whole (header lengths final), the transmission's own bytes
+    ok = ok && b.size() == 44 + 2 * (size_t)t.sample_count && le32(b, 40) == 2 * (unsigned)t.sample_count &&
+         le32(b, 4) == b.size() - 8 && b == slurp(t.filename);
+    struct stat a, c;
+    ok = ok && stat(wav.c_str(), &a) == 0 && stat(t.filename.c_str(), &c) == 0 && a.st_ino == c.st_ino;
+    if (!ok) {
+      why = "part " + std::to_string(k) + ": " + j;
+    }
+  }
+  std::cout << (ok ? "ok    " : "FAIL  ") << name << ": " << got.txs.size() << " transmission(s), " << files.size()
+            << " file(s) handed on" << std::endl;
+  if (!ok) {
+    failures++;
+    std::cout << "  " << why << std::endl;
+    for (const std::string &f : files) {
+      std::cout << "  " << f << std::endl;
+    }
+  }
+  // unset: stock, nothing handed on
+  pertx_clear();
+  run(mode, false, RA, n, tags);
+  if (!pertx_files().empty()) {
+    failures++;
+    std::cout << "FAIL  " << name << ": handed on with SIZEUP_TR_PERTX unset" << std::endl;
+  }
+}
+
 // a talker the voice channel names every 2880 samples (360 ms: P25 Phase 1's LDU1), from `from` up to `to`
 static void every(std::vector<Tag> &tags, long src, long from, long to) {
   for (long at = from; at < to; at += 2880) {
@@ -292,6 +377,14 @@ int main() {
   t.clear(); every(t, RA, 0, 9000); t.push_back({4000, "grp_id", 9211}); t.push_back({9050, "grp_id", 4321});
   t.push_back({12000, "terminate", 1}); every(t, RB, 12200, 16000);
   same_as_stock("log = off: group mismatch", t, 16000);
+
+  // per-transmission hand-off (#986): terminators (log, as the county runs), the patch's cut (on, as MRRS)
+  t.clear(); every(t, RA, 0, 10000); t.push_back({10020, "terminate", 1}); t.push_back({10050, "src_id", RB});
+  every(t, RB, 12930, 16000); t.push_back({14100, "terminate", 1}); every(t, RA, 14400, 20000);
+  pertx_case("per-tx: terminators (log)", "log", t, 20000);
+  t.clear(); every(t, RA, 0, 10000); every(t, RB, 10050, 20000);
+  pertx_case("per-tx: a cut (on)", "on", t, 20000);
+  pertx_case("per-tx: no cut (off)", "off", t, 20000);
 
   std::cout << (failures ? "FAILED" : "all ok") << " (" << failures << " failed)" << std::endl;
   return failures ? 1 : 0;

@@ -550,7 +550,7 @@ class App:
                 self.systems[sysd.name] = p25_systems.Runtime(
                     sysd, trunk_recorder.make_system(sysd.name, sysd.label, cfg.p25_recorder, sysd.dir, log), self.tg,
                     self._call_system, log, self.clips_dir.parent if self.clips_dir else None,
-                    on_activity=self._p25_activity)
+                    on_activity=self._p25_activity, on_part=self._part_system)
         sources.set_context_talkgroups(tg for x in cfg.p25_systems for tg in x.talkgroups)
         for why in cfg.p25_system_problems:       # a system directory that can't be used: said, the rest runs
             log(f"p25 systems: left out: {why}")
@@ -678,6 +678,9 @@ class App:
                 p25_systems.wire_grant_split(self.p25, self.live, p25_systems.sizeup_block(cfg.p25_recorder_dir or "."),
                                              cfg.p25_recorder_dir or ".", getattr(self.recorder, "state_path", None), "",
                                              self.tg.county)
+                # each transmission as it ends (#986): the county's config.json "sizeup" {"per_tx"} (off unless it says)
+                self.p25.per_tx = p25_systems.per_tx_of(p25_systems.sizeup_block(cfg.p25_recorder_dir or "."))
+                self.p25.on_part = self._part
         # [cloud] role = "station": the hub link (sizeup/cloud/station.py) sets these; None = all-in-one.
         self.events: Callable[[str, dict, str | None], None] | None = None   # (type, data, clip id)
         self.link = None
@@ -1699,6 +1702,38 @@ class App:
         self._drop_recorder_files(call, False)
         return True
 
+    def _parts_before(self, call: Call) -> None:
+        """(#986) A call that was going on when this sizeup started, with the per-transmission hand-off on
+        (Call.straddles): its transmissions taken as parts before the restart, rows "<id>-t<k>" in the store, go with
+        Call.parts, so its end never makes a second row of one."""
+        if not getattr(call, "straddles", False):
+            return
+        pre = f"{call.id}-t"
+        have = {t.id[len(pre):] for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]
+                if t.id.startswith(pre)}
+        ks = {int(x) for x in have if x.isdigit()}
+        if ks:
+            call.parts = frozenset(call.parts | ks)
+            log(f"p25: {call.label} {call.id}: {len(ks)} of its transmissions taken before the restart: not again")
+
+    def _part(self, call: Call) -> bool:
+        """(#986) One transmission of a county call still going on (Call.part), as it ended: its row now, as the call's
+        end would have made it, when its talkgroup is recorded. Anything else (Record off, kept only for an emergency
+        window) is left to the call's end, as before. True: taken."""
+        if not self.tg.record(call.talkgroup):
+            return False
+        self._call(call)
+        return True
+
+    def _part_system(self, rt, call: Call) -> bool:
+        """(#986) The same for another system's call (_call_system): taken when its talkgroup's tier records it and no
+        reception test could claim the call; else left to the call's end."""
+        if self.reception.busy(rt) or call.encrypted or \
+                self.tg.tier(call.talkgroup, rt.system.name) not in tiers.RECORDED:
+            return False
+        self._call_system(rt, call)
+        return True
+
     def _call(self, call: Call) -> None:
         # late (#747): written while sizeup was down, ingested at this start. Its rows go to the radio log, speech-to-text
         # and the hub like any (t.late on each), and no pre-alert hears it (_atc, Comms.record / retext with "late": no
@@ -1707,8 +1742,10 @@ class App:
         # button or a mayday still alarms and pushes (_alarm_now, _alarm), labelled late, at its own time
         # (alarms.late_note), and deduped with an alarm the same call or radio raised live before the restart
         late = bool(getattr(call, "late", False))
+        part = call.part is not None           # (#986) one transmission as it ended: the call's end counts the call
         if self._late_dup(call):
             return
+        self._parts_before(call)
         flagged = call.emergency or any(t.emergency for t in call.turns)    # trunk-recorder's flag on this call itself
         windows = self.cad.alarms.windows
         emergency, stuck, keep_record = flagged, "", flagged
@@ -1761,7 +1798,8 @@ class App:
                 log(f"p25: {call.label} {call.id}: Record is off, kept: emergency window "
                     f"({'its talkgroup' if why == 'talkgroup' else 'the radio that pressed it'})")
         evidence = self._p25_evidence(call) if emergency else None
-        self.tg.seen(call.talkgroup)
+        if not part:
+            self.tg.seen(call.talkgroup)
         for _name, (src, tag) in call.ids.items():      # radio ID <-> alias, kept for lookups without the alias
             self._heard("p25", src, tag, call.start, call.label)
         key = channels.tg_key(call.talkgroup)
@@ -1776,7 +1814,8 @@ class App:
                             talkgroup=call.talkgroup, rig=self.radios.rig_p25(pc.pairs),
                             radio_id=", ".join(src for src, _t in pc.pairs if src))
                 t.fm = False  # decoded P25 voice: no FM de-emphasis  # type: ignore[attr-defined]
-                t.call_id, t.turn = call.id, k  # the whole call it is a key-up of (= cad/comms.py split_call)  # type: ignore[attr-defined]
+                # the whole call it is a key-up of (= cad/comms.py split_call); a part's turn is its transmission's (#986)
+                t.call_id, t.turn = call.id, (pc.turn if pc.turn is not None else k)  # type: ignore[attr-defined]
                 t.pairs = pc.pairs  # (radio ID, alias) per talker, for the hub's own rig lookup  # type: ignore[attr-defined]
                 if pc.via == GRANT_CUT:
                     t.cut = "grant"  # cut at a mid-call grant (#819): its talker is the granted radio  # type: ignore[attr-defined]
@@ -1811,9 +1850,11 @@ class App:
         never a unit), and each row's talker is the department's name for its radio (sizeup/cad/radios.py talker:
         an ID's label, its range's, the alias, else "unknown MRRS radio"), each split part by its own radio ID."""
         name, tg = rt.system.name, call.talkgroup
+        part = call.part is not None                 # (#986) one transmission as it ended (_part_system checked it)
         if self._late_dup(call):                     # (#747)
             return
-        if self.reception.on_call(rt, call):         # a reception test (#410): counted there, nothing of it kept
+        self._parts_before(call)
+        if not part and self.reception.on_call(rt, call):   # a reception test (#410): counted there, nothing of it kept
             return self._drop_recorder_files(call, False)
         tier = self.tg.tier(tg, name)
         if call.encrypted and tier in tiers.RECORDED:
@@ -1824,7 +1865,8 @@ class App:
             self.tg.seen(tg, dropped=True, system=name)
             self._drop_recorder_files(call, False)
             return
-        self.tg.seen(tg, system=name)
+        if not part:
+            self.tg.seen(tg, system=name)
         if name in radios_mod.OTHER_P25:             # its radios, as heard (recorded talkgroups only: never encrypted)
             for _talker, (src, tag) in call.ids.items():
                 self._heard(name, src, tag if tag != src else "", call.start, call.label)
@@ -1842,7 +1884,7 @@ class App:
                             talkgroup=call.talkgroup, rig="", radio_id=", ".join(src for src, _t in pc.pairs if src))
                 t.fm = False  # type: ignore[attr-defined]
                 t.pairs = pc.pairs  # (radio ID, alias) per talker: the hub names them from its own registry  # type: ignore[attr-defined]
-                t.call_id, t.turn = call.id, k  # type: ignore[attr-defined]
+                t.call_id, t.turn = call.id, (pc.turn if pc.turn is not None else k)  # type: ignore[attr-defined]
                 if pc.via == GRANT_CUT:
                     t.cut = "grant"  # cut at a mid-call grant (#819): its talker is the granted radio  # type: ignore[attr-defined]
                 # the row's source (#415): its system, never a talkgroup number alone; context, so never "ours"

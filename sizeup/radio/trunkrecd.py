@@ -241,6 +241,23 @@ def split_mode(argv: list[str], workdir: str | Path) -> str:
     return mode if mode in SPLIT_MODES else SPLIT_DEFAULT
 
 
+# (#986) The same patch hands each transmission on as it ends (SIZEUP_TR_PERTX=1: sizeup/radio/p25.py, its parts), per
+# system from its config.json "sizeup": {"per_tx": "off" | "log" | "on"} (off when it says none): log and on write them.
+PERTX_ENV = "SIZEUP_TR_PERTX"
+
+
+def per_tx_mode(argv: list[str], workdir: str | Path) -> str:
+    """The per-transmission hand-off's mode (#986) for the trunk-recorder argv runs in workdir: its config's "sizeup":
+    {"per_tx"}, "off" when it says none (or something else)."""
+    k = next((i for i, a in enumerate(argv) if a.startswith("--config")), None)
+    name = (argv[k].split("=", 1)[1] if "=" in argv[k] else argv[k + 1]) if k is not None else "config.json"
+    try:
+        mode = (json.loads((Path(workdir) / name).read_text()).get("sizeup") or {}).get("per_tx")
+    except (OSError, ValueError, AttributeError):
+        mode = None
+    return mode if mode in ("off", "log", "on") else "off"
+
+
 def runtime_argv(argv: list[str], workdir: str | Path, dev: int | str | None = None,
                  ambiguous=None, left_out: list[str] | None = None) -> list[str]:
     """argv with --config pointing at a copy of its config (config.runtime.json, written in workdir) whose sources
@@ -1167,6 +1184,7 @@ class Supervisor:
         env = dict(os.environ)
         env["PATH"] = ":".join(["/opt/homebrew/bin", "/usr/local/bin", env.get("PATH", "") or "/usr/bin:/bin"])
         env[SPLIT_ENV] = split_mode(r["argv"], r["workdir"])
+        env[PERTX_ENV] = "1" if per_tx_mode(r["argv"], r["workdir"]) in ("log", "on") else "0"
         try:
             self.proc = self.popen(argv, cwd=r["workdir"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, start_new_session=True, env=env)
@@ -1825,6 +1843,7 @@ class SystemSupervisor(Supervisor):
         env = dict(os.environ)
         env["PATH"] = ":".join(["/opt/homebrew/bin", "/usr/local/bin", env.get("PATH", "") or "/usr/bin:/bin"])
         env[SPLIT_ENV] = split_mode(r["argv"], r["workdir"])
+        env[PERTX_ENV] = "1" if per_tx_mode(r["argv"], r["workdir"]) in ("log", "on") else "0"
         try:
             self.proc = self.popen(argv, cwd=r["workdir"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, start_new_session=True, env=env)

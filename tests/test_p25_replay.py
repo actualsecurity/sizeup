@@ -166,8 +166,7 @@ def test_a_late_call_still_being_written_waits_for_its_wav(cap):
     got, logs = [], []
     ing = run(base, mark, got, logs)
     assert settle(ing) == [] and logs == []                   # waited for, not dropped
-    write_call(d, "307-1-call_1", 307, [RADIO])               # finished
-    assert ing.poll() == []                                   # its size just changed: one more poll
+    write_call(d, "307-1-call_1", 307, [RADIO])               # finished: its header says it is whole (#986)
     assert [(c.id, c.late) for c in ing.poll()] == [("307-1-call_1", True)]
     assert logs == ["p25 P25: 1 calls from while it was down ingested late (0 older skipped)"]
 

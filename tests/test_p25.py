@@ -51,8 +51,62 @@ def test_wav_still_being_written_is_waited_for(tmp_path):
     (day / "307-1.wav").write_bytes(b"")
     assert ing.scan() == [] and ing.scan() == []          # still empty: wait, don't drop it
     write_call(day, "307-1", 307, [1])                    # recorder finishes the file
-    assert ing.scan() == []                               # size just changed: one more poll
-    assert [c.label for c in ing.scan()] == ["Fire/EMS 15"]
+    assert [c.label for c in ing.scan()] == ["Fire/EMS 15"]   # its header says it is whole: at once (#986)
+
+
+def placeholder_wav(path, seconds=1.0, rate=8000, riff=0xFFFFFFFF):
+    """A WAV as its writer leaves it while still writing: the lengths in its header placeholders (ffmpeg's
+    0xFFFFFFFF, trunk-recorder's sink 0), every sample there."""
+    data = (0.2 * np.sin(np.arange(int(rate * seconds)) / 5) * 32767).astype("<i2").tobytes()
+    head = (b"RIFF" + riff.to_bytes(4, "little") + b"WAVEfmt " + (16).to_bytes(4, "little")
+            + (1).to_bytes(2, "little") + (1).to_bytes(2, "little") + rate.to_bytes(4, "little")
+            + (2 * rate).to_bytes(4, "little") + (2).to_bytes(2, "little") + (16).to_bytes(2, "little")
+            + b"data" + riff.to_bytes(4, "little"))
+    path.write_bytes(head + data)
+    return len(head) + len(data)
+
+
+def test_a_wav_whose_header_isnt_whole_is_taken_once_its_size_held_settle_s(tmp_path, monkeypatch):
+    # (#986) the header is what says a WAV is whole; without it, its size holding SETTLE_S (1 s, as the 1 s poll's
+    # two looks were), never a second look alone at a 0.25 s poll
+    import time
+    import types
+    import sizeup.radio.p25 as p25
+    now = [1000.0]
+    monkeypatch.setattr(p25, "time", types.SimpleNamespace(time=lambda: now[0], monotonic=time.monotonic))
+    day = tmp_path / "westchester" / "2026" / "10" / "1"
+    day.mkdir(parents=True)
+    ing = CallIngest(tmp_path, LABELS, on_call=lambda c: None).prime()
+    (day / "307-1.json").write_text(json.dumps({"talkgroup": 307}))
+    placeholder_wav(day / "307-1.wav")
+    assert ing.scan() == []
+    now[0] += 0.25
+    assert ing.scan() == []                               # the same size, a poll later: not yet
+    now[0] += 0.8
+    assert [c.label for c in ing.scan()] == ["Fire/EMS 15"]   # held 1.05 s
+
+
+def test_wav_complete_reads_the_header():
+    import sizeup.radio.p25 as p25
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "a.wav"
+        for riff in (0, 0xFFFFFFFF):
+            n = placeholder_wav(f, riff=riff)
+            assert not p25.wav_complete(f, n)
+        write_call(Path(d), "b", 307, [1])
+        g = Path(d) / "b.wav"
+        assert p25.wav_complete(g, g.stat().st_size)
+        assert not p25.wav_complete(g, g.stat().st_size + 2)       # more on disk than its header says: still going
+        g.write_bytes(g.read_bytes()[:-100])
+        assert not p25.wav_complete(g, g.stat().st_size)           # cut short
+        assert not p25.wav_complete(Path(d) / "none.wav", 100)
+
+
+def test_the_poll_is_a_quarter_second():
+    import sizeup.radio.p25 as p25
+    assert p25.POLL_S == 0.25 and CallIngest("/nonexistent", LABELS, on_call=lambda c: None).poll_s == 0.25
 
 
 def test_wav_that_never_fills_is_given_up_without_stopping_ingest(tmp_path, monkeypatch):

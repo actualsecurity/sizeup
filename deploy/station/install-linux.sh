@@ -53,25 +53,30 @@ TR_COMMIT="7f9e21ecfa445e568371cef3153a07887c36b380"
 #         (sizeup/radio/live.py names that talker at once)
 # A new ID is a new talker only when the current one's ID came from the voice channel (not a grant alone), at least a
 # second into its turn, and the new ID is heard again (or a second passes) with no flip back to the current one's.
+# Also (#986), per system: SIZEUP_TR_PERTX=1 (the supervisor sets it from "sizeup": {"per_tx": "log" | "on"}) hands each
+# transmission on as it ends: its WAV (whole then: closed, its header's lengths written) hard-linked into
+# <captureDir>/sizeup-tx/<call>-t<k>.wav, then <call>-t<k>.json beside it (tmp + rename), <call> the call file's own stem
+# and k its srcList index. Unset: nothing written (sizeup/radio/p25.py CallIngest reads them).
 # .github/scripts/tr_split_test.cc tests it on the real sink (CI, station-update.sh). The build's name and its
 # .sizeup-build carry the patch's hash: a change to it is a new build (an older release keeps the one it ran with), made
 # in the same source tree (only what the patch touches is compiled again). An empty tr_patch builds stock 5.2.0.
 tr_patch() {
   cat <<'PATCH'
 diff --git a/trunk-recorder/gr_blocks/transmission_sink.cc b/trunk-recorder/gr_blocks/transmission_sink.cc
-index 4e8c2ba..a7b12e7 100644
+index 4e8c2ba..e5b9783 100644
 --- a/trunk-recorder/gr_blocks/transmission_sink.cc
 +++ b/trunk-recorder/gr_blocks/transmission_sink.cc
-@@ -35,6 +35,8 @@
+@@ -35,6 +35,9 @@
  #include <stdexcept>
  #include <stdio.h>
  #include <chrono>
 +#include <algorithm>
++#include <cstdio>
 +#include <cstdlib>
  
  // win32 (mingw/msvc) specific
  #ifdef HAVE_IO_H
-@@ -77,6 +79,251 @@ transmission_sink::transmission_sink(int n_channels, unsigned int sample_rate, i
+@@ -77,6 +80,320 @@ transmission_sink::transmission_sink(int n_channels, unsigned int sample_rate, i
    d_slot = -1;
    d_termination_flag = false;
    state = AVAILABLE;
@@ -83,6 +88,8 @@ index 4e8c2ba..a7b12e7 100644
 +  d_talker_start = 0;
 +  d_split_drop = false;
 +  d_conventional = false;
++  const char *pertx = std::getenv("SIZEUP_TR_PERTX");
++  d_pertx = pertx && !std::strcmp(pertx, "1");
 +}
 +
 +// sizeup (#638). trunk-recorder ends a transmission only on a terminator (Phase 1 TDU; Phase 2 MAC_HANGTIME). When
@@ -320,10 +327,77 @@ index 4e8c2ba..a7b12e7 100644
 +    split_terminate();
 +  }
 +  return noutput_items;
++}
++
++// sizeup (#986). SIZEUP_TR_PERTX=1: each transmission is handed on when it ends (a terminator, the patch's cut, a group
++// mismatch, the call's end), not only in the call's WAV at the call's end. Its WAV is complete then (close_wav wrote
++// the header's lengths and closed it; nothing rewrites it later: the call WAV is a new file made from it). It is linked
++// (a hard link: trunk-recorder removes its own at the call's end) into <captureDir>/sizeup-tx/ as
++// "<call>-t<k>.wav", then "<call>-t<k>.json" is written beside it (tmp + rename: once it is there, both are whole).
++// <call> is the call file's own stem as the concluder will name it (default filenameFormat: talkgroup, the first
++// transmission's start, freq, TDMA slot, call number); k is the transmission's index in the call, which is its
++// srcList / freqList index in the call JSON (minTransmissionDuration 0: none is dropped). Unset or anything else:
++// stock, nothing written. A part that can't be written is left to the call's end (an error line says so).
++void transmission_sink::sizeup_emit() {
++  if (!d_current_call || transmission_list.empty()) {
++    return;
++  }
++  const Transmission &t = transmission_list.back();
++  const size_t k = transmission_list.size() - 1;
++  std::int64_t first_ms = 0;
++  for (const Transmission &x : transmission_list) {
++    if (x.start_time_ms > 0 && (first_ms == 0 || x.start_time_ms < first_ms)) {
++      first_ms = x.start_time_ms;
++    }
++  }
++  int slot = d_current_call->get_tdma_slot();
++  char stem[256];
++  if (slot != -1) {
++    snprintf(stem, sizeof stem, "%ld-%lld.%03d_%lld.%d-call_%ld", d_current_call_talkgroup, (long long)(first_ms / 1000),
++             (int)(first_ms % 1000), (long long)std::llround(d_current_call_freq), slot, d_current_call_num);
++  } else {
++    snprintf(stem, sizeof stem, "%ld-%lld.%03d_%lld-call_%ld", d_current_call_talkgroup, (long long)(first_ms / 1000),
++             (int)(first_ms % 1000), (long long)std::llround(d_current_call_freq), d_current_call_num);
++  }
++  std::string base = std::string(stem) + "-t" + std::to_string(k);
++  boost::filesystem::path dir = boost::filesystem::path(d_current_call->get_capture_dir()) / "sizeup-tx";
++  boost::system::error_code ec;
++  boost::filesystem::create_directories(dir, ec);
++  boost::filesystem::path wav = dir / (base + ".wav");
++  if (!ec) {
++    boost::filesystem::create_hard_link(t.filename, wav, ec);
++  }
++  if (ec) {
++    BOOST_LOG_TRIVIAL(error) << "sizeup per-tx: " << base << " not handed on (" << ec.message() << "): left to the call's end";
++    return;
++  }
++  std::string json = (dir / (base + ".json")).string();
++  std::string tmp = json + ".tmp";
++  std::FILE *f = std::fopen(tmp.c_str(), "w");
++  if (!f) {
++    BOOST_LOG_TRIVIAL(error) << "sizeup per-tx: " << base << ".json not written: left to the call's end";
++    boost::filesystem::remove(wav, ec);
++    return;
++  }
++  std::fprintf(f, "{\"v\": 1, \"short_name\": \"%s\", \"talkgroup\": %ld, \"call_num\": %ld, \"call\": \"%s\", "
++                  "\"k\": %zu, \"src\": %ld, \"start_time_ms\": %lld, \"stop_time_ms\": %lld, \"samples\": %ld, "
++                  "\"rate\": %u, \"error_count\": %ld, \"spike_count\": %ld, \"freq\": %lld, \"slot\": %d, "
++                  "\"emergency\": %d, \"encrypted\": %d}\n",
++               d_current_call_short_name.c_str(), d_current_call_talkgroup, d_current_call_num, stem, k, t.source,
++               (long long)t.start_time_ms, (long long)t.stop_time_ms, t.sample_count, d_sample_rate, t.error_count,
++               t.spike_count, (long long)std::llround(d_current_call_freq), slot, d_current_call->get_emergency() ? 1 : 0,
++               d_current_call->get_encrypted() ? 1 : 0);
++  bool ok = !std::ferror(f);
++  ok = (std::fclose(f) == 0) && ok;
++  if (!ok || std::rename(tmp.c_str(), json.c_str()) != 0) {
++    BOOST_LOG_TRIVIAL(error) << "sizeup per-tx: " << base << ".json not written: left to the call's end";
++    std::remove(tmp.c_str());
++    boost::filesystem::remove(wav, ec);
++  }
  }
  
  void transmission_sink::create_filename() {
-@@ -170,6 +417,12 @@ bool transmission_sink::start_recording(Call *call) {
+@@ -170,6 +487,12 @@ bool transmission_sink::start_recording(Call *call) {
    curr_src_id = d_current_call->get_current_source_id();
    cached_src_id = -1;
    d_sample_count = 0;
@@ -336,7 +410,7 @@ index 4e8c2ba..a7b12e7 100644
  
    // when a wav_sink first gets associated with a call, set its lifecycle to idle;
    state = IDLE;
-@@ -257,6 +510,13 @@ void transmission_sink::set_source(long src) {
+@@ -257,6 +580,13 @@ void transmission_sink::set_source(long src) {
  }
  
  void transmission_sink::end_transmission() {
@@ -350,7 +424,17 @@ index 4e8c2ba..a7b12e7 100644
    std::string loghdr = log_header(d_current_call_short_name,d_current_call_num,d_current_call_talkgroup_display,d_current_call_freq);
    
    if (d_sample_count > 0) {
-@@ -320,6 +580,11 @@ void transmission_sink::end_transmission() {
+@@ -307,6 +637,9 @@ void transmission_sink::end_transmission() {
+ 
+     BOOST_LOG_TRIVIAL(debug) << "Adding transmission: " << transmission.filename << " Slot: " << transmission.slot << " Talkgroup: " << transmission.talkgroup << " Length: " << transmission.length << " Samples: " << d_sample_count;
+     this->add_transmission(transmission);
++    if (d_pertx) {
++      sizeup_emit(); // sizeup (#986)
++    }
+ 
+     // Reset the recorder to be ready to record the next Transmission
+     state = IDLE;
+@@ -320,6 +653,11 @@ void transmission_sink::end_transmission() {
    } else {
      BOOST_LOG_TRIVIAL(error) << "Trying to end a Transmission, but the sample_count is 0" << std::endl;
    }
@@ -362,7 +446,7 @@ index 4e8c2ba..a7b12e7 100644
  }
  
  void transmission_sink::stop_recording() {
-@@ -358,6 +623,9 @@ State transmission_sink::get_state() {
+@@ -358,6 +696,9 @@ State transmission_sink::get_state() {
  }
  
  int transmission_sink::work(int noutput_items, gr_vector_const_void_star &input_items, gr_vector_void_star &output_items) {
@@ -372,7 +456,7 @@ index 4e8c2ba..a7b12e7 100644
  
    gr::thread::scoped_lock guard(d_mutex); // hold mutex for duration of this function
    std::string loghdr = log_header(d_current_call_short_name,d_current_call_num,d_current_call_talkgroup_display,d_current_call_freq);
-@@ -450,6 +718,14 @@ int transmission_sink::work(int noutput_items, gr_vector_const_void_star &input_
+@@ -450,6 +791,14 @@ int transmission_sink::work(int noutput_items, gr_vector_const_void_star &input_
      if (pmt::eq(src_id_key, tags[i].key)) {
        long src_id = pmt::to_long(tags[i].value);
        pos = d_sample_count + (tags[i].offset - nitems_read(0));
@@ -388,7 +472,7 @@ index 4e8c2ba..a7b12e7 100644
        if (curr_src_id == -1) {
          // BOOST_LOG_TRIVIAL(info) << "Updated Voice Channel source id: " << src_id << " pos: " << pos << " offset: " << tags[i].offset - nitems_read(0);
 diff --git a/trunk-recorder/gr_blocks/transmission_sink.h b/trunk-recorder/gr_blocks/transmission_sink.h
-index e82819c..4724c03 100644
+index e82819c..54e5a09 100644
 --- a/trunk-recorder/gr_blocks/transmission_sink.h
 +++ b/trunk-recorder/gr_blocks/transmission_sink.h
 @@ -33,6 +33,7 @@
@@ -399,7 +483,7 @@ index e82819c..4724c03 100644
  
  class Call;
  struct Transmission;
-@@ -60,6 +61,23 @@ private:
+@@ -60,6 +61,25 @@ private:
    long d_error_count;
    long curr_src_id;
    long cached_src_id;
@@ -412,6 +496,8 @@ index e82819c..4724c03 100644
 +  long d_talker_start;              // samples into the transmission where the current talker began
 +  std::vector<int16_t> d_pending;   // (on) the samples since d_cand_pos, held back until the new ID is settled
 +  bool d_split_drop;                // (on) a terminator with nothing recorded: the rest of its chunk is dropped
++  bool d_pertx;                     // sizeup (#986) SIZEUP_TR_PERTX=1: each transmission handed on as it ends
++  void sizeup_emit();
 +  int split_on_src(long src, long pos);
 +  void split_cut();
 +  void split_keep();

@@ -7,7 +7,7 @@ plus a JSON sidecar per call:
     ... .json  {"talkgroup": 307, "start_time": ..., "stop_time": ..., "freq": ...,
                 "srcList": [{"src": 2391001, "time": ..., "pos": 0.0, "tag": "..."}], ...}
 
-CallIngest polls the directory for new JSON sidecars (stdlib only, no inotify needed), keeps
+CallIngest polls the directory for new JSON sidecars (stdlib only, no inotify needed: POLL_S), keeps
 the talkgroups we care about, and hands each call (audio at 16 kHz + who talked) on.
 Decoding P25 stays outside sizeup, so trunk-recorder can be swapped for SDRTrunk/OP25 if the
 simulcast decodes poorly with RTL-SDRs.
@@ -64,6 +64,19 @@ split_call() marks the piece the button belongs to (Piece.emergency). The unit s
 flag in 5.2.0 (plugins/unit_script passes only the system, radio ID, talkgroup and patches), so the
 button is known when the call's JSON is written, not at the key-up.
 
+Each transmission as it ends (#986). trunk-recorder writes the call's WAV and JSON only at the call's end, so a first
+turn waited for every later one. Its sink closes each transmission's own WAV when it ends (the header's lengths written;
+the call WAV is a new file made from them later), and the station's patch, with SIZEUP_TR_PERTX=1 (per system: its
+config.json "sizeup": {"per_tx": "off" | "log" | "on"}, off by default), links it into <capture dir>/sizeup-tx/ as
+"<call>-t<k>.wav" and writes "<call>-t<k>.json" beside it: <call> the call file's own stem, k its srcList index. With
+"on", CallIngest hands each to on_part as a Call of one turn (Call.part = k): its row "<call>-t<k>" (turn k) at once.
+The call's JSON still comes at its end; the transmissions taken as parts go with it (Call.parts) and split_call makes
+only the others, under the same ids (part_rest). "log" only notes them, for the hourly line. The capture dir is polled
+every POLL_S (0.25 s, was 1 s), listed with os.scandir (half of Path.rglob's CPU). Measured on a dev Mac: 0.15-0.3 ms of
+CPU a look on a tree like the station's (the janitor removes empty day dirs: today's and a few more), about 0.1 % of a
+core per system; 60 day dirs 2 ms, 0.8 %. A call WAV whose header says it is whole (wav_complete) is taken at once,
+instead of after two looks a second apart.
+
 Calls written while sizeup was down (#747). trunk-recorder keeps recording through a restart of sizeup (the station
 service restarts for every auto-update, about a dozen times a day), so a call can conclude while nothing reads the
 capture dir. CallIngest keeps a high-water mark per capture dir (mark_path, beside the station's state): the newest
@@ -81,6 +94,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import statistics
 import threading
 import time
 import wave
@@ -108,6 +123,7 @@ class Turn:
     errors: int = 0               # freqList error_count
     via: str = "srclist"          # srclist | grant (talker named by a live grant) | split (cut at a grant) | grant_cut (#819)
     emergency: bool = False       # srcList "emergency": this key-up was an emergency (P25 emergency button)
+    tx: int = -1                  # its transmission's index in the call (srcList order; a cut's: the one it was cut from)
 
 
 @dataclass
@@ -129,6 +145,11 @@ class Call:
     noise: float | None = None
     freq: float | None = None     # its voice channel, Hz
     late: bool = False         # written while sizeup was down, ingested at the next start (#747): no pre-alert
+    # Per-transmission hand-off (#986, the module's doc): part = this Call is one transmission of a call still going on
+    # (its index k; id the call's own, its row "<id>-t<k>"); parts = at the call's end, the transmissions already taken
+    # as parts (their rows are in: only the others are made)
+    part: int | None = None
+    parts: frozenset = frozenset()
 
     def __post_init__(self) -> None:
         self.turns = [t if isinstance(t, Turn) else Turn(float(t[0]), str(t[1])) for t in self.turns]
@@ -136,6 +157,18 @@ class Call:
 
 WAV_HEADER = 44            # bytes; a WAV this size or smaller has no audio yet
 SETTLE_GIVE_UP_S = 60.0
+# A call WAV whose header doesn't say it is whole (wav_complete) is taken once its size has held this long (the poll
+# was 1 s and the size had to hold across two polls before #986)
+SETTLE_S = 1.0
+POLL_S = 0.25              # the capture dir's poll (#986: 1 s before; measured cost in the module's doc)
+# Per-transmission hand-off (#986, the module's doc)
+PARTS_DIR = "sizeup-tx"    # under the capture dir: trunk-recorder's <call>-t<k>.wav + .json, SIZEUP_TR_PERTX=1
+PER_TX_MODES = ("off", "log", "on")
+PART_KEEP_S = 1800.0       # a call's parts are kept in mind this long for its JSON (a call never concluded: dropped)
+PART_STALE_S = 600.0       # a part file this old is an orphan (its call long over): removed
+PART_REPORT_S = 3600.0     # the hourly per-tx line
+CALL_NUM = re.compile(r"-call_(\d+)$")
+PART_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,110}")
 # Calls written while sizeup was down (#747): ingested late at start back this far (older ones are primed as seen)
 REPLAY_S = 600.0
 MARK_SAVE_S = 5.0          # the high-water mark is written at most this often (and at stop)
@@ -158,6 +191,30 @@ def _mtime(p: Path) -> float:
         return p.stat().st_mtime
     except OSError:                                          # removed between listing and sorting
         return 0.0
+
+
+def wav_complete(path: Path, size: int) -> bool:
+    """Whether a WAV's header says it is whole: its RIFF length is the file's and its data chunk fits in it. Both
+    writers of a call's audio put a placeholder there when they open the file (trunk-recorder's sink 0, ffmpeg
+    0xFFFFFFFF) and the real lengths when they close it, the RIFF length last; so a file still being written never
+    passes, and one that passes is taken at once instead of after its size held still (SETTLE_S)."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4096)
+    except OSError:
+        return False
+    if len(head) < 12 or head[:4] != b"RIFF" or head[8:12] != b"WAVE":
+        return False
+    riff = int.from_bytes(head[4:8], "little")
+    if riff in (0, 0xFFFFFFFF) or riff + 8 != size:
+        return False
+    at = 12
+    while at + 8 <= len(head):
+        n = int.from_bytes(head[at + 4:at + 8], "little")
+        if head[at:at + 4] == b"data":
+            return n != 0xFFFFFFFF and at + 8 + n <= size
+        at += 8 + n + (n & 1)
+    return False
 
 
 def read_wav_16k(path: Path) -> np.ndarray:
@@ -237,7 +294,7 @@ def _turns(d: dict, aliases: dict[str, str]) -> list[Turn]:
         if p is not None and "len" in f:
             freqs.setdefault(round(max(0.0, p), 2), f)
     turns: list[Turn] = []
-    for s in d.get("srcList") or []:
+    for i, s in enumerate(d.get("srcList") or []):
         if not isinstance(s, dict):
             continue
         pos = round(max(0.0, _num(s.get("pos"), 0.0)), 2)
@@ -247,7 +304,7 @@ def _turns(d: dict, aliases: dict[str, str]) -> list[Turn]:
         f = freqs.get(pos) or {}
         turns.append(Turn(pos, talker_name(src, tag, aliases) if src else "", src, tag, _num(f.get("len")),
                           _num(s.get("time")), int(_num(f.get("error_count"), 0) or 0),
-                          emergency=_flag(s.get("emergency"))))
+                          emergency=_flag(s.get("emergency")), tx=i))
     have = {t.pos for t in turns}
     for pos, f in freqs.items():
         if pos not in have:
@@ -375,7 +432,7 @@ def apply_grants(call: Call, grants: list[tuple[float, str]], aliases: dict[str,
             if src and src == t.src and k == len(segs) - 1:
                 talker, tag, via = t.talker, t.tag, "srclist"     # as the call JSON named it
             out.append(Turn(pos, talker, src, tag, round(nxt - pos, 2), t.at + (pos - t.pos),
-                            t.errors if k == 0 else 0, via, t.emergency and k == 0))
+                            t.errors if k == 0 else 0, via, t.emergency and k == 0, t.tx))
         changed = True
     if changed:
         call.turns = out + [t for t in call.turns if t.at is None]
@@ -415,6 +472,8 @@ class Piece:
     stt: bool = True           # False: too short and silent to transcribe (a key-up, nothing said)
     via: str = "srclist"
     emergency: bool = False    # the P25 emergency button: its srcList entry, or the call's flag on its first key-up
+    tx: tuple = ()             # the call's transmissions it holds (Turn.tx; a merged fragment's too)
+    turn: int | None = None    # its turn number when it isn't its place in the list (#986: a transmission's index)
 
 
 def has_voice(audio: np.ndarray, rate: int = RATE) -> bool:
@@ -430,7 +489,9 @@ def has_voice(audio: np.ndarray, rate: int = RATE) -> bool:
 
 def split_call(call: Call, rate: int = RATE) -> list[Piece]:
     """The call's audio cut at every key-up (Call.turns): one Piece each, see SHORT_TURN_S for the
-    one merge. One piece keeps the call's own id; more are "<id>-t0", "-t1", ... in talk order."""
+    one merge. One piece keeps the call's own id; more are "<id>-t0", "-t1", ... in talk order.
+    Per-transmission hand-off (#986): a part (Call.part = k) is one piece, "<id>-t<k>" (turn k); a call whose parts were
+    taken (Call.parts) makes only the pieces of its other transmissions (part_rest)."""
     audio = call.audio if call.audio is not None else np.zeros(0, np.float32)
     n = len(audio)
 
@@ -440,11 +501,18 @@ def split_call(call: Call, rate: int = RATE) -> list[Piece]:
         return [(call.ids.get(x, ("", ""))[0], call.ids.get(x, ("", ""))[1] or x) for x in names if x]
 
     turns = sorted(call.turns, key=lambda t: t.pos)
+    if call.part is not None:
+        t = turns[0] if turns else None
+        stt = n >= MIN_STT_S * rate and not (n < SHORT_TURN_S * rate and not has_voice(audio, rate))
+        return [Piece(f"{call.id}-t{call.part}", call.start, call.start + n / rate, t.talker if t else "", audio,
+                      pairs_of(t, [t.talker] if t else []), stt, t.via if t else "srclist", call.emergency,
+                      (call.part,), call.part)]
     if not turns or (len(turns) > 1 and all(t.pos <= 0 for t in turns)):
         # No positions (an old JSON shape): the talkers can't be placed in the audio.
         names = list(call.units)
-        return [Piece(call.id, call.start, call.end, ", ".join(names), audio, pairs_of(None, names),
-                      emergency=call.emergency or any(t.emergency for t in turns))]
+        return part_rest(call, [Piece(call.id, call.start, call.end, ", ".join(names), audio, pairs_of(None, names),
+                                      emergency=call.emergency or any(t.emergency for t in turns),
+                                      tx=tuple(t.tx for t in turns))])
     cuts = [(min(n, max(0, int(round(t.pos * rate)))), t) for t in turns]
     raw: list[list] = []                                     # [a, b, turn]
     for i, (a, t) in enumerate(cuts):
@@ -453,37 +521,64 @@ def split_call(call: Call, rate: int = RATE) -> list[Piece]:
             raw.append([a, b, t])
     if not raw:
         t = turns[-1]
-        return [Piece(call.id, call.start, call.end, t.talker, audio, pairs_of(t, [t.talker]), via=t.via,
-                      emergency=call.emergency or any(x.emergency for x in turns))]
+        return part_rest(call, [Piece(call.id, call.start, call.end, t.talker, audio, pairs_of(t, [t.talker]),
+                                      via=t.via, emergency=call.emergency or any(x.emergency for x in turns),
+                                      tx=tuple(x.tx for x in turns))])
     raw[0][0] = 0
     short = SHORT_TURN_S * rate
-    kept: list[list] = []                                    # [a, b, turn, emergency]
+    kept: list[list] = []                                    # [a, b, turn, emergency, transmissions]
     carry = None                                             # a leading fragment, for the next piece
     carry_em = False
+    carry_tx: list[int] = []
     for a, b, t in raw:
         if len(raw) > 1 and b - a < short and not t.src and not t.talker and not has_voice(audio[a:b], rate):
             if kept:
                 kept[-1][1] = b
                 kept[-1][3] = kept[-1][3] or t.emergency
+                kept[-1][4].append(t.tx)
             else:
                 carry = a if carry is None else carry
                 carry_em = carry_em or t.emergency
+                carry_tx.append(t.tx)
             continue
-        em = t.emergency
+        em, txs = t.emergency, [t.tx]
         if carry is not None:
-            a, carry, em = carry, None, em or carry_em
-        kept.append([a, b, t, em])
+            a, carry, em, txs = carry, None, em or carry_em, carry_tx + txs
+        kept.append([a, b, t, em, txs])
     if kept and call.emergency:      # 5.2.0: the call's flag, from the grant that opened it: its first key-up
         kept[0][3] = True
     out: list[Piece] = []
-    for k, (a, b, t, em) in enumerate(kept):
+    for k, (a, b, t, em, txs) in enumerate(kept):
         cid = call.id if len(kept) == 1 else f"{call.id}-t{k}"
         start = t.at if t.at is not None else call.start + a / rate
         if out and start < out[-1].start:
             start = out[-1].start
         clip = audio[a:b]
         stt = (b - a) >= MIN_STT_S * rate and not ((b - a) < short and not has_voice(clip, rate))
-        out.append(Piece(cid, start, start + (b - a) / rate, t.talker, clip, pairs_of(t, [t.talker]), stt, t.via, em))
+        out.append(Piece(cid, start, start + (b - a) / rate, t.talker, clip, pairs_of(t, [t.talker]), stt, t.via, em,
+                         tuple(dict.fromkeys(txs))))
+    return part_rest(call, out)
+
+
+def part_rest(call: Call, pieces: list[Piece]) -> list[Piece]:
+    """(#986) The pieces of a call some of whose transmissions were taken as parts (Call.parts): a piece holding any of
+    them is left out (its part is in; a fragment merged into one goes with it), the others are named by their own
+    transmission as the parts are, "<id>-t<k>" (turn k), so no id is ever made twice; a second piece of one
+    transmission (a cut) "<id>-t<k>c<j>". No parts: the pieces as they are."""
+    if not call.parts:
+        return pieces
+    out: list[Piece] = []
+    used: dict[int, int] = {}
+    for pc in pieces:
+        if any(x in call.parts for x in pc.tx):
+            continue
+        k = min((x for x in pc.tx if x >= 0), default=-1)
+        if k < 0:                                            # (no transmission index: after every part)
+            k = max(call.parts) + 1
+        j = used.get(k, 0)
+        used[k] = j + 1
+        pc.id, pc.turn = (f"{call.id}-t{k}", k) if not j else (f"{call.id}-t{k}c{j}", k)
+        out.append(pc)
     return out
 
 
@@ -666,7 +761,7 @@ def apply_grant_cuts(call: Call, cuts: list[GrantCut], aliases: dict[str, str] |
             nxt = mine[i + 1].pos if i + 1 < len(mine) else end
             tag = alias_of(c.src) or ""
             out.append(Turn(c.pos, talker_name(c.src, tag, aliases), c.src, tag, round(nxt - c.pos, 2),
-                            (t.at + (c.pos - t.pos)) if t.at is not None else None, 0, GRANT_CUT))
+                            (t.at + (c.pos - t.pos)) if t.at is not None else None, 0, GRANT_CUT, tx=t.tx))
     call.turns = out
     call.units = []
     for t in call.turns:
@@ -719,7 +814,7 @@ class CallIngest:
     start primes what is on disk."""
 
     def __init__(self, capture_dir: str | Path, labels: dict[int, str], on_call: Callable[[Call], None],
-                 aliases: dict[str, str] | None = None, poll_s: float = 1.0,
+                 aliases: dict[str, str] | None = None, poll_s: float = POLL_S,
                  on_event: Callable[[str], None] = lambda m: None, name: str = "P25",
                  mark_path: str | Path | None = None):
         self.name = name  # status label (the header pill), not every talkgroup's name
@@ -727,7 +822,7 @@ class CallIngest:
         self.dir, self.labels, self.on_call = Path(capture_dir), labels, on_call
         self.aliases, self.poll_s, self.on_event = aliases or {}, poll_s, on_event
         self._seen: set[str] = set()
-        self._pending: dict[str, tuple[float, int]] = {}   # json path -> (first seen, last WAV size)
+        self._pending: dict[str, tuple[float, int, float]] = {}   # json path -> (first seen, last WAV size, since when)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.state, self.detail, self.last_call = "starting", "", 0.0
@@ -757,10 +852,22 @@ class CallIngest:
         self._late: set[str] = set()
         self._late_n = self._late_skipped = 0
         self._late_say_by: float | None = None
+        # Per-transmission hand-off (#986): the mode (the system's config.json "sizeup": {"per_tx"}), what takes a part
+        # (Call.part set; True: taken, its row made), and the calls whose parts came in, until their JSON does
+        self.per_tx = "off"
+        self.on_part: Callable[[Call], bool] | None = None
+        self._calls: dict[str, dict] = {}                       # call id -> {start, at, key, seen {k: (release, at)}, taken}
+        self._by_num: dict[tuple[str, int, int], str] = {}      # (system, talkgroup, call number) -> call id
+        self._done: dict[str, float] = {}                       # call ids whose JSON came in -> when (a late part: dropped)
+        self._part_stats: list[tuple[float, float]] = []        # (after its release, before its call's file) per part
+        self._part_calls = self._part_taken = 0
+        self._part_said = time.monotonic()
+        self._part_swept = 0.0
+        self.started_at = time.time()
 
     def prime(self) -> CallIngest:
         """Mark calls already on disk as seen: don't replay old calls as if they were live."""
-        self._seen = {str(p) for p in self.dir.rglob("*.json")} if self.dir.exists() else set()
+        self._seen = {str(p) for _k, p in self._listing()}
         return self
 
     def resume(self) -> CallIngest:
@@ -807,6 +914,8 @@ class CallIngest:
         return self
 
     def start(self, skip_existing: bool = True) -> CallIngest:
+        self.started_at = time.time()
+        self._sweep_parts(0.0)     # (#986) parts from before this start: their calls' JSON brings them in
         if skip_existing:
             if self.mark_path is not None:
                 self.resume()
@@ -840,7 +949,26 @@ class CallIngest:
         """Every sidecar in the capture dir, oldest first: ((mtime, path under the dir), path)."""
         if not self.dir.exists():
             return []
-        out = [((_mtime(p), self._rel(p)), p) for p in self.dir.rglob("*.json") if p != self.mark_path]   # (a mark kept in it)
+        out = []
+        parts, mark = str(self.dir / PARTS_DIR), str(self.mark_path) if self.mark_path else ""
+        stack = [str(self.dir)]
+        while stack:               # (os.scandir, not Path.rglob: half the CPU, which a 0.25 s poll pays four times a second)
+            d = stack.pop()
+            try:
+                it = os.scandir(d)
+            except OSError:
+                continue
+            with it:
+                for e in it:
+                    try:
+                        if e.is_dir(follow_symlinks=False):
+                            if e.path != parts:      # (#986's parts)
+                                stack.append(e.path)
+                        elif e.name.endswith(".json") and e.path != mark:   # (a mark kept in it)
+                            p = Path(e.path)
+                            out.append(((e.stat().st_mtime, self._rel(p)), p))
+                    except OSError:                  # removed between listing and looking
+                        continue
         out.sort(key=lambda x: x[0])
         return out
 
@@ -862,10 +990,11 @@ class CallIngest:
             except OSError:
                 behind.append(key)
                 continue  # audio not there yet: pick it up next poll
-            first, last_size = self._pending.get(k, (now, -1))
-            settled = size > WAV_HEADER and size == last_size
+            first, last_size, since = self._pending.get(k, (now, -1, now))
+            since = since if size == last_size else now
+            settled = size > WAV_HEADER and (wav_complete(wav, size) or (size == last_size and now - since >= SETTLE_S))
             if not settled and now - first < SETTLE_GIVE_UP_S:
-                self._pending[k] = (first, size)
+                self._pending[k] = (first, size, since)
                 behind.append(key)
                 continue
             self._pending.pop(k, None)
@@ -876,6 +1005,7 @@ class CallIngest:
             if call is None:
                 continue
             call.late = late
+            self._join_parts(call)                           # (#986) its transmissions taken as parts already
             # (a late call's grants were never heard: the live ones held now came after the restart, another call's)
             if self.grants is not None and call.turns and not late:
                 try:
@@ -925,10 +1055,15 @@ class CallIngest:
             self.on_event(f"p25: grant split not applied to {call.label}: {type(e).__name__} {e}")
 
     def poll(self) -> list[Call]:
-        """One look: each new call to on_call, the mark moved past each one it took (never one it raised on), the
-        start's "ingested late" line once those are in, the mark written when due. The calls on_call took."""
+        """One look: each new part (#986) to on_part, then each new call to on_call, the mark moved past each one it
+        took (never one it raised on), the start's "ingested late" line once those are in, the mark written when due.
+        The calls on_call took."""
         if not self._look():
             return []
+        try:
+            self._parts()
+        except Exception as e:                               # never let one bad part stop ingest
+            self.on_event(f"p25 {self.name}: per-tx error: {type(e).__name__}: {e}")
         try:
             calls = self.scan()
         except Exception as e:                               # never let one bad file stop ingest
@@ -952,6 +1087,173 @@ class CallIngest:
         self._say_late()
         self._save_mark()
         return took
+
+    # -- per-transmission hand-off (#986, the module's doc) ----------------------------------------------------------
+
+    def _parts(self) -> None:
+        """Each new part in the parts dir: noted for its call (log, on) and with "on" handed to on_part; its files then
+        removed (taken or not: a part not taken is its call's at the call's end). Orphans swept once a minute."""
+        d = self.dir / PARTS_DIR
+        names = []
+        if self.per_tx in ("log", "on"):                     # (off: only swept, should a trunk-recorder still write them)
+            try:
+                names = sorted(n for n in os.listdir(d) if n.endswith(".json"))
+            except OSError:
+                pass
+        for name in names:
+            self._part(d / name)
+        self._sweep_parts(PART_STALE_S)
+        self._say_parts()
+
+    def _part(self, meta: Path) -> None:
+        wav = meta.with_suffix(".wav")
+        try:
+            self._take_part(meta, wav)
+        finally:
+            for f in (meta, wav):
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+
+    def _take_part(self, meta: Path, wav: Path) -> None:
+        try:
+            d = json.loads(meta.read_text())
+            if not isinstance(d, dict) or d.get("v") != 1:
+                raise ValueError("not a part")
+            cid, k, tg, num = d["call"], d["k"], d["talkgroup"], d["call_num"]
+            start, stop = float(d["start_time_ms"]) / 1000.0, float(d["stop_time_ms"]) / 1000.0
+            if not (isinstance(cid, str) and PART_NAME.fullmatch(cid) and all(
+                    isinstance(x, int) and not isinstance(x, bool) and x >= 0 for x in (k, tg, num))):
+                raise ValueError("fields")
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            self.on_event(f"p25 {self.name}: per-tx: {meta.name} not read: {type(e).__name__} {e}")
+            return
+        if cid in self._done or (tg not in self.labels and not self.record_all):
+            return                                           # its call is in already; a talkgroup not taken at all
+        now = time.time()
+        system = str(d.get("short_name") or "")
+        c = self._calls.get(cid)
+        if c is None:
+            c = self._calls[cid] = {"start": start, "at": now, "key": (system, tg, num), "seen": {}, "taken": set()}
+            self._by_num[(system, tg, num)] = cid
+        c["seen"][k] = (stop, now)
+        if self.per_tx != "on" or self.on_part is None or _flag(d.get("emergency")) or _flag(d.get("encrypted")):
+            return                     # log: noted only; an emergency or encrypted call is all taken at its end, as before
+        call = self._part_call(d, cid, k, tg, system, start, stop, wav)
+        if call is None:
+            return
+        try:
+            took = bool(self.on_part(call))
+        except Exception as e:                               # (left to its call's end)
+            self.on_event(f"p25 {self.name}: per-tx handler error: {type(e).__name__}: {e}")
+            took = False
+        if took:
+            c["taken"].add(k)
+            self.last_call = stop or now
+
+    def _part_call(self, d: dict, cid: str, k: int, tg: int, system: str, start: float, stop: float,
+                   wav: Path) -> Call | None:
+        """One part as a Call of one turn (Call.part = k), named from the live grants when the voice channel gave no
+        radio ID (never cut: a part is one transmission)."""
+        try:
+            audio = read_wav_16k(wav)
+        except (OSError, ValueError, EOFError, wave.Error) as e:
+            self.on_event(f"p25 {self.name}: per-tx: {wav.name} not read: {type(e).__name__} {e}")
+            return None
+        src = str(d.get("src", "")).strip()
+        src = "" if src in UNKNOWN_SRC else src
+        tag = self.alias_of(src) if src else ""
+        length = len(audio) / RATE
+        turn = Turn(0.0, talker_name(src, tag, self.aliases) if src else "", src, tag, round(length, 2), start,
+                    int(_num(d.get("error_count"), 0) or 0), tx=k)
+        call = Call(cid, tg, self.labels.get(tg) or f"TG {tg}", start, max(stop, start + length),
+                    [turn.talker] if turn.talker else [], audio, str(wav), [turn],
+                    {turn.talker: (src, tag)} if turn.talker else {}, system, False, False, None, None,
+                    _num(d.get("freq")), part=k)
+        if not src and self.grants is not None:
+            try:
+                one = Call(cid, tg, call.label, start, call.end, [], None, "", [Turn(0.0, "", length=turn.length,
+                                                                                     at=start, tx=k)], {}, system)
+                got = self.grants(system, tg, start - GRANT_LEAD_S - GRANT_SLACK_S, call.end + GRANT_SLACK_S)
+                if apply_grants(one, got, self.aliases, self.alias_of) and len(one.turns) == 1 and one.turns[0].src:
+                    t = one.turns[0]
+                    turn.talker, turn.src, turn.tag, turn.via = t.talker, t.src, t.tag, t.via
+                    call.units, call.ids = [t.talker], {t.talker: (t.src, t.tag)}
+            except Exception as e:                           # (unnamed, as the voice channel left it)
+                self.on_event(f"p25 {self.name}: per-tx: grants not applied: {type(e).__name__} {e}")
+        return call
+
+    def _join_parts(self, call: Call) -> None:
+        """A call's JSON is in: the transmissions taken as parts go with it (Call.parts), counted for the hourly line;
+        any part of it still on disk is taken first (trunk-recorder writes each before the call's JSON), and one
+        coming later is dropped (its call is in)."""
+        if self.per_tx in ("log", "on"):
+            self._parts()
+        now = time.time()
+        c = self._calls.pop(call.id, None)
+        if c is None:                  # (its JSON named otherwise: its first start stepped; the same call by its number)
+            m = CALL_NUM.search(call.id)
+            cid = self._by_num.get((call.system, call.talkgroup, int(m.group(1)))) if m else None
+            if cid is not None and abs(self._calls.get(cid, {}).get("start", -1e18) - call.start) < 60:
+                c = self._calls.pop(cid)
+                self._done[cid] = now
+        self._done[call.id] = now
+        if len(self._done) > 2000:
+            for x in sorted(self._done, key=self._done.get)[:1000]:
+                self._done.pop(x, None)
+        if self.per_tx == "on" and call.start < self.started_at and not call.late:
+            call.straddles = True      # type: ignore[attr-defined]  # (going on at this start: parts taken before?)
+        if c is None:
+            return
+        self._by_num.pop(c["key"], None)
+        call.parts = frozenset(c["taken"])
+        self._part_calls += 1
+        self._part_taken += len(c["taken"])
+        for release, at in c["seen"].values():
+            self._part_stats.append((max(0.0, at - release), max(0.0, now - at)))
+        del self._part_stats[:-5000]
+
+    def _sweep_parts(self, older_s: float) -> None:
+        """Part files older than older_s removed (0: all, at start); calls whose JSON never came forgotten."""
+        now = time.time()
+        if older_s and now - self._part_swept < 60:
+            return
+        self._part_swept = now
+        for cid in [x for x, c in self._calls.items() if now - c["at"] > PART_KEEP_S]:
+            self._by_num.pop(self._calls.pop(cid)["key"], None)
+        d = self.dir / PARTS_DIR
+        try:
+            names = os.listdir(d)
+        except OSError:
+            return
+        for n in names:
+            f = d / n
+            try:
+                if not older_s or now - f.stat().st_mtime > older_s:
+                    f.unlink()
+            except OSError:
+                pass
+
+    def _say_parts(self) -> None:
+        """Hourly (#986): what the parts gained, counts and seconds only (never a radio ID)."""
+        mono = time.monotonic()
+        if mono - self._part_said < PART_REPORT_S:
+            return
+        self._part_said = mono
+        stats, self._part_stats = self._part_stats, []
+        calls, taken, self._part_calls, self._part_taken = self._part_calls, self._part_taken, 0, 0
+        if not stats:
+            return
+
+        def q(xs: list[float], p: float) -> float:
+            xs = sorted(xs)
+            return xs[min(len(xs) - 1, int(p * len(xs)))]
+        after, before = [a for a, _b in stats], [b for _a, b in stats]
+        self.on_event(f"p25 {self.name}: per-tx ({self.per_tx}) last hour: {len(stats)} transmissions in {calls} calls"
+                      + (f", {taken} taken as they ended" if self.per_tx == "on" else "")
+                      + f"; ready {statistics.median(after):.2f} s after the release (p90 {q(after, 0.9):.2f}), "
+                      f"{statistics.median(before):.1f} s before the call's file (p90 {q(before, 0.9):.1f})")
 
     def _say_late(self) -> None:
         """The start's one line (#747), once every call from while it was down is in, or LATE_REPORT_S after start."""
