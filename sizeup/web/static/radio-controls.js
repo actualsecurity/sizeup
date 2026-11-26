@@ -110,6 +110,7 @@ window.RadioControls = (() => {
       n.groups.addEventListener("change", onModel);
       n.groups.addEventListener("change", onChallenger);
       n.groups.addEventListener("click", onPromote);
+      n.groups.addEventListener("click", onShadow);
       n.systems = el("div", "dim small rc-systems");   // the other P25 systems: state, unknown talkgroups (#409)
       n.tiers = el("div", "dim small rc-tiers");       // each tier's audio retention and the expected storage
       n.sync = el("div", "small rc-sync");
@@ -1805,6 +1806,8 @@ window.RadioControls = (() => {
   // scored against the champion, never the transcript; the evidence terse on the row (details in the hover) and
   // Promote only once the evidence is there (the hub checks it again and shows it before the admin confirms)
   const boardOf = (k) => ((st.models || {}).challenges || []).find((b) => b.key === k) || null;
+  // an AWS channel's GPU candidates in shadow (#878): its evidence against AWS, terse; a recommendation only
+  const shadowOf = (k) => ((st.models || {}).shadows || []).find((b) => b.key === k) || null;
   async function onChallenger(e) {
     const s = e.target.closest("select.tg-chall");
     if (!s || s.disabled || ro() || !st.models) return;
@@ -1844,12 +1847,15 @@ window.RadioControls = (() => {
     const ev = el("span", "tg-ev small");
     const pb = el("button", "tg-promote sm", "Promote");
     pb.type = "button";
+    const sh = el("button", "tg-shadow sm");                    // (#878: an AWS channel's shadow evidence, on/off)
+    sh.type = "button";
+    sh.setAttribute("aria-label", "Shadow vs AWS");
     const box = el("span", "tg-challenger");
-    box.append(sel, ev, pb);
+    box.append(sel, ev, pb, sh);
     return box;
   }
   function fillChallenger(box, r, lock) {
-    const [sel, ev, pb] = box.children;
+    const [sel, ev, pb, sh] = box.children;
     const m = st.models, k = r.fm ? r.chan : r.ckey, ch = (m.channels || {})[k] || {}, b = boardOf(k);
     const champ = modelChosen(r) || modelAuto(r);
     const ids = (m.catalog || []).map((c) => c.id).filter((id) => id !== champ);
@@ -1874,6 +1880,35 @@ window.RadioControls = (() => {
     show(ev, !!(b && b.challenger));
     show(pb, !!(b && b.promote_ok) && !lock);
     pb.title = b && b.promote_ok ? `Make ${b.challenger} the model: ${b.evidence}` : "";
+    // #878: on an AWS channel, its GPU candidates against AWS: "vs AWS 34/40" (the best model's), ok when one matches
+    const sb = shadowOf(k);
+    show(sh, !!sb);
+    if (sb) {
+      const best = (sb.models || []).slice().sort((x, y) => (y.ok - x.ok) || (y.n - x.n))[0] || null;
+      setText(sh, !sb.on ? "vs AWS off" : best ? `vs AWS ${best.n}/${sb.min_n}${best.ok ? " ✓" : ""}` : "vs AWS —");
+      sh.className = "tg-shadow sm " + (best && best.ok ? "ok" : "dim");
+      const pct = (x) => (x == null ? "—" : `${Math.round(x * 100)}%`);
+      sh.title = (sb.on ? `GPU candidates decode ${sb.pct}% of its clips in shadow, AWS the reference (idle GPU only)`
+                        : "Shadow off: no GPU candidate is tried on its clips")
+        + (sb.models || []).map((m) => `\n${m.model}: ${m.verdict} · ids ${pct(m.ids)} (${m.ids_n}) · agree ${pct(m.agree)}`
+          + (m.time.n ? ` · time ${pct(m.time.model)} vs ${pct(m.time.aws)} (${m.time.n})` : "")
+          + (m.edit.n ? ` · edits ${pct(m.edit.model)} vs ${pct(m.edit.aws)} (${m.edit.n})` : "")).join("")
+        + "\nOnly an admin moves a channel off AWS. Click: shadow " + (sb.on ? "off" : "on");
+      sh.disabled = lock;
+    }
+  }
+  async function onShadow(e) {
+    const b = e.target.closest("button.tg-shadow");
+    if (!b || b.disabled || ro() || !st.models) return;
+    const li = b.closest(".tg-row"), key = li.dataset.ckey, sb = shadowOf(key);
+    st.error = "";
+    b.disabled = true;
+    try {
+      st.models = (await st.modelsApi.save(key, { shadow: sb && sb.on ? "off" : "on" })) || st.models;
+    } catch (err) {
+      st.error = `Couldn't switch the shadow runs of ${li.dataset.label || key}: ${err.message}`;
+    }
+    renderTalkgroups();
   }
 
   // ---- the Channels list, by radio system ------------------------------------------------------------------------
@@ -1946,7 +1981,7 @@ window.RadioControls = (() => {
                                          nameable, st.renaming === nameKey(r), servable, chosenService(r), autoService(r),
                                          st.svcWaiting.has(nameKey(r)), engineOptions(), modeled && [modelChosen(r), modelAuto(r),
                                          ((st.models.channels || {})[r.fm ? r.chan : r.ckey] || null), (st.models.catalog || []).length,
-                                         boardOf(r.fm ? r.chan : r.ckey)]]);
+                                         boardOf(r.fm ? r.chan : r.ckey), shadowOf(r.fm ? r.chan : r.ckey)]]);
     syncList(n.groups, items, {
       key: (x) => (x.head ? `s:${x.id}` : `g:${x.g}`),
       sig: (x) => (x.head ? JSON.stringify([x.label, x.n, x.heard])
