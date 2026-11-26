@@ -303,7 +303,7 @@ class Pool:
         try:
             job.on_fallback(job, why)
         except Exception as e:  # noqa: BLE001 - the caller's trouble: said, never the pool's end
-            self.log(f"stt pool: {job.id}: fallback failed: {type(e).__name__}: {e}")
+            self.log(f"stt pool: {job.id}: fallback failed: {type(e).__name__}")
 
     def _fall(self, job: Job, reason: str, why: str) -> None:
         """Called with the lock held: out of the pool, its fallback queued (run on the fallback thread). The reason is
@@ -856,7 +856,7 @@ class Pool:
         try:
             job.on_done(job, result)
         except Exception as e:  # noqa: BLE001 - its text couldn't be applied: the next engine takes it (never dropped)
-            self.log(f"stt pool: {job.id}: the result couldn't be applied ({type(e).__name__}: {e}): falling back")
+            self.log(f"stt pool: {job.id}: the result couldn't be applied ({type(e).__name__}): falling back")
             with self._cv:
                 self.fallbacks["error"] += 1
             job.extra["fell"] = "error"

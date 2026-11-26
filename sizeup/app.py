@@ -1198,7 +1198,7 @@ class App:
         try:
             ts = self._terms_for_item(item)
         except Exception as e:  # noqa: BLE001 - the source's own prompt then
-            log(f"speech-to-text terms: {type(e).__name__}: {e}")
+            log(f"speech-to-text terms: {type(e).__name__}")
             ts = None
         base = self._base_prompt(item, short=ts is not None)
         extra = self._extra_prompt(item)
@@ -1207,7 +1207,7 @@ class App:
         try:
             text, vocab_v = stt_terms.with_terms(base, ts)
         except Exception as e:  # noqa: BLE001 - the source's own prompt then
-            log(f"speech-to-text terms: {type(e).__name__}: {e}")
+            log(f"speech-to-text terms: {type(e).__name__}")
             text, vocab_v = base, ""
         return text, vocab_v
 
@@ -1265,7 +1265,7 @@ class App:
                 blocked += b
             return named, blocked
         except Exception as e:  # noqa: BLE001 - no names is still a prompt
-            log(f"speech-to-text: talker hints: {type(e).__name__}: {e}")
+            log(f"speech-to-text: talker hints: {type(e).__name__}")
             return [], []
 
     def _talker_names(self, item) -> list[str]:

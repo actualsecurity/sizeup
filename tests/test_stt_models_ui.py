@@ -173,19 +173,21 @@ def test_a_radios_hint_switch_shows_the_effective_state_and_sets_it(site):
         sys.select_option("mrrs")
         hq = pg.locator("#settings-radios tr", has_text="9900501").locator("button.sw")
         hq.wait_for()
-        assert hq.get_attribute("aria-checked") == "true" and "(default)" in hq.get_attribute("title")
+        # another P25 system's radio: off by default, even with its own exact label (MRRS: roles, agencies)
+        assert hq.get_attribute("aria-checked") == "false" and "(default)" in hq.get_attribute("title")
         assert "A range's label is never a hint" in hq.get_attribute("title")
         ranged = pg.locator("#settings-radios tr", has_text="9900150").locator("button.sw")
         assert ranged.get_attribute("aria-checked") == "false"                     # a range's label: off by default
         shot(pg, "#settings-radios .rp-scroll", "radio-ids-hint")
-        hq.click()
-        until(pg, lambda: r.get("mrrs", "9900501")["hint"] == 0, "its hint off")
+        hq.click()                                                                  # an admin's on: a console's name
+        until(pg, lambda: r.get("mrrs", "9900501")["hint"] == 1, "its hint on")
         hq = pg.locator("#settings-radios tr", has_text="9900501").locator("button.sw")
-        pg.wait_for_function("() => document.querySelector('#settings-radios tr button.sw[title^=\"Hint off\"]')")
+        pg.wait_for_function("() => document.querySelector('#settings-radios tr button.sw[title^=\"Hint on\"]')")
         assert "(default)" not in hq.get_attribute("title")
-        hq.click()                                                                  # on again: the default
-        until(pg, lambda: r.get("mrrs", "9900501")["hint"] is None, "back to the default")
         assert r.hint_on(r.get("mrrs", "9900501"))
+        hq.click()                                                                  # off again
+        until(pg, lambda: r.get("mrrs", "9900501")["hint"] == 0, "its hint off")
+        assert not r.hint_on(r.get("mrrs", "9900501"))
         assert pg.errors == []
     finally:
         browser.close()

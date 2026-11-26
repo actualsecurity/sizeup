@@ -385,6 +385,7 @@ class FakeWorker:
     def __init__(self, url, token, mode="answer", text=GPU_TEXT, wait_s=1.0):
         self.url, self.token, self.mode, self.text, self.wait_s = url, token, mode, text, wait_s
         self.jobs, self.audio, self.answers = [], [], []
+        self.extra: dict = {}                     # more of each result (the context form it decoded with, ...)
         self.stop = threading.Event()
         self.t = threading.Thread(target=self.run, daemon=True)
 
@@ -423,7 +424,7 @@ class FakeWorker:
             self.answers.append(self.post(f"/api/station/stt/jobs/{lease}/complete", {
                 "text": " " + self.text, "model": "ggml-large-v3-turbo-q5_0.bin",
                 "segments": [{"start": 0.0, "end": 2.0, "text": self.text, "words": words}],
-                "timing": {"fetch_ms": 5, "infer_ms": 180}}))
+                "timing": {"fetch_ms": 5, "infer_ms": 180}, **self.extra}))
 
     def close(self):
         self.stop.set()

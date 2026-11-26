@@ -4,5 +4,6 @@
   "poll_s": 25.0,
   "pool_on": true,
   "classes": ["urgent", "high", "context-fallback", "context", "live", "rerun", "low", "catchup"],
-  "worker_update": {"mode": "auto"}
+  "worker_update": {"mode": "auto"},
+  "stt_models": {"llm_priority": "yield"}
 }

@@ -293,7 +293,8 @@ const SttWorkersCard = (() => {
     for (const h of ["Channel", "Model", "Context", "Call signs", ""]) hr.append(el("th", "", h));
     t.append(el("thead"), el("tbody"));
     t.tHead.append(hr);
-    const ctxTitle = "Default: the model's (catalog). On / Off: this channel's, whichever model decodes it";
+    const ctxTitle = "Default: the model's (catalog). On / Off: this channel's, whichever model decodes it"
+      + "\nAirband: a whisper model never gets a prompt; the aircraft go only to a list model";
     for (const [key, v] of Object.entries(m.channels || {}).sort(([a], [b]) => a.localeCompare(b, "en", { numeric: true }))) {
       const tr = el("tr");
       const mod = el("td", v.model ? "mono" : "dim", v.model || "default");
@@ -408,6 +409,8 @@ const SttWorkersCard = (() => {
       return (await r.json()).models || null;
     },
     save: async (key, body) => (await post({ action: "channel_model", key, ...body })).models,
+    // ... and the workers' LLM (Settings > Station > Health beside its status: health.js): {model?, priority?}
+    setLlm: async (body) => (await post({ action: "llm_model", ...body })).llm,
   };
 
   document.addEventListener("visibilitychange", () => { if (isOpen() && !timer) poll(); });

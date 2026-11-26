@@ -1178,10 +1178,13 @@ class HubApp(App):
         # each channel's speech model on the GPU workers (sizeup/sttmodels.py): the catalog in this build's models.json,
         # the choices in Settings > Radios; the workers hear which models to run in their hello and state answers
         self.stt_choices = sttmodels.Choices(self.mdb)
+        self.stt_choices.is_airband = lambda key: self._kind.get(key) == "airband"
         if not self.stt_choices.catalog:
             log("hub: no speech model catalog (deploy/stt-worker/models.json): every clip goes to the workers' own model")
         self.stt_api.stt_models = self._stt_models_word
         self.cad.stt_models = self.stt_choices
+        self.stt_champion_hooks: list = []         # intel's listeners on a champion change (stt_champion_change)
+        self.cad.stt_champion_change = self.stt_champion_change
         from sizeup.cloud.metricsbackup import S3Copies
         self.stt_runs = sttruns.Runs(state / "stt.sqlite" if state else ":memory:", may_write=self._may_write_audio,
                                      backup=S3Copies.from_env("stt") if state else None, exists=self._clips_logged,
@@ -2238,7 +2241,7 @@ class HubApp(App):
                 job.extra["list_vocab_v"] = ts.vocab_v
             job.plain = ch.plain(key)
         except Exception as e:  # noqa: BLE001 - the channel's model and context are a help, never a must
-            self.hub.log(f"stt pool: {job.id}: its model and context: {type(e).__name__}: {e}")
+            self.hub.log(f"stt pool: {job.id}: its model and context: {type(e).__name__}")
 
     def _extra_prompt(self, item) -> str:
         """The channel's call signs (Settings: a dispatch console's "908"), in whisper's prompt with the rest (its
@@ -2253,18 +2256,57 @@ class HubApp(App):
     def _stt_models_word(self) -> dict | None:
         """What a GPU worker hears in its hello and state answers (sizeup/sttmodels.py): the catalog in this build (its
         commit on main and models.json's SHA-256: the worker fetches that file from GitHub itself) and the models the
-        channels use, most important first. None without a build commit (a local run): the workers run only their own."""
-        build = (self.stt_api.build or {}).get("commit", "")
+        channels use, most important first (want: the champions, the resident plan); the LLM it should run (llm: an
+        llm_models id, the admin's or today's 8B) and llm_priority ("yield": speech first, the admin's default). Without
+        a build commit (a local run): only llm_priority (the workers keep their own models and worker.toml's LLM)."""
         ch = self.stt_choices
+        word: dict = {"llm_priority": ch.llm_priority()}
+        build = (self.stt_api.build or {}).get("commit", "")
         if not build or not ch.digest or not ch.catalog:
-            return None
+            return word
         services: dict = {}
         for key in ch.settings():
             try:
                 services[key] = self._key_service(key)[1]
             except Exception:  # noqa: BLE001 - a channel the hub can't place: after the rest
                 services[key] = ""
-        return {"catalog": {"commit": build, "sha256": ch.digest}, "want": ch.want(services)}
+        word.update({"catalog": {"commit": build, "sha256": ch.digest}, "want": ch.want(services)})
+        if ch.llm():
+            word["llm"] = ch.llm()
+        return word
+
+    def prealert_channel(self, key: str) -> bool:
+        """A channel the radio pre-alerts push alerts from (sizeup/intel: is_push_source) or one they promote now: its
+        champion changes only once intel is told (stt_champion_change)."""
+        try:
+            return bool(self.is_push_source(key, self._kind.get(key, ""))) or key in self.promoted_keys()
+        except Exception:  # noqa: BLE001 - can't tell: treated as one (intel told for nothing, never missed)
+            return True
+
+    def stt_champion_change(self, key: str, old: str, new: str, operator: str, why: str) -> dict:
+        """The hook every champion change goes through (Settings' channel model, a promote, an automatic rollback:
+        #728), called BEFORE it applies. Kept (hub.sqlite meta stt_champion_log: what the intel session reads, newest
+        last, HubApp.stt_champion_log), said in the hub's log (the channel key and model ids only), and passed to each
+        listener in stt_champion_hooks (intel's, when it subscribes: never in the way of the change). The audit entry
+        is the caller's (Radios, by its operator)."""
+        row = {"at": time.time(), "key": str(key)[:60], "old": str(old or "")[:48], "new": str(new or "")[:48],
+               "by": str(operator or "")[:60], "why": str(why or "")[:40], "prealert": self.prealert_channel(key)}
+        try:
+            self.stt_choices.note_change(row)
+        except Exception as e:  # noqa: BLE001 - said; the change still goes through the audit
+            self.hub.log(f"stt models: a champion change not kept ({type(e).__name__})")
+        self.hub.log(f"stt models: {row['key']}: champion {row['old'] or 'default'} -> {row['new'] or 'default'} "
+                     f"({row['why']})" + (": a pre-alert channel, intel told" if row["prealert"] else ""))
+        for fn in list(self.stt_champion_hooks):
+            try:
+                fn(dict(row))
+            except Exception as e:  # noqa: BLE001 - a listener's trouble is its own
+                self.hub.log(f"stt models: a champion listener failed ({type(e).__name__})")
+        return row
+
+    def stt_champion_log(self, since: float = 0.0) -> list[dict]:
+        """The champion changes after `since` (newest last): {at, key, old, new, by, why, prealert}."""
+        return self.stt_choices.changes(since)
 
     def stt_chosen(self, cid: str) -> str:
         """The engine the route chose for this clip now (sizeup/sttroute.py Routes.chosen): "GPU" (any GPU worker), a
@@ -2623,7 +2665,7 @@ class HubApp(App):
         # the context it was decoded with (the worker says which form; an older worker's: the prompt it was sent)
         ctx = str(res.get("context") or "") or ("prompt" if job.prompt else "none")
         prompt_v, prompt_n = sttmodels.context_version(ctx, job.prompt, job.context)
-        echo = ctx == "list" and sttmodels.context_echo(raw, job.context)   # (its context list read back)
+        echo = ctx == "list" and sttmodels.context_echo(raw, job.context, job.seconds)   # (its context list read back)
         # a model stuck on a phrase (sizeup/stt_quality.py's loop): discarded, the next engine takes it (never a page or
         # an urgent clip: its words, whatever they are, go now; a "mayday" said again and again is real)
         if raw and job.cls != URGENT and (echo or stt_quality.assess(raw, job.seconds) == "repeated"):
@@ -2824,14 +2866,14 @@ class HubApp(App):
             if role == "text" and clip_end is not None:
                 self.stt_latency.add(key, engine, now - clip_end, target=cls in sttruns.TARGET_CLASSES)
         except Exception as e:  # noqa: BLE001 - bookkeeping
-            self.hub.log(f"stt runs: {cid}: {type(e).__name__}: {e}")
+            self.hub.log(f"stt runs: {cid}: {type(e).__name__}")
 
     def _stt_route_row(self, cid: str, route: str) -> None:
         """Its route on its log row (the transcript's hover); never in the way of the transcript."""
         try:
             self.cad.comms.set_route(cid, route)
         except Exception as e:  # noqa: BLE001 - bookkeeping
-            self.hub.log(f"stt route: {cid}: {type(e).__name__}: {e}")
+            self.hub.log(f"stt route: {cid}: {type(e).__name__}")
 
     def _time_check(self, key: str, item, text: str, clip_end, engine: str = "",
                     prompted: bool | None = None) -> stt_time.Check | None:
@@ -2848,7 +2890,7 @@ class HubApp(App):
                 prompted = engine == "station-whisper" and bool(getattr(item, "stt_prompt_time", False))
             return stt_time.check(text, clip_end, prompted=bool(prompted))
         except Exception as e:  # noqa: BLE001 - bookkeeping
-            self.hub.log(f"stt runs: trailing time: {type(e).__name__}: {e}")
+            self.hub.log(f"stt runs: trailing time: {type(e).__name__}")
             return None
 
     def _vocab_fix(self, key: str, text: str):
@@ -2929,6 +2971,7 @@ class HubApp(App):
                 "engines": self.stt_engines.table(),          # (#878: each engine's live latency, the GPU guard)
                 "bg": self.bg_health(),                        # (#896: background hand-overs, the stations' waits)
                 "infer": self.infer_lane.stats() if self.infer_lane.any_llm() else None,
+                "llm_setting": self.stt_choices.llm_panel() if self.stt_choices.llms else None,
                 "latency": lat, "target": {"p50_s": sttruns.TARGET_P50_S, "p95_s": sttruns.TARGET_P95_S},
                 "copies": self.stt_runs.health()}      # (stt.sqlite's copies in the bucket: unsettled since, last copy)
 

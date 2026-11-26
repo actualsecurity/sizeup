@@ -11,6 +11,37 @@ const StationHealth = (() => {
     return `${cu.waiting ?? 0} waiting · ${cu.caught_24h ?? 0} caught up (24 h)` + (cu.gave_up ? ` · ${cu.gave_up} gave up` : "")
       + (sq && sq.catchup ? ` · ${sq.catchup} queued` : "") + (cu.why && cu.why.startsWith("paused") ? ` · ${cu.why}` : "");
   }
+  // The workers' local LLM, the admin's choice (sizeup/sttmodels.py llm_panel; saved through sttworkers.js setLlm:
+  // action llm_model, audited as System): which model the hub names (the worker downloads, checks and swaps it) and who gives way on VRAM
+  let llmBusy = false;
+  function llmSetting(set) {
+    const row = el("div", "hl-llm-set");
+    if (!set || !(set.catalog || []).length) return row;
+    const pick = el("select", "sm");
+    pick.setAttribute("aria-label", "LLM model");
+    pick.title = "The model the GPU workers' LLM runs: the worker downloads it, checks its SHA-256 and restarts llama-server";
+    for (const c of set.catalog) pick.append(new Option(c.id + (c.id === set.default ? " (default)" : ""), c.id));
+    pick.value = set.model;
+    const prio = el("select", "sm");
+    prio.setAttribute("aria-label", "LLM VRAM priority");
+    prio.title = "Speech first: the LLM gives its VRAM to the speech models that need it. LLM first: a speech model that doesn't fit beside it isn't loaded";
+    prio.append(new Option("Speech first", "yield"), new Option("LLM first", "keep"));
+    prio.value = set.priority;
+    const save = async (body) => {
+      if (llmBusy) return;
+      llmBusy = pick.disabled = prio.disabled = true;
+      try {
+        if (!window.SttWorkersCard) throw new Error("not loaded");
+        await SttWorkersCard.models.setLlm(body);
+      } catch (e) { row.title = `Not saved: ${e.message}`; }
+      llmBusy = false;
+      poll();
+    };
+    pick.addEventListener("change", () => save({ model: pick.value === set.default ? "" : pick.value }));
+    prio.addEventListener("change", () => save({ priority: prio.value }));
+    row.append(el("span", "dim small", "LLM "), pick, " ", prio);
+    return row;
+  }
   const POLL_MS = 5000;
   let panel = null, card = null, timer = null, last = null, busy = false;
   // #606: 24 h of each channel's idle quieting and noise opens, each P25 system's decode rate, in half hours
@@ -404,6 +435,7 @@ const StationHealth = (() => {
             w.jobs_h, w.lost, `${when(w.seen)} · ${longDur(w.seen_s)} ago`, logs(w)];
         }), ""));
       const inf = sp.infer;
+      if (inf || sp.llm_setting) kids.push(llmSetting(sp.llm_setting));
       if (inf) {  // the workers' local LLM (sizeup/cloud/infer.py): its own lane after the pre-alert clips; tasks, times, counts only
         const ms = (v) => (v === null || v === undefined ? "—" : `${v} s`);
         const bad = Object.entries(inf.why_h || {}).filter(([k, n]) => k !== "ok" && n);
@@ -416,7 +448,9 @@ const StationHealth = (() => {
         ]));
         kids.push(table(["Worker", "State", "STT", "LLM", "Jobs/h", "Failed"], (inf.workers || []).map((w) => [
           w.id, [w.state, w.state === "online" ? "hl-ok" : w.state === "offline" || w.state === "cooling" ? "hl-bad" : "dim"],
-          w.stt, [w.llm || "none", w.llm ? "" : "dim", w.llm_version ? `Version ${w.llm_version}` : ""], w.jobs_h, w.fails_h]), ""));
+          w.stt, w.llm ? [w.llm, "", w.llm_version ? `Version ${w.llm_version}` : ""]
+            : [w.llm_state && w.llm_state !== "ok" ? w.llm_state : "none", w.llm_state && w.llm_state !== "ok" ? "hl-warn" : "dim"],
+          w.jobs_h, w.fails_h]), ""));
         const tasks = Object.entries(inf.tasks || {});
         if (tasks.length) kids.push(table(["Task", "Jobs/h", "p50", "p95", "Tokens in/out", "Failed"], tasks.map(([k, t]) => [
           k, t.n, ms(t.p50_s), ms(t.p95_s), t.tokens_in === null ? "—" : `${t.tokens_in}/${t.tokens_out}`,

@@ -316,7 +316,10 @@ POST /api/cad/stt-workers                 {action: add {id, name?} | rename {id,
                                           llm {id, on} | update {id, mode: auto|hold|pin, commit?, sha256?} (its
                                           self-update) | pool {on?, classes?} | channel_model {key, model?, context?
                                           (on|off|default), callsigns?} (a channel's speech model, sizeup/sttmodels.py;
-                                          audited as Radios)}: a signed-in admin only. add / rotate answer {token}
+                                          audited as Radios; a model change goes through HubApp.stt_champion_change
+                                          first: intel told) | llm_model {model?, priority?} (the workers' local LLM:
+                                          an llm_models id or "" for the default, and yield|keep; audited as System)}:
+                                          a signed-in admin only. add / rotate answer {token}
                                           (no-store), the one time it is shown. In the Settings audit (System) and the
                                           person's activity: the action and id, no token
 GET  /api/cad/metrics?subject=&station=&from=&to=&res=raw|hour|auto&kind=&metric=
@@ -1365,6 +1368,7 @@ class CadApi:
         sm = getattr(self.cad, "stt_models", None)
         if sm is not None:                                   # each channel's speech model (sizeup/sttmodels.py)
             out["models"] = sm.panel()
+            out["llm"] = sm.llm_panel()
         return _json(200, out)
 
     def _metrics(self, query: str, who) -> tuple[int, bytes, str]:
@@ -1614,8 +1618,14 @@ class CadApi:
                 and getattr(c, "stt_models", None) is not None:
             op = str(body.get("operator") or "")
             key = str(body.get("key") or "")
+            hook = getattr(c, "stt_champion_change", None)
+
+            def before(k: str, was: dict, now: dict) -> None:     # (a champion change: intel told before it applies)
+                if hook is not None and was.get("model") != now.get("model"):
+                    hook(k, was.get("model") or "", now.get("model") or "", op, "settings")
             try:     # a channel's speech model, context and call signs, in the Settings audit (Radios)
-                old, new = c.stt_models.set(key, {k: body[k] for k in ("model", "context", "callsigns") if k in body})
+                old, new = c.stt_models.set(key, {k: body[k] for k in ("model", "context", "callsigns") if k in body},
+                                            before=before)
             except ValueError as e:
                 raise CadError(str(e)) from None
             for f in ("model", "context", "callsigns"):
@@ -1623,6 +1633,18 @@ class CadApi:
                     said = lambda v: ", ".join(v) if isinstance(v, list) else (v or "default")   # noqa: E731
                     c.settings.note(op, "radios", f"stt_models/{key}/{f}", said(old.get(f)), said(new.get(f)))
             return {"ok": True, "key": key, "channel": new, "models": c.stt_models.panel()}
+        if path == "/api/cad/stt-workers" and body.get("action") == "llm_model" \
+                and getattr(c, "stt_models", None) is not None:
+            op = str(body.get("operator") or "")
+            try:     # the workers' local LLM and its VRAM priority (sizeup/sttmodels.py), in the Settings audit (System)
+                old, new = c.stt_models.set_llm(body.get("model"), body.get("priority"))
+            except ValueError as e:
+                raise CadError(str(e)) from None
+            for f in ("model", "priority"):
+                if old.get(f) != new.get(f):
+                    c.settings.note(op, "system", f"stt workers/llm/{f}", old.get(f) or "worker.toml",
+                                    new.get(f) or "worker.toml")
+            return {"ok": True, "llm": c.stt_models.llm_panel()}
         if path == "/api/cad/stt-workers" and getattr(c, "stt_workers", None) is not None:
             from sizeup.cloud.sttworkers import WorkerError
             op = str(body.get("operator") or "")

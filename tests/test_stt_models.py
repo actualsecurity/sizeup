@@ -72,6 +72,10 @@ def test_context_is_per_model_by_default_and_per_channel_when_set():
     assert c.plain("HPN Tower") == [ATC]
     c.set("HPN Tower", {"context": "on"})
     assert c.context_on("HPN Tower", ATC) and c.plain("HPN Tower") == []
+    # ... but on an airband channel a whisper model never gets a prompt (#900), its switch on or not: a list model does
+    c.is_airband = lambda key: key == "HPN Tower"
+    assert not c.context_on("HPN Tower", ATC) and not c.context_on("HPN Tower", Q5) and c.context_on("HPN Tower", QWEN)
+    assert set(c.plain("HPN Tower")) == {ATC, Q5, "large-v3-turbo-q8_0"}
     c.set("tg:307", {"context": "off"})
     assert set(c.plain("tg:307")) == set(c.catalog)                   # an A/B: none of the models gets context
     with pytest.raises(ValueError):
@@ -152,9 +156,14 @@ def test_hint_names_fire_units_and_dispatch_consoles_in_officers_and_raw_ids_out
     r = c.radios
     # an MRRS range of officers' radios (they swap radios: the label says nobody), and a dispatch console's exact ID
     r.save_range({"system": "mrrs", "lo": "9900100", "hi": "9900199", "label": "Rye PD officer"}, "admin")
-    r.save({"system": "mrrs", "radio_id": "9900500", "label": "908"}, "admin")
-    r.save({"system": "mrrs", "radio_id": "9900501", "label": "Headquarters"}, "admin")
+    r.save({"system": "mrrs", "radio_id": "9900500", "label": "908", "hint": True}, "admin")
+    r.save({"system": "mrrs", "radio_id": "9900501", "label": "Headquarters", "hint": True}, "admin")
     r.save({"system": "mrrs", "radio_id": "9900502", "label": "Car 12 officer", "hint": False}, "admin")
+    # an MRRS radio's own exact label with no switch set (a role: "officers swap radios"): never, by default
+    r.save({"system": "mrrs", "radio_id": "9900503", "label": "Made-up PD officer"}, "admin")
+    named, blocked = r.hints("mrrs", "9900503")
+    assert named == [] and hint_names("Made-up PD officer", "", "9900503", named, blocked) == []
+    assert not r.hint_on(r.get("mrrs", "9900503")) and r.hint_on(r.get("mrrs", "9900500"))
     named, blocked = r.hints("mrrs", "9900150")
     assert named == [] and hint_names("Rye PD officer", "", "9900150", named, blocked) == []      # a range: never
     named, blocked = r.hints("mrrs", "9900500, 9900150")
@@ -330,6 +339,12 @@ def test_a_context_list_read_back_is_caught():
     assert sttmodels.context_echo("Engine 60, Ladder 31, 60 Control, Main Street.", ctx)
     assert not sttmodels.context_echo("Engine 60 responding to Main Street.", ctx)
     assert not sttmodels.context_echo("60 Control, Ladder 31 on scene, nothing showing, investigating.", ctx)
+    # a real call-up of two names (the review's: discarded before, AWS's cost or a catch-up try burnt): kept ...
+    assert not sttmodels.context_echo("60 Control, Engine 60.", ctx, 2.0)
+    assert not sttmodels.context_echo("60 Control, Engine 60.", ctx)
+    # ... but the same two names for a 12 s clip are a read-back, and three are whatever the length
+    assert sttmodels.context_echo("60 Control, Engine 60.", ctx, 12.0)
+    assert sttmodels.context_echo("Engine 60, Ladder 31, 60 Control.", ctx, 3.0)
     assert not sttmodels.context_echo("Engine 60, Ladder 31.", [])
 
 
@@ -341,7 +356,8 @@ def test_another_systems_talker_text_never_gets_in_only_its_exact_names(tmp_path
     r = c.radios
     r.save_range({"system": "mrrs", "lo": "9904000", "hi": "9904999", "label": "4000 series patrol"}, "admin")
     r.save({"system": "mrrs", "radio_id": "9900600", "label": "2398 Sgt", "hint": False}, "admin")
-    r.save({"system": "mrrs", "radio_id": "9900601", "label": "908"}, "admin")
+    r.save({"system": "mrrs", "radio_id": "9900601", "label": "908", "hint": True}, "admin")
+    r.save({"system": "mrrs", "radio_id": "9900602", "label": "Made-up PD officer"}, "admin")     # (no switch: off)
 
     class A:
         _talker_hints = App._talker_hints
@@ -349,7 +365,8 @@ def test_another_systems_talker_text_never_gets_in_only_its_exact_names(tmp_path
         radios = r
     a = A()
     for unit, rid, want in (("4000 series patrol", "9904123", []), ("2398 Sgt", "9900600", []),
-                            ("908", "9900601", ["908"]), ("Medic 5 officer", "9904124", [])):
+                            ("908", "9900601", ["908"]), ("Medic 5 officer", "9904124", []),
+                            ("Made-up PD officer", "9900602", [])):
         item = SimpleNamespace(system="mrrs", unit=unit, radio_id=rid, rig="", talkgroup=9211)
         assert a._talker_names(item) == want, unit
 
@@ -388,3 +405,81 @@ def test_the_catalog_is_in_the_hub_image():
     assert "!deploy/stt-worker/models.json" in (root / ".dockerignore").read_text()
     from tests.stt_worker_module import W
     assert sttmodels.PINS == root / W.CATALOG_PATH      # the file the hub hashes is the one the workers fetch
+
+
+# -- the workers' local LLM (the hub names it) and champion changes (intel told first) -----------------------------
+
+LLMS = {"qwen3-8b-q4_k_m": {"id": "qwen3-8b-q4_k_m", "what": "8B", "vram_mb": 6200},
+        "qwen3-4b-instruct-2507-q4_k_m": {"id": "qwen3-4b-instruct-2507-q4_k_m", "what": "4B", "vram_mb": 3500}}
+
+
+def test_the_llm_is_todays_8b_until_an_admin_picks_another_and_speech_comes_first():
+    c = sttmodels.Choices(Meta(), clock=Clock(), llms=dict(LLMS))
+    assert c.llm() == sttmodels.DEFAULT_LLM == "qwen3-8b-q4_k_m" and c.llm_priority() == "yield"
+    old, new = c.set_llm("qwen3-4b-instruct-2507-q4_k_m")
+    assert old == {"model": "qwen3-8b-q4_k_m", "priority": "yield"} and new["model"] == "qwen3-4b-instruct-2507-q4_k_m"
+    assert c.set_llm(priority="keep")[1] == {"model": "qwen3-4b-instruct-2507-q4_k_m", "priority": "keep"}
+    assert c.set_llm("")[1]["model"] == "qwen3-8b-q4_k_m"                       # back to the default
+    with pytest.raises(ValueError):
+        c.set_llm("gpt-something")
+    with pytest.raises(ValueError):
+        c.set_llm(priority="first")
+    # a catalog without llm_models (one from before them): nothing named, the workers keep worker.toml's
+    assert sttmodels.Choices(Meta(), clock=Clock(), llms={}).llm() == ""
+    assert c.llm_panel()["default"] == "qwen3-8b-q4_k_m" and len(c.llm_panel()["catalog"]) == 2
+
+
+def test_the_repo_catalogs_llms_are_read_when_there_are_some():
+    llms = sttmodels.load_llms()
+    assert all(sttmodels.ID.fullmatch(k) and v["id"] == k for k, v in llms.items())
+
+
+def test_the_hub_tells_the_workers_the_llm_and_its_priority_and_health_shows_its_state(tmp_path):
+    from tests.test_cloud import HubRun, call, hub_cfg
+    hub = HubRun(hub_cfg(tmp_path))
+    try:
+        hub.app.stt_choices.llms = dict(LLMS)
+        hub.app.stt_api.build = {"commit": "c" * 40}
+        word = hub.app._stt_models_word()
+        assert word["llm"] == "qwen3-8b-q4_k_m" and word["llm_priority"] == "yield" and "want" in word
+        hub.app.stt_api.build = {}
+        assert hub.app._stt_models_word() == {"llm_priority": "yield"}     # (a local run: the priority only)
+        token = hub.app.hub.workers.add("gpu-1")
+        code, out = call(hub.url + "/api/station/stt/hello", "POST", {
+            "version": "t", "model": Q5, "state": "online",
+            "models": {"stt": Q5, "llm": "", "llm_state": "unavailable: gave its VRAM to the speech models"}},
+            token=token)
+        assert code == 200 and out["stt_models"]["llm_priority"] == "yield"
+        inf = hub.app.infer_lane.stats()
+        [w] = inf["workers"]
+        assert w["llm_state"] == "unavailable: gave its VRAM to the speech models"
+        assert hub.app.pool_health()["llm_setting"]["model"] == "qwen3-8b-q4_k_m"
+    finally:
+        hub.close()
+
+
+def test_a_champion_change_tells_intel_first_and_is_kept(tmp_path):
+    from tests.test_cloud import HubRun, hub_cfg
+    hub = HubRun(hub_cfg(tmp_path))
+    try:
+        app = hub.app
+        app.is_push_source = lambda key, kind="": key == "tg:307"            # (a pre-alert channel)
+        seen = []
+        app.stt_champion_hooks.append(lambda row: seen.append((row, app.stt_choices.model_for(row["key"], "fire"))))
+        before = time.time() - 1
+        def api_set(key, body):                 # (as the API's channel_model: the hook on a model change only)
+            def before(k, o, n):
+                if o.get("model") != n.get("model"):
+                    app.stt_champion_change(k, o.get("model") or "", n.get("model") or "", "Admin A", "settings")
+            return app.stt_choices.set(key, body, before=before)
+        api_set("tg:307", {"model": QWEN})
+        # the listener ran BEFORE the change applied (the model then still today's), and it is kept for intel
+        [(row, at_the_time)] = seen
+        assert row["prealert"] and row["new"] == QWEN and at_the_time == Q5
+        assert app.stt_choices.model_for("tg:307", "fire") == QWEN
+        [kept] = app.stt_champion_log(before)
+        assert kept["key"] == "tg:307" and kept["old"] == "" and kept["by"] == "Admin A"
+        api_set("tg:999", {"callsigns": ["Base"]})                           # (no model change: nobody told)
+        assert len(seen) == 1
+    finally:
+        hub.close()

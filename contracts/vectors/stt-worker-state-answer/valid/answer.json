@@ -1,5 +1,6 @@
 {
   "ok": true,
   "pool_on": true,
-  "worker_update": {"mode": "auto"}
+  "worker_update": {"mode": "auto"},
+  "stt_models": {"llm_priority": "yield"}
 }

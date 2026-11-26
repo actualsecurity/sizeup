@@ -1813,9 +1813,12 @@ Each channel has its own speech-to-text model on the GPU workers (`sizeup/sttmod
 - **Context, built on the hub as the station builds it:** whisper's prompt (`App._prompt_v`), and for a llama-asr model
   a ranked list of at most 12 spoken forms: who keyed up by name, the channel's call signs (Settings: "908",
   "Headquarters": a dispatch console's), the aircraft near the field at the clip's time (none for a clip older than 2
-  min), then the channel's top terms. Names only: a radio's exact name with its "use as hint" switch on (Settings >
-  Radios > Radio IDs: on by default for a unit's or a console's exact entry, never a range's label), units as said
-  ("Engine 63"), aliases as said ("77 Alpha 4"); never a raw radio ID. Another P25 system's clip gives only its
+  min; only to a model that takes a list: an airband whisper model never gets a prompt, its context switch on or not),
+  then the channel's top terms. Names that identify one unit only: fire/EMS units as said ("Engine 63", on by default
+  for an entry with a unit), aliases as said ("77 Alpha 4"); another P25 system's radio (MRRS: agencies' and roles'
+  labels, officers swap radios) only with its "use as hint" switch turned on by an admin (Settings > Radios > Radio
+  IDs: a dispatch console's exact name), off by default; never a range's label, an agency or a role; never a raw
+  radio ID. Another P25 system's clip gives only its
   radios' exact names (its talker text can hold a range's label). The station's own whisper prompt uses the same rules
   on its own radio registry: the hint switches and MRRS names set on the hub reach only what the hub builds. The hub's `[stt] talker_prompt` is `ids`
   (never `ids+time` until every station runs #736). Context is on or off per model (the ATC whisper's is off by
@@ -1825,6 +1828,19 @@ Each channel has its own speech-to-text model on the GPU workers (`sizeup/sttmod
   vocabulary filter) by name per stream, made ahead of time (minutes to build, a few per account). sizeup already gives
   each channel its own (sizeup-pcfd, sizeup-pd, sizeup-atc and the term lists'). Per-clip names, call signs and
   aircraft can't reach it.
+- **Context read back:** every phrase of the text a context item, and 3 or more of them, or 2 that are too few words
+  for the clip (under 0.8 a second: a 12 s clip "read" as two names). A real call-up of two names ("60 Control, Engine
+  63" in 2 s) is kept (`sttmodels.context_echo`).
+- **The workers' LLM (Settings > Station > Health, beside its status):** the hub names it (`stt_models.llm`, an
+  `llm_models` id of `models.json`; today's Qwen3-8B by default) and its VRAM priority (`llm_priority`: "yield", speech
+  first, the admin's default; "keep", the LLM first). The worker downloads, checks and swaps it; its state ("unavailable:
+  gave its VRAM to the speech models") shows in the GPU workers' LLM table. Audited as System.
+- **A champion change** (Settings' model, a promote, an automatic rollback) goes through `HubApp.stt_champion_change`
+  BEFORE it applies: kept in hub.sqlite (meta `stt_champion_log`, what intel reads: `HubApp.stt_champion_log(since)`),
+  said in the hub's log (the channel key and model ids), and passed to each listener in `stt_champion_hooks`. A
+  pre-alert channel (one the radio pre-alerts push from, or promote now) is flagged `prealert`.
+- **Logs:** no text, prompt or context in a log line on these paths: an error says its type only
+  (`tests/test_no_words_in_logs.py`).
 - **Discarded:** a repetition loop (`sizeup/stt_quality.py`, `repeated`), or a llama-asr model's context read back as the text, is kept as a run (role
   `discarded`) and the clip goes to the next engine (a catch-up clip: a failed try). Never an urgent clip's text (a
   page, the firegrounds: a "mayday" said again and again is real). A clip the worker finds near-silent isn't decoded
