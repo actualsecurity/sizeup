@@ -656,14 +656,14 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
     <!-- fireground (FG1, FG2) radio IDs nobody has named (radio-ids.js, #163): who is this? Under the radio, above the
          units it names (#177: with the units and the radio, not in the incident queue); on Dispatch, with no feed, the
          top of the column above the rigs (#205); hidden while there is nothing to ask -->
+    <section id="newids" class="nid-sec console-only" hidden>
+      <h2 title="Radio IDs heard on a fireground channel (FG1, FG2) that the registry doesn't know: say who each is (nothing is guessed)">New radio IDs</h2>
+      <ol id="q-newids" class="nid-list" aria-live="polite" aria-label="New radio IDs"></ol>
+    </section>
     <!-- a dongle swapped for a new one (dongle-swaps.js, sizeup/radio/replace.py): use the new one for the gone one's jobs? -->
     <section id="dongleswaps" class="nid-sec console-only" hidden>
       <h2 title="A dongle with a job is gone and a new, free dongle that fits its jobs is plugged in: nothing moves until someone says so">New dongles</h2>
       <ol id="q-dongleswaps" class="nid-list" aria-live="polite" aria-label="New dongles"></ol>
-    </section>
-    <section id="newids" class="nid-sec console-only" hidden>
-      <h2 title="Radio IDs heard on a fireground channel (FG1, FG2) that the registry doesn't know: say who each is (nothing is guessed)">New radio IDs</h2>
-      <ol id="q-newids" class="nid-list" aria-live="polite" aria-label="New radio IDs"></ol>
     </section>
     <!-- the wall board's radio (board.js): the main channels (FG1, FG2, Fire/EMS 15, every talkgroup marked Main), not the
          console's pinned 60 Control feed (user, 2026-10-08: "isnt showing the radio traffic from FireGround 1") -->
