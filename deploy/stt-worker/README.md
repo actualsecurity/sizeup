@@ -21,9 +21,9 @@ GPU back at once (see [The local LLM](#the-local-llm-optional)).
 In an ordinary (not elevated) PowerShell window, as the user who games on the PC:
 
 ```powershell
-$u = 'https://raw.githubusercontent.com/actualsecurity/sizeup/b54466e2f0c51d5a434010821dea1127c5adc7ba/deploy/stt-worker/install.ps1'
+$u = 'https://raw.githubusercontent.com/actualsecurity/sizeup/09f527a7d172173923ded0480b79239b8d6ed9c9/deploy/stt-worker/install.ps1'
 Invoke-WebRequest $u -UseBasicParsing -OutFile "$env:TEMP\sizeup-stt-install.ps1"
-(Get-FileHash "$env:TEMP\sizeup-stt-install.ps1").Hash -eq '9328A58081F8549632C1F264EB2DD745661E076598BF092DBA002697CAB2C576'   # True
+(Get-FileHash "$env:TEMP\sizeup-stt-install.ps1").Hash -eq '1808D57B5B90E40C62B7B32BB563FDCF6C51C4145B6A9C19787A6E9F85260A9D'   # True
 powershell -ExecutionPolicy Bypass -File "$env:TEMP\sizeup-stt-install.ps1"
 ```
 
