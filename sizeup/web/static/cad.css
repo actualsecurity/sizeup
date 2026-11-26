@@ -1274,7 +1274,7 @@
   .lp-phead h2 { margin: 0; font-size: var(--fs-md); }
   .lp-how { flex-wrap: wrap; }
   .lp-age input { inline-size: calc(2.5 * var(--ctl)); }
-  .lp-sub { margin: var(--s-2) 0 0; font-size: var(--fs-xs); color: var(--dim); text-transform: uppercase; letter-spacing: 0.04em; }
+  .lp-sub { margin: var(--s-2) 0 0; font-size: var(--fs-xs); font-weight: 600; color: var(--dim); }
   .lp-rule > .trunc { min-inline-size: 0; }
   .lp-lvl { flex: none; }
   .lp-pick { flex: 1 1 auto; min-inline-size: 0; }
