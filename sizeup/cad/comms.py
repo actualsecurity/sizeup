@@ -98,7 +98,8 @@ MAIN_LIMIT, OTHER_LIMIT = 200, 300    # the Radio view's Main and Other: each it
 VIEWS = ("ours", "police", "ems", "transit", "air", "all")
 SERVICE_VIEWS = ("police", "ems", "transit", "air")
 PAGE, PAGE_MAX = 100, 200
-SOURCES_MAX, MUTE_MAX = 24, 100       # ?source= and ?mute= keys taken per request
+SOURCES_MAX, MUTE_MAX = 200, 100      # ?source= and ?mute= keys taken per request (a view resolved to its sources)
+UNITS_MAX = 20                        # ?unit= units taken per request (a view's units)
 COUNT_MINUTES = 60                    # GET /api/cad/comms/sources: calls per minute over the last hour
 SAFETY_WHERE = "t.safety != '' AND t.safety != 'dismissed'"     # as the partial index radio_traffic_safety is declared
 BRANCH_MAX = 64                       # a group or tier resolved to its sources: at most this many index walks
@@ -1121,8 +1122,9 @@ class Comms:
         for w in words:
             _word_where(where, args, "e.text", w)
         if unit:
-            where.append("(',' || e.units || ',') LIKE ?")
-            args.append(f"%,{unit},%")
+            units = [unit] if isinstance(unit, str) else list(unit)
+            where.append("(" + " OR ".join(["(',' || e.units || ',') LIKE ?"] * len(units)) + ")")
+            args += [f"%,{u},%" for u in units]
         if event:
             where.append("(i.number = ? OR CAST(i.id AS TEXT) = ?)")
             args += [event, event]
@@ -1398,12 +1400,13 @@ class Comms:
              before: tuple[float, str] | None = None, changed: str | None = None, at: float | None = None,
              limit: int = PAGE, unit: str = "", channel: str = "", event: str = "", pcfd: list[str] | None = None,
              since: float | None = None, until: float | None = None, kind: str = "", text: str = "",
-             emergency: bool = False, context: bool | None = None) -> dict:
+             emergency: bool = False, context: bool | None = None, linked: bool = False) -> dict:
         """One page of the radio log for the Radio page (#415), newest first: {rows, older, newer, next, cursor, reload,
         gone}.
 
         view: ours | police | ems | transit | air | all ("" = all). system / group / service / tier / dept: the row's
-        own (sizeup/sourcekeys.py). source: only these sources (keys). safety: only scene-safety rows. mute: sources left
+        own (sizeup/sourcekeys.py). source: only these sources (keys; past BRANCH_MAX one walk of the start index with
+        the keys as a condition). unit: a unit, or a list (any of them). linked: only rows on an incident. safety: only scene-safety rows. mute: sources left
         out (not with source=): never one of Our calls, and never a row with the emergency button or an alarm. The
         older filters (unit, channel, event, pcfd, since, until, kind, text, emergency) as in query().
         context: whether the reader may see another system's traffic (None: #419's gate, _sees_context). False:
@@ -1501,6 +1504,8 @@ class Comms:
             keep = ["+t.emergency = 1", ours_sql, f"(+t.service = 'fire' AND +t.system IN {sources.OURS_SQL})"] + (["t.id IN (SELECT traffic_id FROM alarms)"] if has_alarms(self.store) else [])
             cond.append(f"(+t.source NOT IN ({','.join('?' * len(muted))}) OR " + " OR ".join(keep) + ")")
             args += muted + ours_args
+        if linked:                                     # only rows on an incident (a note always is)
+            cond.append("t.id IN (SELECT traffic_id FROM radio_links)")
         hint = ""
         if safety:
             # few rows: from the safety index, the view and the sources as plain conditions on them
@@ -1513,6 +1518,14 @@ class Comms:
                 cond.append(ours_sql.replace("t.talkgroup", "+t.talkgroup"))
                 args += ours_args
             branches = [("1", [])]
+        elif srcs and len(srcs) > BRANCH_MAX:
+            # a view resolved to many sources: one walk along the start index, the keys a plain condition
+            cond.append(f"+t.source IN ({','.join('?' * len(srcs))})")
+            args += srcs
+            branches = [("1", [])]
+            if view == "ours":
+                cond.append(ours_sql)
+                args += ours_args
         elif srcs:
             branches = [("t.source = ?", [k]) for k in srcs]
             if view == "ours":
@@ -1691,7 +1704,7 @@ class Comms:
         for w in words:
             _word_where(where, args, "t.text", w)
         if unit:
-            self._rig_where(where, args, [unit])
+            self._rig_where(where, args, [unit] if isinstance(unit, str) else list(unit))
         if channel:
             where.append("t.channel = ?")
             args.append(channel)

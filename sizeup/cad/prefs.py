@@ -167,7 +167,17 @@ def _listen(v) -> dict:
     return out
 
 
-NAMESPACES = {"map_layers": _map_layers, "preplan": _preplan, "reminders": _reminders, "listen": _listen}
+def _radio_views(v) -> dict:
+    from sizeup.cad import radioviews          # (here: store.py imports this module, radioviews store's CadError)
+    from sizeup.cad.store import CadError
+    try:
+        return radioviews.clean_prefs(v)
+    except CadError as e:
+        raise PrefsError(str(e)) from None
+
+
+NAMESPACES = {"map_layers": _map_layers, "preplan": _preplan, "reminders": _reminders, "listen": _listen,
+              "radio_views": _radio_views}
 
 
 def validate(ns: str, value) -> str:

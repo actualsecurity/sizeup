@@ -38,7 +38,7 @@ const S_STATION_TABS = [["health", "Health"], ["stations", "Stations"], ["worker
 // Settings > Radios, one tab per part (#115; the Lists page's tabs): which RadioControls card, the Tones page and the
 // Radio IDs editor each go under (data-rtab on each).
 const S_RADIO_TABS = [["receivers", "Receivers"], ["channels", "Channels"], ["squelch", "Squelch"], ["signal", "Signal"], ["tones", "Tones"],
-  ["ids", "Radio IDs"], ["vocabulary", "Vocabulary"], ["stt", "Speech-to-text"], ["emergencies", "Emergencies"]];
+  ["ids", "Radio IDs"], ["vocabulary", "Vocabulary"], ["stt", "Speech-to-text"], ["emergencies", "Emergencies"], ["views", "Views"]];
 const S_RC_TABS = new Set(["receivers", "channels", "vocabulary", "stt"]);    // radio-controls.js's cards
 // Channels' display names (#607): the radio rail's own store (sizeup/cad/radiofolders.py), so a name set in either place
 // shows in both. The CAD's (the station's own page mounts RadioControls without: no names there)
@@ -520,6 +520,7 @@ function sRadioTab() {
   for (const n of panel.querySelectorAll("[data-rtab]")) show(n, n.dataset.rtab === S.rtab);
   if (S.rtab === "squelch" && window.SquelchPanel) SquelchPanel.mount($("#settings-squelch"));   // squelch-panel.js
   if (S.rtab === "signal" && window.SignalPanel) SignalPanel.mount($("#settings-signal"));       // signal-panel.js (#606)
+  if (S.rtab === "views" && window.RadioViews) RadioViews.mountSettings($("#settings-views"));    // the rail's views
 }
 
 function sRadios() {

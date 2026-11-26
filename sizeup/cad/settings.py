@@ -71,6 +71,9 @@ Reset to default = drop the override (one item, or a whole section).
                                    key: name}}: the Radio page rail's folders, set for the department, and the channels'
                                    display names (#607, sizeup/cad/radiofolders.py; admins, from the rail's Edit or a
                                    name from Settings > Radios > Channels); not set: the automatic grouping
+    radio_views                    key "views" -> [{id, name, mark, color, filter: {ours, services, systems, sources, units,
+                                   linked}}]: the Radio page rail's views, set for the department (sizeup/cad/radioviews.py;
+                                   admins, from the rail or Settings > Radios > Views); not set: the views that were coded
     radio_services                 key a source key (qualified: p25:<system>:<tg>, fm:<label>, air:<label>) -> fire | police
                                    | ems | transit | air | other: that source's service whatever its talkgroups file or
                                    its group's words say (sizeup/sourcekeys.py; admins, from Settings > Radios > Channels
@@ -119,7 +122,7 @@ from pathlib import Path
 
 from sizeup import channels as channels_mod
 from sizeup.cad import alarms as alarms_mod
-from sizeup.cad import commonplaces, dispatcher, eta, feedtypes, mapview, radiofolders, reminders, runcards, tonelist
+from sizeup.cad import commonplaces, dispatcher, eta, feedtypes, mapview, radiofolders, radioviews, reminders, runcards, tonelist
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
 from sizeup.cad.store import OPERATOR_MAX, SCHEMA_VERSION, TZ, CadError
@@ -206,6 +209,10 @@ PAGE_SECTION[EM_SECTION] = "radios"
 # as Radios. key "layout" -> {folders: [{id, name, section, items}]}; not set: the automatic grouping.
 FOLDERS_SECTION = radiofolders.SECTION
 PAGE_SECTION[FOLDERS_SECTION] = "radios"
+# The Radio page's views (sizeup/cad/radioviews.py): the rail's VIEWS for the department, admins, audited as Radios.
+# key "views" -> [{id, name, mark, color, filter}]; not set: radioviews.SEED (the views that were coded).
+VIEWS_SECTION = radioviews.SECTION
+PAGE_SECTION[VIEWS_SECTION] = "radios"
 # A source's service chosen by the admins (fire, police, ...: sizeup/sourcekeys.py), over its talkgroups file's column
 # and its group's words: Settings > Radios > Channels and the rail's Edit, audited as Radios. key a qualified source key
 # -> a service; not set: automatic.
@@ -616,6 +623,7 @@ class Editor:
         self.cad.premise_visible = dict(ov.get(PREMISE_SECTION) or {})     # premise notes by category (#403)
         self.cad.em_prominent = em_prominent(ov.get(EM_SECTION))          # the Radio page's loud emergencies
         self.cad.radio_folders = radiofolders.stored(ov)                  # the Radio page's folders (#607)
+        self.cad.radio_views = radioviews.stored(ov)                      # ... and its views (None: the coded ones)
         self._use_services(ov)
         self.cad._state = None
         if getattr(self.cad, "intel", None) is not None:
@@ -1229,6 +1237,32 @@ class Editor:
         return {**out, "radio_folders": radiofolders.for_viewer(v, sees_context=self.cad.comms._sees_context(),
                                                        hidden_labels=self.cad.context_labels())}
 
+    def _views_op(self, action: str, body: dict, op: str) -> dict:
+        """set {views: [{id, name, mark, color, filter}], base?} | reset {base?}: the Radio rail's views for the
+        department (sizeup/cad/radioviews.py), admins, audited as Radios. base: the rev the edit started from
+        (radioviews.rev; "" the default): someone else saved meanwhile -> refused, nothing written. The coded views
+        saved as they are: back to the default (nothing kept)."""
+        cur = radioviews.stored(self.overrides())
+        base = body.get("base")
+        if base is not None and base != radioviews.rev(cur):
+            raise CadError("the views were changed meanwhile: reload them and edit again")
+        sees = self.cad.comms._sees_context()
+        if action == "reset":
+            v = None
+        elif action == "set":
+            v = radioviews.clean(body.get("views"))
+            if not sees:
+                v = radioviews.merge_hidden(v, radioviews.SEED if cur is None else cur)
+            if v == radioviews.SEED:
+                v = None
+        else:
+            raise CadError("action: set or reset")
+        if v == cur:                                    # nothing changes: nothing written, nothing audited
+            return {"ok": True, "radio_views": radioviews.for_viewer(cur, sees)}
+        out = self._commit([(VIEWS_SECTION, radioviews.KEY, REMOVE if v is None else v)], op,
+                           [("radios", f"{VIEWS_SECTION}/{radioviews.KEY}", radioviews.summary(cur), radioviews.summary(v))])
+        return {**out, "radio_views": radioviews.for_viewer(v, sees)}
+
     def _mapd_op(self, action: str, body: dict, op: str) -> dict:
         """set {key: detail_zoom | active_zoom | board_detail_zoom | board_active_zoom, value} | reset {key}: admins."""
         key = body.get("key")
@@ -1511,7 +1545,7 @@ class Editor:
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
               channels_mod.SQUELCH_SECTION: self._squelch_op,
               "places": self._places_op, COMMON_SECTION: self._common_op, ADDR_SECTION: self._addresses_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
-              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, HYD_SECTION: self._hyd_op, REM_SECTION: self._rem_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, SIGNAL_SECTION: self._signal_op, FOLDERS_SECTION: self._folders_op, SVC_SECTION: self._services_op, RET_SECTION: self._retention_op,
+              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, HYD_SECTION: self._hyd_op, REM_SECTION: self._rem_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, SIGNAL_SECTION: self._signal_op, FOLDERS_SECTION: self._folders_op, VIEWS_SECTION: self._views_op, SVC_SECTION: self._services_op, RET_SECTION: self._retention_op,
               TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, LOGS_SECTION: self._logs_op, DEPT_SECTION: self._dept_op, FT_SECTION: self._feed_types_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o),
               "intel": lambda a, b, o: self.cad.intel_admin.settings_op(a, b, o),
               FIX_SECTION: lambda a, b, o: self.cad.stt_fix.settings_op(a, b, o)}.get(section)
