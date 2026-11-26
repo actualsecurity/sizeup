@@ -175,5 +175,50 @@
         }
       }
     }
+  },
+  "llm_models": {
+    "_what": "Local LLMs (llama-server) the hub may name for a worker that runs its own (worker.toml llm_server): stt_models llm. The worker downloads the GGUF like a speech model's and swaps llama-server to it (README.md, The local LLM). vram_mb: the worker's estimate, the GGUF's size x 1.05 + 900 MB (KV cache at -c 4096 and buffers). Mirrors pins.json's GGUFs.",
+    "qwen3-8b-q4_k_m": {
+      "what": "Qwen3-8B Q4_K_M: worker.toml's default LLM",
+      "files": {
+        "model": {
+          "file": "Qwen3-8B-Q4_K_M.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/7c41481f57cb95916b40956ab2f0b139b296d974/Qwen3-8B-Q4_K_M.gguf",
+          "bytes": 5027783488,
+          "sha256": "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785"
+        }
+      },
+      "vram_mb": 6179,
+      "reasoning_off": true,
+      "license": "Apache-2.0"
+    },
+    "qwen3-4b-instruct-2507-q4_k_m": {
+      "what": "Qwen3-4B-Instruct-2507 Q4_K_M: the small one, beside every speech model on 12 GB",
+      "files": {
+        "model": {
+          "file": "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+          "url": "https://huggingface.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/resolve/ae44f08e1392f39c0e474af10c3ff8355c8b6688/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+          "bytes": 2497280736,
+          "sha256": "2fde00ce69dd4899c70d020845e2638353015bba0fdf161b3eb965f2bca4464e"
+        }
+      },
+      "vram_mb": 3522,
+      "reasoning_off": true,
+      "license": "Apache-2.0"
+    },
+    "gemma-3-12b-it-q4_k_m": {
+      "what": "Gemma-3-12B-it Q4_K_M: the more accurate, the bigger",
+      "files": {
+        "model": {
+          "file": "google_gemma-3-12b-it-Q4_K_M.gguf",
+          "url": "https://huggingface.co/bartowski/google_gemma-3-12b-it-GGUF/resolve/648e3a36a77c8a9f12d86e741f9dcb9089c769c4/google_gemma-3-12b-it-Q4_K_M.gguf",
+          "bytes": 7300575264,
+          "sha256": "fc57f67efa46d711c346e587cbef7d049e95f3df8db2eb2271153343ef0acc7b"
+        }
+      },
+      "vram_mb": 8566,
+      "reasoning_off": false,
+      "license": "Gemma Terms of Use"
+    }
   }
 }
