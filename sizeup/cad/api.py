@@ -447,7 +447,7 @@ from sizeup.cad import airport
 from sizeup.cad import hydrants as hydrants_mod
 from sizeup.cad.activity import CSV_MAX_ROWS, KINDS, MAX_ROWS
 from sizeup.cad.service import Cad
-from sizeup.cad.settings import LastAdmin, PlaceNameTaken
+from sizeup.cad.settings import AliasNeedsConfirm, LastAdmin, PlaceNameTaken
 from sizeup.cad.store import TZ, CadError
 from sizeup.datasources import TooSoon
 from sizeup.intel.notes import Forbidden as NoteForbidden
@@ -1576,6 +1576,8 @@ class CadApi:
             if signed:
                 self.refused(path, who, str(e), client)
             return _json(403, {"error": str(e)})
+        except AliasNeedsConfirm as e:         # an alias that would place a few of the week's transmissions: asked
+            return _json(409, {"error": str(e), "confirm": True, "count": e.count})
         except PlaceNameTaken as e:            # an alias that is another place's name already (settings.py)
             return _json(409, {"error": str(e)})
         except NeedsConfirm as e:              # live: the page asks (the error is the question), then sends confirm

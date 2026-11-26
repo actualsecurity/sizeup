@@ -424,8 +424,12 @@ def test_an_alias_never_takes_another_places_name_or_alias(placed):
     # the radio's own words and filler (#960 review 4): one alone would place ordinary traffic at the diner
     ("EMS", "the radio says"), ("uh", "the radio says"), ("Respond", "the radio says"), ("Medic", "the radio says"),
     ("Unit", "the radio says"), ("ok", "the radio says"), ("FD", "the radio says"), ("Wires", "the radio says"),
+    # several words, every one the radio's (#960 review 5): a unit, a call type
+    ("Uh Respond", "the radio says"), ("Lift Assist", "the radio says"), ("Engine 60", "the radio says"),
+    ("Medic 5", "the radio says"), ("Car 12", "the radio says"), ("Ladder 2", "the radio says"),
+    ("Structure Fire", "the radio says"), ("Working Fire", "the radio says"), ("Motor Vehicle", "the radio says"),
     # several words that pass the word rules but read as ordinary traffic (the outcome guard)
-    ("Uh Respond", "ordinary radio traffic"), ("Lift Assist", "ordinary radio traffic")])
+    ("Show Us", "ordinary radio traffic"), ("Back In Service", "ordinary radio traffic")])
 def test_a_street_a_number_or_junk_is_never_an_alias(placed, alias, why):
     cad, _clock, _gaz = placed
     code, out = alias_by_settings(cad, "sample diner", alias)
@@ -609,3 +613,102 @@ def test_refused_aliases_leave_ordinary_radio_traffic_unplaced(placed):
     assert [locator(gaz).local_said(t) for t in said] == [False, False, False]
     assert alias_by_settings(cad, "sample diner", "Sampel Diner")[0] == 200       # a real misheard name still goes on
     assert [locator(gaz).local_said(t) for t in said] == [False, False, False]
+
+
+# -- the last week's transmissions (#960 review 5): a unit or a call type matches dozens, a misheard name a few ------
+
+def many(cad, n, text, prefix):
+    """n invented transmissions of text in the last week (as the radio log keeps them), quickly."""
+    radio_row(cad, f"{prefix}-0", text)
+    row = cad.store.one("SELECT * FROM radio_traffic WHERE id = ?", (f"{prefix}-0",))
+    cols = list(row)
+    names = ", ".join(f'"{c}"' for c in cols)                                  # ("group" is a column)
+    with cad.store.lock:
+        cad.store.db.executemany(f"INSERT INTO radio_traffic ({names}) VALUES ({', '.join('?' * len(cols))})",
+                                 [tuple(f"{prefix}-{k}" if c == "id" else row[c] for c in cols) for k in range(1, n)])
+
+
+def test_an_alias_placing_dozens_of_the_weeks_transmissions_is_refused(placed, log_sentinel):
+    cad, _clock, _gaz = placed
+    cad.log = log_sentinel.log
+    many(cad, 30, "port chester units to the blue heron for a fall", "bh")
+    code, out = alias_by_settings(cad, "sample diner", "Blue Heron")
+    assert code == 409 and "would place 30 radio transmissions from the last 7 days" in out["error"]
+    assert [p["aliases"] for p in cad.local_places() if p["key"] == "sample diner"] == [[]]
+    assert_no_sensitive(log_sentinel, ["Blue Heron", "units to the"])          # counts only
+
+
+def test_a_few_ask_first_and_go_on_only_when_confirmed(placed):
+    cad, _clock, _gaz = placed
+    api = CadApi(cad)
+    many(cad, 5, "car 3 at the green lantern now", "gl")
+    code, out = alias_by_settings(cad, "sample diner", "Green Lantern")
+    assert code == 409 and out["confirm"] is True and out["count"] == 5
+    assert out["error"] == "Would place 5 transmissions from the last 7 days. Add anyway?"
+    assert [p["aliases"] for p in cad.local_places() if p["key"] == "sample diner"] == [[]]
+    code, raw, _ = api.post("/api/cad/settings/places", json.dumps({"action": "alias", "key": "sample diner",
+                                                                    "alias": "Green Lantern", "confirm": True}).encode(),
+                            Identity(email=CASEY))
+    assert code == 200 and json.loads(raw)["added"] is True and json.loads(raw)["matches"] == 5
+    # the note's "+ Alias" asks the same, and goes on with confirm
+    many(cad, 4, "car 3 at the sampel diner", "sd")
+    m = suggestion(api, "@ Sample Diner")
+    e = save(cad)
+    nid = call(api, f"/api/cad/intel/{e.id}/notes", {"corrected_pick": pick_of(m), "heard": "Sampel Diner"},
+               VAL)[1]["note"]["id"]
+    code, out = call(api, f"/api/cad/intel/notes/{nid}/alias", {}, CASEY)
+    assert code == 409 and out["confirm"] is True and out["count"] == 4
+    code, out = call(api, f"/api/cad/intel/notes/{nid}/alias", {"confirm": True}, CASEY)
+    assert code == 200 and out["added"] is True
+
+
+def test_a_misheard_name_heard_once_is_added_at_once(placed):
+    cad, _clock, _gaz = placed
+    radio_row(cad, "one-0", "car 3 respond to the sampel diner")
+    code, out = alias_by_settings(cad, "sample diner", "Sampel Diner")
+    assert code == 200 and out["added"] is True and out["matches"] == 1
+
+
+def test_the_weeks_transmissions_are_tried_quickly(placed):
+    """3,000 transmissions (the cap) in well under a second."""
+    import time
+    cad, _clock, _gaz = placed
+    many(cad, 3000, "port chester engine 60 respond to king street, units responding for a structure fire", "x")
+    e = next(p for p in cad.local_places() if p["key"] == "sample diner")
+    t0 = time.perf_counter()
+    n, read = cad.settings.traffic_matches("Sampel Diner", e)
+    took = time.perf_counter() - t0
+    assert (n, read) == (0, 3000) and took < 1.0, took
+    n, _read = cad.settings.traffic_matches("Blue Heron Diner", e)                # (and a name the rows never say)
+    assert n == 0
+
+
+@needs_node
+def test_the_note_asks_when_the_hub_asks_and_sends_confirm(placed):
+    cad, _clock, _gaz = placed
+    api = CadApi(cad)
+    m = suggestion(api, "@ Sample Diner")
+    e = save(cad)
+    call(api, f"/api/cad/intel/{e.id}/notes", {"corrected_pick": pick_of(m), "heard": "Sampel Diner"}, VAL)
+    d = jget(api, f"/api/cad/intel/{e.id}/notes", CASEY)[1]
+    script = f"""
+{(STATIC / "intel-notes.js").read_text()}
+const posts = [], asked = [];
+global.UI = {{ toast() {{}}, confirm: async (q) => {{ asked.push(q); return true; }} }};
+global.api = async (m, p, b) => {{
+  if (m !== "POST") return JSON.parse(JSON.stringify(IN));
+  posts.push(b);
+  if (!b.confirm) {{ const x = new Error("Would place 4 transmissions from the last 7 days. Add anyway?"); x.confirm = true; throw x; }}
+  return {{ ok: true }};
+}};
+(async () => {{
+  const host = $("#pi-notes");
+  await IntelNotes.mount(host, {e.id});
+  host.children[1].children[0].all().find((x) => (x.textContent || "").startsWith("+ Alias")).on.click[0]();
+  await new Promise((r) => setTimeout(r, 10));
+  console.log(JSON.stringify({{ posts, asked }}));
+}})();
+"""
+    out = run_node(script, d)
+    assert [p.get("confirm") for p in out["posts"]] == [None, True]
+    assert out["asked"][-1] == "Would place 4 transmissions from the last 7 days. Add anyway?"

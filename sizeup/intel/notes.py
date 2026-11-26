@@ -578,7 +578,8 @@ class IntelNotes:
         op = str(body.get("operator") or "")[:160]
         remove = bool(body.get("remove"))
         st = self.cad.settings
-        out = (st.remove_place_alias if remove else st.add_place_alias)(key, heard, op)
+        out = st.remove_place_alias(key, heard, op) if remove else \
+            st.add_place_alias(key, heard, op, confirm=body.get("confirm") is True)   # (a few of the week's: asked)
         changed = out["removed"] if remove else out["added"]
         if changed:                                    # before and after: the same entry (a site's primary)
             with self.engine.events._w(listed=False) as db:

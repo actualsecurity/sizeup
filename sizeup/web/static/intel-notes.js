@@ -277,7 +277,13 @@ window.IntelNotes = (() => {
   }
   async function write(host, path, body, ok) {
     try {
-      await api("POST", path, { ...body, operator: typeof operator === "function" ? operator() : "" });
+      try {
+        await api("POST", path, { ...body, operator: typeof operator === "function" ? operator() : "" });
+      } catch (e) {                                   // the hub asks first ("Would place N transmissions ... Add anyway?")
+        if (!e.confirm || body.confirm || !(window.UI && UI.confirm)) throw e;
+        if (!(await UI.confirm(e.message, { ok: "Add anyway", danger: true }))) return;
+        await api("POST", path, { ...body, confirm: true, operator: typeof operator === "function" ? operator() : "" });
+      }
       if (window.UI) UI.toast(ok, "ok");
       st.editing = null;
       mount(host, st.id, true);
