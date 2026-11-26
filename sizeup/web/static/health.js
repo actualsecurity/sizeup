@@ -368,6 +368,20 @@ const StationHealth = (() => {
         return l.at ? [`${longDur(serverNow() - l.at)} ago`, "", `Last batch ${when(l.at)} · ${l.lines} lines today · /sizeup/stt-worker`]
           : ["none yet", "dim"];
       };
+      // a GPU worker's state; keep_awake (deploy/stt-worker/worker.py KeepAwake, Windows): "keeps PC awake" while held;
+      // gone silent: "offline since HH:MM", "(asleep?)" when it looks like the PC slept (sttpool.Pool.asleep)
+      const gpuState = (w) => {
+        const ka = w.keep_awake || {};
+        const kaWhy = ka.on === false ? "keep_awake off in worker.toml: Windows may sleep the PC"
+          : ka.on && !ka.held ? "keep_awake on, not held (paused): Windows may sleep the PC"
+          : ka.held ? "Windows won't idle-sleep the PC (the screen may still turn off)" : "";
+        if (w.state === "offline") {
+          const why = w.asleep ? (ka.on === false || ka.held === false ? kaWhy
+            : "Heartbeats stopped while online, with no pause, gaming or stop first") : "";
+          return [`offline since ${fmtTime(w.seen)}` + (w.asleep ? " (asleep?)" : ""), "hl-bad", why];
+        }
+        return [w.state + (ka.held ? " · keeps PC awake" : ""), w.state === "online" ? "hl-ok" : w.state === "cooling" ? "hl-bad" : "dim", kaWhy];
+      };
       if ((sp.workers || []).length) kids.push(table(["Worker", "State", "Model", "Version", "Load", "Jobs/h", "Lost", "Last seen", "Logs"],
         sp.workers.map((w) => {
           const g = w.gpu || {}, l = w.load || {};
@@ -375,7 +389,8 @@ const StationHealth = (() => {
           const load = w.kind === "station"
             ? [`${l.own ?? 0} own`, l.cpu_pct !== undefined ? `CPU ${Math.round(l.cpu_pct)}%` : "", l.service_s ? `${l.service_s} s/clip` : ""].filter(Boolean).join(" · ")
             : g.util_pct !== undefined ? `GPU ${g.util_pct}%` + (g.mem_used_mb !== undefined ? ` · ${g.mem_used_mb}/${g.mem_total_mb} MB` : "") : "";
-          const st = [w.state, w.state === "online" ? "hl-ok" : w.state === "offline" || w.state === "cooling" ? "hl-bad" : "dim", l.why || ""];
+          const st = w.kind === "station" ? [w.state, w.state === "online" ? "hl-ok" : w.state === "offline" || w.state === "cooling" ? "hl-bad" : "dim", l.why || ""]
+            : gpuState(w);
           return [w.kind === "station" ? `${w.id.replace(/^station:/, "")} (station)` : w.id, st, w.model, ver(w), load,
             w.jobs_h, w.lost, `${when(w.seen)} · ${longDur(w.seen_s)} ago`, logs(w)];
         }), ""));

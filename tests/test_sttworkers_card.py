@@ -38,7 +38,14 @@ class FakeHealth:
                 "fallbacks": {"unclaimed": 3, "lease": 1, "released": 0, "no_worker": 0, "error": 0}, "refused_late": 1,
                 "workers": [{"id": "gpu-1", "state": "online", "model": "ggml-large-v3-turbo-q5_0.bin",
                              "gpu": {"util_pct": 31, "mem_used_mb": 1650, "mem_total_mb": 12288}, "jobs_h": 412,
-                             "lost": 1, "seen": now - 2, "seen_s": 2, **UPDATE},
+                             "lost": 1, "seen": now - 2, "seen_s": 2, "keep_awake": {"on": True, "held": True},
+                             **UPDATE},
+                            {"id": "gpu-2", "state": "offline", "model": "ggml-large-v3-turbo-q5_0.bin", "gpu": {},
+                             "jobs_h": 0, "lost": 0, "seen": now - 600, "seen_s": 600, "asleep": True,
+                             "keep_awake": {"on": True, "held": True}},
+                            {"id": "gpu-3", "state": "offline", "model": "ggml-large-v3-turbo-q5_0.bin", "gpu": {},
+                             "jobs_h": 0, "lost": 0, "seen": now - 900, "seen_s": 900, "asleep": False,
+                             "keep_awake": {"on": False, "held": False}},
                             {"id": "station:st-north", "kind": "station", "state": "paused", "model": "small.en-q5_1",
                              "load": {"own": 6, "cpu_pct": 91.0, "service_s": 14.2, "why": "its own clips first"},
                              "gpu": {}, "jobs_h": 38, "lost": 0, "seen": now - 1, "seen_s": 1},
@@ -135,6 +142,25 @@ def test_health_shows_the_gpu_workers_and_the_latency_by_channel(site):
             Path(SHOTS).mkdir(parents=True, exist_ok=True)
             pg.screenshot(path=str(Path(SHOTS) / "health-gpu-workers.png"),
                           clip={"x": box["x"] - 8, "y": box["y"] - 8, "width": 980, "height": 470})
+        assert pg.errors == []
+    finally:
+        browser.close()
+        pw.stop()
+
+
+def test_health_says_keeps_pc_awake_and_offline_since_asleep(site):
+    pw, browser, pg = browser_page(site, CASEY)
+    try:
+        pg.goto(site.base + "/cad#settings/station/health")
+        pg.get_by_text("GPU workers (hub)").wait_for()
+        panel = pg.locator("#s-station-health")
+        rows = {r: panel.locator("tr", has=pg.locator("td", has_text=r)).first for r in ("gpu-1", "gpu-2", "gpu-3")}
+        on = rows["gpu-1"].locator("td.hl-ok", has_text="online · keeps PC awake")
+        assert on.is_visible() and "idle-sleep" in on.get_attribute("title")
+        asleep = rows["gpu-2"].locator("td.hl-bad", has_text="offline since")
+        assert asleep.inner_text().endswith(" (asleep?)") and "stopped while online" in asleep.get_attribute("title")
+        quiet = rows["gpu-3"].locator("td.hl-bad", has_text="offline since")
+        assert "asleep" not in quiet.inner_text() and "keeps PC awake" not in rows["gpu-3"].inner_text()
         assert pg.errors == []
     finally:
         browser.close()

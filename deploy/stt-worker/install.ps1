@@ -97,6 +97,8 @@ model = "large-v3-turbo-q5_0"
 whisper_server = ['whisper\Release\whisper-server.exe', '-m', 'models\ggml-large-v3-turbo-q5_0.bin',
                   '--host', '127.0.0.1', '--port', '8179', '-t', '4',
                   '-l', 'en', '-sns', '-et', '2.4', '-lpt', '-1.0', '-nth', '0.6']
+# no idle sleep while the worker runs (README "Keeping the PC awake"); false: Windows' own sleep settings
+keep_awake = true
 '@
 $TomlLlm = @'
 # the local LLM (README "The local LLM"): Qwen3-8B, the default
