@@ -76,6 +76,9 @@ def test_on_a_hub_an_aws_channels_candidate_runs_in_shadow_and_is_scored_against
     w = ModelWorker(hub.url, token, text="Engine 61 on location").start()
     try:
         assert app._hub_engine("FG1") == "pin:aws"                  # (an AWS channel: AWS is its champion)
+        app.stt_api.build = {"commit": "c" * 40}
+        word = app._stt_models_word()                                # (its GPU model isn't resident: no live use)
+        assert QWEN not in word["want"] and not app.sttpool.resident
         send(hub, pending_event("FG1-51"))
         assert wait(lambda: row(hub, "FG1-51").get("text") == AWS_TEXT + ".", 20), row(hub, "FG1-51")
         assert wait(lambda: any(r["role"] == "shadow" for r in app.stt_runs.of("FG1-51")), 30)
@@ -88,7 +91,6 @@ def test_on_a_hub_an_aws_channels_candidate_runs_in_shadow_and_is_scored_against
         [board] = app._shadow_boards()
         assert board["key"] == "FG1" and board["on"] and board["models"][0]["model"] == QWEN
         assert board["models"][0]["n"] == 1 and board["models"][0]["verdict"] == "not yet"
-        app.stt_api.build = {"commit": "c" * 40}
         app.stt_choices.set("FG1", {"challenger": Q8})
         word = app._stt_models_word()
         assert Q8 in word["try"] and Q8 not in word["want"]         # (a candidate loaded on demand: never resident)
