@@ -182,7 +182,7 @@ window.PrealertInfo = (() => {
     const items = (sb && sb.items) || [], calls = (sb && sb.calls) || [];
     const n = items.length + calls.length;
     if (!n) return [];
-    const line = el("div", "pi-sibs small", `${n} other call${n === 1 ? "" : "s"} in this window: `);
+    const line = el("div", "pi-sibs small", `${n}${sb.truncated ? "+" : ""} other call${n === 1 ? "" : "s"} in this window: `);
     line.title = `Other calls on this channel within ±${Math.round((sb.window_s || 0) / 60)} min of this one`;
     const parts = [...items.map((x) => [x.at, () => {
       const a = el("a", "pi-sib", `${x.label || x.category} ${tm(x.at)}`);

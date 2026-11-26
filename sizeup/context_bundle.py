@@ -560,11 +560,11 @@ def _siblings(cad, raw: dict) -> dict:
     try:
         log = cad.intel_admin.eventlog
         nb = log.neighbours([raw])[raw["id"]]
-        items, calls = nb["siblings"], nb["calls"]
+        items, calls, cut = nb["siblings"], nb["calls"], bool(nb.get("truncated"))
         span = log.span(raw["pack"])
     except Exception:  # noqa: BLE001 - the bundle never fails on its neighbours
         return {"items": [], "calls": [], "window_s": 0, "empty": "not read"}
-    return {"items": items, "calls": calls, "window_s": span,
+    return {"items": items, "calls": calls, "window_s": span, "truncated": cut,
             "empty": "" if items or calls else "no other calls in this window"}
 
 

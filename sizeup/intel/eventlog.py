@@ -88,8 +88,9 @@ PAGE_MAX = 100
 MAP_MAX = 2000                     # the map's pins: the newest of the filters (the rest counted)
 SEARCH_MAX = 100                   # Search's intel matches returned (the rest counted)
 CALL_SPAN_S = 180.0                # console_calls(): a group is never longer than this (one call's exchange)
-EVENT_SPAN_S = 3600.0              # neighbours(): an event overlapping a window ends at most this long after it
-TX_MAX = 5000                      # ... and a span's transmissions read at most this many
+CHAIN_S = 25.0                     # _own(): an event row's conversation, each transmission this close to the one before
+TX_PAGE = 5000                     # neighbours(): a span's transmissions read this many at a time ...
+TX_MAX = 50000                     # ... and at most this many (beyond: the row's neighbours say "truncated")
 # a transcript's word count in SQL (its spaces + 1): neighbours() never reads the words themselves
 WORDS_SQL = ("(CASE WHEN length(trim(COALESCE(text, ''))) = 0 THEN 0 ELSE length(trim(text)) - "
              "length(replace(trim(text), ' ', '')) + 1 END)")
@@ -229,27 +230,32 @@ def console_calls(txs: list[dict], event_tids: set, talker_of, gap_s: float, spa
 
 
 def _own(txs: list[dict], tks: list, event_tids: set, gap_s: float) -> set[int]:
-    """The indexes of the event rows' own console traffic: for a console's event row, the same department's console
-    transmissions within gap_s before and after it with only units (no other console) between; for a unit's row, the
-    first console after it within gap_s with only units between (its answer)."""
+    """The indexes of the event rows' own console traffic: from each event row, the chain of ADJACENT transmissions
+    each within CHAIN_S of the one before it (either way), each the row's department's console or a unit, stopping at
+    another department's console or another event's row; the consoles in it are the row's call-up and follow-up. For a
+    unit's row (its report), the chain forward only: its first console is the answer, and that console's department
+    the chain's from there. A dispatch after a pause, or across another console, is shown (#961 review: lean to
+    showing). gap_s is unused: the chain's step is CHAIN_S."""
     out: set[int] = set()
     for i, t in enumerate(txs):
         if str(t["id"]) not in event_tids:
             continue
-        at, mine = float(t["start"]), tks[i]
-        dept = _dept(mine) if mine is not None and mine.console else None
-        for step in ((-1, 1) if dept else (1,)):
-            j = i + step
-            while 0 <= j < len(txs) and abs(float(txs[j]["start"]) - at) <= gap_s and str(txs[j]["id"]) not in event_tids:
+        mine = tks[i]
+        start = _dept(mine) if mine is not None and mine.console else None
+        for step in ((-1, 1) if start else (1,)):
+            dept, j, last = start, i + step, float(t["start"])
+            while 0 <= j < len(txs) and str(txs[j]["id"]) not in event_tids:
+                at = float(txs[j]["start"])
+                if abs(at - last) > CHAIN_S:
+                    break
                 tk = tks[j]
                 if tk is not None and tk.console:
                     if dept is None:
-                        out.add(j)
-                        break
-                    if _dept(tk) != dept:
+                        dept = _dept(tk)          # a unit's report: the console that answers it
+                    elif _dept(tk) != dept:
                         break
                     out.add(j)
-                j += step
+                last, j = at, j + step
     return out
 
 
@@ -696,8 +702,8 @@ class IntelLog:
         return SIBLING_S
 
     def neighbours(self, rows: list[dict]) -> dict[int, dict]:
-        """{event id: {siblings: [{id, at, category, label}], calls: [{at, n, consoles}]}} for these rows (the module
-        doc): per source, the rows' windows merged into spans, then one read of its events and one of its
+        """{event id: {siblings: [{id, at, category, label}], calls: [{at, n, consoles}], truncated?}} for these rows
+        (the module doc): per source, the rows' windows merged into spans, then one read of its events and one of its
         transmissions (no text: a word count) per span, on Search's read-only connection (_rq: never the store's
         lock); split per row here."""
         from sizeup.intel.push import category_label
@@ -719,16 +725,28 @@ class IntelLog:
                     spans.append([lo, hi])
             evs: dict = {}
             txs: dict = {}
+            truncated: list = []
             for lo, hi in spans:
+                # every event overlapping it, however long (a two-hour barricade is a sibling too)
                 for e in self._rq("SELECT id, pack, category, first_at, last_at, traffic_ids FROM intel_events WHERE "
-                                  "source_key = ? AND last_at >= ? AND last_at <= ? AND first_at <= ?",
-                                  (key, lo, hi + EVENT_SPAN_S, hi)):
+                                  "source_key = ? AND last_at >= ? AND first_at <= ?", (key, lo, hi)):
                     evs[e["id"]] = e
                 if talker_of is not None:
-                    for t in self._rq("SELECT id, start, system, radio_id, " + WORDS_SQL + " AS words FROM radio_traffic "
-                                      "WHERE source = ? AND start >= ? AND start <= ? ORDER BY start, id LIMIT ?",
-                                      (key, lo, hi, TX_MAX)):
-                        txs[t["id"]] = t
+                    got, after = 0, (lo, "")
+                    while True:                   # oldest first, a page at a time (keyset: never the same row twice)
+                        page = self._rq("SELECT id, start, system, radio_id, " + WORDS_SQL + " AS words FROM "
+                                        "radio_traffic WHERE source = ? AND (start > ? OR (start = ? AND id > ?)) AND "
+                                        "start <= ? ORDER BY start, id LIMIT ?",
+                                        (key, after[0], after[0], after[1], hi, TX_PAGE))
+                        for t in page:
+                            txs[t["id"]] = t
+                        got += len(page)
+                        if len(page) < TX_PAGE:
+                            break
+                        if got >= TX_MAX:
+                            truncated.append((lo, hi))
+                            break
+                        after = (page[-1]["start"], page[-1]["id"])
             tids: set = set()
             for e in evs.values():
                 try:
@@ -753,6 +771,8 @@ class IntelLog:
                     g = self._gap(r["pack"])
                     near = [t for t in ordered if lo - g <= t["start"] <= hi + g]
                     out[r["id"]]["calls"] = [c for c in console_calls(near, tids, talker_of, g) if lo <= c["at"] <= hi]
+                    if any(a <= hi and b >= lo for a, b in truncated):
+                        out[r["id"]]["truncated"] = True     # (its span had over TX_MAX transmissions: calls may lack)
         return out
 
     def _gap(self, pack: str) -> float:

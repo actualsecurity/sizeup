@@ -388,7 +388,7 @@ window.IntelPage = (() => {
     const xs = e.siblings || [], calls = e.calls || [];
     const n = xs.length + calls.length;
     if (!n) return null;
-    const d = el("div", "dim small il-sibs", `${n} other call${n === 1 ? "" : "s"} `);
+    const d = el("div", "dim small il-sibs", `${n}${e.truncated ? "+" : ""} other call${n === 1 ? "" : "s"} `);
     d.title = ["Other calls on this channel within ±10 min",
       ...calls.map((c) => `${when(c.at)} ${c.consoles.join(" · ")} · ${c.n} console tx, no event`)].join("\n");
     xs.forEach((x, i) => {

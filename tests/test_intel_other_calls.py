@@ -313,7 +313,7 @@ def test_console_calls_are_the_consoles_transmissions_in_no_event_and_not_an_eve
     from sizeup.intel.eventlog import console_calls
     known = {rid: T.parse(label) for rid, label in LABELS.items()}
     tx = lambda i, at, rid: {"id": i, "start": at, "system": "mrrs", "radio_id": rid}         # noqa: E731
-    txs = [tx("e1", 1000, A_ID), tx("x0", 1030, A_ID),                    # an event, and its console's answer
+    txs = [tx("e1", 1000, A_ID), tx("x0", 1020, A_ID),                    # an event, and its console's answer
            tx("h1", 1220, A_ID), tx("h2", 1225, B_ID), tx("o1", 1240, OFFICER_ID), tx("h3", 1263, B_ID),
            dict(tx("x1", 1521, A_ID), words=2), tx("e2", 1550, A_ID)]     # a callsign alone, then another event
     out = console_calls(txs, {"e1", "e2"}, lambda t: known.get(t["radio_id"]), 120)
@@ -399,3 +399,63 @@ def test_rows_with_no_radio_id_never_tie_on_a_generic_talker_text():
     assert _talker_ties({"system": "mrrs", "radio_id": "7703,7704"}, "unknown MRRS radio") == {"mrrs:7703", "mrrs:7704"}
     assert _talker_ties({"system": "mrrs", "radio_id": ""}, "unknown MRRS radio") == frozenset()
     assert _talker_ties({"system": "mrrs", "radio_id": ""}, "CAR 3") == {"CAR 3"}
+
+
+@pytest.mark.parametrize("txs", [
+    [tx_("e1", 1000, A_ID), tx_("c1", 1060, A_ID), tx_("c2", 1075, A_ID)],                          # after a pause
+    [tx_("e1", 1000, A_ID), tx_("o1", 1030, OFFICER_ID), tx_("c1", 1060, A_ID), tx_("o2", 1070, OFFICER_ID)],
+])
+def test_the_same_consoles_next_call_after_a_pause_shows(txs):
+    """#961 re-review: an event's conversation is only the chain of adjacent transmissions CHAIN_S apart."""
+    from sizeup.intel.eventlog import console_calls
+    assert console_calls(txs, {"e1"}, of_label, 120) != []
+
+
+def test_an_events_call_up_and_immediate_follow_up_stay_hidden():
+    from sizeup.intel.eventlog import console_calls
+    txs = [tx_("u1", 980, A_ID), tx_("o0", 990, OFFICER_ID), tx_("e1", 1000, A_ID), tx_("o1", 1015, OFFICER_ID),
+           tx_("f1", 1030, A_ID)]
+    assert console_calls(txs, {"e1"}, of_label, 120) == []
+
+
+def long_event_site(tmp_path):
+    from tests.test_cad import make_cad
+    from tests.test_intel import Clock as IntelClock
+    from tests.test_intel import ctx_row
+    from tests.test_intel_page import T0, save
+    from tests.test_roles import people
+    cad = make_cad(tmp_path, clock=IntelClock(T0 + 3 * 3600))
+    people(cad)
+    cad.intel.talkers.radios = FakeRadios(LABELS)
+    long_ = save(cad, first_at=T0 - 300, last_at=T0 + 2 * 3600, traffic_ids=["L1", "L2"])     # a two-hour call
+    a = save(cad, category="assault", first_at=T0, last_at=T0 + 30, traffic_ids=["A1"])
+    cad.comms.record({**ctx_row("A1", "invented words for the event row", T0), "radio_id": A_ID})
+    cad.comms.record({**ctx_row("L2", "invented words for the long call update", T0 + 400), "radio_id": B_ID})
+    return cad, long_, a
+
+
+def test_a_long_event_is_a_sibling_and_its_rows_are_no_calls(tmp_path):
+    """#961 re-review: an event overlapping the window however long after it ends (a two-hour call)."""
+    from sizeup.cad.api import CadApi
+    from tests.test_intel_page import get, listing
+    from tests.test_roles import VAL
+    cad, long_, a = long_event_site(tmp_path)
+    [r] = [x for x in listing(cad)["events"] if x["id"] == a.id]
+    assert [s["id"] for s in r["siblings"]] == [long_.id] and r["calls"] == [] and "truncated" not in r
+    code, d = get(CadApi(cad), f"/api/cad/prealerts/intel/{a.id}", VAL)
+    assert [s["id"] for s in d["siblings"]["items"]] == [long_.id] and d["siblings"]["calls"] == []
+
+
+def test_a_span_is_read_in_pages_and_past_the_cap_says_truncated(tmp_path, monkeypatch):
+    from sizeup.intel import eventlog
+    from tests.test_intel import ctx_row
+    from tests.test_intel_page import T0, listing
+    cad, long_, a = long_event_site(tmp_path)
+    for i in range(7):                                    # another department's call, one tx every 20 s
+        cad.comms.record({**ctx_row(f"P{i}", "car 7 respond to the invented place", T0 + 200 + 20 * i), "radio_id": B_ID})
+    monkeypatch.setattr(eventlog, "TX_PAGE", 2)
+    [r] = [x for x in listing(cad)["events"] if x["id"] == a.id]
+    assert [c["n"] for c in r["calls"]] == [7] and "truncated" not in r        # four pages, nothing lost
+    monkeypatch.setattr(eventlog, "TX_MAX", 4)
+    [r] = [x for x in listing(cad)["events"] if x["id"] == a.id]
+    assert r["truncated"] is True
