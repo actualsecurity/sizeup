@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator
 
-from sizeup import sourcekeys, stt as stt_mod, stt_terms, sttcatchup
+from sizeup import app as app_mod, sourcekeys, stt as stt_mod, stt_terms, sttcatchup
 from sizeup.app import App, AwsJob
 from sizeup.cad import dispatcher
 from sizeup.cad.dispatcher import AudioUnavailable
@@ -223,6 +223,16 @@ def a_station(lv, monkeypatch):
     return st
 
 
+def pin_push_sources(monkeypatch, app, keys, rev: int) -> None:
+    """The hub's pre-alert sources are these, at this revision, for the rest of the test. Pinned, not seeded into the
+    hub's PUSH_CACHE_S cache: a seeded cache expires mid-test, the hub reads the (absent) intel engine's (none, rev 0)
+    and pushes those to the station at its next state post, and the station's revision is 0 again by the end. The
+    cache is also made to expire at once, so a test that seeds it again fails on every machine, not only a slow one."""
+    pinned = (frozenset(keys), rev)
+    monkeypatch.setattr(app_mod, "PUSH_CACHE_S", 0.0)
+    monkeypatch.setattr(app, "_stt_alert_source", lambda: pinned)
+
+
 def every_job_the_hub_makes(lv, st, wire, tmp_path, monkeypatch) -> dict[str, tuple[dict, dict]]:
     """Each kind of job and each function of CALLS, in every form the hub sends, made by the hub's own callers and run
     by the station: {form: (the job, its result)} as they went over the wire."""
@@ -269,7 +279,7 @@ def every_job_the_hub_makes(lv, st, wire, tmp_path, monkeypatch) -> dict[str, tu
                                                       "sdr": "00000105", "minutes": 15}, "admin@example.org"))
     one("reception_sample_b64", lambda: app.reception_sample("0123456789ab"))
     # the pre-alerts' sources, when the station's revision differs from the intel engine's
-    app._push_cache = (time.monotonic(), frozenset({"fm:Paging 1", "p25:east:7001"}), 4242)
+    pin_push_sources(monkeypatch, app, {"fm:Paging 1", "p25:east:7001"}, 4242)
     one("set_stt_alert_keys", app.alert_keys_check)
     assert wait(lambda: not app._alert_push, 5)
     # the term lists for whisper's prompt, when the station's version differs
@@ -695,7 +705,7 @@ def test_the_hub_takes_a_newer_stations_results(live, tmp_path):
         p.close()
 
 
-def test_the_hub_guesses_the_argument_list_from_the_stations_status(live):
+def test_the_hub_guesses_the_argument_list_from_the_stations_status(live, monkeypatch):
     """D2 (contracts/README.md), as it shows in the jobs: nothing says which functions and how many arguments a
     station takes, so the hub reads it off the status. A station whose status has no `p25_systems` is sent the county's
     talkgroup as three arguments and no `p25:` channel key; one without `channels.squelch_ok` three arguments of
@@ -739,7 +749,7 @@ def test_the_hub_guesses_the_argument_list_from_the_stations_status(live):
         assert len(old) == 3 and set(old[0]) == {"Fireground 1"} and "deny" not in old[1]
         assert {len(old), len(new)} == set(c.load(JOBS)["$defs"]["call.set_channel_prefs"]["x-forms"])
         assert args_of("set_talkgroup", talkgroup) == [4101, True, None]
-        app._push_cache = (time.monotonic(), frozenset({"fm:Paging 1"}), 4242)
+        pin_push_sources(monkeypatch, app, {"fm:Paging 1"}, 4242)
         n = len(p.jobs)
         app.alert_keys_check()
         time.sleep(0.3)
@@ -795,7 +805,7 @@ def test_what_the_station_answers_to_arguments_of_the_wrong_type(live, monkeypat
     assert refused == {"ok": False, "error": "ValueError: keys: a list of source keys; rev: a number"}
     assert run("call", {"fn": "set_stt_terms", "args": [{"sets": {"Bad Name": {}}}]})["error"].startswith("ValueError: stt terms")
     assert run("call", {"fn": "set_channel_prefs", "args": [{"Fireground 1": {"engine": "from_the_future"}}]})["error"] \
-        == "ValueError: engine: one of local, aws, both"
+        == "ValueError: engine: one of local, aws, both, auto, auto_bg, or pin:<engine id>"
     assert run("call", {"fn": "set_antenna_groups", "args": [{"name": "roof"}]}) \
         == {"ok": True, "result": "each channel has its own dongle: nothing to group"}
     assert run("call", {"fn": "reception_post", "args": [["start"], "", ""]}) == {"ok": True, "result": "a JSON object"}

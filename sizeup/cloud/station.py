@@ -201,7 +201,8 @@ OTHER = {"answer": (None, "an object"), "jobs": (None, "a list of objects"), "jo
 # ... and the pool's word (#639 phase 2), each of its fields so
 POOL = {"on": (lambda v: isinstance(v, bool), "true or false"), "worker": (lambda v: isinstance(v, bool), "true or false"),
         "ready": (_is_int, "an integer"), "max_s": (_is_num, "a number"),
-        "gpu_idle": (lambda v: isinstance(v, bool), "true or false"), "gpu_idle_n": (_is_int, "an integer")}
+        "gpu_idle": (lambda v: isinstance(v, bool), "true or false"), "gpu_idle_n": (_is_int, "an integer"),
+        "gpu_ready": (_is_int, "an integer"), "gpu_bg": (lambda v: isinstance(v, bool), "true or false")}
 
 
 def _cpu_pct() -> float | None:
@@ -464,6 +465,22 @@ class StationLink:
             return 0
         n = self.pool.get("gpu_idle_n")
         return max(0, n) if _is_int(n) else int(self.pool.get("gpu_idle") is True)
+
+    def pool_gpu_ready(self) -> bool:
+        """The hub's last word, heard lately: a GPU worker is ready for an Auto · priority clip (sizeup/sttroute.py):
+        such a clip goes to the hub at once (a GPU worker there, else AWS, else back to this station's whisper)."""
+        n = self.pool.get("gpu_ready")
+        return self.connected() and _is_int(n) and n > 0
+
+    def pool_takes_bg(self) -> bool:
+        """The hub takes an Auto · background clip handed over (#896: it places it on another station, a GPU, AWS, or
+        sends it back here): a hub with handed-over clips, heard lately."""
+        return POOL_CAP in self.hub_caps and self.connected() and bool(self.pool.get("on"))
+
+    def pool_gpu_bg(self) -> bool:
+        """The hub's last word, heard lately: a GPU worker would take an Auto · background clip now (it holds nothing
+        and no priority work waits: #878). Only to a hub that takes handed-over clips."""
+        return POOL_CAP in self.hub_caps and self.connected() and self.pool.get("gpu_bg") is True
 
     def stt_input(self, item, audio, prio: int = sttinput.NORMAL) -> None:
         """App._stt: this transmission / page goes to speech-to-text now with `audio`. Queued (a reference, nothing

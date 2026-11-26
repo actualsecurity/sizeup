@@ -381,11 +381,13 @@ def everything(lv: Lane, st, monkeypatch) -> dict[str, str]:
     monkeypatch.setattr(st.link, "pool_has_room", lambda seconds=None: True)
     monkeypatch.setattr(st.link, "pool_gpu_idle", lambda: True)
     monkeypatch.setattr(st.link, "pool_takes", lambda: True)
+    monkeypatch.setattr(st.link, "pool_takes_bg", lambda: True)       # (#896: Auto · background, its whisper behind)
     real_stats = st.stt.stats
-    monkeypatch.setattr(st.stt, "stats", lambda: dict(real_stats(), queued=50, service_s=16.0))
+    monkeypatch.setattr(st.stt, "stats", lambda: dict(real_stats(), queued=50, low=50, context=50, service_s=16.0))
     context_call(st, name="7001-1794990100_770181250.0-call_6", at=t + 230)     # transcript_pending pool, stt_class
     ids["context_pool"] = "7001-1794990100_770181250.0-call_6"
     monkeypatch.setattr(st.stt, "stats", real_stats)
+    monkeypatch.setattr(st.link, "pool_takes_bg", lambda: False)      # (the rest on this station's whisper)
     assert wait(all_there, 60), "the hub-transcribed events did not reach the hub"
     # new words: a re-run that changes the text, one for the alternative, and the forms App._retext's callers send
     lv.whisper.again = True

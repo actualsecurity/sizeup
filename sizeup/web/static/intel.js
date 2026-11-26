@@ -80,7 +80,7 @@ window.IntelCard = (() => {
       li.append(fd);
     }
     const src = el("div", "aa-src", `${deps.time(e.first_at)} · ${(e.traffic_ids || []).length} tx`);
-    for (const id of (e.traffic_ids || []).slice(-4)) {
+    for (const id of (e.traffic_ids || []).slice(-4).reverse()) {     // the latest four, newest first
       const b = el("button", "mini play", st.playing === id ? "■" : "▶");
       b.type = "button";
       b.title = "Play (while its audio is kept)";
@@ -332,6 +332,7 @@ window.IntelSettings = (() => {
         field("mode", modeSel(d.modes, p.mode, pset("mode"), `${p.label} pack mode`), "in-w-mode"),
         field("threshold", num(p.threshold, 0, 1, 0.05, pset("threshold"), "Threshold: WHAT at least this", "Threshold, 0 to 1: WHAT at least this")),
         field("window s", num(p.window_s, 10, 1800, 10, pset("window_s"), "Seconds of one source merged into one candidate")),
+        field("late s", num(p.late_s, 30, 3600, 30, pset("late_s"), "Read this long after the clip ended: late, context only, never a push")),
       ], seen));
       // each category: its name, then its mode (and, once changed, the way back), in columns of one width
       const cats = el("div", "in-cats");

@@ -16,6 +16,11 @@ Namespaces, each a known shape (anything else is refused, not trimmed):
     preplan      {layer: bool} (static/preplan.js: the Pre-plan layer on every map)
     reminders    {sound: bool, board_sound: bool} (static/reminders.js: a short chime when a reminder starts flashing,
                  on the console; board_sound: on /monitor, the wall board. Both off unless turned on)
+    listen       {rules: {target: priority | normal | off}, mode: interrupt | duck | queue, max_age: s, ours_only: bool}
+                 (static/live-player.js: what the console's live player plays, and how). A target: "view:<id>" (a
+                 Radio view, the department's or the person's own: its filter), "sys:<system>", "src:<source key>",
+                 "mhz:<frequency>"; from before the views, "ours" and "svc:<service>" (moved to the matching view's
+                 where there is one). An earlier page's mute_police is taken and dropped (LISTEN_GONE), never kept
     search       {intel: bool} (static/search-view.js: Search's Intel events, #937; off unless turned on)
 
 An event's own layer set (incidents.map_layers, POST /api/cad/incident/<id>) is the event's, not here.
@@ -55,7 +60,12 @@ NS = re.compile(r"[a-z][a-z0-9_]{0,31}")
 LISTEN_LEVELS = ("priority", "normal", "off")
 LISTEN_MODES = ("interrupt", "duck", "queue")
 LISTEN_AGE = (10, 600)         # max_age: a Normal transmission older than this (s) is dropped, never played late
-LISTEN_TARGET = re.compile(r"ours|svc:[a-z]{2,12}|sys:[a-z][a-z0-9_-]{0,23}|mhz:\d{2,4}(?:\.\d{1,4})?")
+# view:<id> a Radio view (the department's or the person's own, sizeup/cad/radioviews.py VIEW_ID / MINE_ID: not
+# imported, the store imports this); "ours" and "svc:" are the targets before the views (an older page sends them;
+# static/live-player.js moves them to the matching view's)
+LISTEN_TARGET = re.compile(r"ours|svc:[a-z]{2,12}|sys:[a-z][a-z0-9_-]{0,23}|mhz:\d{2,4}(?:\.\d{1,4})?"
+                           r"|view:(?:ours|police|ems|transit|air|all|[up]:[a-z0-9]{4,24})")
+LISTEN_GONE = {"mute_police"}  # a key an earlier page sent (#895's Mute police): taken and dropped, never kept or served
 LISTEN_SRC_MAX = 120           # a source key's length (radiofolders.KEY_MAX)
 LISTEN_CHANNEL = re.compile(r"(?:fm|air):[^\x00-\x1f\x7f]{1,100}")      # an FM / airband channel (radiofolders.ITEM)
 
@@ -145,9 +155,9 @@ def _listen_target(k) -> bool:
 def _listen(v) -> dict:
     if not isinstance(v, dict):
         raise PrefsError("listen: an object")
-    extra = set(v) - {"rules", "mode", "max_age", "ours_only", "mute_police"}
+    extra = set(v) - {"rules", "mode", "max_age", "ours_only"} - LISTEN_GONE
     if extra:
-        raise PrefsError("listen: rules, mode, max_age, ours_only and mute_police only")
+        raise PrefsError("listen: rules, mode, max_age and ours_only only")
     out: dict = {}
     if "rules" in v:
         r = v["rules"]
@@ -170,7 +180,7 @@ def _listen(v) -> dict:
         if isinstance(a, bool) or not isinstance(a, int) or not LISTEN_AGE[0] <= a <= LISTEN_AGE[1]:
             raise PrefsError(f"listen.max_age: whole seconds, {LISTEN_AGE[0]} to {LISTEN_AGE[1]}")
         out["max_age"] = a
-    for b in ("ours_only", "mute_police"):
+    for b in ("ours_only",):
         if b in v:
             if not isinstance(v[b], bool):
                 raise PrefsError(f"listen.{b}: true or false")
@@ -224,9 +234,12 @@ class Prefs:
         for r in self.store.q("SELECT ns, value FROM person_prefs WHERE operator_id = ?", (oid,)):
             if r["ns"] in NAMESPACES:           # (a namespace a later build dropped: not handed out)
                 try:
-                    out[r["ns"]] = json.loads(r["value"])
+                    v = json.loads(r["value"])
                 except ValueError:
-                    pass
+                    continue
+                if r["ns"] == "listen" and isinstance(v, dict):
+                    v = {k: x for k, x in v.items() if k not in LISTEN_GONE}     # kept before it was dropped
+                out[r["ns"]] = v
         return out
 
     def put(self, oid: int, ns: str, value) -> dict:
