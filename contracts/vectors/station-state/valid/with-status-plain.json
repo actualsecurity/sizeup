@@ -2,6 +2,7 @@
   "at": 1794990000.0,
   "boot_id": "5f0c9a3e-7b1d-4e2a-9c6f-0d8b2a4e1c37",
   "wall_steps": 0,
+  "proc": "6d1e2f3a4b5c6d7e8f90a1b2c3d4e5f6",
   "talking": [],
   "paging": [],
   "status": {
@@ -82,6 +83,8 @@
       "deny_ok": true,
       "promote_ok": true,
       "promote_p25_ok": true,
+      "engine_select_ok": true,
+      "engine_norm_ok": true,
       "sig": "0b022a41e225"
     },
     "p25_systems": [],
@@ -101,6 +104,7 @@
       "sent": 0,
       "dropped": {"queue": 0, "too_big": 0, "failed": 0, "outbox": 0, "refused": 0},
       "hub_takes": false,
+      "wake_on_ack": true,
       "dropped_pre": 0,
       "dropped_fire": 0,
       "encoder": "",
@@ -118,6 +122,7 @@
       "why": "this station's whisper isn't in the pool"
     },
     "stt_alert_rev": 0,
+    "caps": ["stt_withdraw", "stt_held"],
     "version": {
       "build": "",
       "hub": "",

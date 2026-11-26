@@ -70,6 +70,12 @@ RECORDED = {
     "source-health.json": ("source_health", lambda d, ids: True),
     "source-seen.json": ("source_seen", lambda d, ids: True),
 }
+# ... and of the run of a station whose hub takes a transmission at its close (#927, lane.at_the_close: `ran_close`)
+RECORDED_AT_CLOSE = {
+    "traffic-fm-at-its-close.json": ("traffic", lambda d, ids: d["id"] == ids["fm"]),
+    "retext-fill.json": ("retext", lambda d, ids: d["id"] == ids["fm"] and d.get("fill") is True),
+    "retext-fill-to-the-pool.json": ("retext", lambda d, ids: d["id"] == ids["fm_pool"] and d.get("fill") is True),
+}
 
 
 _RUN: dict = {}
@@ -83,7 +89,7 @@ def ran(tmp_path_factory, monkeypatch):
     hub and the station are stopped before it is handed out."""
     if "run" not in _RUN:
         tmp = tmp_path_factory.mktemp("events")
-        lv = lane.Lane(tmp)
+        lv = lane.Lane(tmp)                 # (an older hub's caps: its transmissions in one event; see ran_close)
         try:
             st = lv.rich_station(monkeypatch)
             ids = lane.everything(lv, st, monkeypatch)
@@ -98,9 +104,28 @@ def ran(tmp_path_factory, monkeypatch):
     return _RUN["run"]
 
 
+@pytest.fixture
+def ran_close(tmp_path_factory, monkeypatch):
+    """(#927) One run of a plain station whose hub's caps say "traffic_pending" (lane.at_the_close), as `ran`."""
+    if "close" not in _RUN:
+        tmp = tmp_path_factory.mktemp("events-close")
+        lv = lane.Lane(tmp, answer_with=None)                          # (the hub's own caps: traffic_pending)
+        try:
+            st = lv.station()
+            ids = lane.at_the_close(lv, st, monkeypatch)
+            hub = lv.hub.app
+            held = {t.id: t.as_dict() for t in list(hub.store.loose) + [t for i in hub.store.incidents for t in i.traffic]}
+            _RUN["close"] = types.SimpleNamespace(
+                tmp=tmp, ids=ids, seen=list(lv.events_seen), events=lv.events(), held=held,
+                errors=(hub.hub.errors, hub.hub.last_error), epoch=st.link.outbox.epoch)
+        finally:
+            lv.close()
+    return _RUN["close"]
+
+
 def picked(ran, name: str) -> dict:
     """The post of the run that carried the event a recorded vector stands for, cut to that event."""
-    kind, pick = RECORDED[name]
+    kind, pick = RECORDED[name] if name in RECORDED else RECORDED_AT_CLOSE[name]
     for raw, code, _ in ran.seen:
         post = json.loads(raw)
         for ev in post["events"]:
@@ -129,7 +154,7 @@ def test_every_post_of_a_station_with_everything_is_what_the_schema_says(ran):
     assert all(set(ev) == set(DEFS["event"]["properties"]) - {"qid"} for ev in ran.events)
 
 
-def test_every_event_type_was_sent_and_every_key_of_every_type(ran):
+def test_every_event_type_was_sent_and_every_key_of_every_type(ran, ran_close):
     """What makes the sub-schemas complete (`x-complete`): the run sends every event type the schema knows, and of
     each type every key its sub-schema names. For a transmission that is all 51 attributes of the Traffic object, each
     set by the path that sets it in the code (FM, a key-up cut, an emergency packet, P25, a P25 key-up cut at a mid-call
@@ -138,6 +163,9 @@ def test_every_event_type_was_sent_and_every_key_of_every_type(ran):
     seen: dict[str, set] = {k: set() for k in KINDS}
     for ev in ran.events:
         seen[ev["type"]] |= set(ev["data"])
+    for ev in ran_close.events:                                 # (#927: a fill's keys, and `engine` on every retext)
+        if ev["type"] == "retext":
+            seen["retext"] |= set(ev["data"])
     assert all(seen[k] for k in KINDS), [k for k in KINDS if not seen[k]]
     assert seen["traffic"] | seen["alarm"] == set(TX) and len(TX) == 51
     assert seen["traffic"] == set(TX) and "attach" not in seen["alarm"]
@@ -225,7 +253,11 @@ def test_no_attribute_is_set_on_a_transmission_that_the_schema_does_not_name():
              "rerun_at": "a page's", "rerun_result": "a page's", "alt_text": "a page's", "alt_model": "a page's",
              "page": "the tap's carrier",
              # set only on the CAD of record (App._screen: never while forwarding to a hub, which screens itself)
-             "quality": "the CAD of record's (sizeup/stt_quality.py)", "unclear_text": "the CAD of record's"}
+             "quality": "the CAD of record's (sizeup/stt_quality.py)", "unclear_text": "the CAD of record's",
+             # the text of record's vocabulary correction: only where the term lists are (the hub, all-in-one; never a
+             # station: App._corr_put sets nothing without a corrector), #879 sizeup/stt_correct.py
+             "corr_text": "the CAD of record's (sizeup/stt_correct.py)", "corr_rules": "the CAD of record's",
+             "corr_v": "the CAD of record's"}
     found: dict[str, str] = {}
     for rel in ("sizeup/app.py", "sizeup/stt.py"):
         tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
@@ -358,6 +390,36 @@ def test_the_recorded_event_vectors_are_what_the_station_sends_now(ran):
     assert keys == set(TX)
 
 
+def test_the_recorded_at_close_vectors_and_a_station_that_sends_a_transmission_at_its_close_then_its_fill(ran_close):
+    """(#927) Every post of that run conforms and was applied; each transmission went up once as "traffic" at its close
+    (`transcript_pending` `station`, status pending, no words, its clip) and once as a "retext" with `fill`; the hub
+    holds each once, filled. The recorded vectors of it are what the station sends now."""
+    assert ran_close.errors == (0, "")
+    for raw, code, _answer in ran_close.seen:
+        lane.conforms(raw)
+        assert code == 200
+    for tid in ran_close.ids.values():
+        tr = [ev for ev in ran_close.events if ev["type"] == "traffic" and ev["data"]["id"] == tid]
+        fills = [ev for ev in ran_close.events if ev["type"] == "retext" and ev["data"]["id"] == tid and ev["data"].get("fill")]
+        assert len(tr) == 1 and len(fills) == 1 and tr[0]["seq"] < fills[0]["seq"], tid
+        d = tr[0]["data"]
+        assert (d["status"], d["text"], d["transcript_pending"]) == ("pending", "", "station") and tr[0]["audio"]
+        assert fills[0]["audio"] is None and fills[0]["data"]["engine"] == "station-whisper"
+        assert fills[0]["data"].get("authoritative", True) is (tid != ran_close.ids["fm_withdrawn"])
+    pool = next(ev["data"] for ev in ran_close.events if ev["type"] == "retext" and ev["data"].get("fill")
+                and ev["data"]["id"] == ran_close.ids["fm_pool"])
+    assert (pool["transcript_pending"], pool["status"], pool["model"]) == ("pool", "remote", "pool")
+    both = next(ev["data"] for ev in ran_close.events if ev["type"] == "retext" and ev["data"].get("fill")
+                and ev["data"]["id"] == ran_close.ids["fm_both"])
+    assert both["stt"] == "both" and both["status"] == "done"
+    assert ran_close.held[ran_close.ids["fm"]]["text"] == lane.SAID
+    for name in RECORDED_AT_CLOSE:
+        now = lane.scrub(picked(ran_close, name), ran_close.tmp)
+        committed = c.recorded(f"{lane.EVENTS}/valid/{name}", now)
+        lane.conforms(committed)
+        assert lane.shape(now) == lane.shape(committed), name
+
+
 # What a change in the code would put on the wire: each alone must fail the conformance check. These edit a recorded
 # event, not the code; a real change in the code is caught by the live tests above, which is what they are for.
 MUTATIONS = {
@@ -384,6 +446,9 @@ MUTATIONS = {
                        "an alarm's pairs null": lambda e: e["data"].update(pairs=None)},
     "retext.json": {"a new key on a retext": lambda e: e["data"].update(new_key=1),
                     "catchup false": lambda e: e["data"].update(catchup=False)},
+    "retext-fill.json": {"fill false": lambda e: e["data"].update(fill=False),
+                         "stt as aws": lambda e: e["data"].update(stt="aws"),
+                         "stt_run_s as a string": lambda e: e["data"].update(stt_run_s="1.2")},
     "heard.json": {"at in milliseconds": lambda e: e["data"].update(at=int(c.T0 * 1000)),
                    "a heard without channel": lambda e: e["data"].pop("channel")},
     "activity.json": {"minute as a time in seconds": lambda e: e["data"].update(minute=int(c.T0)),

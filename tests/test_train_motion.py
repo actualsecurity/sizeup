@@ -396,7 +396,7 @@ async function advance(ms, step = 100) {
 const snap = () => ({ ...calls });
 const frames = async (n) => { const r = []; for (let i = 0; i < n; i++) { const a = snap(); await advance(100); const b = snap();
   r.push([(b["tr-cars"] || 0) - (a["tr-cars"] || 0), (b["tr-trains"] || 0) - (a["tr-trains"] || 0)]); } return r; };
-const anim = () => timers.filter((t) => t.live && t.every).length;
+const anim = () => (TrainLayer.animating() ? 1 : 0);              // the frame loop: a timer pending (#887)
 (async () => {
   const out = {};
   now = IN.got;

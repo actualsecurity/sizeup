@@ -56,9 +56,9 @@ $PinsJson = @'
     },
     "worker_py": {
       "what": "worker.py (first install; it updates itself afterwards)",
-      "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/a605ce400d2a705a870eca5984c9e1870101819c/deploy/stt-worker/worker.py",
-      "bytes": 224049,
-      "sha256": "CE03FE00066544A74CD4D5AD50DC3234DE5CC4ECEA121F8A2FB946EF8FEE9C16"
+      "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/b1a190cc27dd0777404f58d71ecd9f9afcc0c2b2/deploy/stt-worker/worker.py",
+      "bytes": 245409,
+      "sha256": "30240EDAECBF54CD0AD6BC86A582D9C41492506189752E1A56F841CB909CA3E8"
     },
     "llama_zip": {
       "what": "llama.cpp b12359, CUDA 12.4 (llama-server.exe)",
@@ -83,6 +83,12 @@ $PinsJson = @'
       "url": "https://huggingface.co/bartowski/google_gemma-3-12b-it-GGUF/resolve/648e3a36a77c8a9f12d86e741f9dcb9089c769c4/google_gemma-3-12b-it-Q4_K_M.gguf",
       "bytes": 7300575264,
       "sha256": "FC57F67EFA46D711C346E587CBEF7D049E95F3DF8DB2EB2271153343EF0ACC7B"
+    },
+    "qwen3_4b": {
+      "what": "Qwen3-4B-Instruct-2507 Q4_K_M GGUF (the small choice: beside every speech model on 12 GB; install.ps1 doesn't fetch it)",
+      "url": "https://huggingface.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/resolve/ae44f08e1392f39c0e474af10c3ff8355c8b6688/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+      "bytes": 2497280736,
+      "sha256": "2FDE00CE69DD4899C70D020845E2638353015BBA0FDF161B3EB965F2BCA4464E"
     }
   }
 }
@@ -97,6 +103,8 @@ model = "large-v3-turbo-q5_0"
 whisper_server = ['whisper\Release\whisper-server.exe', '-m', 'models\ggml-large-v3-turbo-q5_0.bin',
                   '--host', '127.0.0.1', '--port', '8179', '-t', '4',
                   '-l', 'en', '-sns', '-et', '2.4', '-lpt', '-1.0', '-nth', '0.6']
+# no idle sleep while the worker runs (README "Keeping the PC awake"); false: Windows' own sleep settings
+keep_awake = true
 '@
 $TomlLlm = @'
 # the local LLM (README "The local LLM"): Qwen3-8B, the default

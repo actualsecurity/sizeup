@@ -11,11 +11,18 @@ One model for the FM channels (FG1, FG2, South 2) and every P25 talkgroup, keyed
     transcribe   run speech-to-text on it at all (off: the clip is kept, no text)
     engine       "local": whisper.cpp on the station (small.en-q5_1 by default) (whisper-server, :8179)
                  "aws":   Amazon Transcribe streaming from the hub (sizeup/transcribe.py); the station
-                          skips whisper and forwards the clip with transcript_pending "aws"
+                          skips whisper and forwards the clip with transcript_pending "aws". Since #896 only what a
+                          station from before the selector is sent for "pin:aws" (and Auto, pinned GPU): the hub never
+                          stores it (Settings > Radios writes "pin:aws"; a stored one is migrated on the hub's start:
+                          App.migrate_engines) and routes any it meets as "pin:aws"
                  "both":  whisper on the station and Transcribe on the hub: Transcribe's text is the
-                          transcript, whisper's is kept as the alternative to compare
+                          transcript, whisper's is kept as the alternative to compare (Settings: "Compare")
+                 "auto", "auto_bg", "pin:<id>": the engine selector (#875, sizeup/sttroute.py): Auto · priority,
+                          Auto · background, one engine by its real id; "local" and "aws" are shown as the channel's
+                          own station and AWS pinned, so nothing changes until an admin picks Auto. A station from
+                          before them is sent the nearest old engine (for_station, its engine_select_ok)
 
-Defaults: [stt] aws_channels (South 2, FG1, FG2, Fire/EMS 15 = tg:307) record + transcribe with "aws";
+Defaults: [stt] aws_channels (South 2, FG1, FG2, Fire/EMS 15 = tg:307) record + transcribe with "pin:aws" (#896);
 [stt] record_only (the hub: WCPD Ch 1 = tg:383, LLT Supervisor 1 = tg:3127, #201) recorded, not
 transcribed; everything else as before (record as it was, transcribe on, "local"). An edit is a CAD settings
 override (section "channels", key as above, value {record?, transcribe?, engine?}: only what differs
@@ -47,7 +54,8 @@ import hashlib
 import json
 import re
 
-ENGINES = ("local", "aws", "both")
+ENGINES = ("local", "aws", "both", "auto", "auto_bg", "auto_norm")   # + "pin:<id>" (sizeup/sttroute.py PIN_RE)
+PIN_AWS = "pin:aws"        # (sizeup/sttroute.py PIN_AWS) "aws" is only what an old station is sent, never stored (#896)
 FIELDS = ("record", "transcribe", "engine")
 # "tg:307": the county system's talkgroup; "p25:<system>:<tg>": another P25 system's (#409, sizeup/sourcekeys.py)
 KEY = re.compile(r"tg:\d{1,9}|p25:[a-z][a-z0-9_-]{0,23}:\d{1,9}|[A-Za-z0-9][A-Za-z0-9 ./_-]{0,39}")
@@ -77,8 +85,13 @@ def tg_of(key: str) -> tuple[str, int]:
     return ("" if key.startswith("tg:") else got[0]), got[1]
 
 
-def defaults(key: str, aws_channels=DEFAULT_AWS, record_only=DEFAULT_RECORD_ONLY) -> dict:
-    return {"record": True, "transcribe": key not in record_only, "engine": "aws" if key in aws_channels else "local"}
+def defaults(key: str, aws_channels=DEFAULT_AWS, record_only=DEFAULT_RECORD_ONLY, context=None) -> dict:
+    """[stt] aws_channels: pinned AWS ("pin:aws": AWS, a GPU worker only when AWS can't take a clip; #896, before it
+    "aws", which a GPU worker took first wherever the pool's class switch was on); a context or neighbour talkgroup
+    (context(key): another P25 system's, or a county talkgroup not Main) Auto · background (the stations' whisper, a GPU
+    as overflow, AWS last: the admin, #896); the rest the channel's own station."""
+    eng = PIN_AWS if key in aws_channels else "auto_bg" if context is not None and is_tg(key) and context(key) else "local"
+    return {"record": True, "transcribe": key not in record_only, "engine": eng}
 
 
 def clean(key: str, raw: dict) -> dict:
@@ -94,25 +107,37 @@ def clean(key: str, raw: dict) -> dict:
                 raise ValueError(f"{f}: true or false")
             out[f] = raw[f]
     if raw.get("engine") is not None:
-        if raw["engine"] not in ENGINES:
-            raise ValueError(f"engine: one of {', '.join(ENGINES)}")
+        from sizeup import sttroute
+        if raw["engine"] not in ENGINES and not sttroute.valid(raw["engine"]):
+            raise ValueError(f"engine: one of {', '.join(ENGINES)}, or pin:<engine id>")
         out["engine"] = raw["engine"]
     return out
 
 
-def pref(key: str, overrides: dict, aws_channels=DEFAULT_AWS, record_only=DEFAULT_RECORD_ONLY) -> dict:
-    p = defaults(key, aws_channels, record_only)
+def pref(key: str, overrides: dict, aws_channels=DEFAULT_AWS, record_only=DEFAULT_RECORD_ONLY, context=None) -> dict:
+    p = defaults(key, aws_channels, record_only, context)
     o = overrides.get(key)
     if isinstance(o, dict):
         p.update({k: v for k, v in o.items() if k in FIELDS})
     return p
 
 
-def for_station(overrides: dict, record_only=DEFAULT_RECORD_ONLY) -> dict:
+def for_station(overrides: dict, record_only=DEFAULT_RECORD_ONLY, select_ok: bool = True, norm_ok: bool = True) -> dict:
     """The map the hub sends the station (set_channel_prefs): its Settings overrides, plus {"transcribe": false}
     for each record_only channel whose override doesn't say (the station's defaults don't know the hub's
-    record_only; a Settings choice wins). Only fields a station keeps (check_map), so its sig agrees."""
+    record_only; a Settings choice wins). Only fields a station keeps (check_map), so its sig agrees. select_ok False:
+    a station from before the engine selector (its check_map refuses the whole map with one it doesn't know) gets the
+    nearest old engine (sizeup/sttroute.py legacy); the hub still routes its clips by the choice itself."""
+    from sizeup import sttroute
     out = {k: dict(v) for k, v in overrides.items() if isinstance(v, dict)}
+    if not select_ok:
+        out = {k: dict(v, engine=sttroute.legacy(v["engine"])) if sttroute.is_new(v.get("engine", "")) else v
+               for k, v in out.items()}
+    else:                                  # (#896: "aws" is pinned AWS wherever it is still met)
+        out = {k: dict(v, engine=PIN_AWS) if v.get("engine") == "aws" else v for k, v in out.items()}
+        if not norm_ok:                    # (a station with the selector but not Auto · normal: Auto · priority's way)
+            out = {k: dict(v, engine=sttroute.before_norm(v["engine"])) if v.get("engine") == sttroute.AUTO_NORM else v
+                   for k, v in out.items()}
     for key in record_only:
         if KEY.fullmatch(key) and "transcribe" not in out.get(key, {}):
             out[key] = {**out.get(key, {}), "transcribe": False}
@@ -120,11 +145,13 @@ def for_station(overrides: dict, record_only=DEFAULT_RECORD_ONLY) -> dict:
 
 
 def effective(p: dict, aws_ok: bool) -> str:
-    """off | local | aws | both: what runs for this channel now."""
+    """off | local | aws | both | auto | auto_bg | pin:<id>: what runs for this channel now (an "aws" or "both" channel
+    without AWS: local; the selector's own engines whatever AWS can do: their order has its own fallbacks)."""
     if not p.get("transcribe", True):
         return "off"
     eng = p.get("engine", "local")
-    return eng if eng == "local" or aws_ok else "local"
+    from sizeup import sttroute
+    return eng if eng == "local" or aws_ok or sttroute.is_new(eng) else "local"
 
 
 AWS_KEYS_MAX = 16          # channels in the hub's reserve / deny lists (the airband, the pages, Fire/EMS 15, police)

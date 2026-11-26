@@ -110,7 +110,10 @@ COUNTS = ("asked", *WHYS, "events", "evidence", "capped", "unavailable", "uncued
 # an event the trigger row doesn't back (_corroborated) is at most ALONE_MAX ("medium": never "high", never pushed), and
 # at most SHORT_MAX ("low") when that row is short (under SHORT_WORDS words or SHORT_S seconds): one odd transmission.
 # A category with "model_cues" (rules.py) is raised only when the trigger says one of them, or CUE_CONTEXT of the
-# context transmissions do (a clear sequence); else the answer is kept, used "uncued", nothing raised.
+# context transmissions do (a clear sequence), or the row aired just before the trigger does and is a dispatch (the
+# dispatcher or the pack's dispatch cue, within the pack's window_s: "units respond, two males fighting" then "copy, en
+# route"); else the answer is kept, used "uncued", nothing raised. The cues cover every wording of the category's rules
+# (tests/test_intel_backing.py, CUE_EXEMPT the exceptions).
 ALONE_MAX = 0.6
 SHORT_MAX = 0.45
 SHORT_WORDS = 10
@@ -121,12 +124,18 @@ SITE_PRECISIONS = ("address", "intersection", "landmark")
 SYSTEM = ("You read police radio transcripts (speech-to-text, often misheard) for a fire department that wants an "
           "early warning of calls it may be sent to or must stage for. Answer only from the words given. "
           "category: the one listed category whose definition the trigger transmission (with its context) fits, else "
-          "\"none\". confidence: a number from 0 to 1 that the category is right. in_progress: the incident is "
-          "happening now. weapon: the weapon said, \"unknown\" when one is hinted but not named, else \"none\". "
+          "\"none\". confidence: a number from 0 to 1 that the category is right; below 0.5 when the transmission is "
+          "garbled, partial or only hints at the incident. Choose a category other than none only when the trigger "
+          "transmission, or a dispatch in its context, describes that incident; when in doubt, none. in_progress: "
+          "the incident is happening now. "
+          "weapon: the weapon said, \"unknown\" when one is hinted but not named, else \"none\". "
           "deescalation: the transmission says an incident is calming down or under control (a subject in custody, "
           "the scene secure, no injuries after all). address: the place as said in the TRIGGER transmission (at most "
           "80 characters), or null. reason: at most 120 characters, why.")
-NONE_LINE = "- none: anything else: routine traffic, a unit's status or location, a call already handled."
+NONE_LINE = ("- none: anything else: routine traffic, a unit's status or location, a call already handled or cleared, an "
+             "alarm cancelled, a theft or larceny reported after the fact, plate or vehicle checks, traffic and "
+             "parking conditions, a category word used in routine business (a parade barricade, a rifle at the range, a "
+             "CPR class), or a transmission too garbled or partial to tell what is happening.")
 
 
 # -- the schema and its check -----------------------------------------------------------------------------------------
@@ -531,10 +540,14 @@ class ModelBacking:
         text = str(row.get("text") or "")
         with self._lock:
             src = self.sources.setdefault(key, deque(maxlen=SOURCE_KEEP))
-            if text.strip() and not any(x["tid"] == tid for x in src):
+            mine = next((x for x in src if x["tid"] == tid), None)
+            if mine is not None:
+                mine["text"] = text           # a re-text (#901's correction, a re-ask): its words now, never the old
+            elif text.strip():
                 src.append({"tid": tid, "at": at, "text": text})
         out = self._due(engine, at)
-        if (suppressed or changed or ruled or tid in self.asked or any(r.category == "routine" for r, _w in hits)
+        late = row.get("late") or getattr(win.entries.get(tid), "late", False)      # context only, never asked
+        if (suppressed or changed or ruled or late or tid in self.asked or any(r.category == "routine" for r, _w in hits)
                 or len(rules_mod.words(text)) < int(c["infer_pd_min_words"]) or not self.needs(pack, text)
                 or any(tid in e.traffic_ids for e in engine.events.open_events()
                        if e.pack == pack.name and e.source_key == key)):      # a re-feed of a row already in an event
@@ -629,16 +642,36 @@ class ModelBacking:
             except Exception as e:  # noqa: BLE001 - the thread goes on
                 self.log(f"intel: model: {type(e).__name__}")
 
+    def forget(self, tid: str) -> None:
+        """A row withdrawn (engine._withdraw: its text emptied or unclear since): out of every source's context, its
+        held question dropped and an asked one never applied."""
+        with self._lock:
+            for src in self.sources.values():
+                for x in [x for x in src if x["tid"] == tid]:
+                    src.remove(x)
+            self.asked.pop(tid, None)          # its words back after a re-ask: asked afresh
+        self.pending = [j for j in self.pending if j["tid"] != tid]
+        with self._q.mutex:                   # a question already queued for the model thread: never asked (_ask)
+            for item in self._q.queue:
+                if isinstance(item, tuple) and len(item) > 2 and isinstance(item[2], dict) and item[2].get("tid") == tid:
+                    item[2]["dead"] = True
+        for job in list(self.open.values()):
+            if job.get("tid") == tid:
+                job["dead"] = True
+
     def context(self, key: str, tid: str, at: float) -> list[dict]:
-        """Up to CONTEXT_MAX of the source's transmissions within CONTEXT_S of the trigger (the nearest), oldest first."""
+        """Up to CONTEXT_MAX of the source's transmissions within CONTEXT_S of the trigger (the nearest), oldest first:
+        by AIR time (each row's start), whatever order their transcripts arrived in."""
         with self._lock:
             have = list(self.sources.get(key, ()))
-        near = [x for x in have if x["tid"] != tid and abs(float(x["at"]) - at) <= CONTEXT_S]
+        near = [x for x in have if x["tid"] != tid and x["text"].strip() and abs(float(x["at"]) - at) <= CONTEXT_S]
         near = sorted(near, key=lambda x: abs(float(x["at"]) - at))[:CONTEXT_MAX]
         return sorted(near, key=lambda x: float(x["at"]))
 
     def _ask(self, engine, job: dict) -> list:
         """The model thread (live): the backend's availability, the site history, the messages, the question."""
+        if job.get("dead"):
+            return []                          # its row withdrawn since it was queued (forget)
         c = self.cfg()
         pack = engine.pack(job["pack"])
         if pack is None:
@@ -769,7 +802,7 @@ class ModelBacking:
                 return []
             if near == "other":                # another call while one is open on the source: on the card, no push
                 mode = lowest(mode, "map")
-            if not self._cued(pack, cat, text, job.get("context") or []):
+            if not self._cued(pack, cat, text, job.get("context") or [], self._dispatch(pack, win, tid, at)):
                 rec.update(event_id=None, used="uncued")   # "water rescue" with no word of water in what was said
                 self.count("uncued")
                 return []
@@ -803,9 +836,25 @@ class ModelBacking:
             self.count("events")
             return [ev]
 
-    def _cued(self, pack, cat: str, text: str, context: list[str]) -> bool:
-        """The category's "model_cues" (rules.py; none: any answer) in the trigger's words, or in CUE_CONTEXT of the
-        context transmissions."""
+    @staticmethod
+    def _dispatch(pack, win, tid: str, at: float) -> str:
+        """The text of the source's transmission just before the trigger when it is a dispatch (the dispatcher's voice
+        or a positive hit of the pack's dispatch cue), else "". Just before: the newest of the window's rows, as the
+        answer is applied (a row aired in between whose text came in late counts), that AIRED before the trigger,
+        within the pack's window_s, not suppressed."""
+        from sizeup.intel import rules as rules_mod
+        prior = [e for t, e in (win.entries.items() if win is not None else ())
+                 if t != tid and not e.suppressed and 0.0 < at - e.at <= pack.window_s]
+        e = max(prior, key=lambda x: x.at, default=None)
+        if e is None:
+            return ""
+        if e.dispatcher or any(w > 0 and r.mode != "shadow" and r.category == rules_mod.WILD for r, w in e.hits):
+            return e.text or ""
+        return ""
+
+    def _cued(self, pack, cat: str, text: str, context: list[str], dispatch: str = "") -> bool:
+        """The category's "model_cues" (rules.py; none: any answer) in the trigger's words, in the dispatch just
+        before it (_dispatch), or in CUE_CONTEXT of the context transmissions."""
         src = pack.category(cat).get("model_cues") or []
         if not src:
             return True
@@ -817,7 +866,8 @@ class ModelBacking:
         def says(t: str) -> bool:
             ws = rules_mod.words(t)
             return any(p.found(t, ws) for p in self._needs[k])
-        return says(text) or sum(1 for t in context if t and says(t)) >= CUE_CONTEXT
+        return (says(text) or bool(dispatch and says(dispatch))
+                or sum(1 for t in context if t and says(t)) >= CUE_CONTEXT)
 
     @staticmethod
     def _short(row: dict, text: str) -> bool:

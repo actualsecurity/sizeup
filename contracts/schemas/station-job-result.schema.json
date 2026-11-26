@@ -143,6 +143,13 @@
       ],
       "description": "null when saved, else why not; `confirm: <question>` asks the person first."
     },
+    "result.replace_sdr": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "null when done, else why not."
+    },
     "result.sources_poll_now": {
       "type": "integer",
       "minimum": 0,
@@ -190,6 +197,33 @@
       "type": "integer",
       "minimum": 0,
       "description": "How many of the station's stuck and late quarantined events of that type were dropped; 0 when none (or no hub link). The hub logs it, audits it with who asked and answers the admin {ok: true, dismissed: n}."
+    },
+    "result.stt_withdraw": {
+      "title": "What the station did with each id",
+      "description": "App.stt_withdraw's answer (#927): each id it was sent in one of three lists.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["withdrawn", "running", "sent", "unknown"],
+      "additionalProperties": true,
+      "properties": {
+        "withdrawn": {"type": "array", "items": {"type": "string"}, "description": "Taken out of whisper's queue: nothing goes up for them."},
+        "running": {"type": "array", "items": {"type": "string"}, "description": "On whisper already: it runs on, and its text goes up as a fill with `authoritative: false` (a run for the hub's rule)."},
+        "sent": {"type": "array", "items": {"type": "string"}, "description": "Its text went up already or is about to: the hub decides between the texts."},
+        "unknown": {"type": "array", "items": {"type": "string"}, "description": "The station doesn't know it: never sent at its close, or from before the station's restart."}
+      }
+    },
+    "result.stt_held": {
+      "title": "Which clips the new process has",
+      "description": "App.stt_held's answer (#927): each id it was sent in one of three lists.",
+      "x-complete": true,
+      "type": "object",
+      "required": ["held", "sent", "unknown"],
+      "additionalProperties": true,
+      "properties": {
+        "held": {"type": "array", "items": {"type": "string"}, "description": "Still waiting for whisper here (saved at the stop and queued again): its text comes as ever."},
+        "sent": {"type": "array", "items": {"type": "string"}, "description": "Its text went up already or is about to."},
+        "unknown": {"type": "array", "items": {"type": "string"}, "description": "This process doesn't have it (lost with a crash or a kill): the hub marks it shed, the catch-up runs it."}
+      }
     },
     "result.sources_reset": {
       "type": "string",

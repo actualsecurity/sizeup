@@ -239,6 +239,7 @@
   .sdr-row > .sdr-err { grid-column: 2; margin: 0; }
   @media (max-width: 40rem) { .sdrs .sdr-row { grid-template-columns: minmax(0, 1fr); } .sdr-row > .sdr-err { grid-column: 1; } }
   .sdr-err { color: var(--warn); font-size: var(--fs-xs); margin-inline-start: var(--s-2); }
+  .sdrs .sdr-row.focus { outline: var(--focus-w) solid var(--warn); outline-offset: var(--focus-off); }   /* an alert's link */
   .sdr-err:empty { display: none; }
   /* antenna groups (radio-controls.js renderGroups): a lock badge on a grouped dongle's row; one line per group,
      the editor inline */
@@ -319,6 +320,8 @@
   /* a display name (#607, the radio rail's): the pencil, and the field in place of the name while it is edited */
   .tg-ren { flex: none; padding-inline: var(--s-1); }
   .tg-rename { flex: 1 1 auto; min-inline-size: 8rem; max-inline-size: 20rem; }
+  .tg-short { flex: 0 1 auto; min-inline-size: 5rem; max-inline-size: 10rem; }
+  .tg-shortlbl { --c: var(--text-2); flex: none; }
   /* a source's service (radio_services): a small select beside the pencil */
   .tg-svc { flex: none; inline-size: auto; max-inline-size: 8.5rem; font-size: var(--fs-xs); padding-block: 0; }
   /* a channel's speech model on the GPU workers (sizeup/sttmodels.py): beside the Engine, the hub's admins only */
@@ -348,6 +351,7 @@
   .tg-note.warn { color: var(--warn); font-weight: 700; }
   .tg-sw { grid-area: sw; display: flex; gap: var(--s-1); }
   .sw[data-field="main"]:is(.on, [aria-checked="true"]) .knob { background: var(--accent); }
+  .sw.na .knob { visibility: hidden; }             /* a switch the row doesn't have (the county's Alerts): no knob */
   /* Channels: Record / Main / Transcribe / Engine under each row (sizeup/channels.py); sync and cost lines */
   .rc-groups .tg-rows { grid-template-columns: repeat(auto-fill, minmax(min(27rem, 100%), 1fr)); }
   .rc-groups .tg-row { grid-template-columns: minmax(0, 1fr); grid-template-areas: "id" "info" "sw"; row-gap: var(--s-1); }

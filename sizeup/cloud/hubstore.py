@@ -34,7 +34,16 @@ CREATE TABLE IF NOT EXISTS traffic (id TEXT PRIMARY KEY, incident_id TEXT NOT NU
 CREATE INDEX IF NOT EXISTS traffic_incident ON traffic (incident_id, start);
 CREATE TABLE IF NOT EXISTS pages (id TEXT PRIMARY KEY, start REAL NOT NULL, doc TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+-- (#927) the transmissions a station sent at their close whose text is still to come: when each came and the station's
+-- boot then (the sweep's evidence, HubApp._flag_waiting); flagged once the sweep said "transcription failed"
+CREATE TABLE IF NOT EXISTS station_wait (id TEXT PRIMARY KEY, at REAL NOT NULL, boot TEXT NOT NULL DEFAULT '',
+                                         flagged INTEGER NOT NULL DEFAULT 0);
+-- ... and a fill (retext) that came before its transmission (a quarantined event sent again later): kept until it does
+CREATE TABLE IF NOT EXISTS early_fill (id TEXT PRIMARY KEY, at REAL NOT NULL, doc TEXT NOT NULL);
 """
+WAIT_KEEP_S = 86400.0       # (#927) a station_wait row this old is forgotten (its row says "transcription failed" by then)
+EARLY_KEEP_S = 6 * 3600.0   # ... an early fill this old is dropped (its transmission never came)
+EARLY_MAX = 2000            # ... and at most this many are kept (the oldest go)
 
 AUDIO_SCHEMA = """
 CREATE TABLE IF NOT EXISTS audio (id TEXT PRIMARY KEY, kind TEXT NOT NULL, at REAL NOT NULL, note TEXT NOT NULL DEFAULT '',
@@ -114,6 +123,54 @@ class MonitorDb:
         with self._lock:
             self.db.execute("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                             (key, value))
+
+    # -- (#927) transmissions waiting for their station's text, and fills that came first --------------------------
+
+    def wait_add(self, tid: str, at: float, boot: str = "") -> None:
+        with self._lock:
+            self.db.execute("INSERT INTO station_wait (id, at, boot) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING",
+                            (tid, at, boot or ""))
+
+    def wait_drop(self, ids) -> None:
+        ids = list(ids)
+        with self._lock:
+            for k in range(0, len(ids), 500):
+                chunk = ids[k:k + 500]
+                self.db.execute(f"DELETE FROM station_wait WHERE id IN ({','.join('?' * len(chunk))})", chunk)
+
+    def wait_flag(self, tid: str) -> None:
+        with self._lock:
+            self.db.execute("UPDATE station_wait SET flagged = 1 WHERE id = ?", (tid,))
+
+    def waiting(self, flagged: bool | None = False) -> list[tuple[str, float, str]]:
+        """[(id, at, boot)] of the transmissions still waiting (flagged None: flagged or not), the oldest first."""
+        with self._lock:
+            return [tuple(r) for r in self.db.execute(
+                "SELECT id, at, boot FROM station_wait" + ("" if flagged is None else " WHERE flagged = ?")
+                + " ORDER BY at", () if flagged is None else (int(flagged),)).fetchall()]
+
+    def is_waiting(self, tid: str) -> bool:
+        with self._lock:
+            return self.db.execute("SELECT 1 FROM station_wait WHERE id = ?", (tid,)).fetchone() is not None
+
+    def early_put(self, tid: str, at: float, doc: dict) -> None:
+        with self._lock:
+            self.db.execute("INSERT INTO early_fill (id, at, doc) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING",
+                            (tid, at, _dump(doc)))
+            self.db.execute("DELETE FROM early_fill WHERE id IN (SELECT id FROM early_fill ORDER BY at DESC "
+                            "LIMIT -1 OFFSET ?)", (EARLY_MAX,))
+
+    def early_take(self, tid: str) -> dict | None:
+        with self._lock:
+            r = self.db.execute("SELECT doc FROM early_fill WHERE id = ?", (tid,)).fetchone()
+            if r is not None:
+                self.db.execute("DELETE FROM early_fill WHERE id = ?", (tid,))
+        return json.loads(r[0]) if r is not None else None
+
+    def wait_prune(self, now: float) -> None:
+        with self._lock:
+            self.db.execute("DELETE FROM station_wait WHERE at < ?", (now - WAIT_KEEP_S,))
+            self.db.execute("DELETE FROM early_fill WHERE at < ?", (now - EARLY_KEEP_S,))
 
     # -- the monitor's incidents, transmissions and pages ------------------------------------------------
 

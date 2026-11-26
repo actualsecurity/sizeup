@@ -209,7 +209,7 @@
     },
     "retext": {
       "title": "retext: new words for a clip",
-      "description": "New words for a page or a transmission the hub already has: a re-run on the station, the station's whisper standing in for Amazon Transcribe, or a shed clip caught up (App._retext, sizeup/app.py). No `audio`.",
+      "description": "New words for a page or a transmission the hub already has: a re-run on the station, the station's whisper standing in for Amazon Transcribe, a shed clip caught up (App._retext, sizeup/app.py), or (`fill`, #927) the first text of a transmission sent at its close with `transcript_pending` `station` (App._fill_pending). No `audio`.",
       "x-complete": true,
       "type": "object",
       "required": ["id", "text", "status", "confidence", "model"],
@@ -235,7 +235,15 @@
         },
         "catchup": {"const": true, "description": "Present (true) only for a shed clip caught up later: the words may be hours old, so on the hub nothing that alerts hears them."},
         "vocab_v": {"type": "string", "description": "The version of the term list that went into whisper's prompt. Present only when one did. The hub cuts it to 80 characters."},
-        "late": {"const": true, "description": "Present (true) only for the words of a P25 call written while sizeup was down and ingested at its next start (#747): on the hub nothing that pre-alerts hears them; an emergency still alarms, labelled late."}
+        "late": {"const": true, "description": "Present (true) only for the words of a P25 call written while sizeup was down and ingested at its next start (#747): on the hub nothing that pre-alerts hears them; an emergency still alarms, labelled late."},
+        "engine": {"type": "string", "description": "The engine that wrote the words (#927): the station's whisper, or Amazon Transcribe where the station runs it. The hub keeps it with the run (stt_runs) and takes any other value as `station-whisper`.", "x-known": ["station-whisper", "station-aws"]},
+        "fill": {"const": true, "description": "Present (true) only on the first text of a transmission the station sent at its close (`traffic` with `transcript_pending` `station`, #927): the hub fills that row in place, and what the text sets off (the text hooks, the alarms' words, the ATC watch, the station's run) happens now, once. A row whose text came another way first keeps it. Sent only to a hub whose caps say `traffic_pending`."},
+        "transcript_pending": {"type": "string", "description": "With `fill`: `pool` when the station's whisper handed the clip to the hub's speech-to-text pool instead of transcribing it (it shed it, or the station is stopping): `status` `remote`, `model` `pool`, in the class `stt_class`. The hub takes any other value as absent.", "x-known": ["pool"]},
+        "stt_class": {"type": "string", "description": "With `fill`: the class of the whisper queue it ran in, or (with `transcript_pending` `pool`) the class the pool is to take it in.", "x-known": ["urgent", "high", "live", "rerun", "context-fallback", "context", "low", "catchup"]},
+        "stt_wait_s": {"type": ["number", "null"], "minimum": 0, "description": "With `fill`: how long it waited in the station's whisper queue, seconds, two decimals; null when it never queued. Present once whisper ran."},
+        "stt_run_s": {"type": "number", "minimum": 0, "description": "With `fill`: how long whisper ran on it, seconds, two decimals. Present once whisper ran."},
+        "stt": {"const": "both", "description": "With `fill`: present (`both`) only on a channel set to both engines: the hub adds Amazon Transcribe's text, the station's kept as the alternative."},
+        "authoritative": {"const": false, "description": "With `fill`: present (false) only when the hub had withdrawn the clip from the station's whisper (`stt_withdraw`) after whisper began it: the hub keeps the words as a run (stt_runs), never as the row's text by themselves; its own rule decides."}
       }
     },
     "rerun": {
@@ -518,7 +526,7 @@
         "start": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When it starts, Unix seconds. The hub fails the event without it.", "x-hub": "required"},
         "end": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When it ends, Unix seconds. The hub fails the event without it, and files the clip under this time.", "x-hub": "required"},
         "text": {"type": "string", "description": "The words; \"\" when nothing was said or it was not transcribed. The hub fails the event without it and then writes `raw` over it (\"\" for an alarm).", "x-hub": "required"},
-        "status": {"type": "string", "description": "Where its speech-to-text stands. `done` / `no_speech`: final, from the station's whisper; `remote`: the hub is to transcribe it (see `transcript_pending`); `off`: kept, not transcribed; `skipped`: whisper was busy, it may be caught up later; `error`: whisper failed; `pending`: not transcribed yet (an alarm). The hub takes a missing one as `done`.", "x-known": ["pending", "done", "no_speech", "off", "remote", "skipped", "error"], "x-hub": "read"},
+        "status": {"type": "string", "description": "Where its speech-to-text stands. `done` / `no_speech`: final, from the station's whisper; `remote`: the hub is to transcribe it (see `transcript_pending`); `off`: kept, not transcribed; `skipped`: whisper was busy, it may be caught up later; `error`: whisper failed; `pending`: not transcribed yet (an alarm; a transmission with `transcript_pending` `station`, #927). The hub takes a missing one as `done`.", "x-known": ["pending", "done", "no_speech", "off", "remote", "skipped", "error"], "x-hub": "read"},
         "unit": {"type": "string", "description": "Who talked, as the station names them: an alias, a tag or the radio id, joined with \", \"; \"\" when not known. An MDC-1200 emergency adds ` EMERGENCY` to the name.", "x-hub": "read"},
         "talkgroup": {"type": ["integer", "null"], "minimum": 0, "description": "The P25 talkgroup number; null on an FM or airband channel. With `system` set it is that system's number, never the county's.", "x-hub": "read"},
         "rig": {"type": "string", "description": "The unit the station's registry gives the radio; \"\" when unknown. The hub writes its own registry's answer over it (\"\" for another P25 system's).", "x-hub": "replaced"},
@@ -527,7 +535,7 @@
         "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "The model's confidence in `raw`, 0 to 1; null without one.", "x-hub": "read"},
         "model": {"type": "string", "description": "The model that wrote `raw` (a file name), or in its place why there are no words (`pool`, `weak signal (carrier 2.0 dB): not transcribed`, `<model> (skipped: busy ...)`): at most 200 characters.", "x-hub": "read"},
         "stt": {"type": "string", "description": "Which engine the hub is to add. \"\": none; `aws`: the hub's Amazon Transcribe writes the text (with `transcript_pending`); `both`: the hub adds Amazon Transcribe's text as the alternative.", "x-known": ["", "aws", "both"], "x-hub": "read"},
-        "transcript_pending": {"type": "string", "description": "Present only when the station did not transcribe it and the hub is to: `aws` (Amazon Transcribe on the clip) or `pool` (the hub's speech-to-text pool, in the class `stt_class`). The hub takes any other value as absent.", "x-known": ["aws", "pool"], "x-hub": "read"},
+        "transcript_pending": {"type": "string", "description": "Present only when its text is still to come: `aws` (the hub's Amazon Transcribe on the clip), `pool` (the hub's speech-to-text pool, in the class `stt_class`), or `station` (#927: sent at its close, `status` `pending`, the station's whisper has it; its text follows as a `retext` with `fill`; only to a hub whose caps say `traffic_pending`). The hub takes any other value as absent.", "x-known": ["aws", "pool", "station"], "x-hub": "read"},
         "stt_wait_s": {"type": ["number", "null"], "minimum": 0, "description": "How long it waited in the station's whisper queue, seconds, two decimals; null when it never queued. Present once whisper ran.", "x-hub": "read"},
         "stt_run_s": {"type": "number", "description": "How long whisper ran on it, seconds, two decimals. Present once whisper ran.", "minimum": 0, "x-hub": "read"},
         "stt_class": {"type": "string", "description": "The class of the whisper queue it ran in, or (with `transcript_pending` `pool`) the class the pool is to take it in.", "x-known": ["urgent", "high", "live", "rerun", "context-fallback", "context", "low", "catchup"], "x-hub": "read"},

@@ -298,6 +298,8 @@ def test_a_hub_names_the_model_and_context_and_a_loop_goes_to_aws(tmp_path, fake
 
     fake = FakeTranscribe(phrases={500: AWS_TEXT})
     hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
+    from tests.test_stt_engine_select import _set
+    _set(hub, "FG1", "auto")                              # (Auto · priority: a GPU worker first, #896)
     hub.app.stt_choices.set("FG1", {"callsigns": ["Command"], "model": QWEN})
     hub.app._pool_class = lambda item, key: LIVE          # (an urgent clip's words are never discarded: a live one's)
     token = hub.app.hub.workers.add("gpu-1", "Test box")

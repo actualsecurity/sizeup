@@ -365,17 +365,22 @@ class Registry:
 
     @staticmethod
     def hint_on(row: dict | None) -> bool:
-        """A radio's own entry gives its name as speech-to-text context: its switch (Settings > Radios > Radio IDs, "use
-        as hint"), else on when the entry names it (a unit, or another system's exact label: a dispatch console's)."""
+        """A radio's own entry gives its name as speech-to-text context (Settings > Radios > Radio IDs, "use as hint").
+        Another P25 system's (MRRS: agencies' and roles' labels, officers swap radios) only with its switch on, an
+        admin's choice for a dispatch console ("908", "Headquarters"); never by default. One of ours: its switch, else on
+        when the entry names a unit (a fire/EMS unit: "E63")."""
         if row is None:
             return False
         h = row.get("hint")
-        return bool(h) if h is not None else bool(row.get("unit") or row.get("label"))
+        if row.get("system") in OTHER_P25:
+            return h == 1
+        return bool(h) if h is not None else bool(row.get("unit"))
 
     def hints(self, system: str, radio_ids) -> tuple[list[str], list[str]]:
         """For a clip's speech-to-text context (sizeup/talkers.py hint_names): (named, blocked). named: another P25
-        system's exact per-ID names with the hint on ("908", "Headquarters": a dispatch console; never a range's label,
-        never "unknown MRRS radio"); blocked: the unit codes, aliases and IDs of radios whose hint is off."""
+        system's exact per-ID names with the hint switched on by an admin ("908", "Headquarters": a dispatch console;
+        never by default, never a range's label, never "unknown MRRS radio"); blocked: the unit codes, aliases and IDs of
+        radios whose hint is off (another system's: unless switched on)."""
         named: list[str] = []
         blocked: list[str] = []
         for rid in [str(r).strip() for r in (radio_ids.split(",") if isinstance(radio_ids, str) else radio_ids or ())]:
@@ -384,9 +389,9 @@ class Registry:
             row = self.get(system, rid.upper() if system == "mdc" else rid)
             if row is None:
                 continue
-            if row.get("hint") is not None and not row["hint"]:
+            if not self.hint_on(dict(row, system=system)) and (system in OTHER_P25 or row.get("hint") is not None):
                 blocked += [x for x in (row.get("unit"), row.get("alias"), row.get("label"), rid) if x]
-            elif system in OTHER_P25 and row.get("label") and self.hint_on(row) and row["label"] not in named:
+            elif system in OTHER_P25 and row.get("label") and row["label"] not in named:
                 named.append(row["label"])
         return named, blocked
 

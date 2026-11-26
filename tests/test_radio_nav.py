@@ -103,6 +103,8 @@ const comms = () => calls.filter((c) => c.startsWith("/api/cad/comms?"));
 const last = (k) => new URLSearchParams(comms().filter((c) => !c.includes("limit=15")).slice(-1)[0].split("?")[1]).get(k);   // not the Our calls line's own
 
 global.RADIO_NAV_TEST = process.argv[4] !== "plain";
+// the views (radio-views.js, loaded before radio-nav.js on the page): the coded ones unless a test sets others
+eval(fs.readFileSync(require("path").join(require("path").dirname(process.argv[2]), "radio-views.js"), "utf8"));
 eval(fs.readFileSync(process.argv[2], "utf8"));
 if (process.argv[4] === "plain") { console.log(JSON.stringify({ test: "test" in window.RadioNav, keys: Object.keys(window.RadioNav) })); process.exit(0); }
 const N = window.RadioNav, T = N.test, st = T.st;

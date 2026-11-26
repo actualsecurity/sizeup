@@ -23,6 +23,7 @@ deploy/stt-worker/README.md."""
 from __future__ import annotations
 
 import argparse
+import atexit
 import ctypes
 import dataclasses
 import hashlib
@@ -58,6 +59,7 @@ MAX_CLAIM_WAIT_S = 25
 HEARTBEAT_TIMEOUT_S = 4.0                 # a slow answer mustn't hold the next heartbeat past the hub's 12 s
 MAX_HEARTBEAT_S = 5                       # the hub takes back a silent worker's leases after 12 s
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
+LLM_PRIORITIES = ("keep", "yield")          # llm_priority: the LLM keeps its VRAM, or gives it to the speech models
 # every speech model is told English, never left to detect a language (a short noisy clip came out in another one):
 # language_setting below is the one place that says how, for today's whisper_server and every catalog model alike
 STT_LANGUAGE = "en"
@@ -145,7 +147,14 @@ class Config:
     primary_vram_mb: float = 1000.0        # whisper_server's, when its model isn't in the catalog
     gate_dbfs: float = -55.0               # a clip whose speech level is under this isn't decoded: no speech (every
                                            # model makes words up on silence); -120 never
+    llm_priority: str = "yield"            # the local LLM vs a catalog model that doesn't fit beside it: "yield" (speech
+                                           # first: the LLM stops for it, the hub hears llm unavailable and intel falls
+                                           # back to its rules; back when there is room) or "keep" (the LLM stays; that
+                                           # model isn't loaded, the hub hears it unavailable and the channel keeps its
+                                           # champion/route). The hub's stt_models llm_priority, when it sends one, wins
+    keep_awake: bool = True                # Windows: no idle sleep while running and not paused by hand (KeepAwake)
     base_dir: str = dataclasses.field(default="", repr=False)  # the config file's folder (not a key)
+    ignored_keys: list = dataclasses.field(default_factory=list, repr=False)  # keys this file doesn't know (not a key)
 
     @property
     def worker_id(self) -> str:
@@ -209,13 +218,21 @@ def load_config(path: str | os.PathLike | None, env: dict | None = None) -> Conf
         if not isinstance(doc, dict):
             raise ConfigError(f"{p.name}: not a table")
         doc = doc.get("worker", doc)
-    keys = {f.name for f in dataclasses.fields(Config)} - {"base_dir"}
-    unknown = sorted(set(doc) - keys)
-    if unknown:
-        raise ConfigError(f"unknown config keys: {', '.join(unknown)}")
-    cfg = Config(base_dir=base)
+    keys = {f.name for f in dataclasses.fields(Config)} - {"base_dir", "ignored_keys"}
+    # a key this file doesn't know is warned of and ignored, never refused: a worker.py rolled back (or not yet
+    # updated) still starts with a worker.toml that a newer one's key was added to. A known key's bad value is refused.
+    unknown = sorted(str(k)[:40] for k in set(doc) - keys)
+    cfg = Config(base_dir=base, ignored_keys=unknown)
     for key, value in doc.items():
+        if key not in keys:
+            continue
+        if key in STRICT_BOOLS and not (isinstance(value, bool) or (isinstance(value, str)
+                                                                     and value.strip().lower() in BOOL_WORDS)):
+            raise ConfigError(f"{key}: true or false")
         setattr(cfg, key, _coerce(key, value, getattr(cfg, key)))
+    cfg.llm_priority = str(cfg.llm_priority).strip().lower()
+    if cfg.llm_priority not in LLM_PRIORITIES:
+        raise ConfigError(f"llm_priority: {cfg.llm_priority[:20]}: one of {', '.join(LLM_PRIORITIES)}")
     for key, var in ENV.items():
         if env.get(var):
             setattr(cfg, key, env[var].strip())
@@ -231,6 +248,10 @@ def load_config(path: str | os.PathLike | None, env: dict | None = None) -> Conf
     cfg.heartbeat_s = min(max(cfg.heartbeat_s, 0.01), MAX_HEARTBEAT_S)
     cfg.claim_wait_s = min(max(cfg.claim_wait_s, 0.0), MAX_CLAIM_WAIT_S)
     return cfg
+
+
+STRICT_BOOLS = ("keep_awake",)             # keys whose value must be a yes or a no (a typo never reads as false)
+BOOL_WORDS = ("1", "0", "true", "false", "yes", "no", "on", "off")
 
 
 def _path(value: str, base: str) -> str:
@@ -443,6 +464,8 @@ def setup_logging(cfg: Config) -> None:
     for h in handlers:
         h.setFormatter(fmt)
         log.addHandler(h)
+    if cfg.ignored_keys:
+        log.warning("config: ignoring keys this worker.py doesn't know: %s", ", ".join(cfg.ignored_keys[:20]))
 
     def _thread_hook(a):
         log.error("thread %s died", a.thread.name if a.thread else "?", exc_info=(a.exc_type, a.exc_value, a.exc_traceback))
@@ -991,6 +1014,9 @@ class Children:
         return ended
 
 
+_SERVER_LOGS_LOCK = threading.Lock()
+
+
 class WhisperProcess:
     """whisper-server started (and restarted) by the worker, when `whisper_server` is set: one Task Scheduler task,
     no console window, its pid known for the GPU check, its output in whisper-server.log (rotated), and none of the
@@ -1026,14 +1052,28 @@ class WhisperProcess:
         return self.pid != 0
 
     def _logger(self) -> logging.Logger:
+        """The server's own log (rotated). One file handler per logger, whatever number of WhisperProcess objects
+        share its name (a catalog model's server is a new one at each start): the one already on this file is kept,
+        any other closed and taken off (two handlers on one file: every line twice, and Windows can't rotate it)."""
         if self._out is None:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             out = logging.getLogger("sizeup.stt_worker." + self.name.replace("-", "_"))
             out.propagate = False
             out.setLevel(logging.INFO)
-            h = logging.handlers.RotatingFileHandler(self.log_path, maxBytes=1_000_000, backupCount=2, encoding="utf-8")
-            h.setFormatter(logging.Formatter("%(message)s"))
-            out.addHandler(h)
+            want = os.path.abspath(os.fspath(self.log_path))
+            with _SERVER_LOGS_LOCK:
+                kept = None
+                for h in list(out.handlers):
+                    if kept is None and isinstance(h, logging.handlers.RotatingFileHandler) and h.baseFilename == want:
+                        kept = h
+                        continue
+                    out.removeHandler(h)
+                    h.close()
+                if kept is None:
+                    kept = logging.handlers.RotatingFileHandler(self.log_path, maxBytes=1_000_000, backupCount=2,
+                                                                encoding="utf-8")
+                    kept.setFormatter(logging.Formatter("%(message)s"))
+                    out.addHandler(kept)
             self._out = out
         return self._out
 
@@ -1261,6 +1301,144 @@ def file_sha256(path: Path, cache: Path) -> str:
             h.update(chunk)
     write_json(cache, dict(key, sha256=h.hexdigest()))
     return h.hexdigest()
+
+
+# --- keeping the PC awake (keep_awake) -----------------------------------------------------------------------------
+
+ES_CONTINUOUS = 0x80000000
+ES_SYSTEM_REQUIRED = 0x00000001            # (never ES_DISPLAY_REQUIRED, 0x2: the screen may still turn off)
+KEEP_AWAKE_RETRY_S = 60.0                  # Windows refused: asked again this often
+KEEP_AWAKE_RESTART_S = (10.0, 60.0, 300.0)  # its thread died: a new one after these waits (then the last, each time)
+
+
+class KeepAwake:
+    """keep_awake (worker.toml, default on): while the worker runs and isn't paused by hand, Windows doesn't idle-sleep
+    the PC: SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED), never the display (the screen still turns off;
+    Sleep from the Start menu, the lid and the power button still work). Gaming, a self-update or whisper-server
+    trouble don't change it. The flag is the setting thread's, so a long-lived thread of its own sets it and clears it
+    (ES_CONTINUOUS alone) on a pause, a stop, the exit or an error; a hard kill ends that thread and Windows drops the
+    flag itself. A stop (a self-update's exit too) first resets the idle timer (ES_SYSTEM_REQUIRED alone), so the PC
+    gets a whole idle timeout before it may sleep: time for the task to start the worker again. No rights needed, no
+    powercfg change. Not Windows: nothing (a no-op, nothing reported)."""
+
+    def __init__(self, on: bool, kernel32=None, windows: bool | None = None, clock: Callable[[], float] = time.monotonic):
+        self.on = bool(on)
+        self.windows = os.name == "nt" if windows is None else bool(windows)
+        self._k32 = kernel32
+        self.clock = clock
+        self._cv = threading.Condition()
+        self._want = False
+        self._closed = False
+        self._thread: threading.Thread | None = None
+        self._deaths = 0
+        self._restart_at = 0.0
+        self._atexit = False
+        self._failed = False
+        self.held = False                  # the flag is set now (what the hub is told)
+        self.why = "starting"              # not held: why (the hub's hover)
+
+    def report(self) -> dict | None:
+        """keep_awake in hello and state: {on, held, why (not held)}; None off Windows (nothing to keep awake there)."""
+        if not self.windows:
+            return None
+        doc = {"on": self.on, "held": self.held}
+        if self.on and not self.held:
+            doc["why"] = self.why[:40]
+        return doc
+
+    def want(self, awake: bool) -> None:
+        """From any thread: the flag should be set (True) or not; the thread does it. A thread that died is replaced
+        after KEEP_AWAKE_RESTART_S (held false meanwhile)."""
+        if not (self.on and self.windows):
+            return
+        with self._cv:
+            if self._closed:
+                return
+            t = self._thread
+            if t is not None and not t.is_alive():
+                if not self._restart_at:
+                    self._deaths += 1
+                    self._restart_at = self.clock() + KEEP_AWAKE_RESTART_S[min(self._deaths, len(KEEP_AWAKE_RESTART_S)) - 1]
+                if self.clock() < self._restart_at:
+                    return
+                self._thread, self._restart_at, t = None, 0.0, None
+            if t is None and not awake:
+                return
+            changed = bool(awake) != self._want
+            self._want = bool(awake)
+            if t is None:
+                self._thread = threading.Thread(target=self._loop, name="keep-awake", daemon=True)
+                self._thread.start()
+                if not self._atexit:
+                    atexit.register(self.close)
+                    self._atexit = True
+            elif changed:
+                self._cv.notify_all()       # (only a change: a retry's wait isn't cut short every tick)
+
+    def close(self) -> None:
+        """The idle timer reset, the flag cleared and the thread ended (a stop, the exit). Never set again by this
+        one."""
+        with self._cv:
+            self._closed, self._want = True, False
+            self._cv.notify_all()
+            t = self._thread
+        if t is not None and t is not threading.current_thread():
+            t.join(2)
+        if self._atexit:
+            atexit.unregister(self.close)
+            self._atexit = False
+
+    def _set(self, flags: int) -> bool:
+        if self._k32 is None:
+            self._k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            self._k32.SetThreadExecutionState.argtypes = [ctypes.c_uint32]
+            self._k32.SetThreadExecutionState.restype = ctypes.c_uint32
+        return bool(self._k32.SetThreadExecutionState(flags))
+
+    def _loop(self) -> None:
+        applied = False                    # what was last asked of Windows on this thread
+        closed = False
+        try:
+            while True:
+                with self._cv:
+                    while not self._closed and self._want == applied and not (applied and not self.held):
+                        self._cv.wait()
+                    if applied and not self.held and not self._closed and self._want:
+                        self._cv.wait(KEEP_AWAKE_RETRY_S)          # it failed: try again now and then
+                    want, closed = self._want and not self._closed, self._closed
+                if want:
+                    ok = self._set(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+                    if ok and not self.held:
+                        log.info("keep awake: Windows won't idle-sleep this PC while the worker runs")
+                    elif not ok and not self._failed:
+                        err = getattr(ctypes, "get_last_error", lambda: 0)()
+                        log.warning("keep awake: SetThreadExecutionState failed (error %s): Windows may sleep this PC",
+                                    err)
+                    self._failed = not ok
+                    self.held, self.why = ok, "" if ok else "refused by Windows"
+                elif applied:
+                    if closed and self.held:
+                        self._set(ES_SYSTEM_REQUIRED)  # the idle timer from now: the restart's grace
+                    self._set(ES_CONTINUOUS)
+                    if self.held and not closed:
+                        log.info("keep awake: released (paused): Windows may sleep this PC")
+                    self.held, self.why = False, "stopped" if closed else "paused"
+                elif closed:
+                    self.why = "stopped"
+                applied = want
+                if closed:
+                    return
+        except Exception:  # noqa: BLE001 - keeping the PC awake never takes the worker down
+            log.exception("keep awake: unexpected error (Windows may sleep this PC; tried again later)")
+        finally:
+            if self.held or applied:
+                try:
+                    self._set(ES_CONTINUOUS)
+                except Exception:  # noqa: BLE001
+                    pass
+            self.held = False
+            if not closed:
+                self.why = "error (see worker.log)"
 
 
 # --- the GPU: gaming detection -------------------------------------------------------------------------------------
@@ -2287,6 +2465,16 @@ MODEL_CHECK_S = 180.0                      # a new server answers a test decode 
                                            # model's hash marked bad (the version it replaced, kept, runs again)
 MODEL_BAD_S = 6 * 3600.0                   # a hash marked bad is tried again after this
 MODEL_RETRY_S = 1800.0                     # a download that failed another way (the network): again after this
+MODEL_SHORT_RETRY_S = 300.0                # a server that failed to load: again after this, doubling each time (to
+                                           # MODEL_RETRY_S): out of VRAM or a port another program holds is never the
+                                           # model's fault; another failure is, after MODEL_BAD_TRIES
+MODEL_BAD_TRIES = 3                        # one hash's server exits or never answers this many times in a row: bad
+MODEL_LOG_TAIL = 65536                     # what of a failed server's own log is read to tell why (never logged)
+# why a server exited, from its own output: CUDA/Metal/Vulkan out of memory, or its port taken
+SERVER_OOM = re.compile(r"out of memory|cudaMalloc failed|failed to allocate|unable to allocate|"
+                        r"ErrorOutOfDeviceMemory|insufficient memory|cudaErrorMemoryAllocation", re.I)
+SERVER_PORT_TAKEN = re.compile(r"address already in use|couldn't bind|could not bind|failed to bind|bind failed|"
+                               r"only one usage of each socket address|WSAEADDRINUSE|error 10048", re.I)
 CATALOG_CHECK_S = 600.0                    # GitHub at most this often for a new catalog
 DISK_MARGIN = 1_000_000_000                # free space left after a download, at least
 DOWNLOAD_CHUNK = 1 << 20
@@ -2558,14 +2746,20 @@ class AsrCall:
             raise WhisperError(f"llama-server said {r.status}")
         try:
             msg = json.loads(data)["choices"][0]["message"]
-            content, said = msg["content"], str(msg.get("reasoning_content") or "")
+            if "content" not in msg and "reasoning_content" not in msg:
+                raise KeyError("content")
+            content, said = str(msg.get("content") or ""), str(msg.get("reasoning_content") or "")
         except (ValueError, KeyError, IndexError, TypeError):
             raise WhisperError("llama-server sent something that isn't a chat completion") from None
-        # (llama-server moves Qwen3-ASR's "language English" ahead of <asr_text> into reasoning_content; "language
-        # None": no speech, whatever the content says. Without that parsing the tag is in the content: cut off.)
-        if re.match(r"\s*language\s+none\b", said, re.I):
-            return {"text": "", "segments": []}
-        text = ASR_TAG.sub("", str(content or ""))
+        # With the language prefill ("language English<asr_text>"), llama.cpp b12728 answers the transcript as the
+        # content and "language English" as reasoning_content (checked on a real server, synthetic speech). A build
+        # that parses it another way: a leading tag in the content is cut off, and an empty content with the
+        # transcript after <asr_text> in reasoning_content takes that (never a silent "" for words that came back).
+        # The language is forced, so no "language None" either: on silence it said "language English" and a stray
+        # word. Silence is the speech-level gate's (gate_dbfs).
+        text = ASR_TAG.sub("", content)
+        if not text.strip() and "<asr_text>" in said:
+            text = said.split("<asr_text>", 1)[1]
         return {"text": " ".join(text.split()), "segments": []}
 
     def abort(self) -> None:
@@ -2604,6 +2798,7 @@ class ModelServer:
         self.ok = False                    # it answered a test decode
         self.started = 0.0
         self.fails = 0
+        self.log_from = 0                  # its log's size at its start (Models._exit_cause reads from there)
 
     def call(self, wav: bytes, prompt: str, context: list, fast: bool) -> "WhisperCall | AsrCall":
         if self.kind == "llama-asr":
@@ -2628,14 +2823,19 @@ class Models:
 
     1. the catalog: models.json at that commit from GitHub (check_on_main, then exactly that hash), checked whole
        (check_catalog), kept in state_dir/catalog.json;
-    2. the plan (plan_models): the wanted models, in the hub's order, each that fits the VRAM budget (the GPU's total
-       less vram_reserve_mb and the primary's); the local LLM gets what is left, and gives way (llm_room() false: the
-       worker stops llama-server) when an ASR model that is ready to start needs its room;
+    2. the plan (plan_models): the wanted models that can start here (blocked(): their program there and new
+       enough), in the hub's order, each that fits the VRAM budget (the GPU's total less vram_reserve_mb and the
+       primary's). The local LLM, by llm_priority: "yield" (the default: speech first) gets what is left and gives way
+       (llm_room_ok false: the worker stops llama-server) only when a model that can start now (files ready, no retry
+       pending) needs its room; "keep" holds its share first and a model that doesn't fit beside it isn't loaded
+       (unavailable: the hub keeps that channel on its champion or route);
     3. each planned model's files in models_dir/managed, downloaded only from an allowed host (download_file: exact
        size and SHA-256), never while gaming or paused;
     4. its server started on its own port, only while the worker is idle (no clip, not gaming); it must answer a test
-       decode within MODEL_CHECK_S, else it is stopped and its hash marked bad for MODEL_BAD_S (a new version of a model
-       that ran: the old files run again). A model no longer planned is stopped while idle.
+       decode within MODEL_CHECK_S. One that exits out of VRAM or on a taken port is tried again after
+       MODEL_SHORT_RETRY_S (doubling); one that exits or never answers otherwise, again too, and its hash is marked
+       bad for MODEL_BAD_S at the MODEL_BAD_TRIES-th time in a row (a new version of a model that ran: the old files
+       run meanwhile). A model no longer planned is stopped while idle.
 
     The hub hears only ids and states (models.stt_* in the heartbeat)."""
 
@@ -2663,6 +2863,12 @@ class Models:
         self._retry: dict[str, float] = {}       # model id -> not before (a download that may pass later)
         self._llama_build: int | None = None
         self._llama_asked = 0.0
+        self._llama_sig: tuple | None = None     # llama-server's file (size, time) and its folder's time when asked
+        self._fails: dict[str, int] = {}         # model hash -> its server's failures in a row (MODEL_BAD_TRIES)
+        self._sha_retry: dict[str, float] = {}   # model hash -> not started before (after a failure)
+        self._short_fails: dict[str, int] = {}   # model id -> loads failed out of VRAM or on a taken port in a row
+        self._port_busy: dict[int, float] = {}   # port -> not used before (another program held it)
+        self.hub_llm_priority = ""               # the hub's llm_priority ("" none: worker.toml's)
         self.prev: dict = {}                     # model id -> the version a new one replaced (its rollback)
         self._final_fails: dict = {}             # file sha256 -> final download failures (marked bad at the second)
         self._dl_retry: dict = {}                # model id -> no download before (a failure that may pass later)
@@ -2705,6 +2911,12 @@ class Models:
             self.offered = (commit, sha)
         want = sm.get("want") if isinstance(sm.get("want"), list) else []
         self.want = list(dict.fromkeys(w for w in want[:16] if isinstance(w, str) and MODEL_ID.fullmatch(w)))
+        lp = sm.get("llm_priority")
+        self.hub_llm_priority = lp if isinstance(lp, str) and lp in LLM_PRIORITIES else ""
+
+    def llm_priority(self) -> str:
+        """"yield" (speech first) or "keep" (the LLM first): the hub's when it says, else worker.toml's."""
+        return self.hub_llm_priority or self.cfg.llm_priority
 
     def forget_offer(self, ans) -> None:
         """An answer without stt_models (the hub turned them off, or an older one): no model wanted any more."""
@@ -2798,10 +3010,11 @@ class Models:
         return all(self.verified(f) for f in e["files"].values())
 
     def effective(self, mid: str) -> dict | None:
-        """The entry a model runs as: the catalog's, or, when the catalog's version is marked bad and the version it
-        replaced is still here and good, that one (the rollback of a model's new version)."""
+        """The entry a model runs as: the catalog's, or, when the catalog's version is marked bad (or waits to be tried
+        again after its server failed) and the version it replaced is still here and good, that one (the rollback of
+        a model's new version)."""
         e = self.catalog.get(mid)
-        if e is None or not self.bad(e["sha256"]):
+        if e is None or not (self.bad(e["sha256"]) or self.clock() < self._sha_retry.get(e["sha256"], 0.0)):
             return e
         p = self.prev.get(mid)
         if p is not None and not self.bad(p["sha256"]) and self.ready_files(p):
@@ -2905,38 +3118,79 @@ class Models:
             return 6500.0
 
     def make_plan(self, gpu: dict | None) -> list:
-        """The wanted models (not marked bad, not the primary) that fit, in the hub's order; and whether the local LLM
-        still fits beside the ones ready to run (llm_room_ok)."""
+        """The wanted models (not marked bad, not the primary, able to start here: blocked()) that fit, in the hub's
+        order; and whether the local LLM may run (llm_room_ok). llm_priority "yield": the LLM gets what the planned
+        models that run, or could start now (files ready, no retry pending), leave; a model that can't start never
+        takes its room. "keep": the LLM's share comes off the budget first (llm_room_ok always), and a model that
+        fits only without it is unavailable."""
         total = self.total_mb(gpu)
         want, cat = [], {}
         for mid in self.want:
             e = self.effective(mid)
-            if e is not None and self.bad(e["sha256"]):
+            if e is None:
+                continue
+            if self.bad(e["sha256"]):
                 self.status[mid] = f"marked bad: {self.bad(e['sha256'])[:50]}"
-            elif e is not None:
-                want.append(mid)
-                cat[mid] = e
-        plan = plan_models(want, cat, total, self.cfg.model, self.primary_mb())
+                continue
+            why = self.blocked(e) if mid not in self.servers else ""
+            if why:
+                self.status[mid] = why            # (not planned: nothing downloaded, nothing stopped for it)
+                continue
+            want.append(mid)
+            cat[mid] = e
+        llm = self.llm_mb()
+        keep = self.llm_priority() == "keep" and llm > 0 and total > 0
+        plan = plan_models(want, cat, total, self.cfg.model, self.primary_mb() + (llm if keep else 0.0))
+        roomy = plan_models(want, cat, total, self.cfg.model, self.primary_mb()) if keep else plan
         for mid in want:
             if mid not in plan and mid != self.cfg.model:
-                self.status[mid] = "no room (VRAM)"
-        # the LLM: what the planned models that run (or are ready to) leave
-        used = self.primary_mb() + sum(cat[m]["vram_mb"] for m in plan
-                                       if m in self.servers or self.ready_files(cat[m]))
-        self.llm_room_ok = total <= 0 or self.llm_mb() <= 0 or used + self.llm_mb() <= total
+                self.status[mid] = ("unavailable: no room beside the LLM (llm_priority keep)" if mid in roomy
+                                    else "no room (VRAM)")
+        if keep:
+            self.llm_room_ok = True
+        else:
+            used = self.primary_mb() + sum(cat[m]["vram_mb"] for m in plan
+                                           if m in self.servers or (self.ready_files(cat[m])
+                                                                    and not self.waiting(m, cat[m])))
+            self.llm_room_ok = total <= 0 or llm <= 0 or used + llm <= total
         self.plan = plan
         return plan
+
+    def blocked(self, e: dict) -> str:
+        """Why this model's server can't start on this PC as it is ("" when it can): no program for its kind, or (a
+        llama-asr one) a llama-server older than its runtime_min. Never planned then: never downloaded, and the LLM
+        never stopped, for it."""
+        if not self._prog(e["kind"]):
+            return ("no whisper-server program (whisper_bin)" if e["kind"] == "whisper-ggml"
+                    else "no llama-server program (llama_bin)")
+        if e["kind"] == "llama-asr" and e["runtime_min"] and self.llama_build() < e["runtime_min"]:
+            return f"needs llama-server b{e['runtime_min']}+ (b{self.llama_build() or '?'} here)"
+        return ""
+
+    def waiting(self, mid: str, e: dict) -> bool:
+        """A start of it waits now (after a failure): not before its retry time."""
+        return self.clock() < max(self._retry.get(mid, 0.0), self._sha_retry.get(e["sha256"], 0.0))
+
+    def _prog(self, kind: str) -> str:
+        if kind == "whisper-ggml":
+            return self.cfg.whisper_bin or (str(self.cfg.whisper_server[0]) if self.cfg.whisper_server else "")
+        return self.cfg.llama_bin or (str(self.cfg.llm_server[0]) if self.cfg.llm_server else "")
 
     # -- servers
 
     def llama_build(self) -> int:
         """llama-server's build number from `--version` (it writes it to stderr: "version: 12728 (ea722948)", or
-        "version: 0.5.0 (build 11146, commit ...)"); 0 when it can't be told (asked again after MODEL_RETRY_S)."""
-        if self._llama_build is None or (not self._llama_build and self.clock() >= self._llama_asked + MODEL_RETRY_S):
-            self._llama_asked = self.clock()
-            prog = self.cfg.llama_bin or (str(self.cfg.llm_server[0]) if self.cfg.llm_server else "")
+        "version: 1.0.0-dev (build 12728, commit ...)"); 0 when it can't be told (asked again after MODEL_RETRY_S).
+        Asked again too when llama-server's file or its folder changed (a new llama.cpp unpacked over the old one:
+        no restart needed)."""
+        prog = self._prog("llama-asr")
+        path = _resolve(prog, self.cfg.base_dir) if prog else ""
+        sig = _file_sig(path)
+        if self._llama_build is None or sig != self._llama_sig or \
+                (not self._llama_build and self.clock() >= self._llama_asked + MODEL_RETRY_S):
+            self._llama_asked, self._llama_sig = self.clock(), sig
             try:
-                out = self.run([_resolve(prog, self.cfg.base_dir), "--version"]) if prog else ""
+                out = self.run([path, "--version"]) if prog else ""
             except (OSError, subprocess.SubprocessError):
                 out = ""
             m = LLAMA_VERSION.search(out or "")
@@ -2947,16 +3201,16 @@ class Models:
         """The ports a catalog model's server may take: MODEL_PORT_FIRST on, never whisper_url's nor llm_url's."""
         taken = {urlsplit(u).port for u in (self.cfg.whisper_url, self.cfg.llm_url) if u}
         taken |= {s.port for s in list(self.servers.values())}
+        taken |= {p for p, until in list(self._port_busy.items()) if self.clock() < until}
         return [p for p in range(MODEL_PORT_FIRST, MODEL_PORT_FIRST + MODEL_PORTS) if p not in taken]
 
     def argv(self, e: dict, port: int) -> list | None:
         p = self.paths(e)
+        prog = self._prog(e["kind"])
         if e["kind"] == "whisper-ggml":
-            prog = self.cfg.whisper_bin or (str(self.cfg.whisper_server[0]) if self.cfg.whisper_server else "")
             t = _arg(self.cfg.whisper_server, ("-t", "--threads")) or "4"
             return whisper_command([prog, "-m", str(p["model"]), "--host", "127.0.0.1", "--port", str(port), "-t",
                                     str(t)]) if prog else None
-        prog = self.cfg.llama_bin or (str(self.cfg.llm_server[0]) if self.cfg.llm_server else "")
         return [prog, "-m", str(p["model"]), "--mmproj", str(p["mmproj"]), "--host", "127.0.0.1", "--port", str(port),
                 "-c", "4096", "-ngl", "99", "-np", "1", "--no-webui", "--no-slots",
                 *language_setting(e["kind"])["argv"]] if prog else None
@@ -2969,8 +3223,9 @@ class Models:
         """Its server started on a free port (one another program holds is skipped). None when it can't be (said in its
         status, tried again after MODEL_RETRY_S)."""
         mid = e["id"]
-        if e["kind"] == "llama-asr" and e["runtime_min"] and self.llama_build() < e["runtime_min"]:
-            self._later(mid, f"needs llama-server b{e['runtime_min']}+ (b{self.llama_build() or '?'} here)")
+        why = self.blocked(e)
+        if why:
+            self._later(mid, why)
             return None
         for port in self._ports():
             argv = self.argv(e, port)
@@ -2986,6 +3241,10 @@ class Models:
             if s.alive():
                 continue                          # (another program holds this port: the next one)
             s.started = self.clock()
+            try:
+                s.log_from = proc.log_path.stat().st_size      # (its own lines from here: why it failed, if it does)
+            except OSError:
+                s.log_from = 0
             proc.ensure(False)
             if not proc.running():
                 self._later(mid, "can't start its server")
@@ -3031,16 +3290,67 @@ class Models:
             try:
                 s.test()
                 s.ok, s.fails = True, 0
+                self._fails.pop(s.sha, None)
+                self._sha_retry.pop(s.sha, None)
+                self._short_fails.pop(s.id, None)
                 self.status[s.id] = "ready"
                 log.info("models: %s: ready on port %d", s.id, s.port)
                 return True
             except WhisperError:
                 pass
         if exited or self.clock() - s.started > MODEL_CHECK_S:
-            self.stop(s.id, "no answer")
-            self.mark_bad(s.id, s.sha, "its server exited" if exited else "its server didn't answer a test decode")
-            self.status[s.id] = "failed: its server (marked bad)"
+            self.stop(s.id, "exited" if exited else "no answer")
+            self.failed_load(s, exited)
         return False
+
+    def failed_load(self, s: ModelServer, exited: bool) -> None:
+        """A new server that exited, or never answered its test decode. Out of VRAM or on a port another program
+        holds: not the model's fault, tried again after MODEL_SHORT_RETRY_S, doubling (that port left alone a while).
+        Otherwise again after MODEL_SHORT_RETRY_S, doubling, and at the MODEL_BAD_TRIES-th time in a row with this
+        hash it is marked bad for MODEL_BAD_S (its previous version runs meanwhile, when there is one)."""
+        cause = self._exit_cause(s) if exited else ""
+        if cause:
+            n = self._short_fails[s.id] = self._short_fails.get(s.id, 0) + 1
+            wait = min(MODEL_SHORT_RETRY_S * 2 ** (n - 1), MODEL_RETRY_S)
+            if cause == "port":
+                self._port_busy[s.port] = self.clock() + MODEL_RETRY_S
+            self._retry[s.id] = self.clock() + wait
+            self.status[s.id] = f"failed: {'out of VRAM' if cause == 'oom' else 'its port was taken'} " \
+                                f"(again in {wait / 60:.0f} min)"
+            log.warning("models: %s: its server %s: again in %.0f min", s.id,
+                        "ran out of VRAM" if cause == "oom" else f"couldn't take port {s.port}", wait / 60)
+            return
+        why = "its server exited" if exited else "its server didn't answer a test decode"
+        n = self._fails[s.sha] = self._fails.get(s.sha, 0) + 1
+        if n >= MODEL_BAD_TRIES:
+            self._fails.pop(s.sha, None)
+            self._sha_retry.pop(s.sha, None)
+            self.mark_bad(s.id, s.sha, f"{why} ({n} times)")
+            self.status[s.id] = "failed: its server (marked bad)"
+            return
+        wait = min(MODEL_SHORT_RETRY_S * 2 ** (n - 1), MODEL_RETRY_S)
+        self._sha_retry[s.sha] = self.clock() + wait
+        self.status[s.id] = (f"failed: {'exited' if exited else 'no test answer'} ({n} of {MODEL_BAD_TRIES}; "
+                             f"again in {wait / 60:.0f} min)")
+        log.warning("models: %s (%s): %s (%d of %d): again in %.0f min", s.id, s.sha[:12], why, n, MODEL_BAD_TRIES,
+                    wait / 60)
+
+    def _exit_cause(self, s: ModelServer) -> str:
+        """"oom" or "port" when the server's own output since its start says so, else "". Read here only: its lines
+        never go to worker.log."""
+        try:
+            with open(s.proc.log_path, "rb") as f:
+                size = os.fstat(f.fileno()).st_size
+                start = s.log_from if 0 <= s.log_from <= size else 0
+                f.seek(max(start, size - MODEL_LOG_TAIL))
+                tail = f.read(MODEL_LOG_TAIL).decode("utf-8", "replace")
+        except (OSError, AttributeError):
+            return ""
+        if SERVER_OOM.search(tail):
+            return "oom"
+        if SERVER_PORT_TAKEN.search(tail):
+            return "port"
+        return ""
 
     def ready(self) -> list:
         with self._lock:
@@ -3113,7 +3423,7 @@ class Models:
                 continue
             if not self.fetch_files(e, stop) or s is not None or stop():
                 continue
-            if self.clock() < self._retry.get(mid, 0.0) or not idle():
+            if self.waiting(mid, e) or not idle():
                 continue
             if llm_running and not self.llm_room_ok:
                 self.status[mid] = "waiting for the LLM to give way"
@@ -3130,6 +3440,19 @@ class Models:
         return {"stt_loaded": self.ready(), "stt_state": {k: str(v)[:60] for k, v in list(self.status.items())[:16]},
                 "stt_catalog": self.catalog_sig[1][:12]}
 
+def _file_sig(prog: str) -> tuple | None:
+    """A program's file (size, time) and its folder's time, found as Popen would (a bare name on PATH); None when
+    it isn't there. A change: a new build put in its place."""
+    if not prog:
+        return None
+    found = prog if os.path.dirname(prog) else (shutil.which(prog) or "")
+    try:
+        st, folder = os.stat(found), os.stat(os.path.dirname(os.path.abspath(found)))
+        return (st.st_size, st.st_mtime_ns, folder.st_mtime_ns)
+    except OSError:
+        return None
+
+
 def _resolve(prog: str, base: str) -> str:
     prog = os.path.expandvars(prog)
     return str(Path(base) / prog) if base and not Path(prog).is_absolute() and (Path(base) / prog).exists() else prog
@@ -3145,9 +3468,10 @@ class Worker:
     def __init__(self, cfg: Config, run: Callable[[list], str] = run_cmd, clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], object] | None = None, popen: Callable = subprocess.Popen,
                  fullscreen: Callable[[], str] = windows_fullscreen, updater: Updater | None = None,
-                 logship: LogShip | None = None):
+                 logship: LogShip | None = None, keep_awake: KeepAwake | None = None):
         """logship: the log shipper `run` made (its handler on the log since the start); its thread runs here."""
         self.cfg, self.run_cmd, self.clock = cfg, run, clock
+        self.keep_awake = keep_awake if keep_awake is not None else KeepAwake(cfg.keep_awake)  # (started by run())
         self.logship = logship
         self._stop = threading.Event()
         self.sleep = sleep if sleep is not None else self._stop.wait     # backoff and refused waits (tests record them)
@@ -3284,6 +3608,9 @@ class Worker:
             body["reason"] = reason
         if self.gpu.info:
             body["gpu"] = dict(self.gpu.info)
+        ka = self.keep_awake.report()
+        if ka is not None:
+            body["keep_awake"] = ka
         return body
 
     def models(self) -> dict:
@@ -3350,7 +3677,8 @@ class Worker:
             try:
                 state = self.state()
                 now = self.clock()
-                sig = (state, self.llm_ok)         # (the LLM coming or going: the hub hears at once too)
+                self.keep_awake.want(state != ("paused", "manual") and not self.stopped)
+                sig = (state, self.llm_ok, self.keep_awake.held)   # (the LLM or keep-awake changing: told at once)
                 if sig != last_state:
                     if last_state is not None and state != last_state[0]:
                         log.info("state: %s%s", state[0], f" ({state[1]})" if state[1] else "")
@@ -3404,9 +3732,7 @@ class Worker:
                              self.cfg.gaming_stop_whisper_min)
                     self._whisper_down("stopped while gaming")     # (said first: no check in between sees it gone)
                     self.proc.stop()
-                if (self.stt_models.servers and self._gaming_since is not None and self.cfg.gaming_stop_whisper_min > 0
-                        and now - self._gaming_since >= self.cfg.gaming_stop_whisper_min * 60):
-                    self.stt_models.stop_all("gaming")     # (their VRAM back to the game; started again when it ends)
+                self._gaming_stop_models(now)
                 if self.proc is not None and not held and now - last_proc >= 5 and not self.proc.running():
                     last_proc = now
                     self.proc.ensure(self.whisper.alive())
@@ -3455,6 +3781,26 @@ class Worker:
                 log.exception("llm monitor: unexpected error (carrying on)")
                 self._stop.wait(5)
             self._stop.wait(self.cfg.tick_s)
+
+    def models_stop_after_s(self) -> float:
+        """Seconds of gaming before the catalog models' servers are stopped: the LLM's rule (they hold VRAM the game
+        wants as it does, often more), not the primary whisper-server's longer gaming_stop_whisper_min.
+        llm_stop_gaming_s, or (below 0, the default) 60 s, 20 s when they hold more than 6 GB together."""
+        if self.cfg.llm_stop_gaming_s >= 0:
+            return self.cfg.llm_stop_gaming_s
+        held = sum(s.vram_mb for s in list(self.stt_models.servers.values()))
+        return 20.0 if held > 6000 else 60.0
+
+    def _gaming_stop_models(self, now: float) -> bool:
+        """The catalog models' servers stopped after models_stop_after_s() of gaming (started again when it ends).
+        True when they were."""
+        if not self.stt_models.servers or self._gaming_since is None or \
+                now - self._gaming_since < self.models_stop_after_s():
+            return False
+        log.info("gaming for %.0f s: stopping the speech models' servers (their VRAM back to the game)",
+                 now - self._gaming_since)
+        self.stt_models.stop_all("gaming")
+        return True
 
     def llm_stop_after_s(self) -> float:
         """Seconds of gaming before llama-server is stopped: llm_stop_gaming_s, or (below 0, the default) 60 for a model
@@ -3575,7 +3921,7 @@ class Worker:
         doc = {"pid": os.getpid(), "worker": self.cfg.worker_id, "state": state, "reason": reason, "hub": self.link,
                "pool_on": self.pool_on, "model": self.cfg.model, "gpu": self.gpu.info, "jobs": dict(self.counts),
                "last_job_at": self.last_job_at, "started": self.started_at, "updated": time.time(),
-               "version": VERSION, "update": self.updater.report(),
+               "version": VERSION, "update": self.updater.report(), "keep_awake": self.keep_awake.report(),
                "models": {**self.stt_models.report(), "catalog": self.stt_models.cat_status,
                           "llm_room": self.stt_models.llm_room_ok}}
         if self.logship is not None:
@@ -3657,6 +4003,17 @@ class Worker:
 
     # -- the jobs loop
 
+    def reap_leftovers(self) -> list[int]:
+        """The servers a worker that died left running (children.json), ended: whisper-server, llama-server and each
+        catalog model's (model-<id>: a whisper-server or llama-server), only while the pid is still that program."""
+        progs = {"whisper-server": Path(str(self.cfg.whisper_server[0])).name if self.cfg.whisper_server else "",
+                 "llama-server": Path(str(self.cfg.llm_server[0])).name if self.cfg.llm_server else ""}
+        for name in read_json(Path(self.cfg.state_dir) / "children.json"):     # the catalog's models' servers
+            if name.startswith("model-"):
+                progs[name] = tuple(p for p in (self.cfg.whisper_process, self.cfg.llm_process,
+                                                Path(self.cfg.whisper_bin).name, Path(self.cfg.llama_bin).name) if p)
+        return self.children.reap_leftovers(progs)
+
     def run(self) -> None:
         log.info("sizeup STT worker %s: worker %s, model %s, hub %s", VERSION, self.cfg.worker_id, self.cfg.model,
                  urlsplit(self.cfg.hub_url).hostname)
@@ -3664,13 +4021,7 @@ class Worker:
             log.info("local LLM: %s at %s", self.cfg.llm_model, self.cfg.llm_url)
             if self.llm_proc is not None and not self.cfg.llm_model_sha256:
                 log.warning("llm_model_sha256 isn't set: llama-server's model isn't checked against its pin")
-        progs = {"whisper-server": Path(str(self.cfg.whisper_server[0])).name if self.cfg.whisper_server else "",
-                 "llama-server": Path(str(self.cfg.llm_server[0])).name if self.cfg.llm_server else ""}
-        for name in read_json(Path(self.cfg.state_dir) / "children.json"):     # the catalog's models' servers
-            if name.startswith("model-"):
-                progs[name] = tuple(p for p in (self.cfg.whisper_process, self.cfg.llm_process,
-                                                Path(self.cfg.whisper_bin).name, Path(self.cfg.llama_bin).name) if p)
-        self.children.reap_leftovers(progs)        # what a worker that died left running (no job object elsewhere)
+        self.reap_leftovers()                      # what a worker that died left running (no job object elsewhere)
         loops = [(self._heartbeat_loop, "heartbeat"), (self._monitor_loop, "monitor"), (self._update_loop, "update"),
                  (self._models_loop, "models")]
         if self.logship is not None:
@@ -3689,7 +4040,10 @@ class Worker:
         except KeyboardInterrupt:
             log.info("stopping (Ctrl-C)")
         finally:
-            self.shutdown()
+            try:
+                self.shutdown()
+            finally:
+                self.keep_awake.close()    # (an error in the shutdown too: never left set)
 
     def _jobs_loop(self) -> None:
         while not self.stopped:
@@ -4103,6 +4457,7 @@ class Worker:
         self.stop()
         for t in self._threads:
             t.join(5)
+        self.keep_awake.close()            # (before the last word: the hub hears it released)
         job = self.job
         if job and job.get("lease"):
             self._release(str(job["lease"]), "shutdown")
@@ -4161,6 +4516,10 @@ def _status_text(cfg: Config, now: float | None = None) -> str:
         if isinstance(up, dict):
             lines.append(f"update: {up.get('state')}; running {str(up.get('sha256') or '?')[:12]}"
                          + (f" (commit {str(up.get('commit'))[:12]})" if up.get("commit") else ""))
+        ka = st.get("keep_awake")
+        if isinstance(ka, dict):
+            lines.append(f"keep awake: {'on' if ka.get('on') else 'off'}"
+                         + (", held (no idle sleep)" if ka.get("held") else ", not held (Windows may sleep)"))
         lg = st.get("logs")
         if isinstance(lg, dict):
             last = lg.get("last_ok")
@@ -4218,6 +4577,8 @@ def _update_cli(cfg: Config, what: str, config_path) -> int:
 
 def _check(cfg: Config) -> int:
     ok = True
+    if cfg.ignored_keys:
+        print(f"config: ignoring keys this worker.py doesn't know: {', '.join(cfg.ignored_keys[:20])}")
     w = Whisper(cfg.whisper_url, cfg.whisper_timeout_s)
     t = time.monotonic()
     try:

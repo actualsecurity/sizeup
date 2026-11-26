@@ -362,13 +362,13 @@ const tick = () => new Promise((ok) => setImmediate(ok));
   out.rows = rows().map((li) => ({ key: li.dataset.key, source: li.dataset.source, nkey: li.dataset.nkey,
     name: li.querySelector("b.tg-name").textContent, title: li.querySelector("b.tg-name").title,
     main: vis(li.querySelector('button[data-field="main"]')), record: vis(li.querySelector('button[data-field="record"]')),
-    tier: vis(li.querySelector("select.tg-tier")), pen: vis(li.querySelector("button.tg-ren")) }));
+    tier: !!li.querySelector("select.tg-tier"), pen: vis(li.querySelector("button.tg-ren")) }));
   const row = (src) => rows().find((li) => li.dataset.source === src || li.dataset.nkey === src);
   // the switches: by the source
   asked.length = 0;
   row("p25:westchester:307").querySelector('button[data-field="main"]').click();
   await tick(); await tick();
-  row("p25:east:307").querySelector('button[data-field="record"]').click();      // (hidden: another system's)
+  row("p25:east:307").querySelector('button[data-field="record"]').click();      // another system's: by its source
   await tick(); await tick();
   out.posted = asked.filter(([u]) => u === "/api/talkgroup").map(([, b]) => b);
   out.pending = [...st.pending.keys()];
@@ -480,20 +480,22 @@ def test_the_page_is_by_system_then_group(page):
 def test_another_systems_talkgroup_has_its_tier_never_main(page):
     rows = {r["source"] or r["nkey"]: r for r in page["rows"]}
     assert len(page["rows"]) == 8 and len({r["key"] for r in page["rows"]}) == 8      # 307 twice: two rows
+    # the same switches as the county's, its tier behind them; Main shown disabled (tests/test_radio_switches.py)
     for src in ("p25:mrrs:9211", "p25:mrrs:9300", "p25:east:307"):
-        assert (rows[src]["tier"], rows[src]["main"], rows[src]["record"]) == (True, False, False), src
+        assert (rows[src]["tier"], rows[src]["main"], rows[src]["record"]) == (False, True, True), src
     for src in ("p25:westchester:307", "p25:westchester:5021"):
         assert (rows[src]["tier"], rows[src]["main"], rows[src]["record"]) == (False, True, True), src
     assert not rows["fm:FG1"]["main"] and rows["fm:FG1"]["record"]
 
 
 def test_a_switch_is_sent_by_its_source_and_affects_only_that_talkgroup(page):
-    # county 307's Main: its source (the server sends the county's the old way); east 307's hidden Record: nothing
-    assert page["posted"] == [{"source": "p25:westchester:307", "main": False}]
-    assert page["pending"] == ["p25:westchester:307"]
+    # county 307's Main: its source (the server sends the county's the old way); east 307's Record: its own source
+    assert page["posted"] == [{"source": "p25:westchester:307", "main": False}, {"source": "p25:east:307", "record": False}]
+    assert page["pending"] == ["p25:westchester:307", "p25:east:307"]
     # the county section's Record: the county's rows only, never east's Fire/EMS
     assert page["group"] == [{"group": "Fire/EMS", "record": False}]
-    assert page["groupPending"] == ["p25:westchester:307", "p25:westchester:5021"]
+    # (east 307's: its own Record above, still pending; the section's switch never touches it)
+    assert page["groupPending"] == ["p25:east:307", "p25:westchester:307", "p25:westchester:5021"]
 
 
 def test_rename_in_place_shows_in_both_places_with_the_original_in_the_hover(page):
@@ -513,7 +515,7 @@ def test_rename_in_place_shows_in_both_places_with_the_original_in_the_hover(pag
 
 def test_the_settings_page_hands_the_names_store_to_the_channels_card():
     js = (STATIC / "settings.js").read_text()
-    assert "RadioControls.mount(rc, { reception: true, tab: S.rtab, names: S_RC_NAMES, services: S_RC_SERVICES," in js
+    assert "RadioControls.mount(rc, { reception: true, tab: S.rtab, names: S_RC_NAMES, services: S_RC_SERVICES, main: S_RC_MAIN," in js
     assert '"/api/cad/settings/radio_folders", { action: "name", key, name' in js and '"/api/cad/comms/sources"' in js
     rc = (STATIC / "radio-controls.js").read_text()
     assert "/api/cad/comms/sources" not in rc and "radio_folders\"" not in rc        # never from the station's page

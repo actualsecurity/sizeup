@@ -1,6 +1,6 @@
 // Settings > Station > STT workers (sizeup/cloud/sttworkers.py, #639): the GPU speech-to-text workers' tokens and the
 // pool's switches; admins, the hub only. GET /api/cad/stt-workers: each worker (id, name, last used, revoked, its live
-// state) and the pool {on, classes}; never a token or a hash. POST {action: add | rename | rotate | revoke | llm | update | pool}: add
+// state) and the pool {on}; never a token or a hash. POST {action: add | rename | rotate | revoke | llm | update | pool}: add
 // and rotate answer the new token, shown here ONCE (this page's memory until Done, never stored) with a copy button.
 // The speech models (sizeup/sttmodels.py, GET's models): each worker's loaded ones and those not ready on its row; the
 // catalog and each channel's context and call signs in a section under them (POST channel_model, audited as Radios).
@@ -8,9 +8,6 @@
 "use strict";
 const SttWorkersCard = (() => {
   const POLL_MS = 10000;
-  const CLASS_LABELS = { urgent: "Pages, Fire/EMS 15, firegrounds", high: "Airband", live: "Other main channels",
-    rerun: "Re-runs", "context-fallback": "Police alert (AWS budget out)", context: "Police alert", low: "Context talkgroups",
-    catchup: "Shed clips (catch-up)" };
   let card = null, status = null, form = null, reveal = null, timer = null, busy = false, last = null, said = "";
   let idIn = null, nameIn = null, fresh = null;
   let pinForm = null, pinHead = null, pinCommit = null, pinSha = null, pinning = "";
@@ -109,7 +106,7 @@ const SttWorkersCard = (() => {
   }
 
   function poolRow(d) {
-    const p = d.pool || { on: false, classes: {} };
+    const p = d.pool || { on: false };
     const wrap = el("div", "row");
     const on = el("label", "check");
     const cb = el("input");
@@ -117,20 +114,9 @@ const SttWorkersCard = (() => {
     cb.checked = !!p.on;
     cb.addEventListener("change", () => act({ action: "pool", on: cb.checked }, cb.checked ? "Pool on" : "Pool off"));
     on.append(cb, " Pool on");
-    on.title = "Off: every clip goes the way it went before (AWS, the station's whisper)";
+    on.title = "Off: no clip goes to a worker (each channel's engine falls back: AWS, the station's whisper). "
+      + "Where a channel's clips go: its engine (Settings > Radios > Channels)";
     wrap.append(on);
-
-    for (const [k, v] of Object.entries(p.classes || {})) {
-      const l = el("label", "check");
-      const c = el("input");
-      c.type = "checkbox";
-      c.checked = !!v;
-      c.disabled = !p.on;
-      c.addEventListener("change", () => act({ action: "pool", classes: { [k]: c.checked } }, ""));
-      l.append(c, ` ${CLASS_LABELS[k] || k}`);
-      l.title = "Clips of this class go to a ready GPU worker first";
-      wrap.append(l);
-    }
     return wrap;
   }
 

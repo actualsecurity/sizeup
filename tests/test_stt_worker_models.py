@@ -412,17 +412,71 @@ def test_an_asr_model_needs_a_new_enough_llama_server(tmp_path, monkeypatch):
     assert procs == [] and "needs llama-server b12643+" in m.status["asr-test"]
 
 
-def test_a_server_that_never_answers_is_dropped_and_its_hash_marked_bad(tmp_path, monkeypatch):
+def step(m, idle=True, held=False, gpu=None, llm_running=False):
+    m.step(idle=lambda: idle, held=held, gpu=gpu, llm_running=llm_running, stop=lambda: False)
+
+
+def test_a_server_that_never_answers_is_tried_again_then_its_hash_marked_bad(tmp_path, monkeypatch):
+    """A repeatable failure (no answer, or an exit that isn't out of VRAM nor a taken port) is tried again after 5
+    min, then 10; only the MODEL_BAD_TRIES-th time in a row with the same hash marks it bad for 6 h."""
     m, procs, clock = ready_models(tmp_path, monkeypatch)
     m.want = ["atc-test"]
-    m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
-    assert "atc-test" in m.servers
-    clock[0] += W.MODEL_CHECK_S + 1
-    m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
-    assert "atc-test" not in m.servers and m.bad(m.catalog["atc-test"]["sha256"])
-    n = len(procs)
-    m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
-    assert len(procs) == n and "marked bad" in m.status["atc-test"]     # not started again while marked
+    h = m.catalog["atc-test"]["sha256"]
+    for n in range(1, W.MODEL_BAD_TRIES + 1):
+        step(m)
+        assert "atc-test" in m.servers and len(procs) == n
+        clock[0] += W.MODEL_CHECK_S + 1
+        step(m)
+        assert "atc-test" not in m.servers
+        if n < W.MODEL_BAD_TRIES:
+            assert not m.bad(h) and f"({n} of {W.MODEL_BAD_TRIES}; again in {5 * 2 ** (n - 1)} min)" in m.status["atc-test"]
+            step(m)
+            assert len(procs) == n                                        # not before its retry
+            clock[0] += W.MODEL_SHORT_RETRY_S * 2 ** (n - 1)
+    assert m.bad(h) and "3 times" in m.bad(h)
+    step(m)
+    assert len(procs) == W.MODEL_BAD_TRIES and "marked bad" in m.status["atc-test"]   # not started again while marked
+
+
+def _exits_with(m, mid: str, line: str) -> None:
+    s = m.servers[mid]
+    with open(s.proc.log_path, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+    s.proc.proc.returncode = 1
+
+
+def test_out_of_vram_at_load_is_a_short_retry_never_bad(tmp_path, monkeypatch):
+    m, procs, clock = ready_models(tmp_path, monkeypatch)
+    m.want = ["atc-test"]
+    h = m.catalog["atc-test"]["sha256"]
+    for n in range(1, W.MODEL_BAD_TRIES + 2):
+        step(m)
+        assert len(procs) == n
+        _exits_with(m, "atc-test", "ggml_backend_cuda_buffer_type_alloc_buffer: allocating 2300.00 MiB on device 0: "
+                                   "cudaMalloc failed: out of memory")
+        step(m)
+        wait = min(W.MODEL_SHORT_RETRY_S * 2 ** (n - 1), W.MODEL_RETRY_S)
+        assert "atc-test" not in m.servers and not m.bad(h)
+        assert m.status["atc-test"] == f"failed: out of VRAM (again in {wait / 60:.0f} min)"
+        clock[0] += wait
+    assert not m.bad(h) and h not in m._fails
+
+
+def test_a_port_another_program_holds_is_left_alone_and_the_next_one_taken(tmp_path, monkeypatch):
+    m, procs, clock = ready_models(tmp_path, monkeypatch)
+    m.want = ["atc-test"]
+    step(m)
+    assert procs[0][0][procs[0][0].index("--port") + 1] == "18181"
+    _exits_with(m, "atc-test", "couldn't bind to server socket: hostname=127.0.0.1 port=18181")
+    step(m)
+    assert "port was taken (again in 5 min)" in m.status["atc-test"] and not m.bad(m.catalog["atc-test"]["sha256"])
+    clock[0] += W.MODEL_SHORT_RETRY_S
+    step(m)
+    assert procs[1][0][procs[1][0].index("--port") + 1] == "18182"
+    # an earlier run's lines in its log say nothing of this one: an exit without a cause of its own counts as a try
+    m.servers["atc-test"].proc.proc.returncode = 1
+    step(m)
+    assert f"(1 of {W.MODEL_BAD_TRIES};" in m.status["atc-test"]
 
 
 def test_a_new_version_waits_for_its_files_and_the_old_one_keeps_running(tmp_path, monkeypatch):
@@ -449,9 +503,22 @@ def test_a_new_version_waits_for_its_files_and_the_old_one_keeps_running(tmp_pat
     assert fresh.sha == m.catalog["atc-test"]["sha256"]
     clock[0] += W.MODEL_CHECK_S + 1                                          # the new version never answers ...
     m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
-    assert m.bad(m.catalog["atc-test"]["sha256"])                            # ... marked bad, so the old version
-    assert m.servers["atc-test"].sha == old.sha                              # runs again
+    assert not m.bad(m.catalog["atc-test"]["sha256"])                        # ... tried again later; meanwhile the
+    assert m.servers["atc-test"].sha == old.sha                              # old version runs again
     assert all(m.path_of(f).exists() for f in m.prev["atc-test"]["files"].values())   # (its files never pruned)
+    m.servers["atc-test"].ok, m.servers["atc-test"].alive = True, lambda: True
+    for n in range(1, W.MODEL_BAD_TRIES):                                    # each retry fails the same way
+        clock[0] += W.MODEL_SHORT_RETRY_S * 2 ** (n - 1)
+        m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
+        assert m.servers["atc-test"].sha == m.catalog["atc-test"]["sha256"]  # the new version's turn again
+        clock[0] += W.MODEL_CHECK_S + 1
+        m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
+        assert m.servers["atc-test"].sha == old.sha
+        m.servers["atc-test"].ok, m.servers["atc-test"].alive = True, lambda: True
+    assert m.bad(m.catalog["atc-test"]["sha256"])                            # the third time: marked bad (6 h)
+    clock[0] += W.MODEL_RETRY_S
+    m.step(idle=lambda: True, held=False, gpu=None, llm_running=False, stop=lambda: False)
+    assert m.servers["atc-test"].sha == old.sha                              # the old one stays
 
 
 def test_a_stopped_download_keeps_its_part_through_a_step(tmp_path, monkeypatch):
@@ -638,14 +705,196 @@ def _claim_extra(hub: FakeHub) -> None:
     hub.send = send_
 
 
-def test_an_asr_models_no_speech_is_no_text():
-    asr = FakeAsr(text="um.")
+def test_an_asr_answer_is_read_from_the_content_or_else_the_reasoning():
+    """llama.cpp b12728 with the prefill: the transcript as the content, "language English" as reasoning_content
+    (checked on a real server). A build that leaves the content empty and puts it all in reasoning_content after
+    <asr_text>: that text, never a silent "". The prefill is always sent."""
+    asr = FakeAsr(text="Engine 60 responding.")
     try:
         e = W.check_catalog(two_models())["asr-test"]
         s = W.ModelServer(e, {}, asr.port, proc=None, timeout_s=10)
-        out = W.AsrCall(s, tone_wav(1.5), ["Engine 60"], 10).run()
-        assert out["text"] == "um."
-        asr.reasoning = "language None"
+        asr.reasoning = "language English"
+        assert W.AsrCall(s, tone_wav(1.5), ["Engine 60"], 10).run()["text"] == "Engine 60 responding."
+        assert asr.requests[-1]["body"]["messages"][-1] == {"role": "assistant",
+                                                            "content": "language English<asr_text>"}
+        asr.text, asr.reasoning = "", "language English<asr_text>Ladder 31 on scene."
+        assert W.AsrCall(s, tone_wav(1.5), [], 10).run()["text"] == "Ladder 31 on scene."
+        asr.text, asr.reasoning = None, "language English"
         assert W.AsrCall(s, tone_wav(1.5), [], 10).run() == {"text": "", "segments": []}
     finally:
         asr.stop()
+
+
+# --- the local LLM and the speech models: real 12 GB numbers -------------------------------------------------------
+
+def real_12gb(tmp_path, monkeypatch, llm_bytes: int, build: str, **kw):
+    """The repo's catalog, a 12 GB card (10752 MB after the reserve), today's q5_0 as the primary (1000 MB) and an LLM
+    GGUF of llm_bytes (a sparse file: the worker's estimate is its size x 1.05 + 900 MB). Files "downloaded"."""
+    gguf = tmp_path / "llm.gguf"
+    with open(gguf, "wb") as f:
+        f.truncate(llm_bytes)
+    procs: list = []
+    cfg = W.Config(state_dir=str(tmp_path / "state"), models_dir=str(tmp_path / "models"), catalog_file=str(PINS),
+                   whisper_server=["whisper-server", "-m", "x.bin", "--host", "127.0.0.1", "--port", "8179"],
+                   llm_server=["llama-server", "-m", str(gguf)], **kw)
+    m = W.Models(cfg, popen=lambda argv, **k: procs.append(argv) or FakeProc(argv), clock=lambda: 1000.0,
+                 run=lambda argv: build)
+    m.ready_files = lambda e: True
+    monkeypatch.setattr(W, "MODEL_PORT_FIRST", 18181)
+    return m, procs
+
+
+GPU_12GB = {"mem_total_mb": 12288}
+ASR, ATC = "qwen3-asr-1.7b-q8_0", "large-v3-turbo-us-atc-v3-f16"
+QWEN3_8B, QWEN3_4B = 5_027_783_488, 2_497_280_736
+
+
+def test_the_llm_never_stops_for_a_model_that_cant_start(tmp_path, monkeypatch):
+    """b12359 here, the hub wants Qwen3-ASR (b12643+), its files downloaded: it isn't planned, the LLM (Qwen3-8B)
+    keeps its room, nothing starts and nothing waits for the LLM."""
+    m, procs = real_12gb(tmp_path, monkeypatch, QWEN3_8B, "version: 12359 (b1b770d9)\n")
+    assert round(m.total_mb(GPU_12GB)) == 10752 and round(m.llm_mb()) == 6179 and m.primary_mb() == 1000
+    m.want = [ASR]
+    assert m.make_plan(GPU_12GB) == [] and m.llm_room_ok
+    assert m.status[ASR] == "needs llama-server b12643+ (b12359 here)"
+    step(m, gpu=GPU_12GB, llm_running=True)
+    assert procs == [] and m.llm_room_ok and m.status[ASR].startswith("needs llama-server")
+    m.run = lambda argv: "version: 1.0.0-dev (build 12728, commit ea7229481)\n"
+    m._llama_sig = ("a new llama.cpp put in its folder",)                   # (its file changed: asked again)
+    assert m.make_plan(GPU_12GB) == [ASR]
+    assert not m.llm_room_ok                                                 # 1000 + 3800 + 6179 = 10979 > 10752
+
+
+def test_a_model_waiting_to_be_tried_again_doesnt_take_the_llms_room(tmp_path, monkeypatch):
+    m, procs = real_12gb(tmp_path, monkeypatch, QWEN3_8B, "version: 12728 (ea722948)\n")
+    m.want = [ASR]
+    m._retry[ASR] = 1000.0 + 60
+    assert m.make_plan(GPU_12GB) == [ASR] and m.llm_room_ok
+    step(m, gpu=GPU_12GB, llm_running=True)
+    assert procs == [] and m.status.get(ASR) != "waiting for the LLM to give way"
+    m._retry.clear()
+    m.make_plan(GPU_12GB)
+    assert not m.llm_room_ok
+
+
+def test_llm_priority_yield_and_keep_on_12gb(tmp_path, monkeypatch):
+    """yield (the default): speech first, Qwen3-8B gives way to Qwen3-ASR. keep: it stays, and Qwen3-ASR is
+    unavailable (the hub keeps that channel on its champion). The hub's word wins over worker.toml's."""
+    m, procs = real_12gb(tmp_path, monkeypatch, QWEN3_8B, "version: 12728 (ea722948)\n")
+    m.want = [ASR, ATC]
+    assert m.llm_priority() == "yield"
+    assert m.make_plan(GPU_12GB) == [ASR, ATC] and not m.llm_room_ok       # 1000 + 3800 + 2300 = 7100; no room
+    m.cfg.llm_priority = "keep"
+    assert m.make_plan(GPU_12GB) == [ATC] and m.llm_room_ok                 # 1000 + 6179 + 2300 = 9479 (3800 no)
+    assert m.status[ASR] == "unavailable: no room beside the LLM (llm_priority keep)"
+    m.offer({"stt_models": {"want": [ASR, ATC], "llm_priority": "yield"}})
+    assert m.llm_priority() == "yield" and m.make_plan(GPU_12GB) == [ASR, ATC] and not m.llm_room_ok
+    m.offer({"stt_models": {"want": [ASR, ATC], "llm_priority": "whatever"}})
+    assert m.llm_priority() == "keep"                                        # (not a word it knows: worker.toml's)
+
+
+def test_the_4b_llm_fits_beside_all_three_speech_models_on_12gb(tmp_path, monkeypatch):
+    """Qwen3-4B-Instruct-2507 Q4_K_M: 2,497,280,736 bytes, about 3522 MB by the worker's estimate. 1000 + 3800 + 2300
+    + 3522 = 10622 <= 10752: the LLM stays with the q5_0 primary, Qwen3-ASR and the airband model all loaded."""
+    m, procs = real_12gb(tmp_path, monkeypatch, QWEN3_4B, "version: 12728 (ea722948)\n")
+    assert round(m.llm_mb()) == 3522
+    m.want = [ASR, ATC]
+    assert m.make_plan(GPU_12GB) == [ASR, ATC] and m.llm_room_ok
+
+
+# --- the servers' own logs, their pids, the job object ---------------------------------------------------------------
+
+def test_a_servers_log_has_one_handler_however_often_it_starts(tmp_path, monkeypatch):
+    m, procs, clock = ready_models(tmp_path, monkeypatch)
+    m.want = ["atc-test"]
+    for _ in range(3):
+        step(m)
+        s = m.servers["atc-test"]
+        s.proc._logger().info("a line")
+        m.stop("atc-test", "again")
+        clock[0] += W.MODEL_SHORT_RETRY_S
+    out = s.proc._logger()
+    files = [h for h in out.handlers if isinstance(h, __import__("logging").handlers.RotatingFileHandler)]
+    assert len(out.handlers) == 1 and len(files) == 1
+    for h in out.handlers:
+        h.flush()
+    assert s.proc.log_path.read_text().count("a line") == 3                 # each line once, never twice
+
+
+def test_a_servers_log_moved_closes_the_old_handler(tmp_path):
+    a = W.WhisperProcess(["x"], tmp_path / "one.log", name="model-moved")
+    old = a._logger().handlers[0]
+    b = W.WhisperProcess(["x"], tmp_path / "two.log", name="model-moved")
+    out = b._logger()
+    assert len(out.handlers) == 1 and out.handlers[0] is not old and old.stream is None     # (closed)
+    out.handlers[0].close()
+    out.removeHandler(out.handlers[0])
+
+
+class FakeJob:
+    handle = 1
+
+    def __init__(self):
+        self.added: list = []
+
+    def add(self, proc) -> bool:
+        self.added.append(proc)
+        return True
+
+
+def test_a_models_server_joins_the_job_object_and_its_pid_is_kept(tmp_path, monkeypatch):
+    m, procs, clock = ready_models(tmp_path, monkeypatch)
+    m.job, m.children = FakeJob(), W.Children(tmp_path / "state" / "children.json")
+    m.want = ["asr-test"]
+    step(m)
+    s = m.servers["asr-test"]
+    assert m.job.added == [s.proc.proc]
+    assert W.read_json(tmp_path / "state" / "children.json") == {"model-asr-test": 4242}
+    m.stop("asr-test", "done")
+    assert W.read_json(tmp_path / "state" / "children.json") == {}
+
+
+def test_a_dead_workers_model_servers_are_reaped_from_the_pid_file(tmp_path, hub, whisper, monkeypatch):
+    cfg = make_cfg(tmp_path, hub, whisper, llama_bin="C:/llama/llama-server.exe",
+                   whisper_server=["whisper-server", "-m", "x.bin", "--port", "8179"])
+    w = W.Worker(cfg, run=lambda a: "")
+    W.write_json(Path(cfg.state_dir) / "children.json", {"model-asr-test": 5001, "model-atc-test": 5002,
+                                                          "model-gone": 5003, "whisper-server": 5004})
+    names = {5001: "llama-server", 5002: "whisper-server.exe", 5003: "notepad", 5004: "whisper-server"}
+    killed: list = []
+    monkeypatch.setattr(W, "process_name", lambda pid, run=None: names.get(pid, ""))
+    monkeypatch.setattr(W, "kill_pid", lambda pid, run=None: killed.append(pid))
+    assert sorted(w.reap_leftovers()) == [5001, 5002, 5004]
+    assert killed == [5001, 5002, 5004] or sorted(killed) == [5001, 5002, 5004]     # (never notepad's pid)
+    assert W.read_json(Path(cfg.state_dir) / "children.json") == {}
+
+
+# --- gaming: the speech models' servers stop on the LLM's schedule --------------------------------------------------
+
+def test_gaming_stops_the_speech_models_on_the_llms_schedule(tmp_path, hub, whisper):
+    cfg = make_cfg(tmp_path, hub, whisper, gaming_stop_whisper_min=10.0)
+    w = W.Worker(cfg, run=lambda a: "")
+    stopped: list = []
+
+    class P:
+        def stop(self):
+            stopped.append(1)
+
+    def load(*vram):
+        for i, v in enumerate(vram):
+            e = {**W.check_catalog(two_models())["atc-test"], "id": f"m{i}", "vram_mb": v}
+            s = W.ModelServer(e, {}, 18190 + i, proc=P(), timeout_s=10)
+            w.stt_models.servers[s.id] = s
+    load(2300, 1400)
+    w._gaming_since = 100.0
+    assert w.models_stop_after_s() == 60.0
+    assert not w._gaming_stop_models(159.0) and len(w.stt_models.servers) == 2
+    assert w._gaming_stop_models(160.0) and w.stt_models.servers == {} and len(stopped) == 2   # 1 min, not 10
+    load(3800, 2300, 1000)                                                    # more than 6 GB together: 20 s
+    assert w.models_stop_after_s() == 20.0 and w._gaming_stop_models(120.0) and w.stt_models.servers == {}
+    cfg.llm_stop_gaming_s = 5.0
+    load(1000)
+    assert w.models_stop_after_s() == 5.0 and w._gaming_stop_models(105.0)
+    load(1000)
+    w._gaming_since = None                                                    # not gaming: never
+    assert not w._gaming_stop_models(1e9) and w.stt_models.servers

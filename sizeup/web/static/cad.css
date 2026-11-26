@@ -9,12 +9,13 @@
   html.cad, body.cad { overflow: hidden; }
   /* each page shows its own: the board hides the console's controls, the console the board's */
   html:not(.board) .board-only, html.board .console-only { display: none !important; }
-  body.cad { grid-template-rows: auto auto auto auto minmax(0, 1fr); }
+  body.cad { grid-template-rows: auto auto auto auto minmax(0, 1fr) auto; }
   body.cad > header { grid-row: 1; }
   body.cad > .cloud-banner { grid-row: 2; }
   body.cad > .role-banner { grid-row: 3; }
   body.cad > .alert-banners { grid-row: 4; }
   body.cad > main { grid-row: 5; }
+  body.cad > .lp { grid-row: 6; }
   body.stale aside { opacity: 0.55; filter: saturate(0.4); }
   body.ro-dispatch .cad-main [data-ro] { cursor: not-allowed; }
 
@@ -754,8 +755,10 @@
   .rn-size:is(:hover, :focus-visible, .on)::before { background: var(--accent); }
   .rn-size:focus-visible { outline: none; }
   .rn-rail { display: grid; gap: var(--s-1); padding: var(--s-2); background: var(--panel); border: var(--bw) solid var(--line);
-             border-radius: var(--radius); min-inline-size: 0; position: sticky; inset-block-start: 0;
-             max-block-size: calc(100vh - 2 * var(--hdr-h)); overflow-y: auto; }
+             border-radius: var(--radius); min-inline-size: 0; position: sticky; inset-block-start: var(--rn-top, 0);
+             /* --rn-max: measured (radio-nav.js fitRail): to the bottom of what can be seen of its column, the live
+                player's strip and the banners left out; its own scroll reaches its last row, the page's never needed */
+             max-block-size: var(--rn-max, calc(100vh - 2 * var(--hdr-h))); overflow-y: auto; overscroll-behavior: contain; }
   .rn-rail-head { display: flex; align-items: center; gap: var(--s-2); padding-inline-start: var(--s-1); }
   .rn-rail { grid-template-columns: minmax(0, 1fr); }
   .rn-rail .tab { gap: var(--s-2); min-inline-size: 0; }
@@ -786,6 +789,21 @@
   .rn-edto { flex: none; inline-size: 4.5rem; min-inline-size: 0; }
   .rn-edsec { color: var(--text-2); }
   .rn-edempty { padding-inline-start: var(--s-4); font-size: var(--fs-xs); line-height: var(--lh-xs); }
+  /* the views' editor (radio-views.js): the rail's ✎ and Settings > Radios > Views */
+  .rv-ed { display: grid; gap: var(--s-2); min-inline-size: 0; }
+  .rv-ed-list { display: grid; gap: var(--s-1); margin: 0; padding: 0; list-style: none; }
+  .rv-ed-row { display: flex; align-items: center; gap: var(--s-1); min-inline-size: 0; }
+  .rv-ed-row.off .rv-ed-name { color: var(--dim); }
+  .rv-ed-name { flex: 0 1 auto; min-inline-size: 0; }
+  .rv-ed-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1); }
+  .rv-ed-form { display: grid; gap: var(--s-2); min-inline-size: 0; }
+  .rv-ed-top { flex-wrap: wrap; align-items: end; gap: var(--s-2); }
+  .rv-ed-top .field:first-child { flex: 1 1 8rem; }
+  .rv-ed-top [data-f="mark"] { inline-size: calc(3 * var(--tag-h)); text-align: center; }
+  .rv-ed-set { display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-3); margin: 0; padding: var(--s-1) var(--s-2);
+               border: var(--bw) solid var(--line); border-radius: var(--radius); min-inline-size: 0; }
+  .rv-ed-src { inline-size: 100%; block-size: auto; padding-block: var(--s-1); }
+  .rn.mini .rn-rail :is(#rn-vedit, .rv-ed) { display: none; }
   .rn-grip { cursor: grab; color: var(--dim); flex: none; user-select: none; }
   .rn-drop { box-shadow: inset 0 var(--bw-mark) 0 var(--accent); }
   .rn-edf.rn-drop { box-shadow: 0 0 0 var(--bw-mark) var(--accent); }
@@ -855,6 +873,11 @@
   .sv-table tr.retired { color: var(--dim); }
   .sv-hit b { color: var(--text); }
   .sv-pager { justify-content: center; gap: var(--s-3); }
+  /* Search's opt-in Intel events (#937, search-view.js): their own table, marked */
+  .sv-intel { display: flex; flex-direction: column; gap: var(--s-1); min-inline-size: 0; }
+  .sv-intel-head { display: flex; align-items: baseline; gap: var(--s-2); }
+  .sv-ichip { border-color: var(--accent-text); color: var(--accent-text); }
+  .sv-table tr.sv-irow td.loc { overflow-wrap: anywhere; }
   /* its height: the layout's, or what the viewer dragged its bottom edge to (--sv-map-h, search-view.js; the incident
      map's handle, .dmap-h); the map clips itself so the handle can reach out into the gap */
   .sv-mapbox { position: relative; block-size: var(--sv-map-h, calc(var(--map-h) * 0.75)); border-radius: var(--radius);
@@ -900,6 +923,64 @@
   .pi-level.medium { color: var(--warn); }
   .aa-more { margin-right: auto; padding-inline: var(--s-0); }      /* a quiet link: its words, little padding */
   @media (max-width: 1100px) { .pi-grid { grid-template-columns: minmax(0, 1fr); } }
+
+  /* ---- Intel (intel-page.js, /cad#intel): every radio intel event, its level and why it didn't push -------------- */
+  body[data-view="intel"] .overview { display: none; }       /* the middle column is the page's (cadmap.js shows the Overview) */
+  .il-view { display: flex; flex-direction: column; gap: var(--gutter); min-inline-size: 0; }
+  .il-filters select { flex: 0 1 auto; max-inline-size: 14rem; }
+  .il-table tr.il-row { cursor: pointer; }
+  .il-table tr.il-sel { background: var(--hover); box-shadow: inset calc(var(--bw) * 2) 0 0 var(--accent-text); }
+  /* the map (#937, intel-page.js): above the list, as Search's; hidden by its Map button (a phone starts hidden) */
+  .il-mapwrap { display: flex; flex-direction: column; gap: var(--s-1); min-inline-size: 0; }
+  .il-mapbox { position: relative; block-size: calc(var(--map-h) * 0.75); border-radius: var(--radius); border: var(--bw) solid var(--line); }
+  .il-mapbox > :is(.il-map, .nomap) { border-radius: calc(var(--radius) - var(--bw)); overflow: hidden; }
+  .il-map { position: absolute; inset: 0; }
+  .il-map-foot { display: flex; align-items: center; gap: var(--s-2); min-block-size: var(--ctl-sm); }
+  .il-table td { vertical-align: top; }
+  .il-table :is(td, th) { padding-inline: var(--s-1); }        /* eight columns in the middle one at 1280 px */
+  .il-table td.t { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .il-table td.loc { overflow-wrap: break-word; max-inline-size: 14rem; }
+  .il-cat, .il-src { overflow-wrap: break-word; }
+  .il-level, .il-why > .chip { white-space: nowrap; }
+  .il-lv { font-variant-numeric: tabular-nums; }
+  .il-lv-push { border-color: var(--accent-text); color: var(--accent-text); }
+  .il-lv-held { border-color: var(--warn); color: var(--warn); }
+  .il-lv-map { color: var(--text); }
+  .il-lv-log, .il-lv-shadow { color: var(--text-2); border-style: dashed; }
+  .il-would { font-variant-numeric: tabular-nums; }
+  .il-held { color: var(--text-2); }
+  .il-sl { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .il-sl.high { color: var(--accent-text); font-weight: 700; }
+  .il-sl.medium { color: var(--warn); }
+  .il-sl.low { color: var(--dim); }
+  .il-parts { overflow-wrap: break-word; font-family: var(--mono); font-size: var(--fs-2xs); line-height: var(--lh-2xs);
+              max-inline-size: 11rem; }                  /* (the score's parts: never what widens the table) */
+  .il-part { white-space: nowrap; }                      /* a part whole: the line wraps at its " · " */
+  .il-acts { min-inline-size: var(--ctl-sm); }          /* the buttons stack in a narrow table */
+  :is(.il-vote, .aa-acts .icon)[aria-pressed="true"] { color: var(--accent-text); border-color: var(--accent-text); }
+  .il-n { margin-inline-start: var(--s-0); font-size: var(--fs-2xs); line-height: var(--lh-2xs); font-variant-numeric: tabular-nums; }
+  .q-intel-all { margin-inline-start: auto; }
+  /* notes and tags (intel-notes.js): the row's chip, More info's notes, the incident's */
+  .il-filters #il-q { flex: 1 1 10rem; }
+  .nt-count { font-variant-numeric: tabular-nums; }
+  .nt-audit summary { cursor: pointer; }
+  .nt-audit-list { margin: 0; }
+  .nt-review { border-color: var(--warn); color: var(--warn); }
+  .nt-notes { margin: 0; }
+  .nt-note { display: flex; flex-direction: column; gap: var(--s-1); padding-block: var(--s-1); }
+  .nt-note-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s-1) var(--s-2); min-inline-size: 0; }
+  .nt-tag[aria-pressed="true"] { border-color: var(--accent-text); color: var(--accent-text); }
+  .nt-done { color: var(--ok); }
+  .nt-text { overflow-wrap: anywhere; white-space: pre-wrap; }
+  .nt-fix { overflow-wrap: anywhere; }
+  .nt-acts { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); }
+  .nt-done-in { inline-size: 10rem; }
+  .nt-form { display: flex; flex-direction: column; gap: var(--s-2); }
+  .nt-ta { inline-size: 100%; resize: vertical; }
+  .nt-tags { flex-wrap: wrap; }
+  .nt-fixrow { flex-wrap: wrap; gap: var(--s-2); }
+  .nt-fixrow input { flex: 1 1 10rem; }
+  .d-intel { display: flex; flex-direction: column; gap: var(--s-1); margin-block: var(--s-2); }
 
   /* ---- the incident card's address notes and History here (addr-history.js, #403) ------------------------- */
   .premise { display: flex; flex-direction: column; gap: var(--s-1); margin-block: var(--s-2); }
@@ -1248,5 +1329,50 @@
     [data-rem], [data-rem] .lbl { animation: none !important; }
     :is(.q > li.qi, .ov-card, .ulist > li.urow, .on-units > li.ou, .card.inc > .card-head, .chip, .b-unit)[data-rem]:not(.talking, .live),
     .cm-rig.rv[data-rem]:not(.talking) .lbl { background-color: color-mix(in srgb, var(--rem) 16%, var(--raised)); }
+  }
+
+  /* ---- the live player (live-player.js): a strip under every view while Listen is on --------------------- */
+  .lp { position: relative; display: flex; align-items: center; gap: var(--s-2); min-inline-size: 0; flex-wrap: wrap;
+        padding: var(--s-1) var(--gutter); background: var(--panel); border-block-start: var(--bw) solid var(--line); }
+  .lp[hidden] { display: none; }
+  .lp-now { display: inline-flex; align-items: center; gap: var(--s-2); min-inline-size: 0; flex: 0 1 auto; }
+  .lp-ch { font-weight: 600; }
+  .lp-who { color: var(--text-2); }
+  .lp-t { font-variant-numeric: tabular-nums; color: var(--dim); }
+  .lp-p { --c: var(--warn); }
+  .lp-queue { font-variant-numeric: tabular-nums; }
+  .lp-quick { flex: none; }
+  /* the header's Listen: an icon (words only while it needs the click: Tap for sound) */
+  #lp-on:not(.blocked) { inline-size: var(--ctl); padding-inline: 0; justify-content: center; }
+  .lp-pause { display: inline-block; inline-size: var(--s-3); block-size: var(--s-3);
+              border-inline: calc(3 * var(--bw)) solid currentColor; }   /* pause: two bars */
+  .lp-vol { inline-size: calc(4 * var(--ctl)); accent-color: var(--ok); }
+  .lp-panel { position: absolute; inset-block-end: calc(100% + var(--s-1)); inset-inline-end: var(--gutter);
+              inline-size: min(calc(16 * var(--ctl)), calc(100vw - 2 * var(--gutter)));
+              max-block-size: calc(100vh - 3 * var(--hdr-h)); overflow-y: auto; display: grid; gap: var(--s-1); }
+  .lp-panel[hidden] { display: none; }
+  .lp-phead, .lp-pfoot, .lp-rule, .lp-add, .lp-how { display: flex; align-items: center; gap: var(--s-2); min-inline-size: 0; }
+  .lp-phead h2 { margin: 0; font-size: var(--fs-md); }
+  .lp-how { flex-wrap: wrap; }
+  .lp-age input { inline-size: calc(2.5 * var(--ctl)); }
+  .lp-sub { margin: var(--s-2) 0 0; font-size: var(--fs-xs); font-weight: 600; color: var(--dim); }
+  .lp-rule > .trunc { min-inline-size: 0; }
+  .lp-rule.lp-hid > .trunc { color: var(--dim); }
+  .lp-lvl { flex: none; }
+  .lp-pick { flex: 1 1 auto; min-inline-size: 0; }
+  .lp-mhz { inline-size: calc(3 * var(--ctl)); }
+  .lp-pfoot { padding-block-start: var(--s-1); border-block-start: var(--bw) solid var(--line); }
+  /* a channel's level on the Radio rail: P filled, N outlined, Off a dash; its own choice bold, a default dimmed */
+  .lp-lv { display: inline-flex; align-items: center; justify-content: center; inline-size: var(--tag-h); block-size: var(--tag-h);
+           font-size: var(--fs-2xs); line-height: var(--lh-2xs); font-weight: 700; border-radius: var(--radius-s);
+           border: var(--bw) solid transparent; color: var(--dim); }
+  .lp-lv.lp-priority { color: var(--on-warn); background: var(--warn); border-color: var(--warn); }
+  .lp-lv.lp-normal { color: var(--text-2); border-color: var(--text-2); }
+  .lp-lv:not(.own) { opacity: 0.6; }
+  .lp-src.menu-btn { flex: none; }
+  .lp-flash { outline: var(--focus-w) solid var(--ok); outline-offset: calc(-1 * var(--focus-w)); }
+  @media (max-width: 1100px) {
+    body.cad > .lp { position: sticky; inset-block-end: 0; z-index: var(--z-sticky); }
+    .lp-vol { display: none; }
   }
 }

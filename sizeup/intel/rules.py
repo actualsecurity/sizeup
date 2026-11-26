@@ -69,8 +69,9 @@ phrases are context ("a bat in her bedroom", "a contractor has a hammer"), and i
 
 "describe": a category's one-line definition (at most DESCRIBE_MAX characters), given to the local model behind the
 rules (sizeup/intel/backing.py) beside its label; a category without one is offered by its label alone. "model_cues":
-phrases (the grammar above) one of which the trigger transmission (or two of its context transmissions) must say before
-that model's answer of the category raises anything (water_rescue: "water", "boat", "drowning" ...).
+phrases (the grammar above) one of which the trigger transmission (or the dispatch just before it, or two of its context
+transmissions) must say before that model's answer of the category raises anything (water_rescue: "water", "boat",
+"drowning" ...; the police pack's categories but aided and alarm each have theirs).
 
 A category with "fire_related": true (the police pack's fire_report, fire_call, hazmat, alarm) is checked for the FD
 already being there before it pushes (engine.py _fire): one of our fire incidents at its place (dispatched: held at
@@ -347,6 +348,8 @@ class Pack:
     console_cue: str = "shadow"       # a labelled console's call-out as a dispatch cue (CONSOLE_CUE; engine.py)
     stt_high: bool = True             # its sources are push sources for speech-to-text's priority ("stt_high": false:
                                       # never, engine.push_sources; Settings intel_packs.<pack>.stt_high over the file's)
+    late_s: float = 300.0             # a row read longer than this after its clip ENDED is late (engine.py: context,
+                                      # never a push's origin); Settings intel_packs.<pack>.late_s over the file's
 
     def in_scope(self, row: dict) -> bool:
         """The row is one this pack reads: its service, its source key (a glob), its tier and system, as listed (an
@@ -617,7 +620,8 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                 fd=fd_present(d.get("fd_present"), name),
                 hw=(highway_cfg({**(d.get("highway") or {}), **(po.get("highway") or {})}, name)
                     if any(cd["highway"] for cd in cats.values()) else {}),
-                stt_high=_bool(po.get("stt_high", d.get("stt_high", True)), f"{name}.stt_high"))
+                stt_high=_bool(po.get("stt_high", d.get("stt_high", True)), f"{name}.stt_high"),
+                late_s=_num(po.get("late_s", d.get("late_s", 300)), 30, 3600, f"{name}.late_s"))
 
 
 def read_files(paths=None) -> list[dict]:

@@ -8,8 +8,8 @@
 //   Another P25 system's radios (MRRS, data.other_systems) are another agency's: never on a rig, named by a label
 //   (an agency or role) or a range of IDs (data.ranges; an ID's own label wins); each heard one may carry a "likely
 //   agency" hint (data.hints: the talkgroup it's heard on most), accepted into its label with one click, never applied.
-//   Hint (radios.hint, #639 models): a radio's name in the speech-to-text context or not; null the default (on with a rig
-//   or its own label: radios.py hint_on). The switch shows the effective state; a click sets the other one, or the
+//   Hint (radios.hint, #639 models): a radio's name in the speech-to-text context or not; null the default (radios.py
+//   hint_on: on for one of ours with a unit; another P25 system's only when an admin switches it on). The switch shows the effective state; a click sets the other one, or the
 //   default again when that is what the default says.
 "use strict";
 
@@ -177,7 +177,7 @@ window.RadiosPanel = (() => {
   // Its name as speech-to-text context (radios.py hint_on / hints): on, off; null the default (a rig or its own label)
   function hintCell(r) {
     const td = el("td", "rp-hint");
-    const dflt = !!(r.unit || r.label), on = r.hint === null || r.hint === undefined ? dflt : !!r.hint;
+    const dflt = other(r.system) ? false : !!r.unit, on = r.hint === null || r.hint === undefined ? dflt : !!r.hint;
     const b = el("button", "sw");
     b.type = "button";
     b.setAttribute("role", "switch");
@@ -186,12 +186,14 @@ window.RadiosPanel = (() => {
     b.classList.toggle("on", on);
     b.append(el("i", "knob"));
     b.title = `Hint ${on ? "on" : "off"}${r.hint === null || r.hint === undefined ? " (default)" : ""}: its name `
-      + `${on ? "in" : "never in"} the speech-to-text context\nDefault: on with a rig or its own label`
-      + (other(r.system) ? "\nA range's label is never a hint" : "") + "\nNever its ID";
+      + `${on ? "in" : "never in"} the speech-to-text context\nDefault: `
+      + (other(r.system) ? "off (on: a dispatch console's exact name only)\nA range's label is never a hint"
+         : "on with a unit") + "\nNever its ID";
     b.addEventListener("click", async () => {
       const next = !on;
       try {
-        await post("/api/cad/radios", { system: r.system, radio_id: r.radio_id, hint: next === dflt ? null : next });
+        await post("/api/cad/radios", { system: r.system, radio_id: r.radio_id,
+                                        hint: next === dflt && !other(r.system) ? null : next });
         await load();
       } catch (e) { p.error = e.message; render(); }
     });
@@ -210,8 +212,8 @@ window.RadiosPanel = (() => {
     const h = hintOf(r);
     if (!h) return [el("span", "dim", "unknown")];
     const pct = `${Math.round(h.share * 100)}%`;
-    const s = el("span", "dim small", h.shared ? `shared · ${h.channel} ${pct}` : `${h.agency}? ${pct}`);
-    s.title = `Likely agency: heard on ${h.channel} in ${pct} of ${h.n} transmissions (last 14 days)`
+    const s = el("span", "dim small", h.shared ? `shared · ${(typeof chName === "function" ? chName(h) : h.channel)} ${pct}` : `${h.agency}? ${pct}`);
+    s.title = `Likely agency: heard on ${(typeof chName === "function" ? chName(h) : h.channel)} in ${pct} of ${h.n} transmissions (last 14 days)`
       + (h.shared ? ". Several agencies share it: no guess" : ". A hint only: never applied");
     if (h.shared) return [s];
     const use = el("button", "mini", "Use");
@@ -343,7 +345,7 @@ window.RadiosPanel = (() => {
       if (!x.n) continue;
       const parts = [`${x.with_id} with an ID`, x.none && `${x.none} no ID sent`, x.undecoded && `${x.undecoded} ID not decoded`,
                      x.weak && `${x.weak} too weak to tell`, x.unknown && `${x.unknown} not checked`].filter(Boolean);
-      const line = el("div", "dim small rp-ids", `${x.channel}, last 24 h: ${x.n} transmission${x.n === 1 ? "" : "s"}, ${parts.join(", ")}`);
+      const line = el("div", "dim small rp-ids", `${(typeof chName === "function" ? chName(x) : x.channel)}, last 24 h: ${x.n} transmission${x.n === 1 ? "" : "s"}, ${parts.join(", ")}`);
       line.title = "No ID sent: no MDC / FleetSync burst on a strong carrier (the radio sends none). ID not decoded: a burst "
         + "was there but didn't decode. Too weak to tell: no burst found on a weak carrier. Not checked: from before this was kept.";
       out.push(line);
