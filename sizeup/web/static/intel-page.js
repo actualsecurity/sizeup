@@ -13,8 +13,11 @@
 // what the filters select, CSV or JSONL (GET /api/cad/intel/export.*: notes, scores, rule hits, transcripts).
 //
 // Light on the console: nothing per second. The list is read on open, on a filter or page change, after a vote, and
-// every POLL_MS while it shows the newest page; render() draws only what changed (a row is rebuilt only when its
-// own data changed; the same answer again touches nothing).
+// every POLL_MS only while it shows the newest page of the default view (no filter, no end date, at most POLL_SPAN_S
+// back) and the tab is visible (?poll=1: the hub reuses its count unless the events changed); else a Refresh button.
+// render() draws only what changed (a row is rebuilt only when its own data changed; the same answer touches nothing).
+// A vote is one per person (Useful / Noise one of the two; the same one again takes it back): its row's buttons are
+// disabled from the click until the hub answers.
 //
 // Uses cad.js's helpers (el, $, show, setText, api, canDo) and icons.js's Icon: loaded after them.
 "use strict";
@@ -22,7 +25,9 @@
 window.IntelPage = (() => {
   const KEYS = ["level", "category", "source", "system", "decided", "held", "status", "q", "tag", "review", "from", "to"];
   const POLL_MS = 30000;
-  const st = { q: {}, page: 0, seq: 0, data: null, sig: "", rows: new Map(), facetSig: "", timer: null, busy: new Set() };
+  const POLL_SPAN_S = 7 * 86400;
+  const st = { q: {}, page: 0, seq: 0, data: null, sig: "", rows: new Map(), facetSig: "", timer: null, busy: new Set(),
+               open: false };
   const LEVELS = { push: "pushed", held: "at push, not pushed", map: "on the card and the map", log: "logged only",
                    shadow: "counted only" };
   const DECIDED = { rules: "Rules", model: "Model", both: "Rules + model" };
@@ -58,17 +63,39 @@ window.IntelPage = (() => {
     const c = $("#il-category");
     if (st.q.category && ![...c.options].some((o) => o.value === st.q.category)) c.append(new Option(st.q.category, st.q.category));
     c.value = st.q.category;
+    st.open = true;
+    show($("#il-refresh"), !live());
     run();
-    if (!st.timer) st.timer = setInterval(poll, POLL_MS);
+    timer();
   }
   function close() {
     st.seq++;
+    st.open = false;
     if (st.timer) { clearInterval(st.timer); st.timer = null; }
   }
-  // the newest page, no end date, the page on screen: read again (render() skips an unchanged answer)
+  // polled: the newest page of the default view, a short span, no filter (a long or filtered view: Refresh)
+  function live() {
+    if (st.page || st.q.to) return false;
+    if (KEYS.some((k) => k !== "from" && st.q[k])) return false;
+    if (!st.q.from) return true;
+    const t = Date.parse(st.q.from);
+    const since = Number.isNaN(t) ? Number(st.q.from) * 1000 : t;
+    return !Number.isNaN(since) && Date.now() - since <= POLL_SPAN_S * 1000;
+  }
+  function timer() {
+    const want = st.open && live() && !document.hidden;
+    if (want && !st.timer) st.timer = setInterval(poll, POLL_MS);
+    if (!want && st.timer) { clearInterval(st.timer); st.timer = null; }
+  }
   function poll() {
-    if (document.hidden || $("#intel-view").hidden || st.page || st.q.to) return;
+    if (document.hidden || $("#intel-view").hidden || !live()) return;
     run(true);
+  }
+  // hidden: no timer; back: read at once, then the timer again
+  function visibility() {
+    if (!st.open) return;
+    timer();
+    if (!document.hidden && live()) run(true);
   }
   function srcValue() {
     const s = $("#il-source");
@@ -96,7 +123,7 @@ window.IntelPage = (() => {
     q.system = s.startsWith("y:") ? s.slice(2) : "";
     const qs = params(q, page).toString();
     const h = "#intel" + (qs ? `?${qs}` : "");
-    if (location.hash === h) { st.q = q; st.page = page; return run(); }
+    if (location.hash === h) { st.q = q; st.page = page; show($("#il-refresh"), !live()); timer(); return run(); }
     location.hash = h;                         // route() -> open() -> run()
   }
 
@@ -104,7 +131,9 @@ window.IntelPage = (() => {
     const seq = ++st.seq;
     if (!quiet && !st.data) setText($("#il-count"), "Loading…");
     try {
-      const d = await api("GET", `/api/cad/intel/list?${params(st.q, st.page)}`);
+      const p = params(st.q, st.page);
+      if (quiet) p.set("poll", "1");
+      const d = await api("GET", `/api/cad/intel/list?${p}`);
       if (seq !== st.seq) return;
       render(d);
     } catch (e) {
@@ -233,13 +262,20 @@ window.IntelPage = (() => {
     const busy = st.busy.has(e.id);
     const mine = new Set(e.mine || []);
     const n = e.votes || {};
+    const btns = [];
     const b = (icon, verdict, name, tip) => {
       const x = window.Icon ? Icon.button(icon, name, tip, "il-vote") : el("button", "mini il-vote", name);
       x.type = "button";
       x.setAttribute("aria-pressed", String(mine.has(verdict)));
+      if (mine.has(verdict)) x.title += " (yours: again takes it back)";
       if (n[verdict]) x.append(el("span", "il-n", String(n[verdict])));
-      x.disabled = busy || mine.has(verdict);
-      x.addEventListener("click", (ev) => { ev.stopPropagation(); vote(e, verdict, name); });
+      x.disabled = busy;
+      btns.push(x);
+      x.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        for (const o of btns) o.disabled = true;           // at once: a second click never reaches the hub
+        vote(e, verdict, name);
+      });
       return x;
     };
     const out = [b("thumbs-up", "useful", "Useful", "it was real"), b("thumbs-down", "noise", "Noise", "nothing to it")];
@@ -247,10 +283,11 @@ window.IntelPage = (() => {
     return out;
   }
   async function vote(e, verdict, name) {
+    if (st.busy.has(e.id)) return;
     st.busy.add(e.id);
     try {
-      await api("POST", `/api/cad/intel/${e.id}/feedback`, { verdict, operator: typeof operator === "function" ? operator() : "" });
-      if (window.UI) UI.toast(`Noted: ${name.toLowerCase()}`, "ok");
+      const r = await api("POST", `/api/cad/intel/${e.id}/feedback`, { verdict, operator: typeof operator === "function" ? operator() : "" });
+      if (window.UI) UI.toast(r && r.removed ? `Taken back: ${name.toLowerCase()}` : `Noted: ${name.toLowerCase()}`, "ok");
     } catch (err) {
       if (window.UI) UI.toast(`Feedback: ${err.message}`, "err");
     } finally {
@@ -273,6 +310,8 @@ window.IntelPage = (() => {
     $("#il-clear").addEventListener("click", () => { location.hash = "#intel"; });
     $("#il-prev").addEventListener("click", () => submit(Math.max(0, st.page - 1)));
     $("#il-next").addEventListener("click", () => submit(st.page + 1));
+    $("#il-refresh").addEventListener("click", () => run());
+    document.addEventListener("visibilitychange", visibility);
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", wire); else wire();
 

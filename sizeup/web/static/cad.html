@@ -280,6 +280,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       <div class="view-head">
         <h2 class="view-title">Intel</h2>
         <span id="il-count" class="dim small" aria-live="polite"></span>
+        <button id="il-refresh" type="button" class="sm quiet" title="Read it again (a long or filtered view isn't refreshed on its own)" hidden>Refresh</button>
         <span class="spacer"></span>
         <a id="il-csv" class="nav sm" href="#" download hidden title="These events with their notes, scores, rule hits and transcripts (admins; in your activity)">CSV</a>
         <a id="il-jsonl" class="nav sm" href="#" download hidden title="The same as JSON lines (admins; in your activity)">JSONL</a>

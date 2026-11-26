@@ -34,7 +34,7 @@ from sizeup import sourcekeys
 from sizeup.cad.store import CadError
 from sizeup.intel import policy as policy_mod
 from sizeup.intel import rules as rules_mod
-from sizeup.intel.events import VERDICTS
+from sizeup.intel.events import VERDICTS, VOTE_PAIRS
 from sizeup.intel.model import MODES
 from sizeup.intel.push import category_label
 
@@ -270,6 +270,9 @@ class IntelAdmin:
             raise CadError(f"verdict: {' | '.join(VERDICTS)}")
         if self.engine.events.get(eid) is None:
             raise CadError(f"no pre-alert {eid}")
+        if v in VOTE_PAIRS and hasattr(self.engine.events, "vote"):     # a vote: one each, again takes it back
+            fid, removed = self.engine.events.vote(eid, v, str(body.get("operator") or ""), self.cad.clock())
+            return {"ok": True, "id": fid, "removed": removed}
         cc = str(body.get("category") or "")[:40]
         fid = self.engine.events.feedback(eid, None, v, str(body.get("operator") or ""), self.cad.clock(),
                                           corrected_category=cc)

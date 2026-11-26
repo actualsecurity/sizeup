@@ -907,8 +907,9 @@
   .il-filters select { flex: 0 1 auto; max-inline-size: 14rem; }
   .il-table tr.il-row { cursor: pointer; }
   .il-table td { vertical-align: top; }
+  .il-table :is(td, th) { padding-inline: var(--s-1); }        /* eight columns in the middle one at 1280 px */
   .il-table td.t { white-space: nowrap; font-variant-numeric: tabular-nums; }
-  .il-table td.loc { overflow-wrap: break-word; }
+  .il-table td.loc { overflow-wrap: break-word; max-inline-size: 14rem; }
   .il-cat, .il-src { overflow-wrap: break-word; }
   .il-level, .il-why > .chip { white-space: nowrap; }
   .il-lv { font-variant-numeric: tabular-nums; }
@@ -922,8 +923,9 @@
   .il-sl.high { color: var(--accent-text); font-weight: 700; }
   .il-sl.medium { color: var(--warn); }
   .il-sl.low { color: var(--dim); }
-  .il-parts { overflow-wrap: break-word; font-family: var(--mono); }
-  .il-acts { min-inline-size: calc(var(--ctl-sm) * 2); }
+  .il-parts { overflow-wrap: anywhere; font-family: var(--mono); font-size: var(--fs-2xs); line-height: var(--lh-2xs);
+              max-inline-size: 11rem; }                  /* (the score's parts: never what widens the table) */
+  .il-acts { min-inline-size: var(--ctl-sm); }          /* the buttons stack in a narrow table */
   .il-vote[aria-pressed="true"] { color: var(--accent-text); border-color: var(--accent-text); }
   .il-n { margin-inline-start: var(--s-0); font-size: var(--fs-2xs); line-height: var(--lh-2xs); font-variant-numeric: tabular-nums; }
   .q-intel-all { margin-inline-start: auto; }
