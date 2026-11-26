@@ -320,6 +320,29 @@ STT_KEYS = ("vocabulary", "aws_monthly_limit_usd", "aws_context_budget_usd",   #
 MAX_VOCAB_BYTES = 50_000          # AWS's limit; also keeps the Settings request under its 64 KB
 MAX_PLACE_NAMES = 300
 ALIAS_MAX = 40                     # an alias added one at a time (add_place_alias): a place's other name, never a phrase
+# One word the radio says all the time, never a place's alias (with sizeup/geo/pagegeo.py DEPARTMENT_WORDS and
+# NOT_A_STREET): services and units, apparatus, what a call is, and filler.
+RADIO_WORDS = frozenset({
+    "ems", "fd", "pd", "als", "bls", "emt", "emd", "mva", "mvc", "fdny", "ambulance", "medic", "medics", "paramedic",
+    "engine", "engines", "ladder", "ladders", "truck", "rescue", "squad", "tower", "battalion", "chief", "car",
+    "unit", "units", "sector", "post", "patrol", "dispatch", "control", "respond", "responding", "response", "en",
+    "route", "code", "alarm", "alarms", "assist", "assisting", "lift", "wires", "odor", "smoke", "fire", "fires",
+    "gas", "leak", "call", "caller", "standby", "copy", "clear",
+})
+FILLER_WORDS = frozenset({"uh", "um", "uhh", "umm", "er", "ah", "ok", "okay", "copy", "yeah", "yes", "no", "roger",
+                          "affirmative", "negative", "sir", "maam"})       # (norm_tokens drops the apostrophe)
+# Ordinary radio traffic with no place in it (invented): an alias that makes the radio's page locator read a place in
+# any of these, with a town said, is refused (alias_problem's outcome guard). "{town}": each of our towns and the
+# place's own.
+ORDINARY_RADIO = (
+    "{town} ems respond to example avenue", "{town} engine 1 uh respond", "{town} pd copy, ok",
+    "{town} units responding, smoke showing", "{town} car 3 en route", "{town} ladder 31 on scene",
+    "{town} medic responding for a fall", "{town} fire alarm activation, respond", "{town} um okay, 10-4",
+    "{town} chief to control, on location", "{town} rescue responding code 3", "{town} wires down, odor of gas",
+    "{town} lift assist", "{town} units clear, back in service", "{town} roger, affirmative",
+    "{town} negative, no fire", "{town} battalion responding", "{town} tower ladder on scene",
+    "{town} uh standby", "{town} copy that, show us en route",
+)
 # The county's "common place names" list (sizeup/cad/commonplaces.py): imported into section "places" under keys
 # "county/...", replaced as a whole on each import; Settings > Lists > Place names (admins), audited as Lists, counts only.
 COMMON_SECTION = "common_places"
@@ -1989,10 +2012,12 @@ class Editor:
         return tuple(toks) in got[1]
 
     def alias_problem(self, key: str, alias: str, cur: dict | None = None) -> tuple[str, str] | None:
-        """Why alias can't be another name of place key: ("taken", why) (a town, a place on the map, or another
-        place's name or alias already: the API's 409, PlaceNameTaken) | ("bad", why) (empty, too long, a number, a
-        street's name; one word that is common ("Market") or a single letter; several with none but generic words:
-        400); None: it may. cur: {key: entry} (local_places by key), else read."""
+        """Why alias can't be another name of place key: ("taken", why) (a town, one word of a town's name, a place on
+        the map, or another place's name or alias already: the API's 409, PlaceNameTaken) | ("bad", why) (empty, too
+        long, a number, a street's name; one word the radio says all the time (RADIO_WORDS, FILLER_WORDS), that is
+        common ("Market"), or of two or three letters not typed in capitals; several with none but generic words; or,
+        the outcome guard, one that would make the radio's page locator read a place in ordinary traffic
+        (ORDINARY_RADIO, tried in memory): 400); None: it may. cur: {key: entry} (local_places by key), else read."""
         a = " ".join(str(alias or "").split())
         if not a:
             return ("bad", "alias: empty")
@@ -2003,6 +2028,12 @@ class Editor:
             return ("bad", "alias: a number names no place")
         if self._names_town(toks):                     # the county feed's "<town>" alone would pin the place
             return ("taken", f'"{a}" is a town')
+        if len(toks) == 1 and toks[0] in self._town_words():
+            return ("taken", f'"{a}" is part of a town\'s name')
+        from sizeup.geo.pagegeo import DEPARTMENT_WORDS, NOT_A_STREET
+        if len(toks) == 1 and (toks[0] in RADIO_WORDS or toks[0] in FILLER_WORDS or toks[0] in DEPARTMENT_WORDS
+                               or toks[0] in NOT_A_STREET):
+            return ("bad", "alias: a word the radio says all the time")
         ix = self.cad.place_index() if hasattr(self.cad, "place_index") else None
         if ix is not None and getattr(ix, "names_street", None) and ix.names_street(a):
             return ("bad", "alias: a street's name")    # (the location box would offer the place for the street)
@@ -2013,8 +2044,9 @@ class Editor:
         # its words with "&", "." and "'" gone first ("A&P", "C.V.S.", "BJ's" -> ap, cvs, bjs: heard words often lower case)
         words = norm_tokens(re.sub(r"[&.'’]", "", a))
         own = [t for t in words if not t.isdigit() and t not in GENERIC and t not in COMMON_WORDS]
-        if len(words) == 1:                            # one word: its own ("Hudson", "KFC", "cvs"), never a common one
-            ok = bool(own) and len(own[0]) >= 2
+        if len(words) == 1:                            # one word: its own ("Hudson", "KFC"), never a common one; two
+            raw = re.sub(r"[&.'’]", "", a)             # or three letters only as typed in capitals ("CVS", "BJs")
+            ok = bool(own) and (len(own[0]) >= 4 or (len(own[0]) >= 2 and sum(c.isupper() for c in raw) >= 2))
         else:                                          # several ("Golden Star Diner", "NY Deli"): one not generic, or a
             ok = any(len(t) >= 3 and not t.isdigit() and t not in GENERIC for t in words) or \
                 any(len(t) == 2 and t.isalpha() for t in own)                       # two-letter one not common
@@ -2034,7 +2066,42 @@ class Editor:
                 names.append(o.get("label") or "")
             if k in {commonplaces.name_key(x) for x in names if x}:
                 return ("taken", f'"{a}" is already a name of {self._place_label(ok, o)}')
+        if self._fires_on_radio(a, e, ix):
+            return ("bad", "alias: would match ordinary radio traffic")
         return None
+
+    def _town_words(self) -> set:
+        """A word of a town's name, one alone never an alias: every word of our towns (the lists' towns and their
+        aliases, the page locator's: "port", "chester", "brook"), and the county's other towns' own words ("hudson",
+        "scarsdale"), never a word anyone says ("manor", "plains": those are refused as too common anyway)."""
+        L = self.cad.lists
+        got = getattr(self, "_town_word_set", None)
+        if got is None or got[0] is not L:
+            from sizeup.geo.commonwords import COMMON_WORDS
+            from sizeup.geo.gazetteer import MUNI_PHRASES
+            from sizeup.geo.pagegeo import GENERIC, TOWN_WORDS
+            from sizeup.intel.rules import town_names
+            everyday = {"of", "the", "on", "at", "city", "town", "village", "hamlet", "w", "west", "old", "new", "neck"}
+            ours = {w for t in (*L.geo_town_order, *L.geo_town_aliases, *L.geo_town_aliases.values())
+                    for w in norm_tokens(t)} | {w for p, _m, _n in MUNI_PHRASES for w in p} | set(TOWN_WORDS)
+            county = {w for t in town_names().values() for w in norm_tokens(t)}
+            got = self._town_word_set = (L, (ours - everyday) | {w for w in county - everyday
+                                                                  if w not in COMMON_WORDS and w not in GENERIC})
+        return got[1]
+
+    def _fires_on_radio(self, alias: str, e: dict, ix) -> bool:
+        """The outcome guard: the radio's page locator, with the alias alone as a place name in memory (nothing
+        written), reads a place in any of ORDINARY_RADIO, said with each of our towns and the place's own."""
+        if ix is None or getattr(ix, "gaz", None) is None or e.get("lat") is None or e.get("lon") is None:
+            return False
+        from sizeup.geo.pagegeo import locator
+        try:
+            loc = locator(ix.gaz)
+        except Exception:  # noqa: BLE001 - no page locator: the word rules alone
+            return False
+        row = {"name": alias, "aliases": [], "label": alias, "lat": e["lat"], "lon": e["lon"], "muni": e.get("muni") or ""}
+        towns = {t.lower() for t in (*self.cad.lists.geo_town_order[:3], e.get("muni") or "") if t}
+        return any(loc.local_said(p.format(town=t), rows=[row]) for t in towns for p in ORDINARY_RADIO)
 
     def add_place_alias(self, key: str, alias: str, op: str) -> dict:
         """Another name for one of the department's place names, its aliases as Settings > Lists > Place names keeps

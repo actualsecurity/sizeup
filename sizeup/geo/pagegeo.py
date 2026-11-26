@@ -232,6 +232,12 @@ class PageLocator:
         got = self._local
         if sig == got[0]:
             return got
+        self._local = (sig, *self._build_local(rows))
+        return self._local
+
+    @staticmethod
+    def _build_local(rows) -> tuple[list[dict], dict[str, list[int]]]:
+        """(the names, a name's first word -> its names) of these rows: _local_state's, or a trial's (local_said rows=)."""
         out = []
         for r in rows:
             for n in [r.get("name") or "", *(r.get("aliases") or [])]:
@@ -254,15 +260,15 @@ class PageLocator:
         first: dict[str, list[int]] = collections.defaultdict(list)       # a name's first word -> the names
         for i, p in enumerate(out):
             first[p["core"][0]].append(i)
-        self._local = (sig, out, dict(first))
-        return self._local
+        return out, dict(first)
 
-    def _local_hits(self, tokens: list[str], skip: set[int], named, towns=None) -> list[tuple[int, int, dict, float]]:
+    def _local_hits(self, tokens: list[str], skip: set[int], named, towns=None,
+                    state=None) -> list[tuple[int, int, dict, float]]:
         """The department's names said: every word of a name but its town, in order (speech-to-text's spellings:
         _word_match); a generic one with its town (the name's, else its own) said within LOCAL_TOWN_GAP words."""
         found = []
         n = len(tokens)
-        _sig, loc, first = self._local_state()
+        _sig, loc, first = state or self._local_state()
         if not loc:
             return found
         for i in range(n):
@@ -299,16 +305,18 @@ class PageLocator:
             out += [w for w in first if w != t and len(w) >= 5 and _word_match(t, w)]
         return out
 
-    def local_said(self, text: str) -> bool:
-        """A department name is said in text (a cheap first look: sizeup/intel/place.py's cue)."""
-        _sig, loc, first = self._local_state()
+    def local_said(self, text: str, rows=None) -> bool:
+        """A department name is said in text (a cheap first look: sizeup/intel/place.py's cue). rows: these names
+        instead of the department's (a trial, in memory: an alias tried before it is added, settings.py)."""
+        state = ((), *self._build_local(rows)) if rows is not None else self._local_state()
+        _sig, loc, first = state
         if not loc:
             return False
         tokens = tokenize(text or "")
         if not any(self._first_words(t, first) for t in set(tokens) if t != BOUNDARY):
             return False
         named = self.gaz._muni_mentions(tokens, self.gaz._street_mentions(tokens))
-        return bool(self._local_hits(tokens, set(), named))
+        return bool(self._local_hits(tokens, set(), named, state=state))
 
     # ------------------------------------------------------------------ data
 

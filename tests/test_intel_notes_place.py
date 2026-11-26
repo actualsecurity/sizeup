@@ -420,7 +420,12 @@ def test_an_alias_never_takes_another_places_name_or_alias(placed):
     ("", "empty"), ("   ", "empty"), ("Sampel Diner by the old railroad bridge underpass", "at most 40"), ("12", "a number"),
     ("12 34", "a number"), ("King St", "a street's name"), ("N Main St", "a street's name"), ("Arbor", "a street's name"),
     ("X", "too short"), ("the deli", "too common"), ("Market", "too common"), ("Garden", "too common"),
-    ("Bar", "too common")])
+    ("Bar", "too common"), ("kfc", "too short"), ("Joe", "too short"),
+    # the radio's own words and filler (#960 review 4): one alone would place ordinary traffic at the diner
+    ("EMS", "the radio says"), ("uh", "the radio says"), ("Respond", "the radio says"), ("Medic", "the radio says"),
+    ("Unit", "the radio says"), ("ok", "the radio says"), ("FD", "the radio says"), ("Wires", "the radio says"),
+    # several words that pass the word rules but read as ordinary traffic (the outcome guard)
+    ("Uh Respond", "ordinary radio traffic"), ("Lift Assist", "ordinary radio traffic")])
 def test_a_street_a_number_or_junk_is_never_an_alias(placed, alias, why):
     cad, _clock, _gaz = placed
     code, out = alias_by_settings(cad, "sample diner", alias)
@@ -556,7 +561,8 @@ global.api = async (m, p, b) => {{ if (m === "POST") {{ posts.push([p, b]); retu
 
 
 @pytest.mark.parametrize("alias", ["Port Chester", "port  chester", "Village of Rye Brook", "Rye", "Harrison",
-                                   "Greenwich", "City of Rye"])
+                                   "Greenwich", "City of Rye", "Chester", "Brook", "Port",
+                                   "Hudson"])                    # (a county town's own word: Croton-on-Hudson)
 def test_a_town_is_never_an_alias(placed, alias):
     """#960 re-review 1: "Port Chester" as the diner's alias would pin a county event located only by its town there."""
     cad, _clock, _gaz = placed
@@ -574,10 +580,9 @@ def test_a_place_on_the_map_is_never_an_alias(placed, alias):
 
 
 @pytest.mark.parametrize("alias", ["Golden Star Diner", "Lucky Garden", "Royal Palace", "Grand Union", "King St Diner",
-                                   "Mobile Station", "CVS", "KFC", "BJs", "BJ's", "kfc", "cvs", "Kfc", "A&P", "C.V.S.",
-                                   "NY Deli", "Joe",
+                                   "Mobile Station", "CVS", "KFC", "BJs", "BJ's", "A&P", "C.V.S.", "NY Deli",
                                    # words towns use, never a town (#960 re-review 2)
-                                   "Pleasant Manor", "The Castle", "Hudson", "River Vista", "Lake Hills"])
+                                   "Pleasant Manor", "The Castle", "River Vista", "Lake Hills"])
 def test_business_names_and_acronyms_may_be_aliases(placed, alias):
     """#960 re-review 3: common words refuse a single word only; several need one that isn't generic; an acronym."""
     cad, _clock, _gaz = placed
@@ -590,3 +595,17 @@ def test_a_common_word_alone_is_refused_but_never_as_a_town(placed):
     cad, _clock, _gaz = placed
     code, out = alias_by_settings(cad, "sample diner", "Manor")
     assert code == 400 and "too common" in out["error"] and "town" not in out["error"]
+
+
+def test_refused_aliases_leave_ordinary_radio_traffic_unplaced(placed):
+    """#960 review 4's repro: tried as aliases of the diner, "EMS", "uh" and "Respond" are refused, and the radio's page
+    locator still reads no place in ordinary traffic with the town said."""
+    cad, _clock, gaz = placed
+    set_local_source(gaz, cad.local_places)
+    said = ["port chester ems respond to king street", "port chester uh engine 1 respond to king street",
+            "port chester respond to king street"]
+    for alias in ("EMS", "uh", "Respond"):
+        assert alias_by_settings(cad, "sample diner", alias)[0] in (400, 409)
+    assert [locator(gaz).local_said(t) for t in said] == [False, False, False]
+    assert alias_by_settings(cad, "sample diner", "Sampel Diner")[0] == 200       # a real misheard name still goes on
+    assert [locator(gaz).local_said(t) for t in said] == [False, False, False]
