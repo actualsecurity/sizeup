@@ -453,7 +453,7 @@ window.LivePlayer = (() => {
   function relabel(rows) {
     const by = new Map(rows.filter((t) => t && t.id).map((t) => [t.id, t]));
     let hit = false;
-    for (const it of [st.cur, st.over, ...st.q.pq, ...st.q.nq]) {
+    for (const it of [st.cur, st.over, st.q.paused, ...st.q.pq, ...st.q.nq]) {
       const t = it && it.row && by.get(it.id);
       if (t && (t.talker !== it.row.talker || t.rig !== it.row.rig)) {
         it.row = Object.assign({}, it.row, { talker: t.talker, rig: t.rig });

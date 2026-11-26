@@ -381,6 +381,8 @@ class SttCorrections:
         rows = rows[:limit]
         # the rest starts at the first clip left out (a clip sharing the last one's start is then sent again, never lost)
         next_since = more_start if more else None
+        for r in rows:                         # (the label it was recorded with: a snapshot stays reproducible, #977)
+            r["talker_recorded"] = r.get("talker") or ""
         self._talkers(rows)                    # the talker label as the Radio IDs table gives it now
         fix = getattr(getattr(self.cad, "hints", None), "decorate", None)
         if fix is not None:
@@ -417,5 +419,8 @@ def record(r: dict) -> dict:
                 "based_on": r.get("based_on") or ""}
     return {"clip_id": r["id"], "channel": r.get("channel") or "", "talkgroup": r.get("talkgroup"),
             "talker": r.get("talker") or "", "start": r.get("start"), "end": r.get("end"), "asr": asr,
+            # (#977) its radio ID(s), and the talker label it was recorded with ("talker": as the Radio IDs table
+            # names it at the export)
+            "radio_id": r.get("radio_id") or "", "talker_recorded": r.get("talker_recorded", r.get("talker")) or "",
             "fixed_text": r.get("fixed_text") or r.get("text") or "", "correction": corr,
             "system": r.get("system") or "", "service": r.get("service") or ""}      # (extensions of #428's contract)

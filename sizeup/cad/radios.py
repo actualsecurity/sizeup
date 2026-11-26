@@ -20,12 +20,14 @@ ID's label always beats a range. name() / talker() give the talker label rows ca
 talker alias, else "unknown MRRS radio" (the raw ID stays in the row's radio_id). The keys from before stay as they
 were: "p25" is the county's system ("westchester"), "mdc" / "fleetsync" are the fireground's (FG1, FG2).
 
-Talker labels follow the table (#977): a row of another system keeps its radio IDs (radio_traffic.system and
-radio_id) and the label it was recorded with, but every reader is shown the label the table gives NOW
-(shown_talker / show_talkers: the same precedence as talker(), the radio's learned alias in place of the one its call
-sent), cached per `rev`. A label added, changed or removed, an ID range's too, calls the on_change() hooks after the
-commit (the CAD: every Radio page reloads its rows, the state push rebuilds; intel: its own cache). The one label
-function is name(system, radio_id): the entry's label, else its range's, else "".
+Talker labels follow the table (#977): a row keeps its radio IDs (radio_traffic.system, talkgroup, radio_id) and the
+label it was recorded with, but every reader is shown the label the table gives NOW (shown_talker / show_talkers,
+cached per `rev`): another system's rows by talker()'s order (the radio's learned alias in place of the one its call
+sent; an ID with no entry and no range as recorded); the county's and the fireground's rows with no rig by a label a
+person set (label_shown). A label added, changed or removed, an ID range's too, calls the on_change() hooks after the
+commit (the CAD: the Radio pages reload their rows, the state is built again; intel: its own cache). A unit changed
+or cleared moves the radio's recent rows with it when the admin leaves "Also fix past transmissions" on
+(Comms.rerig). The one label function is name(system, radio_id): the entry's label, else its range's, else "".
 
 P25 needs no table to work: a talker alias that is a board code ("E60", "2398", "77A4") or starts
 with one ("E60 P2") names that unit. Every (radio ID, alias) pair heard is kept, so a radio heard
@@ -47,6 +49,8 @@ import json
 import re
 import threading
 from pathlib import Path
+
+from sizeup import sourcekeys
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 SEED = ROOT / "data" / "radio_ids.json"
@@ -381,16 +385,48 @@ class Registry:
 
     # -- talker labels as shown (a row's own radio IDs through the table as it is now) ----------------------------
 
-    def shown_talker(self, system: str, radio_id: str, stored: str = "") -> str:
-        """The talker label of another system's row as every reader is shown it: per radio ID of the row (radio_id
-        "a, b": one per key-up; a split part has its own), name() (the entry's label, else its range's), else the alias
-        the registry learned for that radio, else "unknown <system> radio": talker()'s order, the table as it is now.
-        stored (radio_traffic.talker, what it was recorded with) when the row has no radio ID, for an ID the registry
-        never keeps (0, -1, too long), and for a system with no talker labels (the county's and the fireground's
-        rows: their talker is the alias as heard; their rig follows the table through Comms.relink). Cached per rev."""
+    def label_shown(self, system: str, radio_id: str) -> str:
+        """The label a row of this radio is shown with ("" none). Another P25 system's: name() (its entry's label, else
+        its range's). The county's and the fireground's: the entry's label when a person set it (edited) or the
+        department's file did (confirmed, guessed); a heard row's label is only the alias it was first heard with,
+        never shown in place of what each row heard."""
+        rid = str(radio_id or "").strip()
+        if system in OTHER_P25:
+            return self.name(system, rid)
+        row = self.get(system, rid.upper() if system == "mdc" else rid) if rid else None
+        if row and row["label"] and (row["edited"] or row["source"] != "heard"):
+            return row["label"]
+        return ""
+
+    @staticmethod
+    def row_system(row) -> str:
+        """The registry system of a radio-log row's radio IDs: another P25 system's own key; "p25" for the county's (a
+        talkgroup, the county's system or none); "fm" for the fireground's (no talkgroup: each ID's own, fm_system);
+        "" none (airband, an unknown system)."""
+        system = str(row.get("system") or "")
+        if system in OTHER_P25:
+            return system
+        if row.get("talkgroup") is not None:
+            return "p25" if system in ("", sourcekeys.COUNTY) else ""
+        return "fm" if system in ("", "analog") else ""
+
+    def shown_talker(self, system: str, radio_id: str, stored: str = "", rig: str = "") -> str:
+        """The talker label of a row as every reader is shown it, the table as it is now. system: the registry's
+        (row_system: "mrrs", "p25", or "fm" for each fireground ID's own); radio_id as the row keeps it ("a, b": one
+        per key-up; a split part has its own); stored: radio_traffic.talker, what it was recorded with.
+
+        Another P25 system's: per radio ID name() (the entry's label, else its range's), else the alias the registry
+        learned for that radio, else "unknown <system> radio" (talker()'s order). An ID the registry has neither an
+        entry nor a range for (never kept: 0, -1, too long, a heard event lost, a row from before) leaves the whole
+        row as recorded: its own alias is never thrown away.
+        The county's and the fireground's (#977): a row with no rig whose every radio ID has a label a person set
+        (label_shown) shows the labels in place of the alias or bare ID it heard; a row with a rig, or any ID
+        without one, as recorded (the rig itself follows the table: Comms.relink / Comms.rerig).
+        Cached per rev."""
         system = str(system or "")
         ids = [x.strip() for x in str(radio_id or "").split(",") if x.strip()]
-        if system not in OTHER_P25 or not ids:
+        ours = system in ("p25", "fm")
+        if not ids or (system not in OTHER_P25 and not ours) or (ours and str(rig or "").strip()):
             return stored
         key = (system, ", ".join(ids))
         rev = self.rev
@@ -403,12 +439,18 @@ class Registry:
             return hit or stored
         out: list[str] = []
         for rid in ids:
-            if rid in ("0", "-1") or len(rid) > 12:     # never in the table (heard() skips it): as it was recorded
+            if ours:
+                n = self.label_shown(fm_system(rid) if system == "fm" else "p25", rid)
+            elif rid in ("0", "-1") or len(rid) > 12:   # never in the table (heard() skips it)
+                n = ""
+            else:
+                row = self.get(system, rid)
+                n = (self.talker(system, rid, (row or {}).get("alias") or "")
+                     if row is not None or self.range_of(system, rid) else "")
+            if not n:                                   # nothing in the table for it: the row as it was recorded
                 out = []
                 break
-            row = self.get(system, rid)
-            n = self.talker(system, rid, (row or {}).get("alias") or "")
-            if n and n not in out:
+            if n not in out:
                 out.append(n)
         got = ", ".join(out)
         with self._lock:
@@ -418,18 +460,21 @@ class Registry:
 
     def show_talkers(self, rows) -> None:
         """Each row's `talker` as shown (shown_talker; in place, on the copies a reader is served: nothing stored
-        changes). Rows of the radio log ({system, radio_id, talker}); any other row is left as it is."""
+        changes). Rows of the radio log ({system, talkgroup, radio_id, rig, talker}); any other row as it is."""
         for r in rows or ():
             try:
-                if isinstance(r, dict) and r.get("system") in OTHER_P25 and r.get("radio_id"):
-                    r["talker"] = self.shown_talker(r["system"], r["radio_id"], r.get("talker") or "")
+                if isinstance(r, dict) and r.get("radio_id"):
+                    system = self.row_system(r)
+                    if system:
+                        r["talker"] = self.shown_talker(system, r["radio_id"], r.get("talker") or "", r.get("rig") or "")
             except Exception as e:  # noqa: BLE001 - the row as stored
                 self.say(f"radios: talker label not shown: {type(e).__name__}: {e}")
 
     def on_change(self, callback) -> None:
-        """callback(keys): after a person's edit has committed (save, delete, an ID range saved or removed, the seed),
-        from that writer's thread. keys: the {(system, radio_id)} edited, or None for a range or the seed ("many: look
-        again at all"). Called after rev has moved. Keep it quick; whatever it raises is logged, never the edit's."""
+        """callback(keys): after a person's edit that changed a label shown has committed (save, delete, an ID range
+        saved or removed, the seed), from that writer's thread. keys: the {(system, radio_id)} edited, or None for a
+        range or the seed ("many: look again at all"). Never for an edit of notes or source alone, nor a radio heard.
+        Called after rev has moved. Keep it quick; whatever it raises is logged, never the edit's."""
         with self._lock:
             self._hooks.append(callback)
 
@@ -538,7 +583,7 @@ class Registry:
                                   "WHERE system = ? AND radio_id = ?", (*changes.values(), at, system, rid))
         self._written[key] = at
         self._reload_one(key)
-        if named:
+        if named or (system in OTHER_P25 and "alias" in changes):     # (another system's alias: its rows' label)
             self.rev += 1
 
     def _reload_one(self, key: tuple[str, str]) -> None:
@@ -585,6 +630,7 @@ class Registry:
             f["source"] = body["source"]
         now = self.clock()
         old = self.get(system, rid)
+        before = self.label_shown(system, rid)
         with self.store.tx() as db:
             if old is None:
                 f.setdefault("source", "confirmed" if f.get("unit") or (system in OTHER_P25 and f.get("label"))
@@ -603,7 +649,8 @@ class Registry:
                     audit(db, now, operator, "radios", f"{system}:{rid}/{k}", str(old[k] or ""), str(v or ""))
         self._reload_one((system, rid))
         self.rev += 1
-        self._changed({(system, rid)})
+        if self.label_shown(system, rid) != before:     # (notes, a source, a unit alone: no label moved)
+            self._changed({(system, rid)})
         return self.get(system, rid)
 
     def delete(self, system: str, radio_id: str, operator: str = "") -> None:
@@ -615,12 +662,21 @@ class Registry:
         if old is None:
             raise RadioError(f"no {system} radio {rid!r}")
         now = self.clock()
+        before = self.label_shown(system, rid)
+        # another system's radio heard on the air: its name and notes go, the row stays as heard (its learned alias,
+        # last heard, channel), so its rows fall back to that alias, never to "unknown" (#977)
+        keep = system in OTHER_P25 and bool(old["first_heard"] or old["heard"] or old["alias"])
         with self.store.tx() as db:
-            db.execute("DELETE FROM radios WHERE system = ? AND radio_id = ?", (system, rid))
+            if keep:
+                db.execute("UPDATE radios SET label = '', notes = '', source = 'heard', edited = 0, updated_at = ? "
+                           "WHERE system = ? AND radio_id = ?", (now, system, rid))
+            else:
+                db.execute("DELETE FROM radios WHERE system = ? AND radio_id = ?", (system, rid))
             audit(db, now, operator, "radios", f"{system}:{rid}", self._describe(old), "")
         self._reload_one((system, rid))
         self.rev += 1
-        self._changed({(system, rid)})
+        if self.label_shown(system, rid) != before:
+            self._changed({(system, rid)})
 
     # -- another system's ID ranges (an admin's, Settings > Radios > Radio IDs) ------------------------
 
@@ -684,7 +740,7 @@ class Registry:
                     for k, v in ch.items():
                         audit(db, now, operator, "radios", f"{system}:{old['lo']}-{old['hi']}/{k}", str(old[k]), str(v))
                 rid = old["id"]
-                changed = bool(ch)
+                changed = bool(set(ch) & {"label", "lo", "hi"})     # (its notes alone: no row's label moves)
         self._reload()
         if old is None or changed:
             self._changed(None)

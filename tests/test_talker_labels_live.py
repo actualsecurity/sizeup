@@ -15,7 +15,7 @@ import json
 from sizeup import context_bundle
 from sizeup.cad.api import CadApi
 from sizeup.cloud.access import Identity
-from tests.test_radios import cad
+from tests.test_radios import Clock, cad
 
 A, B, C, D = "9900301", "9900302", "9900303", "9900450"
 PD = 9901                          # an invented talkgroup
@@ -94,12 +94,13 @@ def test_the_same_number_on_the_county_and_on_mrrs_resolves_separately(tmp_path)
                       "status": "done", "model": "m.bin"})
     c.radios.save({"system": "p25", "radio_id": A, "label": "County portable"})
     got = shown(api, "")
-    # the county's row keeps its alias as heard (its rig follows the table through relink), never MRRS's label
-    assert got["307-1-call_9"] == "EXAMPLE ALIAS" and got[f"{PD}-1-call_1"] == UNKNOWN
+    # the county's label names the county's row (no rig), never MRRS's row with the same number
+    assert got["307-1-call_9"] == "County portable" and got[f"{PD}-1-call_1"] == UNKNOWN
     c.radios.save({"system": "mrrs", "radio_id": A, "label": "Example PD officer"})
     got = shown(api, "")
-    assert got["307-1-call_9"] == "EXAMPLE ALIAS" and got[f"{PD}-1-call_1"] == "Example PD officer"
-    assert c.radios.shown_talker("p25", A, "EXAMPLE ALIAS") == "EXAMPLE ALIAS"
+    assert got["307-1-call_9"] == "County portable" and got[f"{PD}-1-call_1"] == "Example PD officer"
+    assert c.radios.shown_talker("p25", A, "EXAMPLE ALIAS") == "County portable"
+    assert c.radios.shown_talker("mrrs", A, UNKNOWN) == "Example PD officer"
 
 
 def test_each_split_part_resolves_by_its_own_radio_id(tmp_path):
@@ -153,6 +154,8 @@ def test_incident_cards_the_prealert_bundle_and_the_corrections_export_read_the_
         assert c.stt_fix.get(tid)["talker"] == "Example PD officer"
         lines = [json.loads(x) for x in c.stt_fix.export_jsonl({})[0].decode().splitlines()]
         assert [x["talker"] for x in lines] == ["Example PD officer"]
+        # its radio ID and the label it was recorded with: a snapshot of the export stays reproducible
+        assert [(x["radio_id"], x["talker_recorded"]) for x in lines] == [(A, UNKNOWN)]
         c.radios.save({"system": "mrrs", "radio_id": A, "label": "Example PD sergeant"})
         lines = [json.loads(x) for x in c.stt_fix.export_jsonl({})[0].decode().splitlines()]
         assert [x["talker"] for x in lines] == ["Example PD sergeant"]
@@ -221,3 +224,164 @@ def test_the_pages_redraw_a_row_whose_talker_changed():
     assert "x.t.talker" in sig and "x.t.radio_id" in sig
     lp = (static / "live-player.js").read_text()
     assert "function relabel(rows)" in lp and lp.count("relabel(") >= 3      # defined, and on both answers (reload, delta)
+    assert "st.q.paused, ...st.q.pq" in lp                                   # a clip paused under a Priority one too
+
+
+# -- the review's follow-ups (#978): the county and the fireground, the stored alias kept, the alias's rev, races --------
+
+def unit(c, name):
+    """An invented unit on the main board (a rig a radio can be on)."""
+    with c.store.tx() as db:
+        db.execute("INSERT INTO units (name, kind, status, status_at, board) VALUES (?, 'engine', 'AVAILABLE', 0, 'main')",
+                   (name,))
+    c.radios.refresh_units()
+    return next(u["id"] for u in c.store.units() if u["name"] == name)
+
+
+def county(c, tid, rid, talker="EXAMPLE ALIAS", rig="", start=1_800_000_000.0):
+    c.record_traffic({"id": tid, "start": start, "end": start + 2, "source": "Fire/EMS 15", "talkgroup": 307,
+                      "unit": talker, "radio_id": rid, "rig": rig, "text": "copy", "status": "done", "model": "m.bin"})
+
+
+def fg(c, tid, rid, talker="", rig="", start=1_800_000_000.0):
+    c.record_traffic({"id": tid, "start": start, "end": start + 2, "source": "FG1", "talkgroup": None, "unit": talker,
+                      "radio_id": rid, "rig": rig, "text": "copy", "status": "done", "model": "m.bin"})
+
+
+def test_a_county_or_fireground_label_with_no_unit_names_rows_old_and_new(tmp_path):
+    c = cad(tmp_path)
+    api = CadApi(c)
+    unit(c, "Z91")
+    county(c, "307-1-call_1", "9900601")
+    county(c, "307-2-call_2", "9900601", rig="Z91", start=1_800_000_010.0)     # on a rig: the rig says who it is
+    fg(c, "FG1-1", "9A03", talker="9A03", start=1_800_000_020.0)
+    page = json.loads(api.get("/api/cad/comms", "view=all")[1])                 # a reader with no sign-in
+    c.save_radio({"system": "p25", "radio_id": "9900601", "label": "Example portable"})
+    c.save_radio({"system": "mdc", "radio_id": "9a03", "label": "Example chief portable"})
+    got = shown(api, "")
+    assert got["307-1-call_1"] == "Example portable" and got["307-2-call_2"] == "EXAMPLE ALIAS"
+    assert got["FG1-1"] == "Example chief portable"
+    # a new row is shown the same; nothing stored was rewritten
+    county(c, "307-3-call_3", "9900601", start=1_800_000_030.0)
+    assert shown(api, "")["307-3-call_3"] == "Example portable"
+    assert c.store.one("SELECT talker FROM radio_traffic WHERE id = '307-1-call_1'")["talker"] == "EXAMPLE ALIAS"
+    # our rows' readers (no sign-in) are told to reload too
+    assert json.loads(api.get("/api/cad/comms", f"view=all&changed={page['cursor']}")[1])["reload"] is True
+    # a county radio's label from what was heard (no person set it) is never shown in place of what each row heard
+    c.radios.heard("p25", "9900602", "HEARD ALIAS")
+    assert c.radios.get("p25", "9900602")["label"] == "HEARD ALIAS"
+    county(c, "307-4-call_4", "9900602", talker="OTHER ALIAS", start=1_800_000_040.0)
+    assert shown(api, "")["307-4-call_4"] == "OTHER ALIAS"
+    # a label taken off: the row as it heard it again
+    c.save_radio({"system": "p25", "radio_id": "9900601", "label": ""})
+    assert shown(api, "")["307-1-call_1"] == "EXAMPLE ALIAS"
+
+
+def test_a_unit_changed_with_past_transmissions_moves_their_rig_and_links_and_off_leaves_them(tmp_path):
+    clock = Clock(1_800_000_000.0)
+    c = cad(tmp_path, clock)
+    z1, z2 = unit(c, "Z91"), unit(c, "Z92")
+    old_ev = c.create({"type": "STRU", "address": "1 Example St"})
+    c.store.assign(old_ev["id"], [z1], "JD")           # (invented units: on the event as the store puts them)
+    new_ev = c.create({"type": "STRU", "address": "2 Example St"})
+    c.store.assign(new_ev["id"], [z2], "JD")
+    clock.t += 10
+    c.save_radio({"system": "mdc", "radio_id": "9A01", "unit": "Z91"})
+    c.save_radio({"system": "mdc", "radio_id": "9A02", "unit": "Z91"})
+    c.save_radio({"system": "p25", "radio_id": "9900611", "unit": "Z91"})
+    fg(c, "FG1-a", "9A01", rig="Z91", start=clock.t)
+    fg(c, "FG1-b", "9A02", rig="Z91", start=clock.t + 1)
+    county(c, "307-1-call_1", "9900611", rig="Z91", start=clock.t + 2)
+    links = lambda tid: {(r["incident_id"], r["why"], r["unit"]) for r in c.store.q(       # noqa: E731
+        "SELECT incident_id, why, unit FROM radio_links WHERE traffic_id = ?", (tid,))}
+    assert links("FG1-a") == {(old_ev["id"], "unit", "Z91")}
+    clock.t += 60
+    # on (the default): the rows on the old unit move, their unit links with them, audited with the count
+    got = c.save_radio({"system": "mdc", "radio_id": "9A01", "unit": "Z92"})
+    assert got["past"] == 1
+    assert c.store.one("SELECT rig FROM radio_traffic WHERE id = 'FG1-a'")["rig"] == "Z92"
+    assert links("FG1-a") == {(new_ev["id"], "unit", "Z92")}
+    audit = c.store.q("SELECT key, old, new FROM settings_audit WHERE key = 'mdc:9A01/past'")
+    assert len(audit) == 1 and audit[0]["old"] == "Z91" and audit[0]["new"].startswith("Z92: 1 transmission")
+    # off: today's behaviour, the rows keep the unit they were logged with
+    got = c.save_radio({"system": "mdc", "radio_id": "9A02", "unit": "Z92", "fix_past": False})
+    assert got["past"] == 0
+    assert c.store.one("SELECT rig FROM radio_traffic WHERE id = 'FG1-b'")["rig"] == "Z91"
+    assert links("FG1-b") == {(old_ev["id"], "unit", "Z91")}
+    # cleared, with it on: the rig goes, and so does its unit link (the county's rows the same way)
+    got = c.save_radio({"system": "p25", "radio_id": "9900611", "unit": ""})
+    assert got["past"] == 1
+    assert c.store.one("SELECT rig FROM radio_traffic WHERE id = '307-1-call_1'")["rig"] == ""
+    assert links("307-1-call_1") == set()
+    try:
+        c.save_radio({"system": "mdc", "radio_id": "9A02", "unit": "Z91", "fix_past": "yes"})
+        raise AssertionError("fix_past took a word")
+    except Exception as e:  # noqa: BLE001
+        assert "fix_past" in str(e)
+
+
+def test_a_radio_the_registry_never_kept_keeps_its_stored_alias_and_a_heard_radios_delete_keeps_its_alias(tmp_path):
+    c = cad(tmp_path)
+    api = CadApi(c)
+    # a valid ID with no entry and no range (a heard event lost, an older row): as recorded, never "unknown"
+    mrrs(c, f"{PD}-1-call_1", "9900350", talker="KEPT ALIAS")
+    assert shown(api) == {f"{PD}-1-call_1": "KEPT ALIAS"}
+    # a heard radio, named, then its name removed: its learned alias again, never "unknown"
+    c.radios.heard("mrrs", B, "SYS ALIAS 8", channel="PD Dispatch")
+    c.save_radio({"system": "mrrs", "radio_id": B, "label": "Example PD officer"})
+    mrrs(c, f"{PD}-2-call_2", B, talker="Example PD officer", start=1_800_000_100.0)
+    c.delete_radio({"system": "mrrs", "radio_id": B})
+    row = c.radios.get("mrrs", B)
+    assert row is not None and row["label"] == "" and row["alias"] == "SYS ALIAS 8" and row["source"] == "heard"
+    assert shown(api)[f"{PD}-2-call_2"] == "SYS ALIAS 8"
+    # never heard (an admin's entry alone): removed outright, as before
+    c.save_radio({"system": "mrrs", "radio_id": C, "label": "Example HQ"})
+    c.delete_radio({"system": "mrrs", "radio_id": C})
+    assert c.radios.get("mrrs", C) is None
+
+
+def test_another_systems_alias_change_moves_the_rev_and_the_label_shown(tmp_path):
+    c = cad(tmp_path)
+    r = c.radios
+    r.heard("mrrs", B, "ALIAS ONE", at=1_800_000_000.0)
+    assert r.shown_talker("mrrs", B, "ALIAS ONE") == "ALIAS ONE"           # (cached for this rev)
+    rev = r.rev
+    r.heard("mrrs", B, "ALIAS TWO", at=1_800_000_010.0)                    # within the write throttle: still written
+    assert r.rev != rev and r.shown_talker("mrrs", B, "ALIAS ONE") == "ALIAS TWO"
+    # a county radio's alias is not another system's talker label: its rev stays (the heard write churn)
+    r.heard("p25", "9900621", "COUNTY ONE", at=1_800_000_000.0)
+    rev = r.rev
+    r.heard("p25", "9900621", "COUNTY TWO", at=1_800_000_010.0)
+    assert r.rev == rev
+
+
+def test_the_state_key_has_the_labels_rev_and_the_hook_writes_under_the_stores_lock(tmp_path):
+    c = cad(tmp_path)
+    c.state()
+    assert c._state[0][-1] == c.radios.labels_rev
+    held = []
+    real = c.comms.note_change
+    c.comms.note_change = lambda *a, **k: held.append(c.store.lock._is_owned()) or real(*a, **k)
+    c.save_radio({"system": "mrrs", "radio_id": A, "label": "Example PD officer"})
+    c.save_radio({"system": "p25", "radio_id": "9900601", "label": "Example portable"})
+    assert held == [True, True]
+    assert c._state is not None                       # (the hook no longer drops it from the writer's thread) ...
+    st = c.state()                                    # ... the key moved instead
+    assert c._state[0][-1] == c.radios.labels_rev and st["radio_labels"] == c.radios.labels_rev
+
+
+def test_an_edit_of_notes_or_source_alone_moves_no_label(tmp_path):
+    c = cad(tmp_path)
+    r = c.radios
+    seen = []
+    r.on_change(seen.append)
+    r.save({"system": "mrrs", "radio_id": A, "label": "Example PD officer"})
+    g = r.save_range({"system": "mrrs", "lo": "9900400", "hi": "9900499", "label": "Example HQ"})
+    n, labels = len(seen), r.labels_rev
+    r.save({"system": "mrrs", "radio_id": A, "notes": "a note"})
+    r.save({"system": "mrrs", "radio_id": A, "source": "guessed"})
+    r.save_range({"system": "mrrs", "id": g["id"], "lo": "9900400", "hi": "9900499", "label": "Example HQ",
+                  "notes": "a note"})
+    assert len(seen) == n and r.labels_rev == labels
+    r.save_range({"system": "mrrs", "id": g["id"], "lo": "9900400", "hi": "9900450", "label": "Example HQ"})
+    assert len(seen) == n + 1                         # its IDs moved: rows may be named differently

@@ -75,7 +75,7 @@ from typing import Callable
 
 from sizeup import sourcekeys as sources
 from sizeup.cad import airport
-from sizeup.cad.radios import is_dispatcher
+from sizeup.cad.radios import audit as audit_row, is_dispatcher
 from sizeup.cad.store import TZ
 
 TURN = re.compile(r"^(?P<call>.+)-t(?P<k>\d+)$")
@@ -159,6 +159,8 @@ UNCLEAR_MAX = 20000                         # an unclear transcript's words kept
 CUTS = ("grant",)    # why a P25 key-up starts where it does when its talker is not the voice channel's (radio_traffic.cut, #819)
 ID_NOTES = ("none", "undecoded", "weak")    # why an FG1 key-up has no radio ID (radio_traffic.id_note, #163)
 RELINK_MAX = 2000                           # a radio just named: at most this many of its unnamed transmissions
+RERIG_DAYS = 30                             # a radio moved to another rig (#977): its rows of this many days back ...
+RERIG_MAX = 2000                            # ... at most this many of them, newest first
 EVIDENCE_MAX = 64 * 1024                    # an emergency's raw call record (radio_traffic.evidence), at most
 # A unit filter (or PCFD only, #284): the rows it matches are looked up once on the partial index radio_traffic_rig; up to
 # this many, each section asks for just those rows (a rare unit no longer reads the whole log to its end); more (a
@@ -765,6 +767,46 @@ class Comms:
             if rows:
                 self.rev += 1
         return sorted(got)
+
+    def rerig(self, system: str, radio_id: str, old_unit: str, new_unit: str, operator: str = "") -> dict:
+        """A radio ID moved to another rig, or taken off one, in Settings > Radios with "Also fix past transmissions"
+        (#977): its rows of the last RERIG_DAYS (newest RERIG_MAX) logged on the old rig alone (rig == old_unit: a row
+        that named two rigs is left as it is) take the new one ("" none); each one's automatic unit links follow (the
+        old unit's why='unit' links go, unless a person kept the link; the new unit's events at the time the row was
+        made are linked, as record() would have, unless a person took it off one). One audit row with the count
+        (section radios, key <system>:<id>/past). -> {rows, linked: event ids that got a transmission}."""
+        rid = str(radio_id or "").strip()
+        rid = rid.upper() if system == "mdc" else rid
+        old_unit, new_unit = str(old_unit or "").strip(), str(new_unit or "").strip()
+        if not rid or not old_unit or old_unit == new_unit or not re.fullmatch(r"[0-9A-Za-z-]{1,12}", rid):
+            return {"rows": 0, "linked": []}
+        fm = system in ("mdc", "fleetsync")
+        now = self.clock()
+        got: set[int] = set()
+        with self.store.tx() as db:
+            rows = db.execute("SELECT id, start FROM radio_traffic WHERE rig = ? AND start >= ? AND "
+                              + ("talkgroup IS NULL" if fm else "talkgroup IS NOT NULL AND system IN ('', ?)")
+                              + " AND (', ' || radio_id || ', ') LIKE ? ORDER BY start DESC LIMIT ?",
+                              (old_unit, now - RERIG_DAYS * 86400.0, *([] if fm else [sources.COUNTY]), f"%, {rid}, %",
+                               RERIG_MAX)).fetchall()
+            for r in rows:
+                db.execute("UPDATE radio_traffic SET rig = ?, updated_at = ? WHERE id = ?", (new_unit, now, r["id"]))
+                db.execute("DELETE FROM radio_links WHERE traffic_id = ? AND why = 'unit' AND unit = ? AND NOT EXISTS "
+                           "(SELECT 1 FROM radio_link_kept k WHERE k.traffic_id = radio_links.traffic_id AND "
+                           "k.incident_id = radio_links.incident_id)", (r["id"], old_unit))
+                self.touch(r["id"])
+                if new_unit:
+                    for e in db.execute(self.ON_EVENT_BY_UNIT, (new_unit, r["start"], r["start"])).fetchall():
+                        before = db.total_changes
+                        self._auto(db, r["id"], e["incident_id"], "unit", new_unit)
+                        if db.total_changes != before:
+                            got.add(e["incident_id"])
+            if rows:
+                audit_row(db, now, operator, "radios", f"{system}:{rid}/past", old_unit,
+                          f"{new_unit or 'no unit'}: {len(rows)} transmission{'s' if len(rows) != 1 else ''} "
+                          f"of the last {RERIG_DAYS} days")
+                self.rev += 1
+        return {"rows": len(rows), "linked": sorted(got)}
 
     def radio_tg_counts(self, system: str, since: float) -> list[dict]:
         """Another P25 system's rows since then, per radio ID and talkgroup: [{radio_id, talkgroup, channel, dept, n}]
