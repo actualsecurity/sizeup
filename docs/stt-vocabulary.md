@@ -370,3 +370,53 @@ and talker prompt got 25.5% WER, 72.5% key-token recall, 67% callsigns and 76% s
 
 The ATC and police vocabularies have no measurement of this kind here. A general evaluation tool (`tools/stt_eval.py`)
 is on main.
+
+## Post-ASR correction (#879)
+
+Deterministic, for every engine (the GPU workers, AWS, the station's whisper), on the hub as each transcript lands:
+`sizeup/stt_correct.py`, its sound keys from `sizeup/dmetaphone.py` (Double Metaphone, standard library only).
+
+| Rule | Does | e.g. |
+|---|---|---|
+| `unit` | spoken numbers in a unit ID or call sign of the list, folded to digits; the whole number run only | "engine ninety seven" → "Engine 97", "ninety control" → "90 Control" |
+| `ten` | a ten-code of the list said in words, at a clause end | "ten four." → "10-4." |
+| `spell`, `sound` | 1-4 words matched to a name of the places list (a street, town, landmark), by spelling and Double Metaphone | "Samplewerth Street" → "Sampleworth Street" |
+
+Safety:
+
+- Only the channel's own list (`stt_terms.own_for`), never another channel's. Names come from the shared places list
+  only; the channel's own list adds unit IDs, call signs and ten-codes. "Fire N" and "Battalion N" are never folded.
+- A street listed under `# streets: <town>` is a target only for the towns in `[stt] correct_towns` (default Port
+  Chester, Rye Brook, Rye). Every other term of the list is still a rival.
+- A correction needs a score of 0.86 (0.9 for one word), no rival within 0.08, the suffix heard for a street, each
+  word alike when the word counts match, the same first letter unless spelled nearly the same, and no word added.
+  One heard word must be capitalised and not start a sentence.
+- Never the trailing time (`stt_time.readings`: that is #727's) and never a digit. Already a term: left alone.
+
+Kept, never overwritten:
+
+- `stt_runs` (#651): `corr_text` (only when it changes the text), `corr_n` (0: it ran and found none; NULL: not on),
+  `corr_rules` (`[[heard, to, rule, score], ...]`) and `corr_v` (`vcorr/1@<list>@<version>`). The raw `text` is the
+  engine's.
+- The Radio rows show the corrected text with the status words put back after it (`statushints.decorate`). The words
+  as transcribed and each `“heard” → to` are on hover. The row in the radio log is never rewritten: the rows are
+  decorated when read, like the status repair. Search and the #491 export's `fixed_text` follow the shown text; the
+  export's `asr` stays the engines' own.
+
+Switch: `[stt] correct_channels` (default the county Fire/EMS dispatch talkgroups, `stt_time.DEFAULT_CHANNELS`; `[]`
+off). It needs the term lists (`terms_whisper` or `terms_aws` on). Other channels stay off until measured.
+
+Measure it offline with `tools/stt_correct_eval.py`: identifier recall (the list's names, unit IDs, call signs and
+ten-codes as written) and WER, before and after, against the admins' corrections (the #491 export or a restored
+cad.sqlite), plus a check that every trailing-time result is unchanged. `--unlabelled N` needs no references: how often
+it corrects, by rule, and the trailing-time check. It prints aggregates only.
+
+Measured 2026-11-25 on a restored copy of the hub's radio log (every county Fire/EMS dispatch transcript kept, about
+116,500 clips; AWS and whisper):
+
+- 262 clips changed (0.22%), with 272 corrections: 75 `unit`, 152 `sound`, 45 `spell`.
+- The trailing-time check was the same before and after on every clip.
+- A hand review of the name corrections found about 96% right. The rest were a real place missing from the list,
+  corrected to the nearest one listed.
+- Identifier recall against references can't be measured yet: there is only one admin correction so far. Rerun the
+  tool once the #491 corrections build up.

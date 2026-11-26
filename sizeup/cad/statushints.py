@@ -423,6 +423,9 @@ class StatusHints:
         self.store, self.log = store, log
         self._lists = lists if callable(lists) else (lambda: lists)
         self.default_channels, self.default_tgs = tuple(channels), tuple(talkgroups)
+        # row -> (its text as shown, [{heard, to, rule}]): the channel's vocabulary corrections (#879, set by the app:
+        # sizeup/stt_correct.py Corrector.row), made before the status words are put back
+        self.vocab = None
         self._for = None
         self._lock = threading.Lock()
         with store.lock:
@@ -442,16 +445,20 @@ class StatusHints:
             self._for = L
 
     def decorate(self, rows: list[dict]) -> list[dict]:
-        """Each row on our fire channels whose status words were put back (statusrepair.py): "fixed_text" (shown) and
-        "fixes" [{heard, to}] (on hover); the row's own text stays what speech-to-text wrote."""
+        """Each row on our fire channels whose status words were put back (statusrepair.py), and each row whose
+        channel's terms were put back (vocab, #879): "fixed_text" (shown) and "fixes" [{heard, to}] (on hover); the
+        row's own text stays what speech-to-text wrote."""
         self._refresh()
-        if not self.cfg.enabled:
+        if not self.cfg.enabled and self.vocab is None:
             return rows
         dispatched: dict[str, bool] = {}
         for r in rows:
             if r.get("kind", "radio") != "radio" or not r.get("text"):
                 continue
-            if r.get("channel") in self.cfg.channels or (r.get("talkgroup") is not None and r["talkgroup"] in self.cfg.talkgroups):
+            text, vfixes = self._vocab(r)
+            fixed, fixes = text, []
+            if self.cfg.enabled and (r.get("channel") in self.cfg.channels or (r.get("talkgroup") is not None and
+                                                                              r["talkgroup"] in self.cfg.talkgroups)):
                 rigs = [x.strip() for x in (r.get("rig") or "").split(",") if x.strip()]
                 talker = rigs[0] if len(rigs) == 1 and rigs[0] in self.phrases.codes else ""
                 heard_fine: list[set[str]] = []  # looked up only when the repair asks (a "fine" after our callsign)
@@ -464,10 +471,19 @@ class StatusHints:
                     if code not in dispatched:
                         dispatched[code] = self.fine_ok(code)
                     return code in heard_fine[0] or dispatched[code]
-                fixed, fixes = self.phrases.repair(r["text"], talker, ok, bool(r.get("dispatcher")))
-                if fixes:
-                    r["fixed_text"], r["fixes"] = fixed, fixes
+                fixed, fixes = self.phrases.repair(text, talker, ok, bool(r.get("dispatcher")))
+            if vfixes or fixes:
+                r["fixed_text"], r["fixes"] = fixed, vfixes + fixes
         return rows
+
+    def _vocab(self, r: dict) -> tuple[str, list[dict]]:
+        """The row's text with its channel's terms put back, and those corrections ((its text, []): none)."""
+        if self.vocab is None:
+            return r["text"], []
+        try:
+            return self.vocab(r)
+        except Exception:  # noqa: BLE001 - the row as heard
+            return r["text"], []
 
     # -- what a status phrase means, in this department's codes ----------------------------------------------------
 

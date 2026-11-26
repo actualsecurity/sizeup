@@ -101,6 +101,7 @@ from sizeup.cad import tonelist
 from sizeup.radio.tones import ToneEvent, TonePlan, base_name
 from sizeup.talkers import talker_prompt
 from sizeup import channels, stt_terms
+from sizeup import stt_correct
 from sizeup.stt import (CATCHUP, CATCHUP_MAX_CLIP_S, CATCHUP_NOTE, CLASS_NAMES, CONTEXT, CONTEXT_FALLBACK, HIGH, LIVE, LOW,
                         RERUN, SHED, URGENT, Transcriber, WhisperClient, radio_voice, wav_bytes)
 from sizeup.talkgroups import TalkgroupPrefs
@@ -3384,6 +3385,7 @@ class App:
         channel's own vocabulary) one Amazon Transcribe vocabulary, the own phrases first, made by the leader, used on
         those channels once READY; off, any made before are deleted (term_cleanup, once this task leads)."""
         self.stt_terms = None
+        self.stt_correct = None
         self.term_vocabs = None
         self.term_cleanup = None
         if self.aws is not None:                  # every AWS transcript says which vocabulary its stream used
@@ -3403,6 +3405,11 @@ class App:
         if files is None:
             return
         self.stt_terms = stt_terms.TermStore(files, log=log, on_read=self._terms_read)
+        # post-ASR vocabulary correction (#879, sizeup/stt_correct.py): the hub's runs record it, the Radio rows show it
+        self.stt_correct = stt_correct.Corrector(lambda: self.stt_terms, self._own_for_key,
+                                                 self.cfg.stt_correct_channels, self.cfg.stt_correct_towns, log=log)
+        if getattr(self.cad, "hints", None) is not None:
+            self.cad.hints.vocab = self.stt_correct.row
         if self.cfg.stt_terms_aws and self.aws is not None:
             self.term_vocabs = tv
             self.aws.term_vocabulary = self._term_vocab_for
@@ -3432,6 +3439,8 @@ class App:
             self.term_vocabs.sync(store.sets())
         if changed:
             self.stt_terms_check()
+        if self.stt_correct is not None:            # (each list's matcher built here, never on a reader's request)
+            self.stt_correct.warm(self.cfg.stt_correct_channels)
 
     def stt_terms_check(self) -> None:
         """The hub sends the station the lists' top terms when its copy differs (HubApp)."""

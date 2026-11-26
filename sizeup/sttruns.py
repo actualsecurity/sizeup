@@ -20,7 +20,11 @@ works as before; this is next to it, keyed by the same clip id.
                             time_conf, time_fixed_text (the text with that time written the canonical way: a match whose
                             text it changes only; the raw text is never changed), fix_rule (the rule and its version,
                             "ttime/1:words") and label_flag (auto_label | review); time_check "prompted": the engine's
-                            prompt carried the clip's time, never counted. Pruned by the hub's
+                            prompt carried the clip's time, never counted; the vocabulary correction (#879,
+                            sizeup/stt_correct.py; "" / None where it isn't on): corr_text (the text with the channel's
+                            terms put back: only when it changes it; the raw text is never changed), corr_n (how many
+                            corrections: 0 when it ran and found none), corr_rules (JSON [[heard, to, rule, score], ...])
+                            and corr_v (the rule and the term list's version, "vcorr/1@county_fire@0123456789ab"). Pruned by the hub's
                             janitor: older than KEEP_DAYS, and a run whose radio log row is gone (its channel's transcript
                             retention: never longer than the transcript), batch after batch for up to PRUNE_BUDGET_S
     LatencyBook             transmission end -> text on the hub, per channel, over WINDOW_S in memory: p50 / p95 and
@@ -62,6 +66,9 @@ _TEXT = "TEXT NOT NULL DEFAULT ''"
 CHECK_TYPES = {"time_check": _TEXT, "time_said": _TEXT, "time_off": "INTEGER", "time_conf": "REAL",
                "time_fixed_text": _TEXT, "fix_rule": _TEXT, "label_flag": _TEXT}
 CHECK_COLUMNS = tuple(CHECK_TYPES)
+# the vocabulary correction (#879, sizeup/stt_correct.py): added the same way
+CORR_TYPES = {"corr_text": _TEXT, "corr_n": "INTEGER", "corr_rules": _TEXT, "corr_v": _TEXT}
+CORR_COLUMNS = tuple(CORR_TYPES)
 TIME_RATES_S = 60.0          # Health's trailing-time table, worked out at most this often
 TIME_DAYS = 7
 TIME_ROLES = ("text", "alt", "late")    # first passes only: a person's re-run and a catch-up are no live engine's word
@@ -108,6 +115,13 @@ def _check_row(c) -> tuple:
     off = getattr(c, "off_min", None)
     return (str(c.result or "")[:20], str(c.said or "")[:8], int(off) if isinstance(off, int) else None, _fin(c.conf),
             str(c.text or "")[:20000], str(c.rule or "")[:40], str(c.flag or "")[:20])
+
+
+def _corr_row(c) -> tuple:
+    """A vocabulary correction's columns (CORR_COLUMNS, a sizeup.stt_correct.Result), "" / None for none."""
+    if c is None:
+        return ("", None, "", "")
+    return (str(c.text or "")[:20000], int(c.n), c.rules_json()[:20000], str(c.v or "")[:80])
 
 
 def _rate(match: int, said: int) -> float | None:
@@ -183,6 +197,9 @@ class Runs:
                 for c in CHECK_COLUMNS:
                     if c not in have:
                         db.execute(f"ALTER TABLE stt_runs ADD COLUMN {c} {CHECK_TYPES[c]}")
+                for c in CORR_COLUMNS:
+                    if c not in have:
+                        db.execute(f"ALTER TABLE stt_runs ADD COLUMN {c} {CORR_TYPES[c]}")
                 want, other = (TIME_INDEX_V, TIME_INDEX) if "vocab_v" in have else (TIME_INDEX, TIME_INDEX_V)
                 db.execute(f"DROP INDEX IF EXISTS {other[0]}")
                 db.execute(f"CREATE INDEX IF NOT EXISTS {want[0]} ON stt_runs ({want[1]}) WHERE time_check != ''")
@@ -199,6 +216,7 @@ class Runs:
     def add(self, clip_id: str, engine: str, *, text: str = "", status: str = "", model: str = "", worker: str = "",
             prompt_v: str = "", role: str = "text", confidence: float | None = None, words: list | None = None,
             check=None,                            # (its trailing-time check, a sizeup.stt_time.Check: #727)
+            corr=None,                             # (its vocabulary correction, a sizeup.stt_correct.Result: #879)
             channel: str = "", cls: str = "", clip_end: float | None = None, queued_at: float | None = None,
             engine_start: float | None = None, done_at: float | None = None, wait_s: float | None = None,
             run_s: float | None = None, keyup: dict | None = None, call_id: str = "", turn: int | None = None,
@@ -217,9 +235,9 @@ class Runs:
             return False
         try:
             with self._lock:
-                cols = COLUMNS + CHECK_COLUMNS
+                cols = COLUMNS + CHECK_COLUMNS + CORR_COLUMNS
                 self._open().execute(f"INSERT INTO stt_runs ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
-                                     row + _check_row(check))
+                                     row + _check_row(check) + _corr_row(corr))
             return True
         except Exception as e:  # noqa: BLE001 - bookkeeping: never in the way of the transcript
             self._say(f"stt runs: not recorded: {type(e).__name__}: {e}")
@@ -231,7 +249,7 @@ class Runs:
             return []
         try:
             with self._lock:
-                cols = COLUMNS + CHECK_COLUMNS
+                cols = COLUMNS + CHECK_COLUMNS + CORR_COLUMNS
                 cur = self._open().execute(f"SELECT {', '.join(cols)} FROM stt_runs WHERE clip_id = ? ORDER BY id",
                                            (clip_id,))
                 rows = [dict(zip(cols, r)) for r in cur.fetchall()]
@@ -240,6 +258,7 @@ class Runs:
         for d in rows:
             d["words"] = json.loads(d["words"]) if d.get("words") else []
             d["keyup"] = json.loads(d["keyup"]) if d.get("keyup") else None
+            d["corr_rules"] = json.loads(d["corr_rules"]) if d.get("corr_rules") else []
         return rows
 
     def prune(self, now: float | None = None, keep_days: float = KEEP_DAYS, batch: int = PRUNE_BATCH,

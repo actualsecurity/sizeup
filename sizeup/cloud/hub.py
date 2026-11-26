@@ -1993,6 +1993,7 @@ class HubApp(App):
             if cls is None and item is not None:
                 cls = self._pool_class(item, key)
             check = self._time_check(key, item, text, clip_end, engine, prompted)
+            corr = self._vocab_fix(key, text)
             now = time.time()
             if not self._may_write_audio():      # a standby (or a lease running out) writes nothing (#501)
                 return
@@ -2006,7 +2007,7 @@ class HubApp(App):
                               run_s=run_s if run_s is not None else (now - engine_start if engine_start else None),
                               keyup=getattr(item, "keyup", None),     # (a cut transmission's piece, the radio's split)
                               call_id=str(getattr(item, "call_id", "") or ""), turn=getattr(item, "turn", None),
-                              check=check)
+                              check=check, corr=corr)
             if role == "text" and clip_end is not None:
                 self.stt_latency.add(key, engine, now - clip_end, target=cls in sttruns.TARGET_CLASSES)
         except Exception as e:  # noqa: BLE001 - bookkeeping
@@ -2029,6 +2030,14 @@ class HubApp(App):
         except Exception as e:  # noqa: BLE001 - bookkeeping
             self.hub.log(f"stt runs: trailing time: {type(e).__name__}: {e}")
             return None
+
+    def _vocab_fix(self, key: str, text: str):
+        """The post-ASR vocabulary correction of an engine's raw text on its channel (#879, sizeup/stt_correct.py):
+        kept with the run, the raw text never changed. None: not on there (or no list)."""
+        corrector = getattr(self, "stt_correct", None)
+        if corrector is None or not text:
+            return None
+        return corrector.correct(text, key)
 
     def _prompt_time(self, cid: str, d: dict) -> None:
         """The station's retext says whether whisper's prompt carried the clip's own time: kept on the transmission
