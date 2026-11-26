@@ -74,6 +74,7 @@ def test_the_priority_helper_is_rank_zero_only():
 
 
 SAID = "Engine 7 on location, nothing showing"
+MAYDAY = "mayday mayday mayday Engine 7 trapped"
 NORM_KEY = "tg:325"
 
 
@@ -245,8 +246,63 @@ def test_a_pool_fill_of_a_row_shown_at_its_close_is_one_row_and_the_pools_text_f
     assert len(_held(hub.app, tid)) == (1 if case == "memory" else 0)
     got = hooks.of(tid)
     assert (got.get("traffic"), got.get("to_cad"), got.get("alarm"), got.get("atc")) == (1, 1, 1, 1), got
-    if case == "memory":             # (the withdrawn whisper's words reach the alarms too, by design: they dedupe by id)
-        assert (got.get("alarm:text"), got.get("atc:text")) == (2, 1), got
+    # the pool's words reach the alarms and ATC once (in memory or by its id), and the withdrawn whisper's words reach the
+    # alarms too, by design (a mayday it heard; they dedupe by id)
+    assert (got.get("alarm:text"), got.get("atc:text")) == (2, 1), got
+
+
+def _alarms(hub):
+    return hub.app.cad.store.q("SELECT traffic_id, level, late FROM alarms")
+
+
+@pytest.mark.parametrize("case", ["memory", "evicted", "takeover"])
+def test_a_pool_mayday_alarms_once_in_memory_or_not(nhub, case):
+    hub = nhub
+    _set(hub, "FG1", sttroute.AUTO)
+    _gpu(hub)
+    tid = f"FG1-{int(time.time() * 1000) % 10_000_000}"
+    send(hub, _close(tid, "FG1", 1))
+    if case in ("evicted", "takeover"):
+        _evict(hub.app)
+    if case == "takeover":
+        hub.app.mdb.wait_drop([tid])
+        send(hub, _close(tid, "FG1", 2))
+    send(hub, _pool_fill(tid, 3))
+    job = _take(hub, tid)
+    assert hub.app.sttpool.complete("gpu-1", job.lease, {"text": MAYDAY, "model": "ggml-large-v3-turbo-q5_0.bin"})
+    assert wait(lambda: len(_alarms(hub)) == 1, 10), _alarms(hub)
+    [a] = _alarms(hub)
+    assert (a["traffic_id"], a["level"], a["late"]) == (tid, "alarm", 0.0)
+
+
+def test_aws_words_for_a_row_no_longer_in_memory_reach_the_alarms(nhub, monkeypatch):
+    from sizeup.app import AwsJob
+    hub = nhub
+    hooks = Hooks(hub.app, monkeypatch)
+    send(hub, _close("FG1-4242", "FG1", 1))
+    _evict(hub.app)
+    hub.app._aws_done(AwsJob("traffic", "FG1-4242", "FG1"), MAYDAY, 0.9)
+    assert _row(hub, "FG1-4242")["text"].lower().startswith("mayday")
+    assert wait(lambda: len(_alarms(hub)) == 1, 10), _alarms(hub)
+    assert hooks.of("FG1-4242").get("alarm:text") == 1 and _held(hub.app, "FG1-4242") == []
+
+
+@pytest.mark.parametrize("case", ["memory", "evicted"])
+def test_a_pool_mayday_long_after_air_is_labelled_late_and_past_the_alarms_age_a_notice(nhub, case):
+    hub = nhub
+    _set(hub, "FG1", sttroute.AUTO)
+    _gpu(hub)
+    for n, (ago, level) in enumerate(((600.0, "alarm"), (40 * 60.0, "notice"))):
+        tid = f"FG1-{n}{int(time.time() * 1000) % 1_000_000}"
+        send(hub, _close(tid, "FG1", 10 * n + 1, at=time.time() - ago))
+        if case == "evicted":
+            _evict(hub.app)
+        send(hub, _pool_fill(tid, 10 * n + 2))
+        job = _take(hub, tid)
+        assert hub.app.sttpool.complete("gpu-1", job.lease, {"text": MAYDAY, "model": "ggml-large-v3-turbo-q5_0.bin"})
+        assert wait(lambda: any(a["traffic_id"] == tid for a in _alarms(hub)), 10), _alarms(hub)
+        a = next(a for a in _alarms(hub) if a["traffic_id"] == tid)
+        assert a["level"] == level and a["late"] > 0, a                # (never pushed hours late: a notice)
 
 
 def test_the_store_never_holds_one_id_twice():

@@ -1460,6 +1460,46 @@ class HubApp(App):
         return next((t for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]
                      if t.id == item.id), None)
 
+    def _late_fill(self, end) -> bool:
+        """(#927) Words this long after air (LATE_FILL_S): their alarm is labelled late, and past the alarms' age a
+        notice, never pushed (sizeup/cad/alarms.py)."""
+        clip_end = self._hub_time(end)
+        return clip_end is not None and time.time() - clip_end > LATE_FILL_S
+
+    def _retext(self, cid: str, text: str, status: str, confidence, model: str, *a, **kw) -> bool:
+        """App._retext, and the first words of a transmission whatever engine wrote them (the station's fill, the
+        pool's, AWS's): labelled late when they came long after air (_late_fill), in one place. A transmission no longer
+        in memory (#927: its row in the radio log only) still reaches the alarms and ATC with its new words, rebuilt
+        from its row, as one in memory does."""
+        quiet = bool(kw.get("quiet"))
+        t = next((x for x in list(self.store.loose) + [x for i in self.store.incidents for x in i.traffic]
+                  if x.id == cid), None)
+        before = None
+        if t is None and not quiet:
+            before = self.cad.store.one("SELECT text, status, end FROM radio_traffic WHERE id = ?", (cid,))
+        mine = t is not None and "late_fill" not in t.__dict__ and not str(t.text or "").strip()
+        if mine:                                  # (its first words: late when long after air)
+            t.late_fill = self._late_fill(t.end)  # type: ignore[attr-defined]
+        try:
+            changed = super()._retext(cid, text, status, confidence, model, *a, **kw)
+        finally:
+            if mine:
+                t.__dict__.pop("late_fill", None)
+        if before is not None:
+            row = self.cad.store.one("SELECT * FROM radio_traffic WHERE id = ?", (cid,)) or {}
+            new = str(row.get("text") or "")
+            words = new or (str(row.get("unclear_text") or "") if row.get("status") == stt_quality.UNCLEAR else "")
+            if words and (new != str(before.get("text") or "") or not new):
+                late = bool(kw.get("late"))
+                tr = self._traffic_of_row(row)
+                tr.late = late                                    # type: ignore[attr-defined]
+                first = not str(before.get("text") or "").strip()
+                tr.late_fill = first and self._late_fill(row.get("end"))      # type: ignore[attr-defined]
+                self._alarm(tr, words)
+                if not late and new:
+                    self._atc(tr, new)
+        return changed
+
     @staticmethod
     def _log_item(item) -> dict:
         """A pool job's extra for a transmission no longer in memory (log_only): the job keeps it, so its fallback still
@@ -1485,8 +1525,11 @@ class HubApp(App):
                     setattr(have, k, item.__dict__[k])
         words = str(getattr(item, "raw", "") or getattr(item, "text", "") or "")
         if words or item.status not in ("pending", "remote"):
+            alt = ({"text": str(getattr(item, "alt_text", "") or ""), "model": str(getattr(item, "alt_model", "") or "")}
+                   if getattr(item, "alt_text", None) is not None else None)
             self._retext(item.id, words, item.status, getattr(item, "confidence", None),
-                         str(getattr(item, "model", "") or ""), why="speech-to-text")
+                         str(getattr(item, "model", "") or ""), alt=alt, why="speech-to-text",
+                         vocab_v=str(getattr(item, "vocab_v", "") or "")[:80])
         else:
             self._stt_row(item.id, item.status, str(getattr(item, "model", "") or ""))
 
@@ -1602,9 +1645,7 @@ class HubApp(App):
         waiting = not have_text and ((self.mdb.is_waiting(pid) and have_status in ("pending", "remote", "skipped", "error"))
                                      or (have_status in ("pending", "remote")
                                          and have_model.startswith(WHISPER_FALLBACK_STATION)))
-        end = getattr(t, "end", None) if t is not None else row["end"]
-        clip_end = self._hub_time(end)
-        late_fill = clip_end is not None and time.time() - clip_end > LATE_FILL_S     # (its words long after air)
+        late_fill = self._late_fill(getattr(t, "end", None) if t is not None else row["end"])  # (words long after air)
         if d.get("authoritative") is False or not waiting:
             if status in LANDED:
                 self._stt_ran(pid, self._engine_of(d), model, text, status, conf, key=key, item=t, role="late",
@@ -1636,21 +1677,11 @@ class HubApp(App):
             return
         self._prompt_time(pid, d)                            # (#727: whisper's prompt had the clip's own time)
         late = bool(d.get("late")) or bool(getattr(t, "late", False))
-        t.late_fill = late_fill                               # type: ignore[attr-defined]  (the alarm: labelled late)
-        try:
-            self._retext(pid, text, status, conf, model, why="speech-to-text", vocab_v=vocab_v, late=late)
-        finally:
-            if held:
-                t.__dict__.pop("late_fill", None)
-        if not held:                                         # (by its id: the alarm's words and ATC from the row)
-            now = self.cad.store.one("SELECT text, status, unclear_text FROM radio_traffic WHERE id = ?", (pid,)) or {}
-            words = str(now.get("text") or "") or (str(now.get("unclear_text") or "")
-                                                   if now.get("status") == stt_quality.UNCLEAR else "")
+        # (its alarm labelled late when its words came long after air: _retext, for every engine's first words)
+        self._retext(pid, text, status, conf, model, why="speech-to-text", vocab_v=vocab_v, late=late)
+        if not held:                     # (by its id: its alarm's words and ATC came from the row, in _retext)
+            now = self.cad.store.one("SELECT text, status FROM radio_traffic WHERE id = ?", (pid,)) or {}
             t.text, t.late = str(now.get("text") or ""), late   # type: ignore[attr-defined]
-            if words:
-                self._alarm(t, words)
-                if not late and t.text:
-                    self._atc(t, t.text)
             t.status = str(now.get("status") or status)
         if status in LANDED:                                  # the station's whisper's text (#639), as it came
             self._stt_ran(pid, self._engine_of(d), model, text, status, conf, key=key, item=t,
