@@ -82,7 +82,7 @@ def test_the_map_reads_the_first_at_index(site, monkeypatch):
     monkeypatch.setattr(cad.store, "one", lambda sql, args=(): (seen.append((sql, args)), real1(sql, args))[1])
     pins(cad, held="quiet")
     reads = list({sql: (sql, args) for sql, args in seen if "intel_events e" in sql}.values())
-    assert len(reads) == 2                                             # the counts, the pins
+    assert len(reads) == 3                                             # the counts, the pins, the corrected places
     for sql, args in reads:
         plan = " ".join(r["detail"] for r in real(f"EXPLAIN QUERY PLAN {sql}", args))
         assert "intel_events_first" in plan and "SCAN e " not in plan + " ", sql
@@ -155,8 +155,11 @@ class FakeMap {
   on(t, a, b) { if (b) (this.lh[t + ":" + a] = this.lh[t + ":" + a] || []).push(b); else (this.h[t] = this.h[t] || []).push(a); }
   hasImage() { return false; }
   addImage() { calls.images++; }
-  addSource(id) { this.src = { setData: (d) => { calls.setData++; this.data = d; } }; }
-  getSource() { return this.src; }
+  addSource(id) {                       // the pins' source counted and kept; the corrected places' (-fixes) apart
+    this.srcs = this.srcs || {};
+    this.srcs[id] = { setData: (d) => { if (id.endsWith("-fixes")) { this.fixes = d; return; } calls.setData++; this.data = d; } };
+  }
+  getSource(id) { return this.srcs[id]; }
   addLayer() {}
   setFilter(id, f) { calls.sel.push(f[2]); }
   easeTo(o) { calls.ease.push(o.center); }
@@ -259,7 +262,7 @@ const maps = () => calls.get.filter((p) => p.includes("map=1")).length;
     out = run_node(script, {"list": d, "map": m, "voted": voted, "more": more, "filtered": filtered, "mapf": mapf})
     ids = out["ids"]
     assert out["before"] == {"maps": 1, "made": True}
-    assert out["images"] == 2 * 10                                     # each glyph, light and dark, once
+    assert out["images"] == 2 * 10 + 1                                 # each glyph, light and dark, once; the fix's diamond
     f = {p["id"]: p for p in out["feats"]}
     assert set(f) == {ids[0], ids[1], 999999}                          # placed only
     assert (f[ids[0]]["h"], f[ids[0]]["r"], f[ids[0]]["k"]) == (0, 0, "im-police-d")         # confirmed: filled

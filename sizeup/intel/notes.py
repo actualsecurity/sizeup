@@ -31,7 +31,34 @@ What reads them later:
                           It holds names and what was said: it stays on the hub until an admin downloads it (in their
                           activity, kind "search")
 
-Notes are kept a year (events.py KEEP_NOTES_S), and an event with a note is kept with them.
+The corrected place is picked as the incident editor's location is (static/cad.js addressBox: an address, an
+intersection, "@" one of the department's common places; the qualifier in front, "IFO", from Settings > Lists >
+Location qualifiers) and kept with the note (corrected_lat / _lon / _precision / _label / _qualifier / _place_key, and
+heard: the words heard for it, "Sampel Diner"). corrected_place stays the place as written ("IFO 12 Sample Rd @ Sample
+Diner"): an older note's free text alone, read as before. A picked place is:
+
+    on the event          More info's Place card (context_bundle.py: place.corrected) and the Intel page's map
+                          (eventlog.py map: corrected, drawn apart from the engine's pin, static/intel-map.js)
+    a labelled example    one PLACE_EXAMPLE row in intel_feedback per note (the heard words -> the place picked; traffic_id
+                          the transmission they were heard in), what tuning and replays read
+    an alias              an admin's "add as alias" (POST /api/cad/intel/notes/<nid>/alias): the heard words become
+                          another name of the common place picked (Settings: add_place_alias; the place search, the
+                          radio's page locator and the county feed read them), so the next transmission saying them
+                          resolves; audited in intel_note_audit (action "alias") and in the settings audit
+    a correction candidate  the misheard -> real pair (heard, the common place's name or the address picked) in
+                          intel_correction_candidates, for the speech-to-text side (#956):
+
+        correction_candidates(since=None, unimported_only=True) -> [{id, note_id, clip_id, heard_phrase, real_phrase,
+                              kind, source, who, when, imported_at}], oldest first: the pairs written since then (epoch
+                              seconds; None: all), only those not taken yet unless unimported_only=False
+        mark_imported(ids) -> n   taken by the speech-to-text side (imported_at: now); a note's edit never rewrites a
+                              pair already taken
+
+    kind is place for a note's (place | unit | street | other); source "intel-note"; who the operator who wrote it; a
+    note's edit replaces its pairs not yet taken, its delete removes them. The hub's store by default (the IntelNotes the
+    hub made); store= another (tests, a copy). The phrases are never logged.
+
+Notes are kept a year (events.py KEEP_NOTES_S), and an event with a note is kept with them; so are the pairs.
 """
 
 from __future__ import annotations
@@ -39,14 +66,18 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
+from contextlib import contextmanager
 
 from sizeup.cad.store import CadError
+from sizeup.intel.model import PRECISIONS
 
 TAGS = ("should_have_pushed", "false_garbled_audio", "wrong_place", "wrong_category", "out_of_area", "late",
         "rule_to_add")
 REVIEW_TAGS = ("rule_to_add", "wrong_category", "should_have_pushed", "false_garbled_audio")
 TX_VERDICT = "garbled_tx"          # false_garbled_audio, per transmission (traffic_id): the speech-to-text side's
 CORRECTED = "corrected"            # a note with corrections and no tag
+PLACE_EXAMPLE = "place_example"    # a picked place: the heard words -> it (once per note; traffic_id where heard)
 TAG_VERDICT = {"should_have_pushed": "should_push", "false_garbled_audio": "garbled", "wrong_place": "wrong_place",
                "wrong_category": "wrong_type", "out_of_area": "out_of_area", "late": "late", "rule_to_add": "rule_to_add"}
 LEVELS = ("push", "map", "log", "none")
@@ -54,7 +85,20 @@ TEXT_MAX = 4000
 PLACE_MAX = 200
 DONE_MAX = 120
 EXPORT_MAX = 5000
-FIELDS = ("text", "tags", "corrected_category", "corrected_place", "corrected_level")
+HEARD_MAX = 60
+PICK = ("corrected_lat", "corrected_lon", "corrected_precision", "corrected_label", "corrected_place_key")
+FIELDS = ("text", "tags", "corrected_category", "corrected_place", "corrected_level", *PICK, "corrected_qualifier",
+          "heard")
+# a location box suggestion's kind (static/cad.js addressBox) -> the engine's precision (model.PRECISIONS)
+KIND_PRECISION = {"address": "address", "intersection": "intersection", "block": "block", "place": "landmark",
+                  "landmark": "landmark", "mile marker": "landmark", "milemarker": "landmark", "exit": "landmark",
+                  "street": "street", "town": "town"}
+AREA = ((40.0, 42.0), (-75.0, -72.0))    # a point in the area (as Settings' place names)
+CANDIDATE_KINDS = ("place", "unit", "street", "other")
+CANDIDATE_SOURCE = "intel-note"
+CANDIDATE_COLS = ("id", "note_id", "clip_id", "heard_phrase", "real_phrase", "kind", "source", "who", "when",
+                  "imported_at")
+_HUB: dict = {}                    # "store": the hub's CAD store (the IntelNotes it made), for the functions below
 
 
 class Forbidden(CadError):
@@ -67,9 +111,75 @@ def _who(operator: str) -> str:
     return o.split(" <", 1)[0].strip() if " <" in o else o
 
 
+def _place_name(e: dict) -> str:
+    """A place name's name as people write it: the county's label ("Sample Diner"), a hand-made one's name (its label
+    is where it was picked)."""
+    from sizeup.cad.commonplaces import is_imported
+    return (e.get("label") if is_imported(e.get("key") or "", e) else "") or e.get("name") or ""
+
+
+def _words(text: str) -> str:
+    """How heard words and names are compared: lower case, letters and digits ("Sampel  Diner!" -> "sampel diner")."""
+    return " ".join(re.findall(r"[a-z0-9]+", (text or "").lower()))
+
+
+# -- the correction candidates (the speech-to-text side's, #956) ---------------------------------------------------------
+
+def _store(store=None):
+    s = store if store is not None else _HUB.get("store")
+    if s is None:
+        raise RuntimeError("no hub store: pass store=")
+    return s
+
+
+@contextmanager
+def _tx(store):
+    """One transaction under the store's lock, no CAD rev (an intel write, as SqlEvents._w)."""
+    with store.lock:
+        db = store.db
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            yield db
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
+        db.execute("COMMIT")
+
+
+def correction_candidates(since: float | None = None, unimported_only: bool = True, *, store=None) -> list[dict]:
+    """The misheard -> real pairs (the module doc), oldest first."""
+    where, args = [], []
+    if since is not None:
+        where.append('"when" >= ?')
+        args.append(float(since))
+    if unimported_only:
+        where.append("imported_at IS NULL")
+    cols = ", ".join(f'"{c}"' for c in CANDIDATE_COLS)
+    sql = f"SELECT {cols} FROM intel_correction_candidates" + (f" WHERE {' AND '.join(where)}" if where else "")
+    return [dict(r) for r in _store(store).q(sql + ' ORDER BY "when", id', args)]
+
+
+def mark_imported(ids, *, store=None, at: float | None = None) -> int:
+    """The pairs taken by the speech-to-text side: imported_at now (or at). -> how many were marked."""
+    ids = [int(i) for i in ids or []]
+    if not ids:
+        return 0
+    s = _store(store)
+    when = float(at) if at is not None else float(s.clock())
+    n = 0
+    with _tx(s) as db:
+        for k in range(0, len(ids), 500):
+            part = ids[k:k + 500]
+            n += db.execute(f"UPDATE intel_correction_candidates SET imported_at = ? WHERE imported_at IS NULL AND id IN "
+                            f"({','.join('?' * len(part))})", [when, *part]).rowcount
+    return n
+
+
 class IntelNotes:
     def __init__(self, cad, engine):
         self.cad, self.engine = cad, engine
+        if getattr(cad, "store", None) is not None:
+            _HUB["store"] = cad.store          # the functions above: the hub's (the last made: the live one)
 
     # -- reading ---------------------------------------------------------------------------------------------------
 
@@ -82,18 +192,54 @@ class IntelNotes:
         mine = bool(email) and (r["author_email"] or "").lower() == email.lower()
         return {"id": r["id"], "event_id": r["event_id"], "text": r["text"], "tags": tags,
                 "corrected_category": r["corrected_category"], "corrected_place": r["corrected_place"],
-                "corrected_level": r["corrected_level"], "author": _who(r["author"]), "created_at": r["created_at"],
+                "corrected_level": r["corrected_level"], "corrected": IntelNotes.picked(r),
+                "corrected_qualifier": r.get("corrected_qualifier") or "", "heard": r.get("heard") or "",
+                "author": _who(r["author"]), "created_at": r["created_at"],
                 "updated_at": r["updated_at"], "edited": r["updated_at"] > r["created_at"], "done": r["done"],
                 "done_by": _who(r["done_by"]), "done_at": r["done_at"], "may_edit": mine or admin,
                 "review": not r["done"] and any(t in REVIEW_TAGS for t in tags)}
+
+    @staticmethod
+    def picked(r: dict) -> dict | None:
+        """The place picked ({lat, lon, precision, label, qualifier, place_key}); None: none (an older note's
+        corrected_place is its free text alone)."""
+        if r.get("corrected_lat") is None or r.get("corrected_lon") is None:
+            return None
+        return {"lat": r["corrected_lat"], "lon": r["corrected_lon"], "precision": r.get("corrected_precision") or "",
+                "label": r.get("corrected_label") or "", "qualifier": r.get("corrected_qualifier") or "",
+                "place_key": r.get("corrected_place_key") or ""}
+
+    def _places(self) -> dict:
+        """The department's place names by key (Settings; the county's common places and hand-made ones)."""
+        try:
+            return {r["key"]: r for r in self.cad.local_places() if r.get("key")}
+        except Exception:  # noqa: BLE001 - no place names: none picked
+            return {}
+
+    @staticmethod
+    def _names(e: dict) -> set:
+        return {_words(x) for x in (e.get("name") or "", e.get("label") or "", *(e.get("aliases") or []))} - {""}
+
+    def _with_place(self, n: dict, places: dict, admin: bool) -> dict:
+        """A shown note with its common place's name (place_name) and, for an admin, whether its heard words may become
+        an alias of it (alias_ok: picked, heard, and not one of its names yet)."""
+        p = n.get("corrected")
+        e = places.get(p["place_key"]) if p and p["place_key"] else None
+        if e is not None:
+            site = places.get(e.get("site") or "")
+            n["place_name"] = _place_name(e)
+            names = self._names(e) | (self._names(site) if site else set())
+            n["alias_ok"] = bool(admin and _words(n["heard"]) and _words(n["heard"]) not in names)
+        return n
 
     def of_event(self, eid: int, email: str = "", admin: bool = False) -> dict:
         """GET /api/cad/intel/<id>/notes: the event's notes, oldest first; the audit for an admin; the choices."""
         if self.cad.store.one("SELECT id FROM intel_events WHERE id = ?", (int(eid),)) is None:
             raise CadError(f"no pre-alert {eid}")
         rows = self.cad.store.q("SELECT * FROM intel_notes WHERE event_id = ? ORDER BY created_at, id", (int(eid),))
-        out = {"notes": [self.shown(r, email, admin) for r in rows], "tags": list(TAGS), "review_tags": list(REVIEW_TAGS),
-               "levels": list(LEVELS), "categories": self.categories(), "admin": admin}
+        places = self._places() if any(r.get("corrected_place_key") for r in rows) else {}
+        out = {"notes": [self._with_place(self.shown(r, email, admin), places, admin) for r in rows], "tags": list(TAGS),
+               "review_tags": list(REVIEW_TAGS), "levels": list(LEVELS), "categories": self.categories(), "admin": admin}
         if admin:
             out["audit"] = [{**a, "operator": _who(a["operator"])} for a in self.cad.store.q(
                 "SELECT note_id, action, operator, at, before, after FROM intel_note_audit WHERE event_id = ? "
@@ -146,8 +292,12 @@ class IntelNotes:
     # -- writing -----------------------------------------------------------------------------------------------------
 
     def _clean(self, body: dict, cur: dict | None = None) -> dict:
-        out = {k: cur[k] for k in FIELDS} if cur else {"text": "", "tags": "[]", "corrected_category": "",
-                                                        "corrected_place": "", "corrected_level": ""}
+        out = {k: cur.get(k) for k in FIELDS} if cur else {
+            "text": "", "tags": "[]", "corrected_category": "", "corrected_place": "", "corrected_level": "",
+            "corrected_lat": None, "corrected_lon": None, "corrected_precision": "", "corrected_label": "",
+            "corrected_place_key": "", "corrected_qualifier": "", "heard": ""}
+        for k in ("corrected_precision", "corrected_label", "corrected_place_key", "corrected_qualifier", "heard"):
+            out[k] = out[k] or ""                         # (an older row read before its columns were filled)
         if "text" in body:
             t = str(body.get("text") or "").strip()
             if len(t) > TEXT_MAX:
@@ -165,15 +315,54 @@ class IntelNotes:
             out["corrected_category"] = c
         if "corrected_place" in body:
             out["corrected_place"] = str(body.get("corrected_place") or "").strip()[:PLACE_MAX]
+        if "corrected_pick" in body:
+            out.update(self._pick(body.get("corrected_pick")))
+            if out["corrected_lat"] is not None and not out["corrected_place"]:
+                out["corrected_place"] = out["corrected_label"][:PLACE_MAX]
+        if "corrected_qualifier" in body:
+            try:
+                out["corrected_qualifier"] = self.cad.lists.qualifier_code(str(body.get("corrected_qualifier") or ""),
+                                                                           (cur or {}).get("corrected_qualifier") or "")
+            except ValueError as e:
+                raise CadError(f"corrected_qualifier: {e}") from None
+        if "heard" in body:
+            out["heard"] = " ".join(str(body.get("heard") or "").split())[:HEARD_MAX]
         if "corrected_level" in body:
             lv = str(body.get("corrected_level") or "")
             if lv and lv not in LEVELS:
                 raise CadError(f"corrected_level: {' | '.join(LEVELS)}")
             out["corrected_level"] = lv
         if not out["text"] and out["tags"] == "[]" and not (out["corrected_category"] or out["corrected_place"]
-                                                             or out["corrected_level"]):
+                                                             or out["corrected_level"] or out["corrected_lat"] is not None):
             raise CadError("a note needs text, a tag or a correction")
         return out
+
+    def _pick(self, p) -> dict:
+        """corrected_pick: a location box suggestion taken ({lat, lon, label, kind | precision, place_key?}) -> the
+        note's columns; null / {}: none (the picked place cleared, corrected_place kept as written)."""
+        none = {"corrected_lat": None, "corrected_lon": None, "corrected_precision": "", "corrected_label": "",
+                "corrected_place_key": ""}
+        if not p:
+            return none
+        if not isinstance(p, dict):
+            raise CadError("corrected_pick: {lat, lon, label, kind, place_key?} or null")
+        try:
+            lat, lon = float(p.get("lat")), float(p.get("lon"))
+        except (TypeError, ValueError):
+            raise CadError("corrected_pick: lat and lon") from None
+        if not (AREA[0][0] <= lat <= AREA[0][1] and AREA[1][0] <= lon <= AREA[1][1]):
+            raise CadError("corrected_pick: lat and lon in the area")
+        label = " ".join(str(p.get("label") or "").split())[:PLACE_MAX]
+        if not label:
+            raise CadError("corrected_pick: its label")
+        key = str(p.get("place_key") or "")[:200]
+        if key and key not in self._places():
+            raise CadError("corrected_pick: no such common place")
+        prec = str(p.get("precision") or "")
+        if prec not in PRECISIONS or prec == "none":
+            prec = KIND_PRECISION.get(str(p.get("kind") or ""), "landmark" if key else "address")
+        return {"corrected_lat": round(lat, 6), "corrected_lon": round(lon, 6), "corrected_precision": prec,
+                "corrected_label": label, "corrected_place_key": key}
 
     def _event(self, eid: int) -> dict:
         r = self.cad.store.one("SELECT id, rules, ruleset_hash, traffic_ids FROM intel_events WHERE id = ?", (int(eid),))
@@ -192,8 +381,27 @@ class IntelNotes:
         if not admin and not (email and (r["author_email"] or "").lower() == email.lower()):
             raise Forbidden("only its author or an admin may change a note")
 
-    def _feedback(self, db, note: dict, ev: dict, at: float) -> None:
-        """The note's tags as intel_feedback verdicts (the tuning's store), replacing what it wrote before."""
+    @staticmethod
+    def _clip(db, note: dict, tids: list) -> str:
+        """The transmission the heard words are in (its text or its corrected text, as words); the event's only one
+        when none says them; else ''."""
+        heard = _words(note.get("heard") or "")
+        tids = [str(t) for t in tids or []]
+        if heard and tids:
+            cols = {r[1] for r in db.execute("PRAGMA table_info(radio_traffic)")}
+            text = "text || ' ' || COALESCE(corr_text, '')" if "corr_text" in cols else "text"
+            for k in range(0, len(tids), 500):
+                part = tids[k:k + 500]
+                got = {str(r[0]): r[1] for r in db.execute(f"SELECT id, {text} FROM radio_traffic WHERE id IN "
+                                                           f"({','.join('?' * len(part))})", part)}
+                for t in part:
+                    if t in got and f" {heard} " in f" {_words(got[t])} ":
+                        return t
+        return tids[0] if len(tids) == 1 else ""
+
+    def _feedback(self, db, note: dict, ev: dict, at: float) -> str:
+        """The note's tags as intel_feedback verdicts (the tuning's store), replacing what it wrote before; a picked
+        place: one PLACE_EXAMPLE row (the heard words -> the place, traffic_id where they were heard). -> that clip."""
         db.execute("DELETE FROM intel_feedback WHERE note_id = ?", (note["id"],))
         try:
             tags = json.loads(note["tags"] or "[]")
@@ -201,17 +409,50 @@ class IntelNotes:
         except ValueError:
             tags, tids = [], []
         corrected = {k: note[f"corrected_{k}"] for k in ("place", "level") if note[f"corrected_{k}"]}
+        point = self.picked(note)
+        if point:
+            corrected["point"] = point
+        if note.get("heard"):
+            corrected["heard"] = note["heard"]
         rows = [(TAG_VERDICT[t], None) for t in tags]                      # once per note
         if not tags and (corrected or note["corrected_category"]):
             rows.append((CORRECTED, None))
         if "false_garbled_audio" in tags:
             rows += [(TX_VERDICT, tid) for tid in tids]                      # the clips, labelled per transmission
+        clip = self._clip(db, note, tids) if point or note.get("heard") else ""
+        if point:                                                          # the labelled example: heard -> picked
+            rows.append((PLACE_EXAMPLE, clip or None))
         for v, tid in rows:
             db.execute("INSERT INTO intel_feedback (event_id, traffic_id, verdict, corrected, corrected_category, rules, "
                        "ruleset_hash, operator, at, note_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                        (note["event_id"], tid, v, json.dumps(corrected) if corrected else "",
                         note["corrected_category"][:40], ev["rules"] or "[]", ev["ruleset_hash"] or "",
                         note["author"][:120], at, note["id"]))
+        return clip
+
+    def _real(self, note: dict, places: dict) -> str:
+        """What the heard words should have been: the common place's name, else the address picked (its first part)."""
+        e = places.get(note.get("corrected_place_key") or "")
+        if e is not None:
+            return _place_name(e)
+        if note.get("corrected_lat") is not None:
+            return (note.get("corrected_label") or "").split(",")[0].strip()
+        return ""
+
+    def _candidates(self, db, note: dict, clip: str, op: str, at: float) -> None:
+        """The note's misheard -> real pair (intel_correction_candidates), replacing those not taken yet."""
+        db.execute("DELETE FROM intel_correction_candidates WHERE note_id = ? AND imported_at IS NULL", (note["id"],))
+        heard = note.get("heard") or ""
+        real = self._real(note, self._places() if note.get("corrected_place_key") else {}) if heard else ""
+        if not heard or not real or _words(heard) == _words(real):
+            return
+        if db.execute("SELECT 1 FROM intel_correction_candidates WHERE note_id = ? AND heard_phrase = ? AND "
+                      "real_phrase = ?", (note["id"], heard, real)).fetchone():
+            return                                                         # taken already: never twice
+        db.execute('INSERT INTO intel_correction_candidates (note_id, clip_id, heard_phrase, real_phrase, kind, source, '
+                   'who, "when") VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                   (note["id"], clip or "", heard, real[:PLACE_MAX], "place", CANDIDATE_SOURCE, (op or note["author"])[:160],
+                    at))
 
     @staticmethod
     def _audit(db, nid: int, eid: int, action: str, op: str, at: float, before, after) -> None:
@@ -224,22 +465,23 @@ class IntelNotes:
         n = self._clean(body)
         op, email = str(body.get("operator") or "")[:160], str(body.get("_email") or "")[:160]
         now = self.cad.clock()
-        with self.engine.events._w() as db:
-            cur = db.execute("INSERT INTO intel_notes (event_id, text, tags, corrected_category, corrected_place, "
-                             "corrected_level, author, author_email, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                             (int(eid), n["text"], n["tags"], n["corrected_category"], n["corrected_place"],
-                              n["corrected_level"], op, email, now, now))
+        admin = body.get("_may") == "admin"
+        with self.engine.events._w(placed=n["corrected_lat"] is not None) as db:
+            cols = ("event_id", *FIELDS, "author", "author_email", "created_at", "updated_at")
+            cur = db.execute(f"INSERT INTO intel_notes ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                             (int(eid), *(n[k] for k in FIELDS), op, email, now, now))
             nid = int(cur.lastrowid)
             note = dict(db.execute("SELECT * FROM intel_notes WHERE id = ?", (nid,)).fetchone())
-            self._feedback(db, note, ev, now)
+            clip = self._feedback(db, note, ev, now)
+            self._candidates(db, note, clip, op, now)
             self._audit(db, nid, int(eid), "add", op, now, None, {k: note[k] for k in FIELDS})
-        return {"ok": True, "note": self.shown(note, email, body.get("_may") == "admin")}
+        return {"ok": True, "note": self._with_place(self.shown(note, email, admin), self._places(), admin)}
 
     def edit(self, nid: int, body: dict) -> dict:
         op, email = str(body.get("operator") or "")[:160], str(body.get("_email") or "")
         admin = body.get("_may") == "admin"
         now = self.cad.clock()
-        with self.engine.events._w() as db:            # read and written in one transaction: never an older copy
+        with self.engine.events._w(placed=True) as db:   # read and written in one transaction: never an older copy
             r = db.execute("SELECT * FROM intel_notes WHERE id = ?", (int(nid),)).fetchone()
             if r is None:
                 raise CadError(f"no note {nid}")
@@ -248,23 +490,48 @@ class IntelNotes:
             e = db.execute("SELECT id, rules, ruleset_hash, traffic_ids FROM intel_events WHERE id = ?",
                            (cur["event_id"],)).fetchone()
             ev = dict(e) if e else {"id": cur["event_id"], "rules": "[]", "ruleset_hash": "", "traffic_ids": "[]"}
-            before = {k: cur[k] for k in FIELDS}
+            before = {k: cur.get(k) for k in FIELDS}
             if body.get("delete"):
                 db.execute("DELETE FROM intel_notes WHERE id = ?", (int(nid),))
                 db.execute("DELETE FROM intel_feedback WHERE note_id = ?", (int(nid),))
+                db.execute("DELETE FROM intel_correction_candidates WHERE note_id = ? AND imported_at IS NULL", (int(nid),))
                 self._audit(db, int(nid), cur["event_id"], "delete", op, now, {**before, "author": cur["author"]}, None)
                 return {"ok": True, "deleted": int(nid)}
             n = self._clean(body, cur)
             if n == before:                            # nothing changed: no write, no audit row
                 return {"ok": True, "note": self.shown(cur, email, admin), "unchanged": True}
-            db.execute("UPDATE intel_notes SET text = ?, tags = ?, corrected_category = ?, corrected_place = ?, "
-                       "corrected_level = ?, updated_at = ? WHERE id = ?",
-                       (n["text"], n["tags"], n["corrected_category"], n["corrected_place"], n["corrected_level"], now,
-                        int(nid)))
+            db.execute(f"UPDATE intel_notes SET {', '.join(f'{k} = ?' for k in FIELDS)}, updated_at = ? WHERE id = ?",
+                       (*(n[k] for k in FIELDS), now, int(nid)))
             note = dict(db.execute("SELECT * FROM intel_notes WHERE id = ?", (int(nid),)).fetchone())
-            self._feedback(db, note, ev, now)
+            clip = self._feedback(db, note, ev, now)
+            self._candidates(db, note, clip, op, now)
             self._audit(db, int(nid), cur["event_id"], "edit", op, now, before, {k: note[k] for k in FIELDS})
-        return {"ok": True, "note": self.shown(note, email, admin)}
+        return {"ok": True, "note": self._with_place(self.shown(note, email, admin), self._places(), admin)}
+
+    def alias(self, nid: int, body: dict) -> dict:
+        """An admin's "add as alias of <common place>": the note's heard words become another name of the common place
+        it picked (Settings add_place_alias), so the next transmission saying them resolves. Audited here (action
+        "alias") and with the lists."""
+        if body.get("_may") != "admin":
+            raise Forbidden("adding an alias is for admins")
+        cur = self._note(nid)
+        heard, key = cur.get("heard") or "", cur.get("corrected_place_key") or ""
+        if not heard or not key:
+            raise CadError("the note needs the words heard and a common place picked")
+        e = self._places().get(key)
+        if e is None:
+            raise CadError("its common place is gone")
+        op = str(body.get("operator") or "")[:160]
+        had = list(e.get("aliases") or [])
+        out = self.cad.settings.add_place_alias(key, heard, op)
+        if out["added"]:
+            now = self.cad.clock()
+            with self.engine.events._w(listed=False) as db:
+                self._audit(db, int(nid), cur["event_id"], "alias", op, now, {"place_key": key, "aliases": had},
+                            {"place_key": out["key"], "aliases": out["aliases"]})
+        email = str(body.get("_email") or "")
+        return {"ok": True, "added": out["added"], "place": out["name"],
+                "note": self._with_place(self.shown(self._note(nid), email, True), self._places(), True)}
 
     def done(self, nid: int, body: dict) -> dict:
         """An admin's "done / PR #": the change it asked for is made ("" again: not yet)."""

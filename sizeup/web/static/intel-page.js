@@ -333,7 +333,7 @@ window.IntelPage = (() => {
     return mp.on;
   }
   const mapShown = () => !!(mp.on && mp.ready);
-  const pinned = (id) => !!(mp.data && mp.data.pins.some((p) => p.id === id));
+  const pinned = (id) => !!(mp.data && (mp.data.pins.some((p) => p.id === id) || (mp.data.corrected || []).some((p) => p.id === id)));
   function mapShow(on, read = true) {
     mp.on = on;
     const b = $("#il-map-btn");
@@ -384,8 +384,9 @@ window.IntelPage = (() => {
     const n = [];
     if (m.placed > m.pins.length) n.push(`newest ${m.pins.length} of ${m.placed}`);
     if (m.unplaced) n.push(`${m.unplaced} unplaced`);
+    if ((m.corrected || []).length) n.push(`${m.corrected.length} corrected ◆`);     // a note's picked place (intel-map.js)
     setText($("#il-map-n"), n.join(" · "));
-    show($("#il-nomap"), !m.pins.length);
+    show($("#il-nomap"), !m.pins.length && !(m.corrected || []).length);
     if (!window.maplibregl || !window.IntelMap || typeof plainMap !== "function" || typeof cad === "undefined" || !cad.scene
         || !cad.scene.home) return;
     if (!mp.m) {
@@ -398,7 +399,7 @@ window.IntelPage = (() => {
       return;
     }
     if (!mp.ready) return;
-    mp.pins.set(m.pins);
+    mp.pins.set(m.pins, m.corrected || []);              // a note's corrected place: its own mark (intel-map.js)
     mp.pins.select(st.sel);
     if (mp.qs !== mp.fit) {                    // new filters: fitted to them; the same filters read again keep the view
       const b = mp.pins.bounds();

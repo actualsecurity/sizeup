@@ -705,7 +705,8 @@ class PlaceIndex:
         out = []
         for r, name in by_address.at(address, lat, lon, town, town_of):
             h = self._item("place", name, r.get("muni") or "", r["lat"], r["lon"], "local", 1.0, ctx,
-                           category="local name", detail=address, address=address, at=address)
+                           category="local name", detail=address, address=address, at=address,
+                           place_key=r.get("key") or "")
             h["score"] = score
             out.append(h)
         return out
@@ -737,7 +738,8 @@ class PlaceIndex:
             r = rows[i]
             out.append(self._item("place", r.get("label") or r["name"], r.get("muni") or "", r["lat"], r["lon"],
                                   "local", quality, near, LOCAL_BONUS, category="local name",
-                                  detail=r.get("note") or r.get("address") or "", address=r.get("address") or ""))
+                                  detail=r.get("note") or r.get("address") or "", address=r.get("address") or "",
+                                  place_key=r.get("key") or ""))
         return out
 
     def _streets(self, q: list[str], near) -> list[dict]:

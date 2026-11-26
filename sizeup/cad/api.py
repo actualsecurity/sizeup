@@ -406,10 +406,14 @@ GET  /api/cad/intel/search?where=&text=&from=&to=
                                           words heard; anyone signed in
 GET  /api/cad/intel/<id>/notes            its notes (sizeup/intel/notes.py), oldest first; the audit for an admin;
                                           anyone signed in
-POST /api/cad/intel/<id>/notes            {text?, tags?: [...], corrected_category?, corrected_place?, corrected_level?}:
-                                          a note, anyone signed in (its author: who signed in)
+POST /api/cad/intel/<id>/notes            {text?, tags?: [...], corrected_category?, corrected_place?, corrected_level?,
+                                          corrected_pick?: {lat, lon, label, kind, place_key?} | null (the location
+                                          box's suggestion), corrected_qualifier?, heard?}: a note, anyone signed in (its
+                                          author: who signed in)
 POST /api/cad/intel/notes/<nid>           the same fields | {delete: true}: its author or an admin; audited
 POST /api/cad/intel/notes/<nid>/done      {done: "PR #123" | ""}: acted on (the review queue); admins
+POST /api/cad/intel/notes/<nid>/alias     its heard words another name of the common place it picked (Settings > Lists >
+                                          Place names: the place search and the radio read them); admins; audited
 GET  /api/cad/intel/export.csv|.jsonl     ?from=&to= and the Intel page's filters: each event with its notes, tags,
                                           scores, rule hits, the model's record, verdicts and transcripts; admins
                                           (ADMIN_READS), in their activity (kind "search")
@@ -477,7 +481,7 @@ OOS_NOTICE = re.compile(r"/api/cad/oos-notice/(\d{1,9})/(service|dismiss)")     
 INTEL_EVENT = re.compile(r"/api/cad/intel/(\d{1,9})/(dismiss|feedback)")        # radio pre-alerts (sizeup/intel)
 PREALERT_INFO = re.compile(r"/api/cad/prealerts/(airport|intel)/(\d{1,9})")      # a pre-alert's More info page
 INTEL_NOTES = re.compile(r"/api/cad/intel/(\d{1,9})/notes")                     # an intel event's notes (notes.py)
-INTEL_NOTE = re.compile(r"/api/cad/intel/notes/(\d{1,9})(/done)?")               # ... one note: edit, delete, done
+INTEL_NOTE = re.compile(r"/api/cad/intel/notes/(\d{1,9})(/done|/alias)?")        # ... one note: edit, delete, done, alias
 INTEL_EXPORT = re.compile(r"/api/cad/intel/export\.(csv|jsonl)")
 INCIDENT_INTEL = re.compile(r"/api/cad/incident/(\d{1,9})/intel")                # its linked intel events' notes
 ALARM_ACK = re.compile(r"/api/cad/alarm/(\d{1,9})/ack")
@@ -534,6 +538,7 @@ WRITES = (
     (re.compile(r"/api/cad/intel/\d{1,9}/feedback"), "active"),              # ... a vote on it: anyone signed in, active
     (INTEL_NOTES, "active"),                                                # ... a note on it: the same
     (re.compile(r"/api/cad/intel/notes/\d{1,9}/done"), "admin"),             # ... a note acted on (the review queue)
+    (re.compile(r"/api/cad/intel/notes/\d{1,9}/alias"), "admin"),            # ... its heard words a common place's alias
     (re.compile(r"/api/cad/intel/notes/\d{1,9}"), "active"),                 # ... its edit: the author or an admin (notes.py)
     (ALARM_ACK, "dispatch"),                                                # an emergency alarm seen (#128)
     (ALARM_CLEAR, "dispatch"),                                              # ... and resolved: its window closed
@@ -808,6 +813,8 @@ def _intel_note(m, b, o, c):
     tags = ", ".join(n.get("tags") or [])
     if m.re is INTEL_NOTES:
         return (f"Added a note on radio pre-alert {m.group(1)}" + (f" ({tags})" if tags else ""), "")
+    if m.group(2) == "/alias":                 # (its common place and the words: in the settings audit)
+        return (f"Added an alias to a common place from note {m.group(1)}", "") if (o or {}).get("added") else None
     if m.group(2):
         return (f"Marked note {m.group(1)} done" + (f": {_clip(b.get('done'), 40)}" if b.get("done") else " (not yet)"), "")
     if b.get("delete"):
@@ -1644,7 +1651,7 @@ class CadApi:
             n = c.intel_admin.notes
             if m:
                 return n.add(int(m.group(1)), body)
-            return (n.done if mn.group(2) else n.edit)(int(mn.group(1)), body)
+            return {"/done": n.done, "/alias": n.alias}.get(mn.group(2) or "", n.edit)(int(mn.group(1)), body)
         if m := INTEL_EVENT.fullmatch(path):
             if not sourcekeys.may_see_context(c.comms.context_broadcast):
                 raise CadError("radio pre-alerts need a sign-in (Cloudflare Access)")

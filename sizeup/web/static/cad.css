@@ -980,6 +980,12 @@
   .nt-tags { flex-wrap: wrap; }
   .nt-fixrow { flex-wrap: wrap; gap: var(--s-2); }
   .nt-fixrow input { flex: 1 1 10rem; }
+  /* the corrected place: [qualifier ▾] [the location box (cad.js addressBox)] [heard as] */
+  .nt-place { flex-wrap: wrap; }
+  .nt-place > .nt-place-in { flex: 2 1 12rem; }
+  .nt-place > .nt-heard { flex: 1 1 8rem; }
+  .nt-geo { margin-block-start: calc(-1 * var(--s-1)); }
+  .pi-fixed { color: var(--ok-text); }
   .d-intel { display: flex; flex-direction: column; gap: var(--s-1); margin-block: var(--s-2); }
 
   /* ---- the incident card's address notes and History here (addr-history.js, #403) ------------------------- */

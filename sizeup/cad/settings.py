@@ -1949,6 +1949,33 @@ class Editor:
                "note": _text(body.get("note"), "note", 120, required=False)}
         return self._commit([("places", key, val)], op, [("lists", f"place/{name}", cur.get(key), val)])
 
+    def add_place_alias(self, key: str, alias: str, op: str) -> dict:
+        """Another name for one of the department's place names, its aliases as Settings > Lists > Place names keeps
+        them (the place search, the radio's page locator and the county feed read them): an admin's from an intel
+        note's misheard name (sizeup/intel/notes.py). A county entry's too (a re-import keeps them: commonplaces.plan);
+        a site's other address: its primary's. Audited with the lists. -> {ok, key, name, aliases, added}"""
+        cur = {r["key"]: {k: v for k, v in r.items() if k != "key"} for r in self.local_places()}
+        e = cur.get(key)
+        if e is None:
+            raise CadError("no such place name")
+        if e.get("site") and e["site"] in cur and e["site"] != key:
+            key, e = e["site"], cur[e["site"]]
+        a = _text(alias, "alias", 60)
+        had = list(e.get("aliases") or [])
+        names = {commonplaces.name_key(x) for x in (e.get("name") or "", e.get("label") or "", *had)}
+        if not commonplaces.name_key(a):
+            raise CadError("alias: letters or digits")
+        name = (e.get("label") if commonplaces.is_imported(key, e) else "") or e.get("name") or ""
+        out = {"ok": True, "key": key, "name": name, "added": False}
+        if commonplaces.name_key(a) in names:
+            return dict(out, aliases=had)                  # its name, or one it has: nothing to add
+        if len(had) >= 10:
+            raise CadError("aliases: up to 10 other names")
+        val = dict(e, aliases=[*had, a])
+        self._commit([("places", key, val)], op, [("lists", f"place/{e.get('name') or key}", {"aliases": had},
+                                                   {"aliases": val["aliases"]})])
+        return dict(out, aliases=val["aliases"], added=True)
+
     # -- the department's own address points (sizeup/geo/localaddr.py) ----------------------------------
 
     def local_addresses(self) -> tuple:
