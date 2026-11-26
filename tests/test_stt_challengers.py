@@ -26,6 +26,7 @@ def _pool():
     p, jobs = pool(clk), Jobs()
     w = online(p, "gpu-a")
     w.models, w.caps, w.model = [Q5, Q8], frozenset({"challenger"}), f"ggml-{Q5}.bin"
+    w.try_models = frozenset({Q8})                                  # (its try server for Q8 answers: try_loaded)
     clk.t += sttpool.CHALL_QUIET_S + 1
     return clk, p, jobs, w
 
@@ -53,7 +54,7 @@ def test_only_on_a_worker_with_its_model_loaded_quiet_and_no_llm_work():
     clk, p, jobs, w = _pool()
     assert p.submit(chall(jobs, model=QWEN))
     assert p.claim("gpu-a", 0) is None                             # (not loaded there: the worker's try, on demand)
-    w.models = [Q5, Q8, QWEN]
+    w.models, w.try_models = [Q5, Q8, QWEN], frozenset({Q8, QWEN})
     p.llm_busy = lambda wid: True                                  # LLM work held or queued: none
     assert p.claim("gpu-a", 0) is None
     p.llm_busy = lambda wid: False

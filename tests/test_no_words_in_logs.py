@@ -310,6 +310,8 @@ def test_the_challenger_path(tmp_path, logs, monkeypatch):
             if path.endswith(("/claim", "/hello", "/state")):
                 body = dict(body, models=["large-v3-turbo-q5_0", qwen, q8] if path.endswith("/claim")
                             else body.get("models"), caps=["challenger"])
+                if path.endswith("/claim"):
+                    body["try_loaded"] = [q8]                       # (its try server for the challenger)
             elif path.endswith("/complete") and self.jobs:
                 job = self.jobs[-1]
                 body = dict(body, model=job.get("model") or "large-v3-turbo-q5_0")
