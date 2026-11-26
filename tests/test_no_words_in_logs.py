@@ -29,7 +29,7 @@ from tests.test_cloud import HubRun, fm_segment, hub_cfg, station, station_cfg
 from tests.test_incident_sources import traffic as feed_traffic
 from tests.test_alarms import tx as radio_tx
 from tests.test_radios import Clock, uid
-from tests.test_stt_pool import FakeWorker, pending_event, row, send
+from tests.test_stt_pool import FakeWorker, auto, pending_event, row, send
 
 MARK = "Quillfeather"            # an invented word, nowhere in sizeup: in a log line it is a leak
 PAGE = ("Port Chester Fire Department, respond to a reported structure fire. 12 Quillfeather Road, cross of Pearl "
@@ -159,7 +159,8 @@ def test_amazon_transcribe_and_the_gpu_pool_a_transmission_and_a_page(tmp_path, 
         assert wait(lambda: row(hub, "FG1-1").get("text") == aws_text + ".", 20), row(hub, "FG1-1")
         token = hub.app.hub.workers.add("gpu-1")
         w = FakeWorker(hub.url, token, text=f"Port Chester engine 99 respond to {MARK} Road").start()
-        assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
+        auto(hub, "FG1", "South 2")                               # (a GPU worker first: Auto, #896)
+        assert wait(lambda: hub.app.sttpool.ready_forced(URGENT)[0], 5)
         send(hub, pending_event("FG1-2", seq=2))                  # the pool: a transmission
         assert wait(lambda: row(hub, "FG1-2").get("text") == w.text, 30), row(hub, "FG1-2")
         send(hub, _page_event("South_2-900", seq=3))              # the pool: a page

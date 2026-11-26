@@ -76,7 +76,7 @@ def test_the_default_order_puts_fg2_last_and_skips_it_without_the_channel(tmp_pa
     p.write_text('[radio]\ntones_file = ""\n[[radio.channels]]\nlabel = "FG1"\nmhz = 453.0375\nkind = "traffic"\n')
     assert load(p).sdr_auto_order == AUTO_ORDER                       # no auto_assign_order: the default
     assert channels.DEFAULT_AWS == ("South 2", "FG1", "FG2", "tg:307")
-    assert channels.pref("FG2", {})["engine"] == "aws" and channels.pref("PC repeater", {})["engine"] == "local"
+    assert channels.pref("FG2", {})["engine"] == "pin:aws" and channels.pref("PC repeater", {})["engine"] == "local"
     assert {"Fireground 1", "Fireground 2"} <= set(channels.vocabulary_suggestions({}, []))
 
 

@@ -627,6 +627,8 @@ class Store:
             self.db.execute("ALTER TABLE radio_traffic ADD COLUMN text_at REAL")   # every later edit), 2026-11-17
         if tcols and "cut" not in tcols:                  # a P25 key-up cut at a mid-call grant: "grant" (#819), 2026-11-19
             self.db.execute("ALTER TABLE radio_traffic ADD COLUMN cut TEXT NOT NULL DEFAULT ''")
+        if tcols and "stt_route" not in tcols:            # the way its text went (#875: the engine selector), 2026-11-25
+            self.db.execute("ALTER TABLE radio_traffic ADD COLUMN stt_route TEXT NOT NULL DEFAULT ''")
         for col in ("quality", "unclear_text"):           # status "unclear": why, and the engine's words kept apart from the
             if tcols and col not in tcols:                # text (sizeup/stt_quality.py: a loop, noise), 2026-11-25
                 self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
