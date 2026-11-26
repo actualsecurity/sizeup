@@ -2672,15 +2672,11 @@ class App:
         p = self.channel_pref(key)
         if not p.get("transcribe", True):
             return ""
-        if ((p.get("engine") in ("aws", "both", sttroute.AUTO_BG) or sttroute.hub_aws(p.get("engine", "")))
+        if ((p.get("engine") in ("aws", "both") or sttroute.hub_aws(p.get("engine", "")))
                 and is_context(key) and self.aws is not None
                 and self.aws.available(key)[0] and self.aws.context_budget()["pct"] < CATCHUP_AWS_PCT):
             return "aws"
-        if (p.get("engine") == sttroute.AUTO_BG and not is_context(key) and self.aws is not None
-                and self.aws.available(key)[0]
-                and self.aws.budget()["pct"] < CATCHUP_AWS_PCT):
-            return "aws"                       # (#896: Auto · background's AWS last, within our month's budget too)
-        return "whisper"
+        return "whisper"                       # (Auto · background: the stations first, #896; the hub puts the pool ahead)
 
     def _catchup_whisper_ready(self, after: float) -> tuple[bool, str]:
         from sizeup.sttcatchup import whisper_idle
@@ -3173,7 +3169,13 @@ class App:
         """(station) This station's whisper's estimated wait for a new clip (queued x its measured time per clip) when
         it is over the class's background budget (sttroute.bg_budget: the clip couldn't START in time here), else 0."""
         st = self.stt.stats()
-        est = int(st.get("queued") or 0) * float(st.get("service_s") or 16.0)
+        ahead = int(st.get("live") or 0) + (int(st.get("rerun") or 0) if prio >= RERUN else 0) \
+            + (int(st.get("context") or 0) if prio >= CONTEXT_FALLBACK else 0) + (int(st.get("low") or 0) if prio >= LOW else 0)
+        try:                                   # (+ the decode in progress)
+            ahead += max(0, int(self.stt.busy()) - int(st.get("queued") or 0))
+        except Exception:  # noqa: BLE001 - the queue alone then
+            pass
+        est = ahead * float(st.get("service_s") or 16.0)    # (never the catch-up's: it yields)
         return est if est > sttroute.bg_budget(prio) else 0.0
 
     def _stt_offload(self, item, key: str, prio, why: str, bg: bool = False) -> bool:
@@ -3956,6 +3958,7 @@ class App:
         try:
             known = [str(r.get("key") or channels.tg_key(r["tg"])) for r in (self.tg.state() or [])
                      if isinstance(r, dict) and (r.get("key") or isinstance(r.get("tg"), int))]
+            known += [k for k in self._channel_overrides() if channels.is_tg(k)]     # (a stored one the hub doesn't list)
             got = self.cad.settings.migrate_engines(context_keys=[k for k in known if self.context_tg(k)])
         except Exception as e:  # noqa: BLE001 - tried again at the next start
             log(f"speech-to-text: the engine migration (#896) failed: {type(e).__name__}: {e}")

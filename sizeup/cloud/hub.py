@@ -99,7 +99,7 @@ import re
 import secrets
 import threading
 import time
-from collections import OrderedDict, deque
+from collections import OrderedDict
 from dataclasses import replace
 from pathlib import Path
 from typing import Callable
@@ -1081,7 +1081,8 @@ class HubApp(App):
         self._aws_since: dict[str, float] = {}         # id -> when Amazon Transcribe got it (the sweep's clock)
         self._aws_asked: dict[str, float] = {}         # id -> when the station's whisper was asked instead
         self._bg_asked: dict[str, float] = {}          # id -> when its station's whisper was asked for background work
-        self._bg_placed: deque = deque()               # (at, station | gpu | aws | back): background hand-overs, 1 h
+        self._bg_placed: OrderedDict = OrderedDict()   # clip id -> (at, station | gpu | aws | back): 1 h (#896)
+        self._bg_lock = threading.Lock()
         self._aws_late_wait: set[str] = set()          # timed out, not a priority channel: AWS's late answer is the text
         self._unclear_tried: dict[str, float] = {}     # id -> when its unclear transcript went to another engine (once)
         self._unclear_lock = threading.Lock()
@@ -1526,6 +1527,8 @@ class HubApp(App):
                     sp = self.aws.spent(CONTEXT_POOL if is_context(key) else "")
                     if float(sp["limit_usd"]) > 0 and float(sp["usd"]) >= UNCLEAR_AWS_SHARE * float(sp["limit_usd"]):
                         ok, why = False, f"re-asks stop at {UNCLEAR_AWS_SHARE:.0%} of the monthly limit"
+                    elif self._hub_engine(key) == sttroute.AUTO_BG and not self._bg_aws_ok(key):
+                        ok, why = False, "background: AWS over its background budget"      # (#896)
                 except Exception:  # noqa: BLE001 - no spend known: AWS's own check stands
                     pass
             pcm = self._rerun_pcm(item) if ok else None
@@ -2007,10 +2010,21 @@ class HubApp(App):
         self.sync()
         return True
 
+    def context_tg(self, key: str) -> bool:
+        """App.context_tg with the station's own Main switch (its talkgroup rows: Main lives on the station; the hub's
+        own copy may be another): a context or neighbour talkgroup's default engine is Auto · background (#896)."""
+        rows = getattr(getattr(self, "hub", None), "talkgroups", None) or []
+        if key.startswith("tg:"):
+            for r in rows:
+                if isinstance(r, dict) and (r.get("key") or (f"tg:{r.get('tg')}" if not r.get("tier_set") else "")) == key:
+                    return not r.get("main")
+        return super().context_tg(key)
+
     def stt_chosen(self, cid: str) -> str:
         """The engine the route chose for this clip now (sizeup/sttroute.py Routes.chosen): "GPU" (any GPU worker), a
         pinned worker's id ("gpu-pc", "station:north"), "pool" (any worker: a GPU, another station's whisper), "AWS",
-        "station" (its own station's whisper); "" for a clip the hub never routed (its station's own text). A retext from
+        "station" (its own station's whisper), "stations" (Auto · background: any pooled station's whisper); "" for a clip
+        the hub never routed (its station's own text). A retext from
         another engine is provisional while this one's text is still to come."""
         return self.stt_routes.chosen(cid)
 
@@ -2096,8 +2110,7 @@ class HubApp(App):
         pcm = wav_pcm(wav, getattr(item, "voice_offset_s", 0.0) if page is not None else 0.0) if wav else None
         cls = self._pool_class(item, key)
         eng = self._hub_engine(key)
-        if pcm is not None and (eng == sttroute.AUTO or (sttroute.is_pin(eng)
-                                                         and not sttroute.pinned(eng).startswith(sttroute.STATION_PIN))):
+        if pcm is not None and (eng == sttroute.AUTO or sttroute.is_pin(eng)):
             # its channel's engine decides (#896): Auto · priority, a pinned GPU worker, pinned AWS go their own order
             # (then AWS, then the station's whisper), never the generic pool's
             if page is None:
@@ -2125,41 +2138,50 @@ class HubApp(App):
         if bg:
             self.stt_routes.start(item.id, sttroute.mode_label(sttroute.AUTO_BG))
             self.stt_routes.note(item.id, f"station {origin}" if origin else "station", "behind its budget")
-            kind, wid, est = self.sttpool.bg_place(cls, seconds, origin, sttroute.bg_budget(cls), self._guard_avoid())
-            if kind:
-                self._bg_count(kind)
-            else:
+            budget = sttroute.bg_budget(cls)
+            kind, wid, est = self.sttpool.bg_place(cls, seconds, origin, budget, self._guard_avoid())
+            if not kind:
                 return self._bg_elsewhere(item, page, pcm, key, cls, "no station can start it in time and no GPU is "
                                           f"free (best wait {est:.0f} s)" if est >= 0 else "no station or GPU free")
             place = (kind, wid)
         job = sttpool.Job(item.id, cls, key, "page" if page is not None else "traffic", seconds,
                           audio_wait=True, audio=self._pool_audio_of(item.id, page, pcm), on_done=self._pool_done,
                           on_fallback=self._pool_fallback, prompt=prompt, clip_end=self._hub_time(getattr(item, "end", None)),
-                          forced=bg, bg=bg, pin=place[1] if place[0] == "gpu" else "",
+                          forced=bg, bg=bg, gpu_only=place[0] == "gpu",
                           extra={"pcm": pcm, "page": page, "handed": True, "origin": origin, "vocab_v": vocab_v,
-                                 **({"station_only": True} if place[0] == "station" else {})})
+                                 **({"station_only": True, "claim_wait": budget} if place[0] == "station" else {}),
+                                 **({"overflow": True} if place[0] == "gpu" else {})})
         if not self.sttpool.submit(job):
             return self._pool_elsewhere(job, "busy with priority work" if bg else "no pool worker could take it now")
-        self.stt_routes.choose(item.id, place[1] if place[0] == "gpu" else "stations" if place[0] else "pool")
+        if place[0]:
+            self._bg_count(item.id, place[0])
+        self.stt_routes.choose(item.id, "GPU" if place[0] == "gpu" else "stations" if place[0] else "pool")
         self.sync()
 
-    def _bg_count(self, how: str) -> None:
-        """Auto · background's hand-overs, where each went (Health: the overflow rate; #896)."""
+    def _bg_count(self, cid: str, how: str) -> None:
+        """Auto · background's hand-overs, where each clip went last (Health: the overflow rate; #896): one entry per
+        clip, its last step (a station that fell back to the GPU counts once, as gpu)."""
         now = time.time()
-        q = self._bg_placed
-        q.append((now, how))
-        while q and now - q[0][0] > 3600.0:
-            q.popleft()
+        with self._bg_lock:
+            d = self._bg_placed
+            d.pop(cid, None)
+            d[cid] = (now, how)
+            while d and now - next(iter(d.values()))[0] > 3600.0:
+                d.pop(next(iter(d)))
 
     def bg_health(self) -> dict:
-        """Health: the last hour's background hand-overs by where they went (station, gpu = overflow, aws, back to the
-        station), and each pooled station's estimated wait for a new clip."""
+        """Health: the last hour's background hand-overs by where each clip went (station, gpu = overflow, aws, back to
+        its station), each pooled station's estimated wait for a new clip, and the budgets."""
         now = time.time()
         out: dict[str, int] = {}
-        for at, how in list(self._bg_placed):
+        with self._bg_lock:
+            rows = list(self._bg_placed.values())
+        for at, how in rows:
             if now - at <= 3600.0:
                 out[how] = out.get(how, 0) + 1
-        return {"h": out, "stations": self.sttpool.station_waits(), "budget_s": sttroute.BG_BUDGET_S}
+        return {"h": out, "stations": self.sttpool.station_waits(), "budget_s": sttroute.BG_BUDGET_S,
+                "budgets": {"low": sttroute.BG_BUDGET_S, "context": sttroute.BG_BUDGET_FAST_S,
+                            "live": sttroute.BG_BUDGET_LIVE_S}}
 
     def _bg_aws_ok(self, key: str) -> bool:
         """AWS for background work: it can take the clip, and its month (the context pool for another P25 system's
@@ -2178,7 +2200,7 @@ class HubApp(App):
         dropped."""
         if pcm is not None and self._bg_aws_ok(key):
             self.stt_routes.note(item.id, "GPU", why)
-            self._bg_count("aws")
+            self._bg_count(item.id, "aws")
             item.stt = "aws"
             self._aws_since[item.id] = time.time()
             self._aws_asked.pop(item.id, None)
@@ -2187,7 +2209,7 @@ class HubApp(App):
             self.aws.submit(key, AwsJob("page" if page is not None else "traffic", item.id, key, page=page), pcm)
             return self.sync()
         self.stt_routes.note(item.id, "AWS", "over its background budget" if self.aws is not None else "not set up")
-        self._bg_count("back")
+        self._bg_count(item.id, "back")
         item.stt = ""
         self._stt_state(item, item.id, "pending", WHISPER_FALLBACK_STATION)
         self._bg_to_station(item.id, key)
@@ -2204,7 +2226,21 @@ class HubApp(App):
                 getattr(item, "status", "") not in ("pending", "remote"):
             return
         self.stt_routes.note(job.id, job.worker or "GPU", _short_why(why, job.worker))
-        if job.bg:                                 # Auto · background: AWS within its budget, else back to its station
+        if job.bg:                                 # Auto · background: a station's fell back: an idle GPU (overflow) ...
+            if job.extra.get("station_only"):
+                kind, _wid, _est = self.sttpool.bg_place(job.cls, job.seconds, str(job.extra.get("origin") or ""),
+                                                         0.0, self._guard_avoid(), stations=False)
+                if kind == "gpu":
+                    extra = {k: v for k, v in job.extra.items() if k not in ("station_only", "claim_wait", "fell", "kind")}
+                    again = sttpool.Job(job.id, job.cls, job.channel, job.kind, job.seconds, audio_wait=True,
+                                        audio=job.audio, on_done=self._pool_done, on_fallback=self._pool_fallback,
+                                        prompt=job.prompt, clip_end=job.clip_end, forced=True, bg=True, gpu_only=True,
+                                        extra={**extra, "overflow": True})
+                    if self.sttpool.submit(again):
+                        self._bg_count(job.id, "gpu")
+                        self.stt_routes.choose(job.id, "GPU")
+                        return self.sync()
+            # ... else AWS within its budget, else back to its station
             self.hub.log(f"stt pool: background {job.kind} {job.id}: {why}: AWS within its budget, else its station")
             return self._bg_elsewhere(item, page, job.extra.get("pcm"), job.channel, job.cls, "")
         if job.cls in (URGENT, HIGH, LIVE):         # (a context class never at live priority, never past the

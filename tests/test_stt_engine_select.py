@@ -10,7 +10,7 @@ import time
 import pytest
 
 from sizeup import channels, sttpool, sttroute
-from sizeup.app import make_app
+from sizeup.app import App, make_app
 from sizeup.stt import CATCHUP, HIGH, LIVE, LOW, URGENT
 from sizeup.sttroute import EngineBook, Route, Routes
 from tests.fake_transcribe import FakeTranscribe
@@ -301,6 +301,7 @@ def test_auto_priority_gpu_first_then_aws_then_the_station_each_said_on_its_rout
         assert wait(lambda: _row(hub, "FG1-1").get("text") == GPU_TEXT, 30), _row(hub, "FG1-1")
         assert hub.app.aws.health()["done"] == 0
         assert wait(lambda: _row(hub, "FG1-1").get("stt_route") == "auto·priority: gpu-1", 5), _row(hub, "FG1-1")
+        assert wait(lambda: hub.app.stt_runs.of("FG1-1"), 5)             # (the run just after its row's route)
         assert hub.app.stt_runs.of("FG1-1")[0]["route"] == "auto·priority: gpu-1"
         # the worker gone: AWS, the route says why
         w.close()
@@ -401,13 +402,14 @@ def test_the_migration_moves_aws_to_pinned_aws_once_audited(tmp_path):
         assert got["migrated"] == ["FG2", "tg:325"] and got["default"] == ["FG1", "South 2", "p25:mrrs:9211", "tg:307"]
         ov = ed.channel_overrides()
         assert ov["tg:325"] == {"engine": "pin:aws"} and "FG2" not in ov       # (FG2: pinned AWS is its default now)
-        assert ov["tg:400"] == {"engine": "local"} and ov["tg:401"] == {"engine": "both"}     # (already pinned, Compare)
+        assert "tg:400" not in ov and ov["tg:401"] == {"engine": "both"}     # (a context talkgroup's local: background)
+        assert got["background"] == ["tg:400"]
         assert hub.app.channel_pref("FG2")["engine"] == "pin:aws" and hub.app.channel_pref("tg:325")["engine"] == "pin:aws"
         audit = [r for r in ed.audit_log("radios") if "#896" in json.dumps(r)]
         keys = sorted(str(r.get("key") or r.get("target") or "") for r in audit)
-        assert len(audit) - before == 6 and any("tg:325" in k for k in keys) and any("FG1" in k for k in keys), audit
+        assert len(audit) - before == 7 and any("tg:325" in k for k in keys) and any("FG1" in k for k in keys), audit
         assert hub.app.migrate_engines() is None                              # once
-        assert len([r for r in ed.audit_log("radios") if "#896" in json.dumps(r)]) - before == 6
+        assert len([r for r in ed.audit_log("radios") if "#896" in json.dumps(r)]) - before == 7
         assert json.loads(ed.cad.store.meta_get(ed.ENGINE_MIGRATION))["migrated"] == ["FG2", "tg:325"]
     finally:
         hub.close()
@@ -457,20 +459,17 @@ def test_the_guard_sends_a_slow_gpus_priority_clips_to_aws_and_says_so(tmp_path)
         fake.close()
 
 
-def test_auto_backgrounds_catch_up_uses_aws_last_within_each_budget(tmp_path):
+def test_auto_backgrounds_catch_up_goes_to_the_stations_never_aws_first(tmp_path):
     fake = FakeTranscribe(phrases={500: AWS_TEXT})
     hub = _hub(tmp_path, fake)
     try:
         _set(hub, "tg:325", "auto_bg")
         real = hub.app.channel_pref
-        hub.app.channel_pref = lambda k: {"record": True, "transcribe": True, "engine": "auto_bg"} if k.startswith("p25:") \
-            else real(k)                                         # (no MRRS system on this hub: its tier says nothing)
-        assert hub.app._catchup_route("p25:mrrs:9211") == "aws"
-        hub.app.aws.context_budget = lambda: {"pct": 95.0}
-        assert hub.app._catchup_route("p25:mrrs:9211") == "whisper"
-        assert hub.app._catchup_route("tg:325") == "aws"         # (ours: within our month's budget, #896)
-        hub.app.aws.budget = lambda: {"pct": 95.0}
-        assert hub.app._catchup_route("tg:325") == "whisper"
+        eng = {"p25:mrrs:9300": "auto_bg", "p25:mrrs:9301": "pin:aws"}
+        hub.app.channel_pref = lambda k: {"record": True, "transcribe": True, "engine": eng[k]} if k in eng else real(k)
+        assert App._catchup_route(hub.app, "p25:mrrs:9300") == "whisper"     # (stations first: #896)
+        assert App._catchup_route(hub.app, "tg:325") == "whisper"
+        assert App._catchup_route(hub.app, "p25:mrrs:9301") == "aws"         # (pinned AWS: its context budget)
     finally:
         hub.close()
         fake.close()
@@ -690,7 +689,7 @@ def test_background_goes_stations_first_then_gpu_overflow_then_aws_then_back(tmp
         online(p, "gpu-1")
         p._prio_at = 0.0
         send(hub, _bg_handed("TG325-2", seq=2))
-        assert wait(lambda: hub.app.stt_chosen("TG325-2") == "gpu-1", 10), hub.app.stt_chosen("TG325-2")
+        assert wait(lambda: hub.app.stt_chosen("TG325-2") == "GPU", 10), hub.app.stt_chosen("TG325-2")
         # no GPU free either: AWS within its budget
         p.workers["gpu-1"].leases.add("busy")
         send(hub, _bg_handed("TG325-3", seq=3))
@@ -712,16 +711,36 @@ def test_background_goes_stations_first_then_gpu_overflow_then_aws_then_back(tmp
 
 
 def test_a_station_keeps_its_background_clip_until_it_is_behind_its_budget(st_app, monkeypatch):
+    """Its estimate counts what is ahead of the clip (its class or above) and the decode in progress: never the
+    catch-up's clips (they yield), never lower classes behind it."""
     app = st_app
+    stats = {"queued": 12, "service_s": 18.0, "live": 0, "rerun": 0, "context": 0, "low": 2, "catchup": 10}
+    monkeypatch.setattr(app.stt, "stats", lambda: dict(stats))
+    monkeypatch.setattr(app.stt, "busy", lambda catchup=True: 13)            # (+1: decoding now)
+    assert app._bg_over_budget(sttpool.LOW) == 0.0                         # 3 x 18 = 54 s: it starts here in time
+    stats["low"] = 6
+    assert app._bg_over_budget(sttpool.LOW) == 126.0                       # 7 x 18 s: over the 90 s budget
+    assert app._bg_over_budget(sttpool.LIVE) == 0.0                        # a live clip: nothing ahead of it but one
     sent = []
     monkeypatch.setattr(app, "_stt_offload", lambda item, key, prio, why, bg=False: sent.append((item.id, bg)) or True)
-    stats = {"queued": 2, "service_s": 18.0}
-    monkeypatch.setattr(app.stt, "stats", lambda: dict(stats))
-    assert app._bg_over_budget(sttpool.LOW) == 0.0                         # 36 s: it starts here in time
-    stats["queued"] = 10
-    assert app._bg_over_budget(sttpool.LOW) == 180.0                       # 180 s: over the 90 s budget
-    assert app._bg_over_budget(sttpool.CONTEXT) == 180.0 and sttroute.bg_budget(sttpool.CONTEXT) == 60.0
-
+    monkeypatch.setattr(app.stt, "submit", lambda *a, **k: sent.append(("whisper", a[0].id)))
+    from sizeup.incidents import Traffic
+    import numpy as np
+    t = Traffic("325-1-call_1-t0", "Neighbor FD", 0.0, 3.0, "", talkgroup=325)
+    monkeypatch.setattr(app, "_stt_input", lambda *a, **k: None)
+    monkeypatch.setattr(app, "_stt_priority", lambda item, key: sttpool.LOW)
+    app._stt(t, np.zeros(16000 * 3, np.float32), "auto_bg", "tg:325")
+    assert sent == [("325-1-call_1-t0", True)]                             # behind its budget: the hub places it
+    stats["low"] = 1
+    t2 = Traffic("325-1-call_2-t0", "Neighbor FD", 0.0, 3.0, "", talkgroup=325)
+    app._stt(t2, np.zeros(16000 * 3, np.float32), "auto_bg", "tg:325")
+    assert sent[-1] == ("whisper", "325-1-call_2-t0")                       # in time: its own whisper
+    monkeypatch.setattr(app.link, "hub_caps", {"stt_pool"})
+    monkeypatch.setattr(app.link, "connected", lambda: True)
+    app.link.pool = {"on": False}
+    assert not app.link.pool_takes_bg()                                     # (the pool off: nothing handed over)
+    app.link.pool = {"on": True}
+    assert app.link.pool_takes_bg()
 
 def test_background_on_a_gpu_waits_for_the_stations_first_and_never_blocks_priority():
     clk, jobs = Clock(), Jobs()
@@ -875,6 +894,44 @@ def test_context_talkgroups_on_the_stations_whisper_move_to_auto_background_audi
         assert hub.app.context_tg("p25:metro:12") is True and channels.defaults("tg:1", context=lambda k: False)["engine"] \
             == "local" and channels.defaults("tg:1", context=lambda k: True)["engine"] == "auto_bg"
         assert channels.defaults("FG1", context=lambda k: True)["engine"] == "pin:aws"    # (never an FM channel)
+    finally:
+        hub.close()
+        fake.close()
+
+
+def test_a_context_class_background_clip_placed_on_a_station_is_taken_in_its_budget_and_falls_to_a_gpu():
+    """A context alert clip (fast class) placed on the stations is theirs (a station's lease, its 60 s budget to be
+    claimed, never the 2.5 s pre-alert wait); one no station claims goes to an idle GPU (overflow)."""
+    clk, jobs = Clock(), Jobs()
+    p = pool(clk)
+    st = p.seen("station:west", "online", kind="station", load={"own": 1, "service_s": 18.0, "max_s": 60.0})
+    assert p.bg_place(sttpool.CONTEXT, 3.0, "east", 60.0)[:2] == ("station", "station:west")
+    j = jobs.job("ctx", sttpool.CONTEXT, forced=True, bg=True, extra={"station_only": True, "claim_wait": 60.0})
+    assert p.submit(j)
+    clk.t += 30.0                                            # (way past the 2.5 s pre-alert wait: still waiting)
+    p.seen("station:west")
+    assert p.tick() == 0
+    st.polling = 1
+    got = p.claim("station:west", 0)
+    assert got.id == "ctx" and got.expires - clk.t >= sttpool.BUDGETS[sttpool.LOW][1]    # (a station's lease)
+    online(p, "gpu-1")
+    assert p.bg_place(sttpool.CONTEXT, 3.0, "east", 60.0, stations=False)[:2] == ("gpu", "gpu-1")
+    assert p.bg_place(sttpool.LOW, 3.0, "west", 90.0)[0] == "gpu"          # (its own station: never back to it)
+
+
+def test_the_hub_reads_main_from_the_stations_own_rows(tmp_path):
+    fake = FakeTranscribe(phrases={500: AWS_TEXT})
+    hub = _hub(tmp_path, fake)
+    try:
+        hub.app.hub.talkgroups = [{"tg": 325, "key": "tg:325", "main": True}, {"tg": 326, "key": "tg:326", "main": False}]
+        assert hub.app.context_tg("tg:325") is False and hub.app.channel_pref("tg:325")["engine"] == "local"
+        assert hub.app.context_tg("tg:326") is True and hub.app.channel_pref("tg:326")["engine"] == "auto_bg"
+        # a stored local on a talkgroup the hub's own list doesn't have: still migrated
+        ed = hub.app.cad.settings
+        ed.cad.store.meta_put(ed.ENGINE_MIGRATION, "")
+        ed._commit([("channels", "tg:326", {"engine": "local"})], "test", [])
+        got = hub.app.migrate_engines()
+        assert "tg:326" in got["background"]
     finally:
         hub.close()
         fake.close()

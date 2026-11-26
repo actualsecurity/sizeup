@@ -475,7 +475,7 @@ class StationLink:
     def pool_takes_bg(self) -> bool:
         """The hub takes an Auto · background clip handed over (#896: it places it on another station, a GPU, AWS, or
         sends it back here): a hub with handed-over clips, heard lately."""
-        return POOL_CAP in self.hub_caps and self.connected()
+        return POOL_CAP in self.hub_caps and self.connected() and bool(self.pool.get("on"))
 
     def pool_gpu_bg(self) -> bool:
         """The hub's last word, heard lately: a GPU worker would take an Auto · background clip now (it holds nothing

@@ -92,7 +92,18 @@ def src_wait_s(job: "Job", now: float) -> float:
     return max(0.0, min(left, (job.expires - now) / 2.0))
 
 
+def _budgets(job) -> tuple[float, float, float]:
+    """(wait for a claim, first lease, lease cap) of this job: its class's, but a background clip placed on the stations
+    (#896, station_only) waits its background budget for a claim and is leased like a context talkgroup's clip (a
+    station's whisper decodes in seconds to tens of seconds, never a pre-alert lease)."""
+    if job.extra.get("station_only"):
+        return float(job.extra.get("claim_wait") or BUDGETS[LOW][0]), BUDGETS[LOW][1], BUDGETS[LOW][2]
+    return BUDGETS[job.cls]
+
+
 def _extra(job) -> float:
+    if job.extra.get("station_only"):
+        return PER_AUDIO_S * max(0.0, job.seconds)
     return 0.0 if job.cls in FAST_CLASSES or job.cls == CATCHUP else PER_AUDIO_S * max(0.0, job.seconds)
 PENDING_MODEL = "gpu-worker"   # a row's model while a worker has it (the UI: "Transcribing (GPU)")
 
@@ -451,7 +462,8 @@ class Pool:
         if (j.pin and w.id != j.pin) or w.id in j.avoid or (j.extra.get("station_only") and w.kind != "station"):
             return False
         if j.bg and w.kind == "gpu":             # (#896: stations first: a GPU only once no station could take it)
-            return self._bg_free(w, now, j.seconds) and (bool(j.pin) or now - j.queued_at >= BG_STATION_FIRST_S
+            return self._bg_free(w, now, j.seconds) and (bool(j.pin) or bool(j.extra.get("overflow"))
+                                                         or now - j.queued_at >= BG_STATION_FIRST_S
                                                          or not self._station_could(j, now))
         if w.kind == "station":
             if (j.cls in FAST_CLASSES and j.pin != w.id and not j.bg) or j.gpu_only or \
@@ -540,7 +552,7 @@ class Pool:
                 gpu = [w for w in ready if w.kind == "gpu"]
                 if any(self._bg_free(w, now, seconds) for w in gpu):
                     return True, ""
-                st = [w for w in ready if w.kind == "station" and cls not in FAST_CLASSES
+                st = [w for w in ready if w.kind == "station"        # (background: any class, #896)
                       and w.id != f"station:{origin}" and (seconds is None or seconds <= float(w.load.get("max_s", 1e9)))]
                 if st:
                     return True, ""
@@ -581,10 +593,11 @@ class Pool:
         """(lock held) A station's whisper's estimated wait for a new clip: its queue (and what the pool leased it) x its
         measured time per clip (what it reports in its load)."""
         svc = float(w.load.get("service_s") or SERVICE_DEFAULT_S * 8)
-        return (float(w.load.get("queue") or 0) + len(w.leases)) * svc
+        own = w.load.get("own", w.load.get("queue"))       # (its own clips: never the catch-up's, which yield)
+        return (float(own or 0) + len(w.leases)) * svc
 
     def bg_place(self, cls: float, seconds: float, origin: str = "", budget: float = 90.0,
-                 avoid=frozenset(), now: float | None = None) -> tuple[str, str, float]:
+                 avoid=frozenset(), now: float | None = None, stations: bool = True) -> tuple[str, str, float]:
         """Where an Auto · background clip its station couldn't start in time goes (#896): ("station", the soonest
         station's worker id, its estimated wait) when a station whisper in the pool can START it within budget (never
         its own station: it was behind; the job then goes to whichever station claims it first: station_only); else
@@ -594,7 +607,7 @@ class Pool:
         if not self._on() or self._stop.is_set():
             return "", "", -1.0
         with self._cv:
-            cands = [w for w in self.workers.values() if w.kind == "station" and self._ready(w, now)
+            cands = [w for w in self.workers.values() if stations and w.kind == "station" and self._ready(w, now)
                      and w.id != f"station:{origin}" and seconds <= float(w.load.get("max_s", 1e9))]
             ahead = sum(1 for j in self._queue if j.extra.get("station_only"))
             best = None
@@ -686,7 +699,7 @@ class Pool:
                 w.polling -= 1
 
     def _lease(self, job: Job, w: Worker, now: float) -> Job:
-        _wait, lease_s, cap_s = BUDGETS[job.cls]
+        _wait, lease_s, cap_s = _budgets(job)
         extra = _extra(job)
         job.lease, job.worker, job.claimed_at = secrets.token_hex(8), w.id, now
         job.extra["kind"] = w.kind
@@ -715,7 +728,7 @@ class Pool:
             if job is None:
                 return None
             now = self.clock()
-            _wait, lease_s, _cap = BUDGETS[job.cls]
+            _wait, lease_s, _cap = _budgets(job)
             job.expires = min(job.cap_at, now + lease_s + _extra(job))
             return job
 
@@ -819,9 +832,9 @@ class Pool:
                     self._queue.remove(job)
                     self._fall(job, "no_worker", "no pool worker ready")
                     n += 1
-                elif now - job.queued_at >= BUDGETS[job.cls][0]:
+                elif now - job.queued_at >= _budgets(job)[0]:
                     self._queue.remove(job)
-                    self._fall(job, "unclaimed", f"no pool worker took it in {BUDGETS[job.cls][0]:g} s")
+                    self._fall(job, "unclaimed", f"no pool worker took it in {_budgets(job)[0]:g} s")
                     n += 1
             if n:
                 self._cv.notify_all()
