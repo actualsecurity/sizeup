@@ -356,3 +356,10 @@ def test_a_tie_by_talker_is_by_radio_id_never_the_shared_talker_text():
     e.clock.t = 1060
     [c] = e.feed(row("t3", "Be advised, male waving a machete, he's on the porch.", 1060, radio_id="7704", **shared))
     assert a.id != b.id and c.id == b.id and c.traffic_ids == ["t2", "t3"]
+
+
+def test_rows_with_no_radio_id_never_tie_on_a_generic_talker_text():
+    from sizeup.intel.engine import _talker_ties
+    assert _talker_ties({"system": "mrrs", "radio_id": "7703,7704"}, "unknown MRRS radio") == {"mrrs:7703", "mrrs:7704"}
+    assert _talker_ties({"system": "mrrs", "radio_id": ""}, "unknown MRRS radio") == frozenset()
+    assert _talker_ties({"system": "mrrs", "radio_id": ""}, "CAR 3") == {"CAR 3"}

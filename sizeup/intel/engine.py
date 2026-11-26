@@ -343,8 +343,7 @@ class Entry:
     end: float = 0.0                   # when its clip ended (lateness is measured from it)
     label: str = ""                    # its radio as Settings > Radios names it (talkers.py), "" none
     town: str = ""                     # ... that department's town, one of the source's ("" not known)
-    radio: str = ""                    # "<system>:<radio ID>" of its first radio ID ("" none): who keyed up, as a radio
-                                       # (the stored talker text is a label many radios share: _who_key)
+    ties: frozenset = frozenset()      # who keyed up, as a tie by talker reads it (_talker_ties): radio IDs, not text
 
 
 @dataclass
@@ -926,8 +925,7 @@ class IntelEngine:
         end = max(at, float(row.get("end") or at))
         entry = Entry(at, hits, text, who, suppressed, talker, frozenset(units), disp, end=end,
                       label=tk.label if tk else "", town=self._talker_town(pack, key, tk),
-                      radio=next((f"{row.get('system') or ''}:{x.strip()}" for x in str(row.get("radio_id") or "").split(",")
-                                  if x.strip()), ""),
+                      ties=_talker_ties(row, talker),
                       late=bool(row.get("late") or row.get("aged")) or self.clock() - end > pack.late_s,
                       read=self.clock())
         # a re-text (#901's correction, a re-ask, a catch-up): the categories its old words said
@@ -1297,8 +1295,8 @@ class IntelEngine:
         call: _relayed), else why it is another (SPLITS):
           place    both name a place a crew can drive to (PLACED), and not the same one
           console  a labelled dispatch console (talkers.py) of a department none of the call's consoles is
-        Before a console: the same place, an address-only read-back, a unit or a radio (_who_key: its radio ID, the
-        talker text only without one; never a dispatcher) of the call's within window_s. After it (a console of another department beats them): more of the same in a
+        Before a console: the same place, an address-only read-back, a unit or a radio (_talker_ties: its radio IDs,
+        a talker text only without one and never a generic one; never a dispatcher) of the call's within window_s. After it (a console of another department beats them): more of the same in a
         caller's words (MORE_OF_SAME: "another caller", "same address"). Units alone never split a call (a second car
         sent, an officer joining, a lookout to other cars are the same call), nor does a fresh dispatch cue (#961
         review). A "new call" (NEW_CALL) is _raise's own. No labels: as before."""
@@ -1315,9 +1313,8 @@ class IntelEngine:
         mine = frozenset(u for u in entry.units if not _unit_placeholder(u))
         if mine & frozenset(u for e in near for u in e.units):
             return "same"
-        if (_who_key(entry) and not entry.dispatcher
-                and _who_key(entry) in {_who_key(e) for e in near if _who_key(e) and not e.dispatcher}):
-            return "same"                     # (the same radio; talker text only for a row with no radio ID)
+        if not entry.dispatcher and entry.ties & frozenset(t for e in near if not e.dispatcher for t in e.ties):
+            return "same"                     # (the same radio: _talker_ties, never a shared talker text)
         con = self._console(pack, entry, rows, key, ev)
         if con:
             return con
@@ -2591,10 +2588,20 @@ def _unit_placeholder(unit: str) -> bool:
         return False
 
 
-def _who_key(e) -> str:
-    """Who keyed up, for a tie by talker in _call: the radio ("<system>:<radio ID>") where the row has one, else its
-    talker text (an unlabelled MRRS radio's stored talker is one shared text, never an identity)."""
-    return e.radio or (f"talker:{e.talker}" if e.talker else "")
+GENERIC_TALKER = re.compile(r"(unknown|unk|unidentified)\b.*", re.I)
+
+
+def _talker_ties(row: dict, talker: str) -> frozenset:
+    """Who keyed up, as a tie by talker reads it: each of the row's radio IDs as "<system>:<id>" ("a,b": one per
+    key-up); a row with no radio ID, its talker text (an alias heard on the channel), never a generic one ("unknown
+    MRRS radio"). Never a radio's label: every unlabelled radio has the same text, and a department's or a range's
+    label is many radios' (the admin labels by department and role, not per car). (#980's rule, as it has it.)"""
+    system = str(row.get("system") or "")
+    ids = frozenset(f"{system}:{x.strip()}" for x in str(row.get("radio_id") or "").split(",") if x.strip())
+    if ids:
+        return ids
+    t = str(talker or "").strip()
+    return frozenset({t}) if t and not GENERIC_TALKER.fullmatch(t) else frozenset()
 
 
 def _agency(label: str) -> str:
