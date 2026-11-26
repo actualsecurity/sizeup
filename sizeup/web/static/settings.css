@@ -330,6 +330,7 @@
   .tg-challenger { display: inline-flex; align-items: center; gap: var(--s-1); flex: none; }
   .tg-chall { inline-size: auto; max-inline-size: 12rem; }
   .tg-ev { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .tg-promote { flex: none; }
   /* Settings > Station > Speech models (sttworkers.js): a channel's context and call signs */
   .stt-models td :is(input, select) { inline-size: 100%; min-inline-size: 6rem; }
   .stt-models table + table { margin-block-start: var(--s-4); }

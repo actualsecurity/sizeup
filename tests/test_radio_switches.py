@@ -382,7 +382,9 @@ def page(tmp_path_factory):
 def test_every_talkgroup_has_the_same_switches(page):
     rows = page["rows"]
     assert page["tierSelects"] == 0
-    assert page["order"] == ["record", "transcribe", "alerts", "main", "activity", "tg-eng sm"]     # the engine: its own slot
+    # the engine: its own slot; then the speech model (the hub's admins only: hidden otherwise, #868)
+    assert page["order"] == ["record", "transcribe", "alerts", "main", "activity", "tg-eng sm", "tg-mod sm",
+                             "tg-challenger"]                       # (and its challenger, #869)
     assert rows["p25:mrrs:9211"] == {"record": "on", "transcribe": "on", "alerts": "on", "main": "off disabled", "activity": "-"}
     assert rows["p25:mrrs:9212"] == {"record": "on", "transcribe": "on", "alerts": "off", "main": "off disabled", "activity": "-"}
     assert rows["p25:mrrs:9564"] == {"record": "off", "transcribe": "off", "alerts": "off", "main": "off disabled", "activity": "-"}
