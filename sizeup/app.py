@@ -2982,8 +2982,8 @@ class App:
         p = self.channel_pref(key)
         if key in _promoted(self):
             eng = p.get("engine", "local")
-            p = dict(p, transcribe=True, engine="aws" if eng == "local" else sttroute.AUTO if eng == sttroute.AUTO_BG
-                     else eng)
+            p = dict(p, transcribe=True, engine=channels.PIN_AWS if eng in ("local", "aws") else sttroute.AUTO
+                     if eng == sttroute.AUTO_BG else eng)
         return channels.effective(p, self.aws_ok(key)[0])
 
     def _stt_way(self, eng: str, key: str) -> str:
@@ -3874,7 +3874,10 @@ class App:
             log(f"speech-to-text: engine migration (#896): {len(got['migrated'])} channel(s) set to AWS moved to pinned "
                 f"AWS ({', '.join(got['migrated']) or 'none'}); {len(got['default'])} on the default AWS, now pinned "
                 f"AWS ({', '.join(got['default']) or 'none'})")
-            self.channels_changed()
+            try:
+                self.channels_changed()
+            except Exception as e:  # noqa: BLE001 - the next push sends them
+                log(f"speech-to-text: channels after the migration: {type(e).__name__}: {e}")
         return got
 
     def channels_changed(self) -> None:

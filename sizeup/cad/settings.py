@@ -2470,10 +2470,13 @@ class Editor:
         default = sorted(k for k in aws if not (isinstance(ov.get(k), dict) and "engine" in ov[k]))
         for key in default:
             audit.append(("radios", f"channel/{key}", {"engine": "aws (default)"}, {"engine": "pin:aws (default)"}))
-        if audit:
-            self._commit(changes, op, audit)
         out = {"migrated": stored, "default": default, "at": time.time()}
-        store.meta_put(self.ENGINE_MIGRATION, json.dumps(out))
+        mark = (lambda db: db.execute("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
+                                      "value = excluded.value", (self.ENGINE_MIGRATION, json.dumps(out))))
+        if audit:                                 # (the overrides, their audit and the mark: one transaction)
+            self._commit(changes, op, audit, extra_sql=mark)
+        else:
+            store.meta_put(self.ENGINE_MIGRATION, json.dumps(out))
         return out
 
     def _channels_op(self, action: str, body: dict, op: str) -> dict:
@@ -3568,6 +3571,8 @@ class Editor:
                 channels_mod.clean(k, v)
             except ValueError as e:
                 raise CadError(f"overrides.channels.{k}: {e}") from None
+            if isinstance(v, dict) and v.get("engine") == "aws":     # (an export from before #896: pinned AWS)
+                v["engine"] = channels_mod.PIN_AWS
         if channels_mod.SQUELCH_SECTION in ov:
             # never the whole backup refused over a squelch entry: what can't apply is skipped, said in the notes
             ov[channels_mod.SQUELCH_SECTION], self._import_notes = self._import_squelch(ov[channels_mod.SQUELCH_SECTION])

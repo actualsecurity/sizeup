@@ -130,6 +130,8 @@ def for_station(overrides: dict, record_only=DEFAULT_RECORD_ONLY, select_ok: boo
     if not select_ok:
         out = {k: dict(v, engine=sttroute.legacy(v["engine"])) if sttroute.is_new(v.get("engine", "")) else v
                for k, v in out.items()}
+    else:                                  # (#896: "aws" is pinned AWS wherever it is still met)
+        out = {k: dict(v, engine=PIN_AWS) if v.get("engine") == "aws" else v for k, v in out.items()}
     for key in record_only:
         if KEY.fullmatch(key) and "transcribe" not in out.get(key, {}):
             out[key] = {**out.get(key, {}), "transcribe": False}

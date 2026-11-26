@@ -47,7 +47,6 @@ window.RadioControls = (() => {
   const ENGINE_HELP = "Auto · priority: idle GPU worker → AWS → station whisper.\n"
     + "Auto · background: GPU with no priority work on it → station whisper → AWS last (its budget).\n"
     + "Pinned (a station, a GPU worker, AWS): that engine first, then Auto · priority's order.\n"
-
     + "Compare: station whisper and AWS on every clip (\u21c4).\n"
     + "Grey: not available now (its fallback runs). Police: its own AWS limit.";
   const ro = () => typeof canDo === "function" && !canDo("admin");
@@ -1279,6 +1278,7 @@ window.RadioControls = (() => {
       const saved = { record: true, transcribe: !(c.record_only || []).includes(key),
                       engine: (c.aws_channels || []).includes(key) ? "pin:aws" : "local",
                       ...((c.prefs || {})[key] || {}) };
+      if (saved.engine === "aws") saved.engine = "pin:aws";     // (#896, as chan() shows it)
       if (now > p.until || Object.entries(p.vals).every(([k, v]) => saved[k] === v)) st.cpending.delete(key);
     }
   }

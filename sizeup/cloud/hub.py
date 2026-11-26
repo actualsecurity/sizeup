@@ -118,6 +118,7 @@ from sizeup.cloud.autoupdate import describe
 from sizeup.cloud.health import StationHealth, status_token
 from sizeup.cloud.hubstore import AudioDb, MonitorDb
 from sizeup.cloud.stations import Principal, Refused, StationRegistry
+from sizeup.cloud import sttworkers as sttworkers_mod
 from sizeup.cloud.sttworkers import API as STT_API, STATION_PREFIX, WorkerApi, WorkerRegistry
 from sizeup.incidents import Traffic
 from sizeup.radio.page import page_from_dict
@@ -1451,6 +1452,7 @@ class HubApp(App):
         pcm = wav_pcm(wav, getattr(item, "voice_offset_s", 0.0) if not isinstance(item, Traffic) else 0.0) if wav else None
         if both:
             if pcm is not None:
+                self.stt_routes.choose(item.id, "AWS")     # (Compare: AWS's text is the text of record)
                 self._aws_alt(item, pcm, key)
             return
         if pcm is None:                                    # no clip came (the outbox dropped it): the station's whisper
@@ -1775,6 +1777,7 @@ class HubApp(App):
                 continue
             self._aws_since[it.id] = now
             self._aws_asked.pop(it.id, None)
+            self.stt_routes.choose(it.id, "AWS")
             self.aws.submit(key, AwsJob(kind, it.id, key, page=it if kind == "page" else None), pcm)
             n += 1
         if n:
@@ -1853,7 +1856,7 @@ class HubApp(App):
         if getattr(self, "sttpool", None) is None:
             return False
         eng = self._hub_engine(key)
-        if not sttroute.is_new(eng):              # ("local" or "both" can't come this way: AWS as pinned)
+        if not sttroute.is_new(eng):              # (a Local or Compare clip the AWS way: the maps disagreed: pinned AWS)
             eng = sttroute.PIN_AWS
         if pcm is None:
             self.stt_routes.start(item.id, sttroute.mode_label(eng))
@@ -1992,14 +1995,37 @@ class HubApp(App):
             self._stt_row(item.id, "pending", sttpool.PENDING_MODEL)
         if not self.sttpool.submit(job):
             return False
-        self.stt_routes.choose(item.id, (kw.get("pin") or "GPU").removeprefix(STATION_PREFIX))
+        self.stt_routes.choose(item.id, kw.get("pin") or ("pool" if kw.get("bg") else "GPU"))
         self.sync()
         return True
 
     def stt_chosen(self, cid: str) -> str:
-        """The engine the route chose for this clip now (sizeup/sttroute.py Routes.chosen): a retext from another engine
-        is provisional while this one's text is still to come."""
+        """The engine the route chose for this clip now (sizeup/sttroute.py Routes.chosen): "GPU" (any GPU worker), a
+        pinned worker's id ("gpu-pc", "station:north"), "pool" (any worker: a GPU, another station's whisper), "AWS",
+        "station" (its own station's whisper); "" for a clip the hub never routed (its station's own text). A retext from
+        another engine is provisional while this one's text is still to come."""
         return self.stt_routes.chosen(cid)
+
+    def migrate_engines(self) -> dict | None:
+        """App.migrate_engines, and the pool's per-class switches gone with it (#896): any an admin had switched off is
+        said in the log and in the System audit, once (the saved switches are dropped from hub.sqlite)."""
+        got = super().migrate_engines()
+        try:
+            reg = self.hub.workers
+            saved = json.loads(reg.mdb.get(sttworkers_mod.META_POOL, "") or "{}")
+            if isinstance(saved, dict) and "classes" in saved:
+                off = sorted(k for k, v in (saved.get("classes") or {}).items() if v is False) \
+                    if isinstance(saved.get("classes"), dict) else []
+                if off:
+                    self.cad.settings._commit([], "system: engine selector (#896)",
+                                              [("system", f"stt workers/pool/{k}", "off", "gone (#896)") for k in off])
+                    self.hub.log(f"stt pool: the per-class switches are gone (#896): {', '.join(off)} were off; a "
+                                 f"channel's engine decides where its clips go now")
+                reg.mdb.put(sttworkers_mod.META_POOL, json.dumps({k: v for k, v in saved.items() if k != "classes"},
+                                                                 sort_keys=True))
+        except Exception as e:  # noqa: BLE001 - said, tried again at the next start
+            self.hub.log(f"stt pool: the old class switches not cleared: {type(e).__name__}: {e}")
+        return got
 
     def _pool_prompt_v(self, item) -> tuple[str, str]:
         """A pool job's whisper prompt and its vocab_v: none for the airband (an ATC prompt costs words and makes
@@ -2047,6 +2073,14 @@ class HubApp(App):
         page = None if isinstance(item, Traffic) else item
         pcm = wav_pcm(wav, getattr(item, "voice_offset_s", 0.0) if page is not None else 0.0) if wav else None
         cls = self._pool_class(item, key)
+        eng = self._hub_engine(key)
+        if pcm is not None and (eng == sttroute.AUTO or (sttroute.is_pin(eng)
+                                                         and not sttroute.pinned(eng).startswith(sttroute.STATION_PIN))):
+            # its channel's engine decides (#896): Auto · priority, a pinned GPU worker, pinned AWS go their own order
+            # (then AWS, then the station's whisper), never the generic pool's
+            if page is None:
+                item.__dict__.pop("transcript_pending", None)
+            return self._aws_start(item, pcm, key)
         if fresh:
             item.status, item.raw, item.confidence, item.model = "pending", "", None, sttpool.PENDING_MODEL
             item.stt = "pool"
@@ -2075,6 +2109,7 @@ class HubApp(App):
                                  "vocab_v": vocab_v})
         if not self.sttpool.submit(job):
             return self._pool_elsewhere(job, "busy with priority work" if bg else "no pool worker could take it now")
+        self.stt_routes.choose(item.id, "pool")
         self.sync()
 
     def _pool_elsewhere(self, job: sttpool.Job, why: str) -> None:
@@ -2894,7 +2929,7 @@ class HubApp(App):
         if self.aws is None:
             for cid in local:
                 item, key = self._find(cid)
-                if item is not None and self.channel_pref(key)["engine"] in ("aws", "both"):
+                if item is not None and sttroute.hub_aws(self.channel_pref(key)["engine"]):
                     self._rerun_note[cid] = "AWS unavailable (not set up on the hub)"
         if alt:
             threading.Thread(target=self._rerun_station, args=(alt, True), name="hub-rerun-alt", daemon=True).start()

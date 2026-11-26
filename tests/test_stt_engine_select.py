@@ -41,7 +41,7 @@ def test_migration_rewrites_nothing_and_an_old_station_gets_the_nearest_old_engi
     ov = {"FG1": {"engine": "auto"}, "tg:307": {"engine": "aws"}, "p25:mrrs:9211": {"engine": "auto_bg"},
           "FG2": {"engine": "pin:gpu-pc"}, "South 2": {"engine": "pin:aws"}, "tg:300": {"engine": "local"},
           "tg:301": {"engine": "both", "transcribe": True}}
-    assert channels.for_station(ov) == ov                                   # a station that takes them: as set
+    assert channels.for_station(ov) == {**ov, "tg:307": {"engine": "pin:aws"}}     # as set ("aws": pinned AWS, #896)
     old = channels.for_station(ov, select_ok=False)
     assert old == {"FG1": {"engine": "aws"}, "tg:307": {"engine": "aws"}, "p25:mrrs:9211": {"engine": "local"},
                    "FG2": {"engine": "aws"}, "South 2": {"engine": "aws"}, "tg:300": {"engine": "local"},
@@ -720,5 +720,76 @@ def test_two_clips_of_one_channel_on_different_engines_stay_in_air_time_order_an
     finally:
         if w is not None:
             w.close()
+        hub.close()
+        fake.close()
+
+
+def test_a_handed_over_clip_follows_its_channels_engine_and_chosen_follows_each_step(tmp_path):
+    """A clip a station hands to the pool (its whisper behind) on a pinned AWS channel goes AWS's way, never the
+    generic pool's (#896); stt_chosen says the engine of record at each step: the hand-over, a resend, Compare."""
+    fake = FakeTranscribe(phrases={500: AWS_TEXT})
+    hub = _hub(tmp_path, fake)
+    try:
+        ev = pending_event("FG1-h1")
+        ev["data"].update(transcript_pending="pool", stt_class="live", stt="")
+        send(hub, ev)                                            # FG1: pinned AWS (its default)
+        assert wait(lambda: _row(hub, "FG1-h1").get("text") == AWS_TEXT + ".", 30), _row(hub, "FG1-h1")
+        assert hub.app.stt_chosen("FG1-h1") == "AWS" and hub.app.sttpool.submitted == 0
+        _set(hub, "tg:325", "local")                              # a Local channel's hand-over: the pool's way
+        ev = pending_event("TG325-h2", seq=2)
+        ev["data"].update(source="Neighbor FD", talkgroup=325, transcript_pending="pool", stt_class="live", stt="")
+        hub.app.hub.workers.add("gpu-1")
+        online(hub.app.sttpool, "gpu-1")
+        send(hub, ev)
+        assert wait(lambda: hub.app.stt_chosen("TG325-h2") == "pool", 10)
+        # a resend after AWS came back: AWS is the engine of record
+        sent = []
+        hub.app.aws.submit = lambda key, job, pcm: sent.append(job.id)
+        hub.app.stt_routes.choose("FG1-h1", "station")
+        from sizeup.incidents import Traffic
+        now = time.time()
+        hub.app.store.loose.append(Traffic("FG1-r9", "FG1", now - 5, now - 2, "", status="error"))
+        import base64
+        wav = base64.b64decode(pending_event("x")["audio"])
+        hub.app.audio.get = lambda cid: wav
+        assert hub.app._aws_resend() >= 1 and "FG1-r9" in sent and hub.app.stt_chosen("FG1-r9") == "AWS"
+    finally:
+        hub.close()
+        fake.close()
+
+
+def test_an_import_from_before_never_stores_aws_and_an_old_station_still_gets_it(tmp_path):
+    fake = FakeTranscribe(phrases={500: AWS_TEXT})
+    hub = _hub(tmp_path, fake)
+    try:
+        ed = hub.app.cad.settings
+        data = ed.export()
+        data.setdefault("overrides", {})["channels"] = {"tg:325": {"engine": "aws"}}      # (an export from before)
+        got = ed._check_import(data)[0]
+        assert got["channels"]["tg:325"]["engine"] == "pin:aws"
+        _set(hub, "tg:325", "pin:aws")
+        hub.app.hub.status = {"channels": {"prefs": {}}}                 # a station from before the selector
+        assert hub.app.channel_desired()["prefs"]["tg:325"]["engine"] == "aws"
+        hub.app.hub.status = {"channels": {"prefs": {}, "engine_select_ok": True}}
+        assert hub.app.channel_desired()["prefs"]["tg:325"]["engine"] == "pin:aws"
+        assert channels.for_station({"tg:9": {"engine": "aws"}}) == {"tg:9": {"engine": "pin:aws"}}
+    finally:
+        hub.close()
+        fake.close()
+
+
+def test_switched_off_pool_classes_are_said_and_audited_once_when_they_go(tmp_path):
+    fake = FakeTranscribe(phrases={500: AWS_TEXT})
+    hub = _hub(tmp_path, fake)
+    try:
+        reg = hub.app.hub.workers
+        reg.mdb.put("stt_pool", '{"on": true, "classes": {"catchup": false, "low": false, "urgent": true}}')
+        hub.app.migrate_engines()
+        audit = [r for r in hub.app.cad.settings.audit_log("system") if "gone (#896)" in json.dumps(r)]
+        assert len(audit) == 2
+        assert "classes" not in json.loads(reg.mdb.get("stt_pool", ""))
+        hub.app.migrate_engines()
+        assert len([r for r in hub.app.cad.settings.audit_log("system") if "gone (#896)" in json.dumps(r)]) == 2
+    finally:
         hub.close()
         fake.close()

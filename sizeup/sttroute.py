@@ -154,7 +154,7 @@ class Route:
         del self.hops[:-6]
 
     def text(self, final: str) -> str:
-        if not self.hops and self.mode.lower().endswith(final.lower()):
+        if not self.hops and self.mode.lower() in (final.lower(), f"pinned {final.lower()}"):
             return self.mode                                  # ("pinned AWS", not "pinned AWS: AWS")
         names = [e for e, _w in self.hops if e != final] + [final]
         whys = [f"{e}: {w}" if w and not w.startswith(e) else w for e, w in self.hops if w and e != final]
