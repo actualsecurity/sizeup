@@ -98,8 +98,8 @@ class Event:
     pushed_at: float | None = None
     push_count: int = 0
     suppressed: str = ""               # rate | quiet | shadow | merged | scrub | off | out_of_area | near_incident | unplaced |
-                                       # fd_on_scene | fd_dispatched | fd_there | fd_late | late (read over
-                                       # engine.LATE_S after it aired: never a first push) | ""
+                                       # fd_on_scene | fd_dispatched | fd_there | fd_late | late | ""
+                                       # (late: its rows read in time don't push it alone, engine._fresh)
     updated_at: float = 0.0
     note: str = ""                     # "possibly cancelled" (a nameless disregard of a safety call), "moved", "re-opened", "de-escalated",
                                        # "source withdrawn" (its only row's text emptied or unclear since)
