@@ -348,7 +348,7 @@ class WhisperService:
     def __init__(self, binary: str, model: str, port: int, threads: int, beam_size: int = 0,
                  state_path: str | Path | None = None):
         threads = min(int(threads or 0) or whisper_threads(), whisper_threads())   # (start-whisper does the same, #300)
-        self.argv = [binary, "-m", model, "--host", "127.0.0.1", "--port", str(port), "-t", str(threads)]
+        self.argv = [binary, "-m", model, "--host", "127.0.0.1", "--port", str(port), "-l", "en", "-t", str(threads)]
         if beam_size > 1:
             self.argv += ["-bs", str(beam_size)]
         self.port, self.state, self.detail = port, "starting", ""
