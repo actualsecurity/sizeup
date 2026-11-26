@@ -54,12 +54,13 @@ def test_the_age_gate_a_repeat_a_match_below_threshold_an_event_a_push_and_a_hel
     h = pd(e)["h24"]
     assert h["considered"] == 4 and h["in_scope"] == 3 and h["out_of_scope"] == 1
     assert h["too_old"] == 1 and h["repeat"] == 1
-    assert h["matched"] == 1 and h["below"] == 0 and h["events"] == 1 and h["pushed"] == 1 and h["held"] == 0
-    assert len(sink.pushes) == 1 and e.stale == 2
+    # the old row is read as context and recorded at log ("late", counted too_old): never pushed
+    assert h["matched"] == 2 and h["below"] == 0 and h["events"] == 2 and h["pushed"] == 1 and h["held"] == 0
+    assert sum(d.would_push for _e, d in sink.pushes) == 1 and e.stale == 2
     clock.t += 600
     e.feed(row("t2", "an odor of smoke", clock.t, source="p25:mrrs:9212"))      # a rule, under the threshold (no cue)
     h = pd(e)["h24"]
-    assert h["matched"] == 2 and h["below"] == 1 and h["events"] == 1
+    assert h["matched"] == 3 and h["below"] == 1 and h["events"] == 2
 
 
 def test_held_counts_every_reason_an_event_was_not_pushed_once_per_event():
@@ -191,7 +192,8 @@ def test_a_counter_that_fails_never_costs_an_event(broken):
     e.reload()
     [ev] = e.feed(row("t1", "respond to 100 Example Ave, smoke coming from the house", clock.t))
     assert ev.category == "fire_report" and len(sink.pushes) == 1 and sink.pushes[0][1].would_push
-    assert e.feed(row("old", "smoke coming from the house", clock.t - 3600)) == []
+    [old] = e.feed(row("old", "smoke coming from the house", clock.t - 3600))      # recorded at log, never pushed
+    assert old.suppressed == "late" and sum(d.would_push for _e, d in sink.pushes) == 1
     assert e.feed(row("t1", "respond to 100 Example Ave, smoke coming from the house", clock.t)) == []
     if broken in ("add", "in_scope", "watching"):
         assert e.count_errors > 0

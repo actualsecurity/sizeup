@@ -82,6 +82,8 @@ SUPPRESSED = {
     "merged": ("merged", "An update within the repush limits of an earlier push"),
     "scrub": ("scrubbed", "Withheld by the PII scrub (PII off)"),
     "unsent": ("unsent", "Not taken for sending: no pre-alert topic in effect, the queue full, or not the leader"),
+    "late": ("late", "Its transcripts reached intel too late (over the pack's late s after the clip ended, a catch-up "
+                     "or an outage): kept as context and at log, never pushed"),
 }
 # derived when Event.suppressed is empty (HELD_SQL): label, hover
 DERIVED = {
@@ -98,7 +100,7 @@ DERIVED = {
     "not_pushed": ("not pushed", "At push, not pushed (yet)"),
 }
 HELD = {**SUPPRESSED, **DERIVED}
-ENGINE_HOLDS = ("unplaced", "out_of_area", "near_incident", "placed_late", "fd_on_scene", "fd_dispatched", "fd_there",
+ENGINE_HOLDS = ("unplaced", "out_of_area", "near_incident", "placed_late", "late", "fd_on_scene", "fd_dispatched", "fd_there",
                 "fd_late")
 POLICY_HOLDS = ("off", "quiet", "rate", "merged", "scrub", "unsent")
 HELD_KEY = re.compile(r"[a-z][a-z_]{0,39}")
