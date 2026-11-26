@@ -614,7 +614,8 @@ it changes nothing.
   channel jobs, P25 trunk silent, station silent, dispatch coverage, hub errors ...), until unmuted or for 1 h / 24 h /
   7 days (station silent, P25 trunk silent, channel jobs and dispatch coverage: for a time only). Muting a cause
   ("P25 trunk silent", "SDR gone" ...) doesn't mute our dispatch lost: to silence dispatch-lost pushes, mute "Dispatch
-  coverage" (the list's hover says so); muting "Station silent" mutes the station's ("station silent"). A muted alert
+  coverage" (the list's hover says so). Planned dongle work: mute "Dispatch coverage" for the time it takes (two
+  short swaps within 10 min count together as 5 min of 10); muting "Station silent" mutes the station's ("station silent"). A muted alert
   still shows on Health ("Muted", and the muted kinds in its header); it isn't pushed. One pushed before it was muted still gets its "Recovered". Audited as
   System. Default: none.
 

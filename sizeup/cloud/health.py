@@ -254,11 +254,12 @@ MUTE_KINDS = {"adsb": "ADS-B receiver down", "whisper": "Speech-to-text down", "
               "hub_errors": "Hub errors", "litestream": "Litestream too old",
               "replication_checks": "Takeover checks skipped",
               "metrics_shift": "Signal shift warnings"}   # #606: Health hints only, never pushed; muted: not shown
-MUTE_TIMED_ONLY = ("silent", "id_mismatch", "trunk", "job", "rejected", "cover")   # critical ones: muted for a time
+MUTE_TIMED_ONLY = ("silent", "id_mismatch", "trunk", "job", "rejected", "cover", "off")   # critical ones: muted for a time
                                                                                    # only, never until unmuted
 # the mute list's hover (Settings > System > Push notifications > Mute alerts)
 MUTE_HINTS = {"cover": "Fire/EMS 15 or paging lost 5 min: urgent push. Muting its causes (SDR gone, trunk-recorder down, "
-                       "P25 trunk silent ...) doesn't mute it: to silence dispatch-lost pushes, mute this",
+                       "P25 trunk silent ...) doesn't mute it: to silence dispatch-lost pushes, mute this. Planned dongle "
+                       "work: mute this for the time it takes (two short swaps within 10 min count together)",
               "trunk": "This alert only: to silence dispatch-lost pushes, mute \"Dispatch coverage\"",
               "silent": "Also mutes the station's dispatch-lost push (\"station silent\")",
               "off": "Fire/EMS 15 or paging switched Off: one push (urgent when auto set it Off)"}
@@ -1185,6 +1186,7 @@ class StationHealth:
             return out, False
         if self._judged_prev is False:
             self._back_at = now                      # back from silent: a job "starting" is given its grace
+            self._trunk_up = None                    # ... and the P25 trunk its window to hear a call, from now
         self._judged_prev = True
         self._station_cover(m, now, out, False, None)
 
@@ -1358,7 +1360,7 @@ class StationHealth:
         the config's [radio.channels] or the station's rows), the ones this station runs: a dongle's job or its own
         job, a job of an antenna group (not parked), trunk-recorder expected, or (one dongle per channel) a channel."""
         paging = set(self.paging) | {c["label"] for c in m["channels"] if c.get("kind") == "paging"}
-        jobs = {d["job"] for d in m["dongles"]} | {d["own"] for d in m["dongles"] if d.get("own")}
+        jobs = {d["job"] for d in m["dongles"]} | {d["own"] for d in m["dongles"] if d.get("own") and d["job"] != "Off"}
         jobs |= {j for g in m.get("groups") or [] for j in g["jobs"] if j not in g["parked"]}
         if not m["shared"]:
             jobs |= {c["label"] for c in m["channels"] if c["mhz"]}
@@ -1463,7 +1465,7 @@ class StationHealth:
         cut = now - COVER_WINDOW_S
         if c["fired"] is None:
             spent = sum(max(0.0, (e if e is not None else now) - max(b, cut)) for b, e in iv)
-            if spent >= COVER_DOWN_S:
+            if down and spent >= COVER_DOWN_S:          # (never on the tick it is back: that tick closes the spell)
                 c["fired"] = min(b for b, e in iv if (e if e is not None else now) > cut)
             else:
                 c["iv"] = [x for x in iv if x[1] is None or x[1] > cut]
@@ -1488,7 +1490,7 @@ class StationHealth:
         running = set(self.dispatch_jobs(m))
         for job in [j for j in have if j not in running]:
             offs = [d for d in m["dongles"] if d["job"] == "Off"]
-            d = next((d for d in offs if d.get("own") == job), None) or (offs[0] if len(offs) == 1 else None)
+            d = next((d for d in offs if d.get("own") == job), None)     # (only its own dongle says who: never a spare's)
             by = str((d or {}).get("set_by") or "")
             auto = by == "auto"
             title = f"{job} Off (set by {by})" if by in ("person", "auto") else f"{job} Off (no dongle runs it)"

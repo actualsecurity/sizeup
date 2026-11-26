@@ -341,6 +341,7 @@ def off_status(job_serial="00000103", by="person", **kw):
     st = station_status(**kw)
     d = next(d for d in st["sdr"]["sdrs"] if d["serial"] == job_serial)
     d["mode"] = "Off"
+    d["own"] = "Fire/EMS 15" if d["serial"] == "00000103" else "South 2"      # its own job: it says who set it Off
     if by:
         d["set_by"] = by
     if d["serial"] == "00000103":
@@ -486,3 +487,34 @@ def test_a_push_not_even_queued_is_tried_again_too():
     r.h.notifier = r.n = FullQueue()
     run(r, 0, COVER_DOWN_S, p25_gone)
     assert titles(r)[0] == "SDR 103 gone 60 s" and urgent(r) == ["Fire/EMS 15 down 5 min: SDR 103 gone"]
+
+
+def test_a_spare_set_off_by_auto_is_never_blamed_and_off_is_muted_for_a_time_only():
+    r = Rig(channels=PAGING)
+    st = station_status()
+    st["sdr"]["sdrs"][0] = {"serial": "00000104", "name": "104", "mode": "Off", "present": True, "set_by": "auto"}
+    st["health"]["jobs"].pop("South 2", None)
+    run(r, 0, 120, st)
+    assert titles(r) == ["South 2 Off (no dongle runs it) 60 s"] and urgent(r) == []
+    assert "off" in H.MUTE_TIMED_ONLY
+
+
+def test_a_single_5_min_swap_is_no_urgent_push_on_the_tick_it_is_back():
+    r = Rig(channels=PAGING)
+    run(r, 0, COVER_DOWN_S - TICK, p25_gone)                              # down 0 .. 4:55
+    run(r, COVER_DOWN_S, 30 * 60, lambda: talking(r))                    # back at 5:00
+    assert urgent(r) == []
+
+
+def test_back_from_a_long_silence_the_p25_trunk_gets_its_window_again(monkeypatch):
+    from tests.test_trunk_silence import DAY, p25
+    monkeypatch.setattr(H, "_part", lambda t: DAY)                       # the day's window (20 min)
+    r = Rig(channels=PAGING)
+    run(r, 0, 60, lambda: p25(r.hub.now - T0))                           # calls
+    for t in range(65, 65 + 65 * 60, TICK):                              # 65 min silent
+        r.at(t, post=False)
+    back = 65 + 65 * 60
+    run(r, back, back + 120, lambda: p25(60))                            # back; the county's first call 2 min later
+    run(r, back + 125, back + 900, lambda: p25(r.hub.now - T0))
+    assert all("station silent" in u for u in urgent(r)) and not any("P25" in t for t in titles(r))
+    assert titles(r)[-1] == "All clear: station back"
