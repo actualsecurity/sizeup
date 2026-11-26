@@ -263,7 +263,8 @@
             "reception_sample_b64",
             "set_stt_alert_keys",
             "set_stt_terms",
-            "quarantine_dismiss"
+            "quarantine_dismiss",
+            "stt_withdraw"
           ]
         },
         "args": {
@@ -588,6 +589,26 @@
             "properties": {
               "args": {
                 "$ref": "#/$defs/call.quarantine_dismiss"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "fn": {
+                "const": "stt_withdraw",
+                "description": "The job calls stt_withdraw."
+              }
+            },
+            "required": [
+              "fn"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/call.stt_withdraw"
               }
             }
           }
@@ -1280,6 +1301,27 @@
           "type": "string",
           "pattern": "^[a-z][a-z0-9_]{0,39}$",
           "description": "kind: an event `type` (station-events), as the quarantine's status lists it under `kinds`. The hub sends only a word of this pattern (else 400 before any job); the station takes any string and matches it exactly."
+        }
+      ]
+    },
+    "call.stt_withdraw": {
+      "description": "App.stt_withdraw(ids): the hub's pool took these clips (#927, HubApp.stt_withdraw_station): the station's whisper skips them. Sent only to a connected station whose status `caps` has `stt_withdraw`. Only a transmission the station sent at its close (`transcript_pending` `station`) is taken: one still waiting leaves whisper's queue and nothing goes up for it (no `skipped` over the pool's text); one whisper has begun runs on and its text stays on the station. Result: {withdrawn, running, gone}.",
+      "x-names": [
+        "ids"
+      ],
+      "x-forms": [
+        1
+      ],
+      "minItems": 1,
+      "maxItems": 1,
+      "prefixItems": [
+        {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "$ref": "station-events.schema.json#/$defs/clip_id"
+          },
+          "description": "ids: the clip ids (at most 500; the hub sends only ids of the clip id pattern). More than 500, or no list of strings, is refused (ValueError); an id of another shape is answered `gone`."
         }
       ]
     }

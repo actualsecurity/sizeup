@@ -410,12 +410,14 @@ class SttQueue:
                 self._items.remove(e)
         return [e[2] for e in out]
 
-    def withdraw_all(self, priority: float | None = None) -> list[tuple]:
-        """Every waiting item (of that class; None: of every class) taken out, the best first (the station stopping:
-        handed on, #549, #639 phase 2): [(priority, item, audio, channel)]."""
+    def withdraw_all(self, priority: float | None = None, ids=None) -> list[tuple]:
+        """Every waiting item (of that class; None: of every class; ids: only the items with those ids) taken out, the
+        best first (the station stopping: handed on, #549, #639 phase 2; the hub's pool taking clips, #927):
+        [(priority, item, audio, channel)]."""
         with self._cv:
             now = self.clock()
-            out = sorted((e for e in self._items if priority is None or e[0] == priority), key=lambda e: self._key(e, now))
+            out = sorted((e for e in self._items if (priority is None or e[0] == priority)
+                          and (ids is None or getattr(e[2], "id", None) in ids)), key=lambda e: self._key(e, now))
             for e in out:
                 self._items.remove(e)
         return [(e[0], e[2], e[3], e[4]) for e in out]
@@ -626,11 +628,12 @@ class Transcriber:
     def withdraw_catchup(self) -> list:
         return self._q.withdraw(CATCHUP)
 
-    def withdraw(self, priority: float | None = None) -> list[tuple]:
-        """Waiting items taken out (priority None: every class, the best first; else that class only): [(priority,
-        item, audio, channel, queued at)]. Nothing of them is said to on_drop: the caller hands them on (the station
-        stopping: to the hub's pool, or saved for its next start; #549, #639 phase 2)."""
-        got = self._q.withdraw_all(priority)
+    def withdraw(self, priority: float | None = None, ids=None) -> list[tuple]:
+        """Waiting items taken out (priority None: every class, the best first; else that class only; ids: only the
+        items with those ids, the hub's pool taking them, #927): [(priority, item, audio, channel, queued at)]. Nothing
+        of them is said to on_drop: the caller hands them on (the station stopping: to the hub's pool, or saved for its
+        next start; #549, #639 phase 2). One being transcribed now is not among them (current())."""
+        got = self._q.withdraw_all(priority, None if ids is None else frozenset(ids))
         out = []
         for prio, item, audio, ch in got:
             out.append((prio, item, audio, ch if ch is not None else self._channels.get(id(item)),

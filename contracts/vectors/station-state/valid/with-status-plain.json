@@ -118,6 +118,7 @@
       "why": "this station's whisper isn't in the pool"
     },
     "stt_alert_rev": 0,
+    "caps": ["stt_withdraw"],
     "version": {
       "build": "",
       "hub": "",

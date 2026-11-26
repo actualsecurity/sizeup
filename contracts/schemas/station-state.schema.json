@@ -747,6 +747,13 @@
             "why": {"type": "string", "description": "Why it is off or paused; \"\" when online."}
           }
         },
+        "caps": {
+          "type": "array",
+          "description": "Capability strings: what this station takes from the hub (StationLink.status, STATION_CAPS in sizeup/cloud/station.py). The hub reads them only while the station is connected, and asks nothing of a station without the string. Today: `stt_withdraw` (the `stt_withdraw` call: the hub's pool takes clips back from this station's whisper, #927).",
+          "items": {"type": "string", "description": "One capability name, lower case with underscores."},
+          "uniqueItems": true,
+          "x-known": ["stt_withdraw"]
+        },
         "stt_alert_rev": {
           "type": "integer",
           "minimum": 0,

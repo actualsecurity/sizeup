@@ -77,7 +77,7 @@ TALKGROUP = {"tg": INT}
 TOP: dict[str, tuple] = {
     "id": STR, "config_id": OSTR, "name": OSTR,
     "radios": LIST, "sdr": ODICT, "rerun": DICT, "channels": DICT, "p25_systems": LIST, "reception": ODICT,
-    "stt_terms": DICT, "outbox": DICT, "stt_input": DICT, "pool_worker": DICT, "stt_alert_rev": INT,
+    "stt_terms": DICT, "outbox": DICT, "stt_input": DICT, "pool_worker": DICT, "stt_alert_rev": INT, "caps": LIST,
     "version": DICT, "logship": DICT, "metrics": DICT, "health": DICT, "talkgroups": LIST,
 }
 NESTED: dict[str, dict] = {"sdr": SDR, "rerun": RERUN, "channels": CHANNELS, "reception": RECEPTION,

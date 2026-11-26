@@ -12,6 +12,7 @@
         "status": "done",
         "confidence": 0.8,
         "model": "m.bin",
+        "engine": "station-whisper",
         "stt_prompt_time": true,
         "alt": {"text": "Engine 5 on location, nothing showing", "model": "other.bin"},
         "catchup": true,

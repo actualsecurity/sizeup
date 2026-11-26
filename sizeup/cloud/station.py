@@ -3,8 +3,9 @@
     App._emit(kind, data, clip)  -> outbox.sqlite (outbox.py), in order, durable
         page        a page off the air (paging channel), with its clip      (App._segment)
         page_text   its transcript (the hub parses the dispatch itself)     (App._transcribed)
-        traffic     a finished, transcribed transmission, with its clip     (App._transcribed)
-        retext      a re-run's new text for a page or transmission          (App._retext)
+        traffic     a finished transmission, with its clip: transcribed, or (a hub with traffic_pending, #927) at its
+                    close, "Transcribing", its text following as a retext with fill   (App._transcribed, _land_pending)
+        retext      a re-run's new text for a page or transmission          (App._retext); a fill (App._fill_pending)
         rerun       a re-run is over: changed | same | failed: why          (App._rerun_finish)
         alt_text    "both" re-run: whisper's text as the alternative        (App._set_alt)
         heard       a radio ID (and P25 alias) heard on the air             (App._heard)
@@ -107,7 +108,8 @@ CALLS = ("set_mode", "set_talkgroup", "set_talkgroup_group", "retranscribe", "se
          "reception_sample_b64",      # ... and a call it captured, to listen to (never stored on the hub)
          "set_stt_alert_keys",        # the sources the hub's pre-alerts push from: HIGH at least in whisper (#639 ph. 2)
          "set_stt_terms",             # the private term lists' top for whisper's prompt (sizeup/stt_terms.py)
-         "quarantine_dismiss")        # Health's Dismiss: the stuck / late events the hub refused (outbox.py dismiss)
+         "quarantine_dismiss",        # Health's Dismiss: the stuck / late events the hub refused (outbox.py dismiss)
+         "stt_withdraw")              # the hub's pool took these clips: this whisper skips them (#927; status caps)
 # A call's arguments that must be given, never left to the function's default: a default that means "everything"
 # (retranscribe's ids=None: every recording on the disk). Given as null, it is asked for; left out, it is refused. The
 # parameters without a default are required anyway.
@@ -174,6 +176,9 @@ def source_rows(runner) -> list[dict]:
 
 
 POOL_CAP = "stt_pool"      # the hub takes clips handed to its pool (sizeup/cloud/hub.py POOL_CAP, #639 phase 2)
+# what this station takes from the hub (its status' "caps", station-state status.caps): the hub's pool withdrawing clips
+# from its whisper (the stt_withdraw call, App.stt_withdraw, #927)
+STATION_CAPS = ("stt_withdraw",)
 RESTART_S = (1.0, 30.0)    # a link thread that raised starts again after this long (doubling, at most the second)
 
 
@@ -929,6 +934,7 @@ class StationLink:
                "stt_input": self.stt_stats(),                # (each clip's STT input: waiting, sent, dropped by reason)
                "pool_worker": dict(self.pool_worker.stats),  # (its whisper as a pool worker, #639 phase 2)
                "stt_alert_rev": app.stt_alert_rev,           # (the alert sources' revision it has: the hub resends on a change)
+               "caps": list(STATION_CAPS),                   # (what it takes from the hub: stt_withdraw, #927)
                "version": self.version()}
         try:
             out["logship"] = self.logs.stats()

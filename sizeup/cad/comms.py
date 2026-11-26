@@ -149,6 +149,7 @@ CHANGES_RETRY_S = 60.0                # a broken change log is tried again after
 CHANGES_BUSY_MS = 200                 # the change log waits this long for the database's write lock, no more
 CHANGES_TRIM_EVERY = 500              # the change log is trimmed to CHANGES_KEPT every this many transmissions logged
 LANDED = ("done", "no_speech", "unclear")    # a transcript is in (unclear: sizeup/stt_quality.py, its text "")
+WAITING = ("pending", "remote")     # its transcript still to come (an engine has it): record() tells no text hook (#927)
 UNCLEAR_MAX = 20000                         # an unclear transcript's words kept, at most (radio_traffic.unclear_text)
 CUTS = ("grant",)    # why a P25 key-up starts where it does when its talker is not the voice channel's (radio_traffic.cut, #819)
 ID_NOTES = ("none", "undecoded", "weak")    # why an FG1 key-up has no radio ID (radio_traffic.id_note, #163)
@@ -398,6 +399,8 @@ class Comms:
         if self._logged[kind] >= CHANGES_TRIM_EVERY:
             self._logged[kind] = 0
             self._trim_changes(kind)
+        if (t.get("status") or "") in WAITING and not (t.get("text") or "").strip():
+            return out          # (#927) on the timeline, its text still to come: nothing has been said yet (retext tells)
         if late:
             self._heard_late(tid)
         else:
