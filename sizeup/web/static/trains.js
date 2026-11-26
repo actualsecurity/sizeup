@@ -1309,5 +1309,5 @@ window.TrainLayer = (() => {
     host.append(foot);
   }
 
-  return { panel, load, maps, data: () => store.data, animating: () => !!animT, KEY, REF_KEY, headline, placeRow, onTrack, poleFeatures, trackCorridor, railFilter, TrainMap };
+  return { panel, load, maps, data: () => store.data, KEY, animating: () => !!animT, REF_KEY, headline, placeRow, onTrack, poleFeatures, trackCorridor, railFilter, TrainMap };
 })();
