@@ -6,7 +6,8 @@
       "path": "/keep_awake",
       "value": {
         "on": true,
-        "held": false
+        "held": false,
+        "why": "paused"
       }
     }
   ]

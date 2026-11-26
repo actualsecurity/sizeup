@@ -373,7 +373,7 @@ const StationHealth = (() => {
       const gpuState = (w) => {
         const ka = w.keep_awake || {};
         const kaWhy = ka.on === false ? "keep_awake off in worker.toml: Windows may sleep the PC"
-          : ka.on && !ka.held ? "keep_awake on, not held (paused): Windows may sleep the PC"
+          : ka.on && !ka.held ? `keep_awake on, not held${ka.why ? ` (${ka.why})` : ""}: Windows may sleep the PC`
           : ka.held ? "Windows won't idle-sleep the PC (the screen may still turn off)" : "";
         if (w.state === "offline") {
           const why = w.asleep ? (ka.on === false || ka.held === false ? kaWhy

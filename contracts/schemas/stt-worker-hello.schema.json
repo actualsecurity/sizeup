@@ -66,13 +66,14 @@
     },
     "keep_awake": {
       "title": "Keep awake",
-      "description": "A GPU worker on Windows (deploy/stt-worker/worker.py KeepAwake): whether it keeps the PC from idle sleep. Left out off Windows and by a worker from before. Health shows \"keeps PC awake\" while held, and \"(asleep?)\" on a worker gone silent whose last word said off or not held (sizeup/sttpool.py Pool.asleep). A hub from before ignores it.",
+      "description": "A GPU worker on Windows (deploy/stt-worker/worker.py KeepAwake): whether it keeps the PC from idle sleep. Left out off Windows and by a worker from before. Health shows \"keeps PC awake\" while held, and \"offline since HH:MM (asleep?)\" on a GPU worker gone silent (unheard 30 s, not after a clean stop: reason `shutdown`) whose last word said off or not held, or whose last state was `online` (its heartbeats just stopped, with no pause or gaming first): sizeup/sttpool.py Pool.asleep. A hub from before ignores it.",
       "x-complete": true,
       "type": "object",
       "additionalProperties": true,
       "properties": {
         "on": {"type": "boolean", "description": "keep_awake in its worker.toml (default true)."},
-        "held": {"type": "boolean", "description": "The flag is set now: false while paused by hand, before the worker's first tick, or when Windows refused it."}
+        "held": {"type": "boolean", "description": "The flag is set now: false while paused by hand, before the worker's first tick, or when Windows refused it."},
+        "why": {"type": "string", "maxLength": 40, "description": "Not held: why, in words (starting, paused, refused by Windows, stopped, error). Sent only with `on` true and `held` false; the hub keeps 40 characters and shows it in Health's hover."}
       }
     },
     "self_update": {

@@ -46,6 +46,9 @@ class FakeHealth:
                             {"id": "gpu-3", "state": "offline", "model": "ggml-large-v3-turbo-q5_0.bin", "gpu": {},
                              "jobs_h": 0, "lost": 0, "seen": now - 900, "seen_s": 900, "asleep": False,
                              "keep_awake": {"on": False, "held": False}},
+                            {"id": "gpu-4", "state": "online", "model": "ggml-large-v3-turbo-q5_0.bin", "gpu": {},
+                             "jobs_h": 3, "lost": 0, "seen": now - 1, "seen_s": 1,
+                             "keep_awake": {"on": True, "held": False, "why": "refused by Windows"}},
                             {"id": "station:st-north", "kind": "station", "state": "paused", "model": "small.en-q5_1",
                              "load": {"own": 6, "cpu_pct": 91.0, "service_s": 14.2, "why": "its own clips first"},
                              "gpu": {}, "jobs_h": 38, "lost": 0, "seen": now - 1, "seen_s": 1},
@@ -154,13 +157,17 @@ def test_health_says_keeps_pc_awake_and_offline_since_asleep(site):
         pg.goto(site.base + "/cad#settings/station/health")
         pg.get_by_text("GPU workers (hub)").wait_for()
         panel = pg.locator("#s-station-health")
-        rows = {r: panel.locator("tr", has=pg.locator("td", has_text=r)).first for r in ("gpu-1", "gpu-2", "gpu-3")}
+        rows = {r: panel.locator("tr", has=pg.locator("td", has_text=r)).first
+                for r in ("gpu-1", "gpu-2", "gpu-3", "gpu-4")}
         on = rows["gpu-1"].locator("td.hl-ok", has_text="online · keeps PC awake")
         assert on.is_visible() and "idle-sleep" in on.get_attribute("title")
         asleep = rows["gpu-2"].locator("td.hl-bad", has_text="offline since")
         assert asleep.inner_text().endswith(" (asleep?)") and "stopped while online" in asleep.get_attribute("title")
         quiet = rows["gpu-3"].locator("td.hl-bad", has_text="offline since")
         assert "asleep" not in quiet.inner_text() and "keeps PC awake" not in rows["gpu-3"].inner_text()
+        refused = rows["gpu-4"].locator("td.hl-ok", has_text="online")         # on, not held: the worker's reason
+        assert "keeps PC awake" not in refused.inner_text()
+        assert "not held (refused by Windows)" in refused.get_attribute("title")
         assert pg.errors == []
     finally:
         browser.close()

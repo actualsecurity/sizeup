@@ -25,6 +25,7 @@ from tests.test_stt_worker import TOKEN, FakeHub, FakeSmi, FakeWhisper, make_cfg
 
 SET = W.ES_CONTINUOUS | W.ES_SYSTEM_REQUIRED
 CLEAR = W.ES_CONTINUOUS
+NUDGE = W.ES_SYSTEM_REQUIRED                # alone (no ES_CONTINUOUS): the idle timer reset before a stop's release
 ES_DISPLAY_REQUIRED = 0x00000002
 API = "/api/station/stt/"
 
@@ -81,17 +82,19 @@ def test_set_while_running_cleared_on_pause_set_again_on_resume_cleared_on_stop(
         wait_for(lambda: last_keep_awake(hub) == {"on": True, "held": True}, what="the hub told it is held")
         W.Control(cfg.control_path).set(paused=True)
         wait_for(lambda: k32.flags == [SET, CLEAR] and not w.keep_awake.held, what="cleared on pause")
-        wait_for(lambda: last_keep_awake(hub) == {"on": True, "held": False}, what="the hub told it is released")
+        wait_for(lambda: last_keep_awake(hub) == {"on": True, "held": False, "why": "paused"},
+                 what="the hub told it is released, and why")
         W.Control(cfg.control_path).set(paused=False)
         wait_for(lambda: k32.flags == [SET, CLEAR, SET], what="set again on resume")
         W.Control(cfg.control_path).set(gaming=True)           # gaming: the PC is awake anyway; nothing changes
         wait_for(lambda: w.state()[0] == "gaming" and hub.calls("/state")[-1][3]["state"] == "gaming", what="gaming")
         assert k32.flags == [SET, CLEAR, SET] and w.keep_awake.held
-    assert k32.flags == [SET, CLEAR, SET, CLEAR]                # the stop
+    assert k32.flags == [SET, CLEAR, SET, NUDGE, CLEAR]         # the stop: the idle timer reset first, then cleared
     assert not w.keep_awake.held and ES_DISPLAY_REQUIRED not in {f & ES_DISPLAY_REQUIRED for f in k32.flags}
     assert {t for _, t in k32.calls} == {"keep-awake"}          # one thread of its own (the flag is per thread)
     last = hub.calls("/state")[-1][3]
-    assert (last["state"], last["reason"], last["keep_awake"]) == ("paused", "shutdown", {"on": True, "held": False})
+    assert (last["state"], last["reason"], last["keep_awake"]) == ("paused", "shutdown",
+                                                                  {"on": True, "held": False, "why": "stopped"})
 
 
 def test_cleared_when_the_worker_fails_and_at_the_exit(tmp_path, hub, whisper, monkeypatch):
@@ -116,7 +119,7 @@ def test_cleared_when_the_worker_fails_and_at_the_exit(tmp_path, hub, whisper, m
     wait_for(lambda: w.keep_awake.held, what="held")
     w.stop()
     t.join(5)
-    assert not t.is_alive() and raised and k32.flags == [SET, CLEAR] and not w.keep_awake.held
+    assert not t.is_alive() and raised and k32.flags == [SET, NUDGE, CLEAR] and not w.keep_awake.held
     assert registered == [w.keep_awake.close]                   # the exit clears it too (atexit)
     # and at the exit itself: a KeepAwake still held when the interpreter ends is cleared by its atexit hook
     k2 = FakeKernel32()
@@ -125,9 +128,9 @@ def test_cleared_when_the_worker_fails_and_at_the_exit(tmp_path, hub, whisper, m
     wait_for(lambda: ka.held, what="held")
     assert registered[-1] == ka.close
     registered[-1]()                                            # what atexit calls
-    assert k2.flags == [SET, CLEAR] and not ka.held
+    assert k2.flags == [SET, NUDGE, CLEAR] and not ka.held
     ka.want(True)                                               # closed: never set again
-    assert k2.flags == [SET, CLEAR]
+    assert k2.flags == [SET, NUDGE, CLEAR]
 
 
 def test_an_error_on_its_own_thread_clears_it():
@@ -145,6 +148,7 @@ def test_an_error_on_its_own_thread_clears_it():
     ka.want(False)                                              # the clear raises: the thread's finally clears again
     ka._thread.join(2)
     assert not ka.held and k32.flags == [SET, CLEAR, CLEAR]
+    assert ka.report() == {"on": True, "held": False, "why": "error (see worker.log)"}
     ka.close()
 
 
@@ -154,9 +158,66 @@ def test_windows_refusing_is_reported_and_logged_once(caplog):
     ka = W.KeepAwake(True, kernel32=k32, windows=True)
     ka.want(True)
     wait_for(lambda: k32.flags == [SET], what="tried")
-    assert ka.report() == {"on": True, "held": False}
+    assert ka.report() == {"on": True, "held": False, "why": "refused by Windows"}
     ka.close()
-    assert caplog.text.count("SetThreadExecutionState failed") == 1
+    assert caplog.text.count("SetThreadExecutionState failed (error ") == 1
+    assert k32.flags == [SET, CLEAR]                            # (never held: no idle-timer reset at the stop)
+
+
+def test_the_stop_resets_the_idle_timer_before_it_clears_and_a_pause_does_not():
+    """A stop (a self-update's exit 75 too): ES_SYSTEM_REQUIRED alone first (no ES_CONTINUOUS: a one-off reset of the
+    idle timer, a whole timeout's grace until the task starts the worker again), then ES_CONTINUOUS alone."""
+    k32 = FakeKernel32()
+    ka = W.KeepAwake(True, kernel32=k32, windows=True)
+    ka.want(True)
+    wait_for(lambda: ka.held, what="held")
+    ka.want(False)                                              # a pause: cleared, no reset
+    wait_for(lambda: k32.flags == [SET, CLEAR], what="released")
+    ka.want(True)
+    wait_for(lambda: k32.flags == [SET, CLEAR, SET] and ka.held, what="held again")
+    ka.close()
+    assert k32.flags == [SET, CLEAR, SET, NUDGE, CLEAR]
+    assert NUDGE & W.ES_CONTINUOUS == 0 and {t for _, t in k32.calls} == {"keep-awake"}
+
+
+def test_a_refusal_is_retried_every_keep_awake_retry_s_whatever_the_ticks(monkeypatch):
+    monkeypatch.setattr(W, "KEEP_AWAKE_RETRY_S", 0.4)
+    k32 = FakeKernel32(ok=False)
+    ka = W.KeepAwake(True, kernel32=k32, windows=True)
+    end = W.time.monotonic() + 1.0
+    while W.time.monotonic() < end:                             # the heartbeat's ticks: want(True) every 20 ms
+        ka.want(True)
+        W.time.sleep(0.02)
+    n = len(k32.calls)
+    assert 2 <= n <= 4, k32.flags                               # the first try, then one each 0.4 s (not one a tick)
+    k32.ok = True
+    wait_for(lambda: ka.held, timeout=2, what="held once Windows takes it")
+    ka.close()
+
+
+def test_a_dead_thread_is_replaced_after_a_wait(monkeypatch):
+    clock = Clock(100.0)
+
+    class DiesOnce(FakeKernel32):
+        def _set(self, flags):
+            if not self.calls:
+                self.calls.append((flags, threading.current_thread().name))
+                raise OSError("a made-up failure")
+            return super()._set(flags)
+
+    k32 = DiesOnce()
+    ka = W.KeepAwake(True, kernel32=k32, windows=True, clock=clock)
+    ka.want(True)
+    wait_for(lambda: not ka._thread.is_alive(), what="the thread died")
+    assert ka.report() == {"on": True, "held": False, "why": "error (see worker.log)"}
+    ka.want(True)                                               # too soon: not yet
+    assert len(k32.calls) == 1
+    clock.t += W.KEEP_AWAKE_RESTART_S[0] + 1
+    ka.want(True)
+    wait_for(lambda: ka.held, what="a new thread holds it")
+    assert k32.flags == [SET, SET]
+    ka.close()
+    assert k32.flags == [SET, SET, NUDGE, CLEAR]
 
 
 def test_keep_awake_off_never_calls_windows(tmp_path, hub, whisper):
@@ -249,8 +310,9 @@ def test_the_hub_keeps_what_the_worker_says_and_health_guesses_asleep(tmp_path):
         w.shutdown()                                            # a clean stop: offline, never asleep
         app.sttpool.clock = lambda: real() + 60
         (row,) = [x for x in app.pool_health()["workers"] if x["id"] == c.WORKER]
-        assert (row["state"], row["asleep"], row["keep_awake"]) == ("offline", False, {"on": True, "held": False})
-        assert k32.flags == [SET, CLEAR]
+        assert (row["state"], row["asleep"], row["keep_awake"]) == ("offline", False,
+                                                                       {"on": True, "held": False, "why": "stopped"})
+        assert k32.flags == [SET, NUDGE, CLEAR]
     finally:
         lv.close()
 
@@ -268,6 +330,9 @@ def test_a_worker_from_before_or_off_windows_says_nothing_and_bad_values_are_dro
             code, ans = lv.call("POST", API + "state", {"state": "online", "model": "m", "keep_awake": bad}, token="sw1")
             assert code == 200 and ans["ok"] is True and pool.workers[c.WORKER].keep_awake == {}
         assert sttworkers.clean_keep_awake({"on": False, "held": False, "x": 1}) == {"on": False, "held": False}
+        assert sttworkers.clean_keep_awake({"on": True, "held": False, "why": "  refused \n by Windows " + "x" * 60}) == \
+            {"on": True, "held": False, "why": ("refused by Windows " + "x" * 60)[:40]}
+        assert sttworkers.clean_keep_awake({"on": True, "held": False, "why": 3}) == {"on": True, "held": False}
     finally:
         lv.close()
 
@@ -295,7 +360,7 @@ def test_the_worker_against_an_older_hub_is_unchanged(tmp_path, hub, whisper):
     hub.add_job("clip-ka", tone_wav(1.0))
     with running(w):
         wait_for(lambda: hub.accepted(), what="the job done")
-    assert w.counts["done"] == 1 and k32.flags == [SET, CLEAR]
+    assert w.counts["done"] == 1 and k32.flags == [SET, NUDGE, CLEAR]
 
 
 def pool_with(clock, wid="gpu-1", state="online", ka=None, reason=""):

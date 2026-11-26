@@ -180,11 +180,14 @@ def clean_self_update(v) -> dict | None:
 
 
 def clean_keep_awake(v) -> dict:
-    """A GPU worker's keep_awake {on, held} (deploy/stt-worker/worker.py KeepAwake), its booleans only; {} when it sent
-    none (a worker from before, or not on Windows)."""
+    """A GPU worker's keep_awake {on, held, why} (deploy/stt-worker/worker.py KeepAwake): the booleans, and why it isn't
+    held (40 characters); {} when it sent none (a worker from before, or not on Windows)."""
     if not isinstance(v, dict):
         return {}
-    return {k: v[k] for k in ("on", "held") if isinstance(v.get(k), bool)}
+    out = {k: v[k] for k in ("on", "held") if isinstance(v.get(k), bool)}
+    if isinstance(v.get("why"), str) and v["why"].strip():
+        out["why"] = " ".join(v["why"].split())[:40]
+    return out
 
 
 class WorkerRegistry:

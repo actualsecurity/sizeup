@@ -1246,7 +1246,8 @@ def file_sha256(path: Path, cache: Path) -> str:
 
 ES_CONTINUOUS = 0x80000000
 ES_SYSTEM_REQUIRED = 0x00000001            # (never ES_DISPLAY_REQUIRED, 0x2: the screen may still turn off)
-KEEP_AWAKE_RETRY_S = 60.0
+KEEP_AWAKE_RETRY_S = 60.0                  # Windows refused: asked again this often
+KEEP_AWAKE_RESTART_S = (10.0, 60.0, 300.0)  # its thread died: a new one after these waits (then the last, each time)
 
 
 class KeepAwake:
@@ -1255,46 +1256,76 @@ class KeepAwake:
     Sleep from the Start menu, the lid and the power button still work). Gaming, a self-update or whisper-server
     trouble don't change it. The flag is the setting thread's, so a long-lived thread of its own sets it and clears it
     (ES_CONTINUOUS alone) on a pause, a stop, the exit or an error; a hard kill ends that thread and Windows drops the
-    flag itself. No rights needed, no powercfg change. Not Windows: nothing (a no-op, nothing reported)."""
+    flag itself. A stop (a self-update's exit too) first resets the idle timer (ES_SYSTEM_REQUIRED alone), so the PC
+    gets a whole idle timeout before it may sleep: time for the task to start the worker again. No rights needed, no
+    powercfg change. Not Windows: nothing (a no-op, nothing reported)."""
 
-    def __init__(self, on: bool, kernel32=None, windows: bool | None = None):
+    def __init__(self, on: bool, kernel32=None, windows: bool | None = None, clock: Callable[[], float] = time.monotonic):
         self.on = bool(on)
         self.windows = os.name == "nt" if windows is None else bool(windows)
         self._k32 = kernel32
+        self.clock = clock
         self._cv = threading.Condition()
         self._want = False
         self._closed = False
         self._thread: threading.Thread | None = None
+        self._deaths = 0
+        self._restart_at = 0.0
+        self._atexit = False
         self._failed = False
         self.held = False                  # the flag is set now (what the hub is told)
+        self.why = "starting"              # not held: why (the hub's hover)
 
     def report(self) -> dict | None:
-        """keep_awake in hello and state: {on, held}; None off Windows (nothing to keep awake there)."""
-        return {"on": self.on, "held": self.held} if self.windows else None
+        """keep_awake in hello and state: {on, held, why (not held)}; None off Windows (nothing to keep awake there)."""
+        if not self.windows:
+            return None
+        doc = {"on": self.on, "held": self.held}
+        if self.on and not self.held:
+            doc["why"] = self.why[:40]
+        return doc
 
     def want(self, awake: bool) -> None:
-        """From any thread: the flag should be set (True) or not; the thread does it."""
+        """From any thread: the flag should be set (True) or not; the thread does it. A thread that died is replaced
+        after KEEP_AWAKE_RESTART_S (held false meanwhile)."""
         if not (self.on and self.windows):
             return
         with self._cv:
-            if self._closed or (self._thread is None and not awake):
+            if self._closed:
                 return
+            t = self._thread
+            if t is not None and not t.is_alive():
+                if not self._restart_at:
+                    self._deaths += 1
+                    self._restart_at = self.clock() + KEEP_AWAKE_RESTART_S[min(self._deaths, len(KEEP_AWAKE_RESTART_S)) - 1]
+                if self.clock() < self._restart_at:
+                    return
+                self._thread, self._restart_at, t = None, 0.0, None
+            if t is None and not awake:
+                return
+            changed = bool(awake) != self._want
             self._want = bool(awake)
-            if self._thread is None:
+            if t is None:
                 self._thread = threading.Thread(target=self._loop, name="keep-awake", daemon=True)
                 self._thread.start()
-                atexit.register(self.close)
-            self._cv.notify_all()
+                if not self._atexit:
+                    atexit.register(self.close)
+                    self._atexit = True
+            elif changed:
+                self._cv.notify_all()       # (only a change: a retry's wait isn't cut short every tick)
 
     def close(self) -> None:
-        """The flag cleared and the thread ended (a stop, the exit). Never set again by this one."""
+        """The idle timer reset, the flag cleared and the thread ended (a stop, the exit). Never set again by this
+        one."""
         with self._cv:
             self._closed, self._want = True, False
             self._cv.notify_all()
             t = self._thread
         if t is not None and t is not threading.current_thread():
             t.join(2)
-        atexit.unregister(self.close)
+        if self._atexit:
+            atexit.unregister(self.close)
+            self._atexit = False
 
     def _set(self, flags: int) -> bool:
         if self._k32 is None:
@@ -1305,6 +1336,7 @@ class KeepAwake:
 
     def _loop(self) -> None:
         applied = False                    # what was last asked of Windows on this thread
+        closed = False
         try:
             while True:
                 with self._cv:
@@ -1315,23 +1347,28 @@ class KeepAwake:
                     want, closed = self._want and not self._closed, self._closed
                 if want:
                     ok = self._set(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
-                    if ok != self.held or (not ok and not self._failed):
-                        if ok:
-                            log.info("keep awake: Windows won't idle-sleep this PC while the worker runs")
-                        else:
-                            log.warning("keep awake: SetThreadExecutionState failed: Windows may sleep this PC")
+                    if ok and not self.held:
+                        log.info("keep awake: Windows won't idle-sleep this PC while the worker runs")
+                    elif not ok and not self._failed:
+                        err = getattr(ctypes, "get_last_error", lambda: 0)()
+                        log.warning("keep awake: SetThreadExecutionState failed (error %s): Windows may sleep this PC",
+                                    err)
                     self._failed = not ok
-                    self.held = ok
+                    self.held, self.why = ok, "" if ok else "refused by Windows"
                 elif applied:
+                    if closed and self.held:
+                        self._set(ES_SYSTEM_REQUIRED)  # the idle timer from now: the restart's grace
                     self._set(ES_CONTINUOUS)
                     if self.held and not closed:
                         log.info("keep awake: released (paused): Windows may sleep this PC")
-                    self.held = False
+                    self.held, self.why = False, "stopped" if closed else "paused"
+                elif closed:
+                    self.why = "stopped"
                 applied = want
                 if closed:
                     return
         except Exception:  # noqa: BLE001 - keeping the PC awake never takes the worker down
-            log.exception("keep awake: unexpected error (Windows may sleep this PC)")
+            log.exception("keep awake: unexpected error (Windows may sleep this PC; tried again later)")
         finally:
             if self.held or applied:
                 try:
@@ -1339,6 +1376,8 @@ class KeepAwake:
                 except Exception:  # noqa: BLE001
                     pass
             self.held = False
+            if not closed:
+                self.why = "error (see worker.log)"
 
 
 # --- the GPU: gaming detection -------------------------------------------------------------------------------------

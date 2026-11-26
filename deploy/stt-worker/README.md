@@ -494,7 +494,10 @@ lose it overnight. A worker that has updated itself to this version does it with
   the power button still work.
 - **Released** on `worker.py pause`, a stop or the exit, and when the worker crashes or is killed (Windows drops the
   flag with its thread). `worker.py resume` takes it again. Gaming, a self-update and whisper-server trouble don't
-  change it.
+  change it. A stop (a self-update's restart too) first resets the idle timer, so the PC gets a whole sleep timeout
+  before it may sleep: time for the task to start the worker again.
+- **Modern Standby PCs** (`powercfg /a` says S0 Low Power Idle): check that `powercfg /requests` (an administrator
+  prompt) lists the worker's `python`/`pythonw` under `SYSTEM` while it runs.
 - **Off:** `keep_awake = false` in `worker.toml`, then restart the task. A `worker.py` from before this key refuses a
   `worker.toml` that has it: take the line out before an `update rollback` to such a version or a **Pin** to one.
 - **Seen:** `worker.py status` (`keep awake: on, held`) and Health: the worker's state says `keeps PC awake`. A worker
