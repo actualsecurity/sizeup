@@ -502,7 +502,8 @@ ADMIN_READS = {
 
 # Who may POST what (enforced only with a verified sign-in, see above): "dispatch" = dispatchers and
 # admins (running calls), "admin" = admins only (Settings in every form, and the radios), "read" =
-# anyone signed in (a POST that changes nothing). First match wins; a path not here is "admin".
+# anyone signed in (a POST that changes nothing), "active" = anyone signed in whose account is active, never a
+# deactivated one (a vote or a note on a radio pre-alert). First match wins; a path not here is "admin".
 WRITES = (
     (re.compile(r"/api/cad/incident(?:/\d{1,9}(?:/(?:accept|dismiss|close|reopen|note|recommend|preview|dispatch|upgrade"
                 r"|attach|link|unlink|keep|return|feed-use|auto-undo|merge))?)?"), "dispatch"),      # events, notes, dispatches, radio links

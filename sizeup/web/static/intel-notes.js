@@ -73,7 +73,8 @@ window.IntelNotes = (() => {
     const list = el("ol", "list nt-notes");
     for (const n of d.notes) list.append(st.editing === n.id ? form(host, n) : noteRow(host, n));
     const kids = [head, list];
-    if (st.editing === null || st.editing === "new") kids.push(st.editing === "new" ? form(host, null) : addBtn(host));
+    const may = typeof canDo !== "function" || canDo("active");          // a deactivated account: reads only
+    if (may && (st.editing === null || st.editing === "new")) kids.push(st.editing === "new" ? form(host, null) : addBtn(host));
     if (d.audit && d.audit.length) kids.push(audit(d.audit));
     host.replaceChildren(...kids);
   }
@@ -122,7 +123,7 @@ window.IntelNotes = (() => {
     const fx = fixes(n);
     if (fx) li.append(fx);
     const acts = el("div", "nt-acts");
-    if (n.may_edit) {
+    if (n.may_edit && (typeof canDo !== "function" || canDo("active"))) {
       const e = el("button", "sm quiet", "Edit");
       e.type = "button";
       e.addEventListener("click", () => { st.editing = n.id; draw(host); });

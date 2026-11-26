@@ -4439,9 +4439,10 @@ async function loadWho(fresh) {
 // through Cloudflare Access (sizeup/cad/api.py WRITES); this only shows it: Settings read-only for a
 // dispatcher, every action off for a viewer or a deactivated user, each with a banner naming the
 // admins. Without Access (whoami enforced: false) nothing changes.
-function canDo(need) {             // "dispatch" (run calls) | "admin" (Settings, the radios)
+function canDo(need) {             // "dispatch" (run calls) | "admin" (Settings, the radios) | "active" (a vote, a note)
   const w = cad.who;
   if (!w || !w.enforced) return true;
+  if (need === "active") return w.active !== false || !!w.bootstrap;     // anyone signed in, never a deactivated account
   return w.may === "admin" || (need === "dispatch" && w.may === "dispatcher");
 }
 function askAdmin() {

@@ -264,6 +264,7 @@ window.IntelPage = (() => {
 
   // Useful / Noise / Should have pushed: the intel feedback store (what the rules' and the model's tuning read)
   function votes(e) {
+    if (typeof canDo === "function" && !canDo("active")) return [];     // a deactivated account: no votes
     const busy = st.busy.has(e.id);
     const mine = new Set(e.mine || []);
     const n = e.votes || {};

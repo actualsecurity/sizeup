@@ -996,21 +996,23 @@ class Comms:
         not_fixed = " AND id NOT IN (SELECT traffic_id FROM stt_corrections)" if fixed else ""
         still_not_fixed = (" AND NOT EXISTS (SELECT 1 FROM stt_corrections c WHERE c.traffic_id = radio_traffic.id)"
                            if fixed else "")
-        if self.noted_kept():                          # a noted intel event's: kept while its note is
-            not_fixed += f" AND id NOT IN ({NOTED})"
-            still_not_fixed += f" AND radio_traffic.id NOT IN ({NOTED})"
+        # a noted intel event's: kept while its note is. The ids read ONCE per prune into a set, skipped in Python: never
+        # a subquery per row under the write lock (#913 re-check: 3-9 ms a row with a few thousand notes); a note added
+        # between the look and the delete is a harmless race (its transmission was old enough to go anyway)
+        keep_ids = {r["value"] for r in self.store.q(NOTED)} if self.noted_kept() else set()
         n = 0
         noted = {True: 0, False: 0}                    # rows noted one by one, each kind; past CHANGES_MAX: that kind's reset
         for cond, params, days in self._groups(tpol, apol):
             cutoff, after = now - days * 86400, float("-inf")
             while True:
-                rows = self.store.q(
+                looked = self.store.q(
                     f"SELECT rowid AS r, id, system, start FROM radio_traffic WHERE {cond} AND start < ? AND start >= ? "
                     f"AND id NOT IN (SELECT l.traffic_id FROM radio_links l WHERE {SURE_LINK}){not_fixed} "
                     f"AND NOT (start >= ? AND ({record})) ORDER BY start LIMIT ?",
                     (*params, cutoff, after, now - KEEP_RECORD_S, self.PRUNE_BATCH))
-                if not rows:
+                if not looked:
                     break
+                rows = [r for r in looked if r["id"] not in keep_ids] if keep_ids else looked
                 with self.store.tx() as db:            # the conditions again: a link confirmed since the look keeps it
                     for r in rows:
                         gone = db.execute(f"DELETE FROM radio_traffic WHERE rowid = ? AND NOT EXISTS (SELECT 1 FROM "
@@ -1028,8 +1030,8 @@ class Comms:
                             # a big clear-out: the pages ask afresh; of another system's rows: only the readers who may
                             # see them (that reset is theirs, so how many went is never told to anyone else)
                             self.touch_reset() if kind else self.touch("reset", r["system"])
-                after = rows[-1]["start"]
-                if len(rows) < self.PRUNE_BATCH:
+                after = looked[-1]["start"]
+                if len(looked) < self.PRUNE_BATCH:
                     break
                 if pause_s:
                     time.sleep(pause_s)

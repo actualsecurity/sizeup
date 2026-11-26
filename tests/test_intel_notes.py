@@ -274,6 +274,38 @@ def test_a_noted_events_transmissions_are_kept_while_the_note_is(site):
     assert "n1" not in cad.comms.kept_for_events(["n1"])
 
 
+def test_the_prune_reads_the_noted_transmissions_once_never_a_subquery_a_row(site, monkeypatch):
+    """#913 re-check B1: with thousands of notes, the per-row DELETE under the write lock never rebuilds the noted list
+    (it was 3-9 ms a row): the ids are read once per prune and skipped before the delete."""
+    import time
+    from tests.test_intel import ctx_row
+    cad, _clock = site
+    old = T0 - 400 * 86400
+    with cad.store.tx() as db:                     # 3000 noted events, two transmissions each (none in the log)
+        for i in range(3000):
+            db.execute("INSERT INTO intel_events (domain, pack, category, subject, first_at, last_at, until, status, "
+                       "traffic_ids, updated_at) VALUES ('police', 'police', 'weapons', 'x', ?, ?, ?, 'ended', ?, ?)",
+                       (T0, T0, T0, json.dumps([f"k{i}a", f"k{i}b"]), T0))
+            db.execute("INSERT INTO intel_notes (event_id, text, tags, created_at, updated_at) VALUES (?, 'n', '[]', ?, ?)",
+                       (i + 1, T0, T0))
+    for k in range(1500):                          # 1500 old transmissions to go, and two of the noted ones to stay
+        cad.comms.record(ctx_row(f"old{k}", "test transmission", old + k))
+    for tid in ("k5a", "k2999b"):
+        cad.comms.record(ctx_row(tid, "test transmission", old + 2000))
+    seen = []
+    real = cad.store.q
+    monkeypatch.setattr(cad.store, "q", lambda sql, args=(): (seen.append(sql), real(sql, args))[1])
+    t = time.perf_counter()
+    gone = cad.comms.prune()
+    took = time.perf_counter() - t
+    monkeypatch.undo()
+    assert gone >= 1500
+    left = {r["id"] for r in cad.store.q("SELECT id FROM radio_traffic WHERE start < ?", (old + 3000,))}
+    assert left == {"k5a", "k2999b"}
+    assert sum("FROM intel_notes" in x for x in seen) == 1                 # the noted ids: one read
+    assert took < 10.0, took                     # (generous: about 2 s here; the per-row check took 3-9 ms a row)
+
+
 # -- the incident's view -------------------------------------------------------------------------------------------------
 
 def test_the_incidents_view_has_the_notes_of_its_linked_events(site):
