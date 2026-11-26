@@ -3183,7 +3183,7 @@ milepost every tenth, also laid along the recorded static feed's line); no Metro
 ## More P25 systems: MTA MRRS (#408, #409)
 
 A second trunked system beside the county's: Metro-25 / MTA MRRS, for Port Chester / Rye / Rye Brook PD, their EMS
-talkgroup, Metro-North and MTA PD. Its traffic is **pre-alert and safety context only**: never Main, never on our
+talkgroup, Metro-North and MTA PD. Its traffic is **pre-alert and safety context only**: its Main switch is Our calls only (never the county's Main), never on our
 incident by a rule, never an incident source.
 
 ### The system (as listed, community-maintained)

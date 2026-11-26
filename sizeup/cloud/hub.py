@@ -1244,6 +1244,10 @@ class HubApp(App):
         self.cad.live = self.live.state
         # the Radio page's source tree (#415): the station's talkgroups and systems, as its state says them
         self.cad.source_rows = lambda: self.hub.talkgroups or []
+        # Our calls: another system's talkgroups with Main on, as the station's rows say (the county's Main is main_tg)
+        self.cad.ours_others = lambda: sorted(
+            (str(r["system"]), int(r["tg"])) for r in (self.hub.talkgroups or []) if isinstance(r, dict) and r.get("ours")
+            and r.get("tier_set") and r.get("system") and r.get("system") != sourcekeys.COUNTY and isinstance(r.get("tg"), int))
         self.cad.source_systems = lambda: {self.tg.county: "County", **{
             str(x.get("name")): str(x.get("label") or x.get("name")) for x in (_part(self.hub.status, "p25_systems", list) or [])
             if isinstance(x, dict) and x.get("name")}}

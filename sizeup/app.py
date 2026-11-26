@@ -710,7 +710,8 @@ class App:
         # Radio view's rows too.
         self.cad.comms.names_ours = self.cad.feed.names_ours
         self.cad.comms.intel_pushes = self._intel_source      # a late row already transcribed on a push source: intel
-        self.cad.main_tg = self.tg.main
+        self.cad.main_tg = self.tg.main            # the county's Main (incident talkgroups: automode, coverage, STT class)
+        self.cad.ours_others = self.tg.ours_others  # Our calls: the county's Main (above) and these (views, Listening)
         # the Radio page's source tree (#415, Cad.comms_sources): the talkgroups as Settings > Radios lists them, and each
         # system's label (the county's is its name: it has none of its own)
         self.cad.source_rows = self.talkgroups_state
@@ -2017,7 +2018,8 @@ class App:
     def set_talkgroup_tier(self, tg: int, tier: str, system: str = "") -> str | None:
         err = self.tg.set_tier(int(tg), str(tier), system)
         if not err:
-            log(f"talkgroup {system}:{tg} ({self.tg.name(int(tg), system)}): tier={self.tg.tier(int(tg), system)}")
+            log(f"talkgroup {system}:{tg} ({self.tg.name(int(tg), system)}): tier={self.tg.tier(int(tg), system)} "
+                f"ours={self.tg.ours(int(tg), system)}")
         return err
 
     def _p25_ours(self, call: Call, turns) -> bool:
@@ -6293,9 +6295,12 @@ class App:
             # a bare number is the county's: this one is another system's talkgroup (its Main / Record would have
             # landed on a county talkgroup that doesn't exist, an "Unknown" card): never written
             return f"talkgroup {tg} is {owners[0]}'s, not the county's: send its source (p25:{owners[0]}:{int(tg)})"
+        if system and main is not None and self.tg.sealed(int(tg), system):
+            return f"{self.tg.name(int(tg), system)} is encrypted or Activity only: never Our calls"
         self.tg.set(int(tg), record, main, system)
         if system:
-            log(f"talkgroup {system}:{tg} ({self.tg.name(int(tg), system)}): tier={self.tg.tier(int(tg), system)}")
+            log(f"talkgroup {system}:{tg} ({self.tg.name(int(tg), system)}): tier={self.tg.tier(int(tg), system)} "
+                f"ours={self.tg.ours(int(tg), system)}")
             return None
         log(f"talkgroup {tg} ({self.tg.name(int(tg))}): record={self.tg.record(int(tg))} main={self.tg.main(int(tg))}")
         return None

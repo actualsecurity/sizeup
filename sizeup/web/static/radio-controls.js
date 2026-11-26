@@ -1258,7 +1258,9 @@ window.RadioControls = (() => {
       if (other) c.transcribe = r.tier === "alert" || r.tier === "text";      // its tier says (#409)
       // Alerts: another system's alert tier; the county's have none (null: the intel packs', sizeup/tiers.py)
       const alerts = other ? r.tier === "alert" : null;
-      return { ...r, ...c, tier_set: other, src: srcOf(r), ckey: r.key || `tg:${r.tg}`, record: r.record, alerts };
+      // Main: the county's is its own; another system's means Our calls only (the hub's `ours`)
+      return { ...r, ...c, tier_set: other, src: srcOf(r), ckey: r.key || `tg:${r.tg}`, record: r.record, alerts,
+               ...(other ? { main: !!r.ours } : {}) };
     });
     return st.pending.size ? rows.map((r) => (st.pending.has(r.src) ? { ...r, ...st.pending.get(r.src).vals, pending: true } : r)) : rows;
   }
@@ -1298,7 +1300,7 @@ window.RadioControls = (() => {
   }
   function settle() {
     const now = Date.now(), by = new Map(((st.state && st.state.talkgroups) || []).map((r) => [srcOf(r), isOther(r)
-      ? { ...r, transcribe: r.tier === "alert" || r.tier === "text", alerts: r.tier === "alert" } : r]));
+      ? { ...r, transcribe: r.tier === "alert" || r.tier === "text", alerts: r.tier === "alert", main: !!r.ours } : r]));
     for (const [src, p] of st.pending) {
       const r = by.get(src);
       if (!r || now > p.until || Object.entries(p.vals).every(([k, v]) => r[k] === v)) st.pending.delete(src);
@@ -1352,6 +1354,7 @@ window.RadioControls = (() => {
   const CHAIN_OFF = { record: ["transcribe", "alerts"], transcribe: ["alerts"], alerts: [] };
   function setOther(r, field) {
     if (field === "activity") return r.encrypted ? setTalkgroup(r, "tier", r.tier === "activity" ? "off" : "activity") : null;
+    if (field === "main") return r.encrypted || r.tier === "activity" ? null : setTalkgroup(r, "main", !r.main);
     if (r.encrypted || !CHAIN_ON[field]) return null;
     const next = !r[field];
     if (field === "record" && next) return setTalkgroup(r, "record", true, [], { transcribe: false });
@@ -1950,7 +1953,9 @@ window.RadioControls = (() => {
               : r.encrypted ? "Encrypted: can't be decoded" : "Not recording: calls dropped";
             if (other) recB.title += `\nTier: ${tierName}`;
             setSwitch(mainB, !!r.main, "Main");
-            mainB.title = other ? "Another system: never Main" : r.main ? "Main: Our calls (up front in Radio, on our incident, the player's Our calls)" : "Other: folded in Radio, not Our calls";
+            const noMain = sealed || (other && r.tier === "activity");      // encrypted / Activity only: never Our calls
+            mainB.title = other ? (noMain ? "Encrypted or Activity only: never Our calls"
+              : "Our calls only: listening and views; no transcription or alert change") : r.main ? "Main: Our calls (up front in Radio, on our incident, the player's Our calls)" : "Other: folded in Radio, not Our calls";
             show(mainB, !r.fm || (r.main !== undefined && !!st.mainApi));
             setSwitch(alrB, !!r.alerts, "Alerts");
             alrB.classList.toggle("na", !other);         // the county's: no Alerts of its own (no knob, the hover says why)
@@ -1973,7 +1978,7 @@ window.RadioControls = (() => {
             sttB.disabled = sttB.disabled || !r.record || onHub;
             engS.disabled = engS.disabled || !r.record || !r.transcribe || onHub;
             if (onHub) sttB.title = engS.title = "Set on the hub (the CAD of record) while this station forwards to it";
-            mainB.disabled = mainB.disabled || other;
+            mainB.disabled = mainB.disabled || noMain;     // another system's: only encrypted / Activity only
             alrB.disabled = lock || !other || sealed;
             actB.disabled = lock;
             if (other) {                // its tier (POST /api/talkgroup): Transcribe on turns Record on, never the hub's channels

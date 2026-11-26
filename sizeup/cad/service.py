@@ -349,6 +349,8 @@ class Cad:
         self.has_clip: Callable[[str], bool] = lambda cid: False
         # Is this talkgroup "Main" (the station's switch, Settings > Radios)? The app sets it; alone: the incident talkgroups.
         self.main_tg: Callable[[int], bool] = lambda tg: tg in s.incident_talkgroups
+        # Our calls = the county's Main (main_tg) + other systems' Main switches [(system, tg)]: nothing else reads these
+        self.ours_others: Callable[[], list] = lambda: []
         # The Radio page's source tree (#415, comms_sources): every known talkgroup as the monitor's state lists it
         # ([{source, system, name, group, service, tier, ours, encrypted, department, last}], App.talkgroups_state; the
         # hub: the station's), and each P25 system's label ({name: label}). Without them: what the log itself says.
@@ -2137,24 +2139,25 @@ class Cad:
         # made a moment ago, for COMMS_CACHE_S (#284). Only "talking" is live.
         pcfd = [u["name"] for u in self.radios.units if is_pcfd(u)]
         main_tgs = [tg for tg in self.comms.talkgroups() if self.main_tg(tg)]
+        others = sorted(map(tuple, self.ours_others()))
         # (+ whether this reader may be shown another P25 system's rows, #419: an answer is never another reader's)
         context = self.comms._sees_context()
         # (kept by the log's and the store's own counters, not the reader's rev: a setting changed is a new answer)
         mark = (self.comms.rev, self.store.rev)
-        key = (mark, context, tuple(pcfd), tuple(main_tgs),
+        key = (mark, context, tuple(pcfd), tuple(main_tgs), tuple(others),
                tuple(sorted((k, tuple(v)) for k, v in q.items() if k != "rev")))
         hit = self._comms_cache.get(key)
         if hit is not None and time.monotonic() - hit[0] < COMMS_CACHE_S:
             return {**hit[1], "talking": talking}
         if any((q.get(k) or [""])[0].strip() for k in COMMS_PAGE_PARAMS):
-            out = self._comms_page(q, one, when, pcfd, main_tgs, now_rev, context)
+            out = self._comms_page(q, one, when, pcfd, main_tgs, now_rev, context, others)
             return {**self._comms_keep(key, mark, out), "talking": talking}
         try:
             limit = max(1, min(int(one("limit") or OTHER_LIMIT), MAX_ROWS))
             main_limit = max(1, min(int(one("main_limit") or MAIN_LIMIT), MAX_ROWS))
         except ValueError:
             raise CadError("limit, main_limit: numbers") from None
-        main, other = self.comms.split(main_tgs, self.not_main(),
+        main, other = self.comms.split(main_tgs, self.not_main(), ours_other=others,
                                        unit=one("unit"), channel=one("channel"), event=one("event"),
                                        pcfd=pcfd if one("pcfd") in ("1", "true", "on") else None,
                                        since=when("since"), until=when("until"), main_limit=main_limit, limit=limit,
@@ -2206,6 +2209,10 @@ class Cad:
         Radio tree's rev (a switch changed: every rail asks the tree again)."""
         return ",".join(f"{k}={int(v)}" for k, v in sorted(self.fm_main_over.items()))
 
+    def ours_rev(self) -> str:
+        """Other systems' Main switches as a short string ("" none): part of the Radio tree's rev, as fm_main_rev."""
+        return "".join(f"+{s}:{t}" for s, t in sorted(map(tuple, self.ours_others())))
+
     def fm_main(self, label: str, kind: str = "") -> bool:
         """An FM / airband channel's Main switch: the admins' choice (settings radio_main), else its default."""
         return self.fm_main_over.get(label, self.fm_main_default(label, kind))
@@ -2214,6 +2221,13 @@ class Cad:
         """The FM / airband channels whose Main is off: Comms leaves them out of Main and Our calls (#241, #415)."""
         return tuple(sorted({*self.s.airband, *(k for k, v in self.fm_main_over.items() if not v)}
                             - {k for k, v in self.fm_main_over.items() if v}))
+
+    def ours_tg(self, tg: int, system: str = "") -> bool:
+        """Whether a talkgroup is part of Our calls: the county's Main, or another system's Main switch (which means
+        only this: the county's Main alone drives speech-to-text, automode and coverage, via main_tg)."""
+        if system in ("", sourcekeys.COUNTY):
+            return bool(self.main_tg(int(tg)))
+        return (str(system), int(tg)) in set(map(tuple, self.ours_others()))
 
     def row_ours(self, r: dict, not_main=None) -> bool:
         """Whether a row of the radio log is Our calls now: its channel's or (the county's) talkgroup's Main switch, as
@@ -2224,7 +2238,7 @@ class Cad:
         tg, system = r.get("talkgroup"), str(r.get("system") or "")
         if tg is None:
             return str(r.get("channel") or "") not in (self.not_main() if not_main is None else not_main)
-        return system in ("", sourcekeys.COUNTY) and bool(self.main_tg(int(tg)))
+        return self.ours_tg(int(tg), system)
 
     def _comms_rows(self, rows: list[dict]) -> None:
         """Each row as it is sent: whether its audio is here, whether it is Our calls now, without the columns nobody
@@ -2255,7 +2269,7 @@ class Cad:
                                       f"(SELECT l.incident_id FROM radio_links l {ours}) "
                                       "ORDER BY i.id DESC LIMIT 100")]
 
-    def _comms_page(self, q: dict, one, when, pcfd, main_tgs, now_rev: str, context: bool) -> dict:
+    def _comms_page(self, q: dict, one, when, pcfd, main_tgs, now_rev: str, context: bool, others=()) -> dict:
         """comms_query's answer for the Radio page's views (#415): one page (Comms.page)."""
         def keys(k: str, most: int) -> list[str]:
             out = [x.strip() for v in q.get(k) or [] for x in v.split(",") if x.strip()]
@@ -2287,7 +2301,7 @@ class Cad:
         if len(units) > UNITS_MAX or any(len(x) > 60 for x in units):
             raise CadError(f"unit: at most {UNITS_MAX} units")
         got = self.comms.page(
-            main_tgs, self.not_main(), view=view, system=one("system"), group=one("group"), source=keys("source", SOURCES_MAX),
+            main_tgs, self.not_main(), ours_other=others, view=view, system=one("system"), group=one("group"), source=keys("source", SOURCES_MAX),
             service=service, tier=one("tier").lower(), dept=one("dept"), safety=one("safety") in ("1", "true", "on"),
             mute=keys("mute", MUTE_MAX), before=before, changed=changed, at=at, limit=limit,
             unit=units[0] if len(units) == 1 else units, channel=one("channel"), event=one("event"),
@@ -2322,7 +2336,7 @@ class Cad:
         minute = int(now // 60)
         folders = self.radio_folders
         rev = (f"{self.comms.rev_for(context)}.{minute}.{int(bool(context))}.{services_rev(self.radio_services)}"
-               f".{self.fm_main_rev()}.{radioviews.rev(self.radio_views)}.{radiofolders.rev(folders)}")
+               f".{self.fm_main_rev()}{self.ours_rev()}.{radioviews.rev(self.radio_views)}.{radiofolders.rev(folders)}")
         live = set()
         for e in self._talking():
             if e.get("ended"):
@@ -2333,7 +2347,7 @@ class Cad:
                 live.add(sourcekeys.p25(str(e.get("p25_system") or sourcekeys.COUNTY), int(e["tg"])))
             elif e.get("channel"):
                 live.update((f"fm:{e['channel']}", f"air:{e['channel']}"))
-        mark = (self.comms.rev, self.store.rev, minute)
+        mark = (self.comms.rev, self.store.rev, minute, self.ours_rev())
         hit = self._sources_cache.get(bool(context))
         if hit is None or hit[0] != mark:
             county = sourcekeys.COUNTY
@@ -2360,7 +2374,7 @@ class Cad:
                     continue
                 name = str(i.get("name") or s.get("channel") or key.split(":", 1)[-1])
                 if got:
-                    ours = system == county and bool(self.main_tg(got[1]))
+                    ours = self.ours_tg(got[1], system)
                 else:
                     ours = self.fm_main(name, kind)
                 tier = str(i.get("tier") or s.get("tier") or "")

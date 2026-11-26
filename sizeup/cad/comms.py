@@ -1314,7 +1314,7 @@ class Comms:
                  "events": [{"id": r["iid"], "number": r["number"], "type": r["type"], "subtype": r["subtype"],
                              "address": r["address"], "why": "note", "unit": r["units"]}]} for r in rows]
 
-    def split(self, main_tgs, not_main=(), unit: str = "", channel: str = "", event: str = "", pcfd: list[str] | None = None,
+    def split(self, main_tgs, not_main=(), ours_other=(), unit: str = "", channel: str = "", event: str = "", pcfd: list[str] | None = None,
               since: float | None = None, until: float | None = None, main_limit: int = MAIN_LIMIT, limit: int = OTHER_LIMIT,
               kind: str = "", text: str = "", emergency: bool = False) -> tuple[list[dict], list[dict]]:
         """The Radio view's two sections, each its own newest N with the same filters (#241: on a busy evening the
@@ -1327,6 +1327,7 @@ class Comms:
         limit = max(1, min(int(limit), MAX_ROWS))
         words = [w.lower() for w in text.split()][:8]
         main_tgs, not_main = sorted({int(t) for t in main_tgs}), tuple(dict.fromkeys(not_main))
+        ours_other = sorted({(str(s), int(t)) for s, t in ours_other})
         notes = (self._notes(unit, event, pcfd, since, until, main_limit, words)
                  if kind in ("", "notes") and channel in ("", NOTES) and not emergency else [])
         main, other = [], []
@@ -1336,7 +1337,8 @@ class Comms:
             where, args = w
             fm = "t.talkgroup IS NULL" + (f" AND t.channel NOT IN ({','.join('?' * len(not_main))})" if not_main else "")
             county = f"+t.system IN ('', '{sources.COUNTY}')"      # (as view=ours will: never another system's number)
-            for cond, extra in [(fm, list(not_main))] + [(f"t.talkgroup = ? AND {county}", [tg]) for tg in main_tgs]:
+            for cond, extra in ([(fm, list(not_main))] + [(f"t.talkgroup = ? AND {county}", [tg]) for tg in main_tgs]
+                                + [("t.talkgroup = ? AND t.system = ?", [tg, sy]) for sy, tg in ours_other]):
                 main += self._fetch(where + [cond], args + extra, main_limit)
             # +t.talkgroup: no index on it, so the newest-first walk stays on the start (or channel) index; never NULL
             # inside the NOT (NULL IN (...) is NULL, and NOT NULL would drop an airband row from both sections)
@@ -1344,7 +1346,11 @@ class Comms:
             if main_tgs:
                 mine = (f"({mine}) OR (+t.talkgroup IS NOT NULL AND +t.talkgroup IN ({','.join('?' * len(main_tgs))}) "
                         f"AND {county})")
-            other = self._fetch(where + [f"NOT ({mine})"], args + list(not_main) + main_tgs, limit)
+            extra_args = list(not_main) + main_tgs
+            for sy, tg in ours_other:
+                mine += " OR (+t.talkgroup = ? AND +t.system = ?)"
+                extra_args += [tg, sy]
+            other = self._fetch(where + [f"NOT ({mine})"], args + extra_args, limit)
         main = sorted(main, key=lambda r: -r["start"])[:main_limit]
         self._decorate(main + other)
         main = sorted(main + notes, key=lambda r: -r["start"])[:main_limit]
@@ -1352,12 +1358,14 @@ class Comms:
 
     # ---- the Radio page's views (#415): one page of one filter, older pages by a keyset, changes by a cursor --------
 
-    def _ours_branches(self, main_tgs, not_main) -> list[tuple[str, list]]:
+    def _ours_branches(self, main_tgs, not_main, ours_other=()) -> list[tuple[str, list]]:
         """"Our calls" as index walks (as split()'s Main, #241): the analog channels but the airband, and each talkgroup
-        marked Main, the county system's only (a talkgroup number alone is never read: #409)."""
+        marked Main, the county system's, and each (system, talkgroup) of another system's with Main on (its own Our-calls
+        switch: a talkgroup number alone is never read, #409)."""
         fm = "t.talkgroup IS NULL" + (f" AND t.channel NOT IN ({','.join('?' * len(not_main))})" if not_main else "")
         return [(fm, list(not_main))] + [("t.talkgroup = ? AND t.system IN ('', ?)", [int(tg), sources.COUNTY])
-                                         for tg in main_tgs]
+                                         for tg in main_tgs] + [("t.talkgroup = ? AND t.system = ?", [int(tg), str(sy)])
+                                                                for sy, tg in ours_other]
 
     # ---- the change log (radio_changes): told after the write, never part of it ----------------------------------
 
@@ -1560,7 +1568,7 @@ class Comms:
             return f"{self.rev}.{self.store.rev}"
         return f"o{self.ours_rev}"
 
-    def page(self, main_tgs, not_main=(), *, view: str = "", system: str = "", group: str = "", source=(),
+    def page(self, main_tgs, not_main=(), *, ours_other=(), view: str = "", system: str = "", group: str = "", source=(),
              service: str = "", tier: str = "", dept: str = "", safety: bool = False, mute=(),
              before: tuple[float, str] | None = None, changed: str | None = None, at: float | None = None,
              limit: int = PAGE, unit: str = "", channel: str = "", event: str = "", pcfd: list[str] | None = None,
@@ -1593,6 +1601,7 @@ class Comms:
         limit = max(1, min(int(limit), PAGE_MAX))
         words = [w.lower() for w in text.split()][:8]
         main_tgs, not_main = sorted({int(t) for t in main_tgs}), tuple(dict.fromkeys(not_main))
+        ours_other = sorted({(str(s), int(t)) for s, t in ours_other})
         srcs = list(dict.fromkeys(str(x) for x in source if x))[:SOURCES_MAX]
         muted = [] if srcs else list(dict.fromkeys(str(x) for x in mute if x))[:MUTE_MAX]
         sees = self._sees_context() if context is None else bool(context)
@@ -1646,7 +1655,7 @@ class Comms:
             # system (+: not that index)
             cond.append("t.dept != '' AND t.dept = ?" if sees else "+t.dept != '' AND +t.dept = ?")
             args.append(dept)
-        ours = self._ours_branches(main_tgs, not_main)
+        ours = self._ours_branches(main_tgs, not_main, ours_other)
         ours_sql = "(" + " OR ".join(f"({c})" for c, _ in ours) + ")"
         ours_args = [a for _, extra in ours for a in extra]
         if group or tier:
@@ -1763,10 +1772,11 @@ class Comms:
                 out["older"] = out["older"] or len(notes) > limit
                 notes = notes[:limit]
         self._decorate(radio)
-        mains = set(main_tgs)
+        mains, others_ours = set(main_tgs), set(ours_other)
         for r in radio:
             r["main"] = (r["channel"] not in not_main if r["talkgroup"] is None
-                         else r["talkgroup"] in mains and r["system"] in ("", sources.COUNTY))
+                         else (r["talkgroup"] in mains and r["system"] in ("", sources.COUNTY))
+                         or (r["system"], r["talkgroup"]) in others_ours)
         for r in notes:
             r["main"] = True
         rows = sorted(sorted(radio + notes, key=lambda r: r["id"], reverse=True), key=lambda r: -r["start"])

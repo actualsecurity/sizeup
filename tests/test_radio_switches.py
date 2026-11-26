@@ -15,7 +15,8 @@ written as the tier it makes (tiers.from_switches):
 
     the chain   Alerts on: Transcribe and Record on; Transcribe on: Record on;
                 Record off: Transcribe and Alerts off; Transcribe off: Alerts off
-    Main        another system's: never (disabled, "Another system: never Main")
+    Main        another system's: only Our calls (the TalkgroupPrefs.ours set; no transcription, alert or automode change);
+                encrypted / Activity only: disabled
     county      Record / Main / Transcribe as before; no Alerts of its own (`alerts` null, the switch disabled): its
                 pre-alerts are the intel packs' (scope by service and source), never a per-talkgroup choice
 
@@ -151,8 +152,12 @@ def test_the_switches_round_trip_through_the_station(two):
     assert app.set_talkgroup(PD, True, None, None, "mrrs") is None and app.tg.tier(PD, "mrrs") == "alert"
     # a tier and the switches at once: refused, nothing changes (never the tier silently over the switches)
     assert app.set_talkgroup(PD, None, None, "off", "mrrs", alerts=True) == tiers.BOTH and app.tg.tier(PD, "mrrs") == "alert"
-    # never Main (as before: accepted, nothing changes)
-    assert app.set_talkgroup(PD, None, True, None, "mrrs") is None and not row(PD)["main"]
+    # Main: only Our calls (`ours`); the county's Main (`main`) never moves, nor the tier
+    assert app.set_talkgroup(PD, None, True, None, "mrrs") is None
+    assert row(PD)["ours"] and not row(PD)["main"] and row(PD)["tier"] == "alert"
+    assert app.set_talkgroup(PD, None, False, None, "mrrs") is None and not row(PD)["ours"]
+    # encrypted / Activity only: never
+    assert "never Our calls" in app.set_talkgroup(PD_SECURE, None, True, None, "mrrs") and not row(PD_SECURE)["ours"]
     # encrypted: activity only
     assert row(PD_SECURE)["tier"] == "activity" and not any(row(PD_SECURE)[k] for k in ("record", "transcribe", "alerts"))
     assert app.set_talkgroup(PD_SECURE, None, None, None, "mrrs", transcribe=True) == tiers.ENCRYPTED
@@ -271,7 +276,7 @@ const REC = ["alert", "text", "record"], TX = ["alert", "text"];
 function serve(b) {
   const r = SERVER.talkgroups.find((x) => x.source === b.source || (b.tg !== undefined && x.tg === b.tg && x.system === "westchester"));
   if (!r) return;
-  if (b.main !== undefined) r.main = b.main;
+  if (b.main !== undefined) { if (r.tier) r.ours = b.main; else r.main = b.main; }   // another system's: Our calls only
   if (!r.tier) { if (b.record !== undefined) r.record = b.record; return; }          // the county's
   let t = r.tier;
   if (b.tier) t = b.tier;
@@ -318,7 +323,7 @@ const tick = () => new Promise((ok) => setImmediate(ok));
   out.otherAlertsNa = sw(row("p25:mrrs:9212"), "alerts").classList.contains("na");
   out.order = row("p25:mrrs:9212").querySelector("div.tg-sw").children.map((c) => c.dataset.field || c.className);
   out.tierSelects = groups.querySelectorAll("select.tg-tier").length;
-  out.titles = { otherMain: sw(row("p25:mrrs:9212"), "main").title, countyAlerts: sw(row("p25:westchester:307"), "alerts").title,
+  out.titles = { otherMain: sw(row("p25:mrrs:9212"), "main").title, sealedMain: sw(row("p25:mrrs:9213"), "main").title, countyAlerts: sw(row("p25:westchester:307"), "alerts").title,
                  sealed: sw(row("p25:mrrs:9213"), "transcribe").title, activity: sw(row("p25:mrrs:9213"), "activity").title,
                  record: sw(row("p25:mrrs:9212"), "record").title };
   // a tap: what is sent and shown at once (`now`, `pending`), then what the next poll shows from the server (`look`)
@@ -337,7 +342,8 @@ const tick = () => new Promise((ok) => setImmediate(ok));
   out.transcribeOn = await click("p25:mrrs:9564", "record") && await click("p25:mrrs:9564", "transcribe");
   out.activity = await click("p25:mrrs:9213", "activity");        // activity -> off
   out.sealedRecord = await click("p25:mrrs:9213", "record");      // disabled: nothing sent
-  out.otherMain = await click("p25:mrrs:9570", "main");           // disabled: nothing sent
+  out.otherMain = await click("p25:mrrs:9570", "main");           // Our calls only: sent as main, shown on at once
+  out.sealedMain = await click("p25:mrrs:9213", "main");          // encrypted: disabled, nothing sent
   out.countyAlerts = await click("p25:westchester:307", "alerts");  // disabled: nothing sent
   out.countyMain = await click("p25:westchester:307", "main");    // as before
   // a viewer: every switch locked
@@ -383,9 +389,9 @@ def test_every_talkgroup_has_the_same_switches(page):
     rows = page["rows"]
     assert page["tierSelects"] == 0
     assert page["order"] == ["record", "transcribe", "alerts", "main", "activity", "tg-eng sm"]     # the engine: its own slot
-    assert rows["p25:mrrs:9211"] == {"record": "on", "transcribe": "on", "alerts": "on", "main": "off disabled", "activity": "-"}
-    assert rows["p25:mrrs:9212"] == {"record": "on", "transcribe": "on", "alerts": "off", "main": "off disabled", "activity": "-"}
-    assert rows["p25:mrrs:9564"] == {"record": "off", "transcribe": "off", "alerts": "off", "main": "off disabled", "activity": "-"}
+    assert rows["p25:mrrs:9211"] == {"record": "on", "transcribe": "on", "alerts": "on", "main": "off", "activity": "-"}
+    assert rows["p25:mrrs:9212"] == {"record": "on", "transcribe": "on", "alerts": "off", "main": "off", "activity": "-"}
+    assert rows["p25:mrrs:9564"] == {"record": "off", "transcribe": "off", "alerts": "off", "main": "off", "activity": "-"}
     # encrypted on another system: activity only, the rest disabled
     assert rows["p25:mrrs:9213"] == {"record": "off disabled", "transcribe": "off disabled", "alerts": "off disabled",
                                      "main": "off disabled", "activity": "on"}
@@ -401,7 +407,8 @@ def test_every_talkgroup_has_the_same_switches(page):
 
 def test_the_hovers_say_why(page):
     t = page["titles"]
-    assert t["otherMain"] == "Another system: never Main"
+    assert t["otherMain"] == "Our calls only: listening and views; no transcription or alert change"
+    assert t["sealedMain"] == "Encrypted or Activity only: never Our calls"
     assert t["countyAlerts"] == "County: pre-alerts by the intel packs (Settings > System > Intel)"
     assert t["sealed"] == "Encrypted: never decoded" and t["activity"].startswith("Logged")
     assert t["record"].endswith("Tier: Transcribe")
@@ -417,12 +424,15 @@ def test_the_chain_shows_at_once_and_is_sent_as_one_switch(page):
     # Record on, then Transcribe on: each by itself (Transcribe has Record already)
     assert page["transcribeOn"]["posted"] == [{"source": "p25:mrrs:9564", "transcribe": True}]
     assert page["transcribeOn"]["pending"] == {"transcribe": True}
-    assert page["transcribeOn"]["look"] == {"record": "on", "transcribe": "on", "alerts": "off", "main": "off disabled",
+    assert page["transcribeOn"]["look"] == {"record": "on", "transcribe": "on", "alerts": "off", "main": "off",
                                             "activity": "-"}
     assert page["activity"]["posted"] == [{"source": "p25:mrrs:9213", "tier": "off"}]
     assert page["activity"]["look"]["activity"] == "off"
-    for k in ("sealedRecord", "otherMain", "countyAlerts"):
+    for k in ("sealedRecord", "sealedMain", "countyAlerts"):
         assert page[k]["posted"] == [], k
+    om = page["otherMain"]                                  # MRRS's Main: Our calls only, one switch, nothing chained
+    assert om["posted"] == [{"source": "p25:mrrs:9570", "main": True}] and om["pending"] == {"main": True}
+    assert om["now"]["main"] == "on" and om["look"]["main"] == "on"
     assert page["countyMain"]["posted"] == [{"source": "p25:westchester:307", "main": False}]
 
 
@@ -430,7 +440,7 @@ def test_record_on_from_off_is_record_only_never_the_files_tier(page):
     # PD Dispatch's file says alert: Record alone would bring Transcribe and Alerts back a poll later (TalkgroupPrefs.set)
     r = page["recordOn"]
     assert r["posted"] == [{"source": "p25:mrrs:9211", "record": True, "transcribe": False}]
-    want = {"record": "on", "transcribe": "off", "alerts": "off", "main": "off disabled", "activity": "-"}
+    want = {"record": "on", "transcribe": "off", "alerts": "off", "main": "off", "activity": "-"}
     assert r["now"] == want and r["look"] == want          # shown at once, and what the server made of it
 
 
@@ -438,7 +448,7 @@ def test_alerts_on_from_off_shows_the_chain_at_once(page):
     r = page["alertsFromOff"]
     assert r["posted"] == [{"source": "p25:mrrs:9211", "alerts": True}]
     assert r["pending"] == {"alerts": True, "transcribe": True, "record": True}
-    want = {"record": "on", "transcribe": "on", "alerts": "on", "main": "off disabled", "activity": "-"}
+    want = {"record": "on", "transcribe": "on", "alerts": "on", "main": "off", "activity": "-"}
     assert r["now"] == want and r["look"] == want
 
 

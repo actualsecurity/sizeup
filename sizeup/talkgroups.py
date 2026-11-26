@@ -10,7 +10,7 @@ records except encrypted talkgroups (they can't be decoded anyway). Choices are 
 More than one P25 system (GitHub #409, sizeup/sourcekeys.py): a talkgroup number is only unique inside its system, so
 every method takes the system too (`system`: "" or the county's name = the county system, as before). A talkgroup of
 another system (`others`: {system: {tg: info}}, from sizeup/radio/systems.py) has a tier instead of the switches
-(sizeup/tiers.py: alert, text, record, off, activity): Record follows the tier and it is never Main (its traffic is
+(sizeup/tiers.py: alert, text, record, off, activity): Record follows the tier and its Main is Our calls only (`ours`; the county's `main` is untouched; its traffic is
 context, never our incident's). The county's choices stay in talkgroups.json under the bare number, as a release from
 before this reads them; the other systems' are in talkgroups_systems.json under "p25:<system>:<tg>". A talkgroup
 granted on another system that isn't in its file is counted as unknown (unknown()).
@@ -169,10 +169,31 @@ class TalkgroupPrefs:
         return p.get("record", not self.info.get(k, {}).get("encrypted", False))
 
     def main(self, tg: int, system: str = "") -> bool:
+        """The COUNTY's Main: the incident's talkgroups (attach, speech-to-text class, automode, dispatch coverage).
+        Another system's is never Main in this sense (its switch is `ours`, below)."""
         k = self._k(tg, system)
         if isinstance(k, tuple):
             return False                      # another system's traffic is context: never our incident's
         return self._prefs.get(k, {}).get("main", k in self.main_default)
+
+    def sealed(self, tg: int, system: str = "") -> bool:
+        """Another system's talkgroup whose Main stays off: encrypted, or Activity only."""
+        k = self._k(tg, system)
+        return isinstance(k, tuple) and (bool(self.info.get(k, {}).get("encrypted")) or self.tier(tg, system) == tiers.ACTIVITY)
+
+    def ours(self, tg: int, system: str = "") -> bool:
+        """Part of Our calls (the Our calls view, Listening's Our calls and its "Our calls only"): the county's Main,
+        or another system's Main switch, which means this and nothing else (no transcription, alert or automode change)."""
+        k = self._k(tg, system)
+        if not isinstance(k, tuple):
+            return self.main(tg)
+        return bool(self._prefs.get(k, {}).get("main")) and not self.sealed(tg, system)
+
+    def ours_others(self) -> list[tuple[str, int]]:
+        """[(system, tg)] of the other systems' talkgroups with Main on."""
+        with self._lock:
+            keys = [k for k, v in self._prefs.items() if isinstance(k, tuple) and v.get("main")]
+        return sorted(k for k in keys if self.ours(k[1], k[0]))
 
     def set_tier(self, tg: int, tier: str, system: str = "") -> str | None:
         """A tier for a talkgroup of another system. None, or why not."""
@@ -255,7 +276,17 @@ class TalkgroupPrefs:
 
     def set(self, tg: int, record: bool | None = None, main: bool | None = None, system: str = "") -> None:
         k = self._k(tg, system)
-        if isinstance(k, tuple):              # another system's: Record is its tier, and it is never Main
+        if isinstance(k, tuple):              # another system's: Record is its tier; Main is only Our calls (`ours`)
+            if main is not None and k in self.info and not self.sealed(tg, system):
+                with self._lock:
+                    p = self._prefs.setdefault(k, {})
+                    if main:
+                        p["main"] = True
+                    else:
+                        p.pop("main", None)
+                        if not p:
+                            self._prefs.pop(k, None)
+                self.save()
             if record is not None and bool(record) != self.record(tg, system):
                 enc = bool(self.info.get(k, {}).get("encrypted"))
                 back = tiers.default(enc, self.info.get(k, {}).get("tier"))
@@ -321,7 +352,7 @@ class TalkgroupPrefs:
                              # #409 / #415: the source, qualified by its system; `key`: where its speech-to-text
                              # choices are (sizeup/channels.py); tier None: the county's own switches
                              "system": sysname or self.county, "source": sources.p25(sysname or self.county, tg),
-                             "key": sources.channel_key(sysname, tg, self.county), "ours": main,
+                             "key": sources.channel_key(sysname, tg, self.county), "ours": self.ours(tg, sysname),
                              # its service: the admins' for this source (sourcekeys.overridden), else automatic
                              "service": sources.service(i.get("group") or "", i.get("service") or "",
                                                         key=sources.p25(sysname or self.county, tg)),

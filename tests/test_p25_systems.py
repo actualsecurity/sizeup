@@ -186,8 +186,8 @@ def test_tiers_per_talkgroup_and_the_county_file_stays_as_an_older_release_reads
     assert p.set_tier(PD, "transcribe", "mrrs") is None                       # the older word for it
     assert "encrypted" in p.set_tier(PD_SECURE, "record", "mrrs") and p.set_tier(PD_SECURE, "off", "mrrs") is None
     assert "Record / Main" in p.set_tier(307, "alert") and "one of" in p.set_tier(PD, "loud", "mrrs")
-    p.set(PD, main=True, system="mrrs")                                       # never Main
-    assert not p.main(PD, "mrrs")
+    p.set(PD, main=True, system="mrrs")                                       # Our calls only: never the county's Main
+    assert not p.main(PD, "mrrs") and p.ours(PD, "mrrs") and p.ours_others() == [("mrrs", PD)]
     p.set(PD, record=False, system="mrrs")
     assert p.tier(PD, "mrrs") == "off"
     p.set(PD, record=True, system="mrrs")
@@ -195,14 +195,14 @@ def test_tiers_per_talkgroup_and_the_county_file_stays_as_an_older_release_reads
     # the county's choices: bare numbers only (a release from before this does int(key) on every one)
     assert json.loads((tmp_path / "talkgroups.json").read_text()) == {"307": {"record": False}}
     assert json.loads((tmp_path / "talkgroups_systems.json").read_text()) == {
-        "p25:mrrs:9211": {"tier": "alert"}, "p25:mrrs:9213": {"tier": "off"}}
+        "p25:mrrs:9211": {"tier": "alert", "main": True}, "p25:mrrs:9213": {"tier": "off"}}
     again = prefs(tmp_path)
     assert again.tier(PD_SECURE, "mrrs") == "off" and not again.record(307)
     rows = {r["source"]: r for r in again.state()}
     assert rows["p25:mrrs:9211"] | {"count": 0, "last": None} == {
         "tg": PD, "name": "PD Dispatch", "group": "Police", "encrypted": False, "record": True, "main": False,
         "count": 0, "last": None, "dropped": 0, "system": "mrrs", "source": "p25:mrrs:9211", "key": "p25:mrrs:9211",
-        "ours": False, "service": "police", "service_auto": "police", "department": "", "tier": "alert"}
+        "ours": True, "service": "police", "service_auto": "police", "department": "", "tier": "alert"}
     assert (rows["p25:westchester:307"]["key"], rows["p25:westchester:307"]["tier"]) == ("tg:307", None)
     assert rows["p25:mrrs:9121"]["department"] == "Metro-North"
 
