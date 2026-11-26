@@ -1134,10 +1134,10 @@ class IntelEngine:
             return True
         mine_entries = self._event_entries(pack, ev, entry.at)
         shared = frozenset(u for u in entry.units & frozenset(u for e in mine_entries for u in e.units)
-                           if not _placeholder(u))
+                           if not _unit_placeholder(u))
         if shared and not self._busy(pack, ev, shared, entry.at):
             return True                       # (a unit on two or more open jobs: only words or the place tie it)
-        if (entry.talker and not entry.dispatcher and not _placeholder(entry.talker)
+        if (entry.talker and not entry.dispatcher
                 and entry.talker in {e.talker for e in mine_entries if e.talker and not e.dispatcher}):
             return True
         # "now at", "last seen at": the one moving incident open on this source
@@ -2292,14 +2292,11 @@ def rung(evidence: list, damp: list, thr: float, cues: list = ()) -> str:
     return modes[-1] if modes else "off"
 
 
-PLACEHOLDER_TALKER = re.compile(r"(unknown|unk|unidentified)\b.*|(radio|id|rid)?\s*#?\d+", re.I)
-
-
-def _placeholder(who: str) -> bool:
-    """A talker or unit that says nothing about the job: "unknown" / "unknown radio", a bare radio ID, a department's
-    placeholder (DPT239 ...: sizeup/cad/mapview.is_placeholder). Never a tie between two rows."""
-    w = str(who or "").strip()
-    if not w or PLACEHOLDER_TALKER.fullmatch(w):
+def _unit_placeholder(unit: str) -> bool:
+    """A department's placeholder unit (DPT239 ...: sizeup/cad/mapview.is_placeholder, a CAD unit placeholder): never a
+    tie between two rows. Talkers tie as they are (a bare radio ID is most MRRS talkers'), within window_s of air."""
+    w = str(unit or "").strip()
+    if not w:
         return True
     try:
         from sizeup.cad.mapview import is_placeholder
