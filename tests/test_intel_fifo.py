@@ -101,10 +101,37 @@ def test_a_row_read_twelve_minutes_late_still_finds_its_neighbours():
     assert sorted(ev.traffic_ids) == ["l", "n"] and ev.first_at == t and ev.suppressed == "late" and pushed(sink) == []
 
 
-def test_a_row_read_twenty_minutes_late_is_history():
-    t = 5000.0
-    e, sink = engine(clock=Clock(t + 1200))
-    assert e.feed(row("s", SHOTS, t)) == [] and e.stale == 1 and e.events.all() == [] and pushed(sink) == []
+def test_rows_read_twenty_minutes_and_three_hours_late_are_kept_at_log_never_pushed():
+    for late in (20 * 60, 3 * 3600):
+        t = 50_000.0
+        clock = Clock(t + late)
+        e, sink = engine(clock=clock)
+        [ev] = e.feed(row("s", "respond to 100 Example Ave, male with a gun", t))
+        assert ev.category == "weapons" and ev.first_at == t and (ev.suppressed, ev.mode) == ("late", "log")
+        assert pushed(sink) == [] and e.stale == 1
+        e.feed(row("n", FD, t + 40))                                   # read at the same time as its neighbour ...
+        [fc] = e.feed(row("m", SMELL, t + 30))
+        assert sorted(fc.traffic_ids) == ["m", "n"] and fc.suppressed == "late"   # ... and scored with it
+        clock.t += 60                                                  # fresh words now: a push of its own
+        assert e.feed(row("f", "respond to 100 Example Ave, male with a gun", clock.t - 5)) and len(pushed(sink)) == 1
+
+
+def test_an_old_row_never_reopens_or_pushes_an_event_again():
+    t = 50_000.0
+    clock = Clock(t + 5)
+    e, sink = engine(clock=clock)
+    [ev] = e.feed(row("s1", "shots fired near Sample St and Test Rd", t))
+    e.feed(row("s2", "disregard, units disregard", t + 20))
+    assert e.events.get(ev.id).note == "possibly cancelled"
+    clock.t = t + 20 * 60
+    e.feed(row("s3", "shots fired near Sample St and Test Rd", t + 30))    # aired after the disregard, read 20 min late
+    assert e.events.get(ev.id).note == "possibly cancelled" and len(pushed(sink)) == 1
+
+
+def test_a_row_over_a_day_old_is_never_read():
+    t = 500_000.0
+    e, sink = engine(clock=Clock(t + 25 * 3600))
+    assert e.feed(row("s", SHOTS, t)) == [] and e.stale == 1 and e.events.all() == [] and e.windows == {}
 
 
 def test_gpu_and_aws_results_for_adjacent_rows_out_of_order():

@@ -204,6 +204,7 @@ LATE_S = RELEASE_S                     # air-time order (FIFO): an event whose n
                                        # this is never pushed a first time ("late", at log), and a row that late never
                                        # pushes an event again (speech-to-text's HIGH class sheds a clip after 300 s too)
 WITHDRAWN = "source withdrawn"         # the note on an event whose only support was a row withdrawn since (_unsupport)
+IGNORE_S = 24 * 3600.0                 # a row older than this (or max_age_min if longer) is never read at all
 UNCLEAR = "unclear"                    # a transcript's status (#890: a loop, noise): withdrawn like an emptied text
 # a read-back of a held call: the address and these words only ("copy, that's going to be 40 Example Place"; "the
 # house is 40 Example Place"; "40 Example Place, the caller's house"). The building's nouns are read-back filler; any
@@ -718,8 +719,9 @@ class IntelEngine:
         if not text.strip() or str(row.get("status") or "") == UNCLEAR:
             # a text read before and emptied or marked unclear since (#890's re-ask): withdrawn, whatever its age
             return self._withdraw(row, tid) if tid in self._seen else []
-        if start and now - start > float(self.policy.cfg.get("max_age_min", 15)) * 60 and not row.get("late"):
-            self.stale += 1
+        max_age = float(self.policy.cfg.get("max_age_min", 15)) * 60
+        if start and now - start > max(IGNORE_S, max_age):
+            self.stale += 1                   # a backfill of days: never read (it can't flood the engine)
             if scoped:
                 self._count(now, "too_old", scoped)
             return []
@@ -728,6 +730,13 @@ class IntelEngine:
             if scoped:
                 self._count(now, "repeat", scoped)
             return []
+        if start and now - start > max_age:
+            # older than max_age_min (a catch-up, a startup backfill): still read, as context and a record at log
+            # ("late"), never a push, a re-push or a re-open (as a row #747 logged late)
+            self.stale += 1
+            if scoped:
+                self._count(now, "too_old", scoped)
+            row = dict(row, late=True)
         if scoped and policy_mod.quiet(self.policy.cfg, now, self.tz):
             self._count(now, "quiet", scoped)
         self._seen[tid] = sig
@@ -1414,14 +1423,14 @@ class IntelEngine:
             if ev is not None:
                 break
         after = ev is not None and at >= self._aired(pack, ev)    # aired after the disregard / de-escalation (FIFO)
-        if ev is not None and ev.note == "possibly cancelled" and speaks and after:
+        if ev is not None and ev.note == "possibly cancelled" and speaks and after and not entry.late:
             reopened = True                   # a nameless disregard, then the call again: it stands, pushed again
             ev.note = "re-opened"
         elif ev is not None and ev.note == WITHDRAWN and speaks:
             ev.note = ""                      # its words are back (a re-ask's clean text, another row saying it)
         elif ev is not None and ev.note == DEESCALATED and speaks and after:
             ev.note = ""                      # the weapon is back in it: the note goes; a safety category's escalation
-            if cd.get("safety") and pack.escalates(cat, entry.text, rules_mod.words(entry.text)):   # ("pulled out a gun",
+            if cd.get("safety") and pack.escalates(cat, entry.text, rules_mod.words(entry.text)) and not entry.late:   # ("pulled out a gun",
                 reopened, ev.note = True, "re-opened"                                               # never "in custody")
         if ev is None and not speaks:
             return None                       # a cue alone (another job's "respond to ...") never makes an event
@@ -1690,7 +1699,7 @@ class IntelEngine:
                 if ev.note != DEESCALATED or at < self._aired(pack, ev) or not self._same_job(pack, ev, entry, ws, mine):
                     continue                  # (a row that aired before the de-escalation, read late: undoes nothing)
                 now = self.clock()
-                if pack.is_safety(cat) and pack.escalates(cat, entry.text, ws):
+                if pack.is_safety(cat) and pack.escalates(cat, entry.text, ws) and not entry.late:
                     before = copy.deepcopy(ev)
                     ev.note, ev.last_at, ev.updated_at = "re-opened", max(ev.last_at, at), now
                     ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))

@@ -163,8 +163,8 @@ def test_out_of_scope_rows_are_never_read():
     for r in (row("f1", "smoke showing from the house", 1, source="tg:307", system="westchester", service="fire"),
               row("f2", "smoke showing from the house", 1, service="ems"),
               row("f3", "smoke showing from the house", 1, source="fm:FG1", system="analog", service="fire")):
-        assert e.feed(r) == []
-    assert sink.hits == []
+        e.feed(r)
+    assert not [h for h in sink.hits if h.pack == "police"] and not [ev for ev in e.events.all() if ev.pack == "police"]
 
 
 def test_every_hit_is_reported_shadow_and_below_threshold_too():
@@ -867,12 +867,12 @@ def test_a_startup_backfill_of_old_rows_pushes_nothing(live):
         tid = f"old{i}-t0"
         cad.comms.record(ctx_row(tid, text, now - 3600 - i))          # an hour old: the backfill replays them (the hook)
     cad.intel.drain()
-    assert n.sent == [] and cad.intel.events.open_events() == [] and cad.intel.stale == len(TRIGGER)
-    cad.intel_admin.settings_op("set", {"key": "max_age_min", "value": 120}, "test")     # configurable: read ...
-    cad.comms.on_context_text("old0-t0")
+    evs = cad.intel.events.rows()                                      # read as context and recorded at air time ...
+    assert n.sent == [] and cad.intel.stale == len(TRIGGER) and evs
+    assert all((ev["suppressed"], ev["mode"]) == ("late", "log") and ev["first_at"] <= now - 3600 for ev in evs)
+    cad.comms.record(ctx_row("days-t0", TRIGGER[0][0], now - 25 * 3600))    # past IGNORE_S: never read at all
     cad.intel.drain()
-    [ev] = cad.intel.events.open_events()                       # ... but an hour after it aired: recorded, never pushed
-    assert n.sent == [] and (ev.suppressed, ev.mode) == ("late", "log") and ev.first_at == now - 3600
+    assert len(cad.intel.events.rows()) == len(evs) and cad.intel.stale == len(TRIGGER) + 1 and n.sent == []
 
 
 def test_the_hook_firing_again_for_the_same_text_does_nothing(live):
