@@ -107,12 +107,14 @@ window.CadFeed = (() => {
     alertNew(rows);
   }
 
+  // a channel's one name (cad.js chName: radio-names.js), its real label where that isn't loaded
+  const ch = (t) => (typeof chName === "function" ? chName(t) : String((t && t.channel) || ""));
   function renderHead(f, talking) {
     const tgs = f.talkgroups || [];
     const live = talking.filter((e) => e.system === "p25" && tgs.includes(e.tg));
     const now = live.find((e) => !e.ended) || live[0] || null;
     const text = now ? `${now.ended ? "Ended" : "TX"} ${now.rig || now.alias || (now.radio_id ? `radio ${now.radio_id}` : "unknown")}`
-      + (tgs.length > 1 ? ` ${now.channel}` : "") : "";
+      + (tgs.length > 1 ? ` ${ch(now)}` : "") : "";
     const sig = JSON.stringify([f.title, f.channel, text, now && now.ended, now && now.dispatcher]);
     if (sig === st.headSig) return;
     st.headSig = sig;
@@ -171,13 +173,13 @@ window.CadFeed = (() => {
       if (st.seen.has(key)) continue;
       st.seen.add(key);
       if (flag && (!first || Date.now() / 1000 - t.start < 600) && typeof oursNamedText === "function") {
-        UI.toast(oursNamedText(t) + ": not an event", "err", `${hhmmss(t.start)} ${t.channel}`
+        UI.toast(oursNamedText(t) + ": not an event", "err", `${hhmmss(t.start)} ${ch(t)}`
           + (t.prealert ? `, phone rang ${hhmmss(t.prealert.at)}` : ""), 30000);
         continue;
       }
       if (first || !t.pc || !alertsOn() || !window.Radio) continue;
       const head = t.dispatcher ? "60 Control → Port Chester" : `${who(t)} → 60 Control`;
-      Radio.toast(`${head}: ${said(t)}`, `${hhmmss(t.start)} ${t.channel}, ${t.pc}`);
+      Radio.toast(`${head}: ${said(t)}`, `${hhmmss(t.start)} ${ch(t)}, ${t.pc}`);
     }
     if (st.seen.size > 500) st.seen = new Set(rows.map((t) => t.id));
   }

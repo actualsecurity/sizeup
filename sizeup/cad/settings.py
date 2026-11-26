@@ -71,6 +71,9 @@ Reset to default = drop the override (one item, or a whole section).
                                    key: name}}: the Radio page rail's folders, set for the department, and the channels'
                                    display names (#607, sizeup/cad/radiofolders.py; admins, from the rail's Edit or a
                                    name from Settings > Radios > Channels); not set: the automatic grouping
+    radio_shorts                   key a qualified source key -> a short label (1 to 24 characters) for the chips: the second
+                                   field beside a channel's name in Settings > Radios > Channels (sizeup/radionames.py:
+                                   every label on every page; admins); not set: its name
     radio_services                 key a source key (qualified: p25:<system>:<tg>, fm:<label>, air:<label>) -> fire | police
                                    | ems | transit | air | other: that source's service whatever its talkgroups file or
                                    its group's words say (sizeup/sourcekeys.py; admins, from Settings > Radios > Channels
@@ -121,6 +124,7 @@ from datetime import datetime
 from pathlib import Path
 
 from sizeup import channels as channels_mod
+from sizeup import radionames
 from sizeup.cad import alarms as alarms_mod
 from sizeup.cad import commonplaces, dispatcher, eta, feedtypes, mapview, radiofolders, reminders, runcards, tonelist
 from sizeup.cad import lists as lists_mod
@@ -221,6 +225,10 @@ PAGE_SECTION[FOLDERS_SECTION] = "radios"
 # -> a service; not set: automatic.
 SVC_SECTION = "radio_services"
 PAGE_SECTION[SVC_SECTION] = "radios"
+# A channel's or talkgroup's short label for chips (sizeup/radionames.py): a second field beside its name in Settings >
+# Radios > Channels, admins, audited as Radios. key a qualified source key -> the short label; not set: its name.
+SHORT_SECTION = radionames.SECTION
+PAGE_SECTION[SHORT_SECTION] = "radios"
 # The station metrics read back (#606, sizeup/cloud/metricsinsight.py): the suggested squelch's margin and the shift
 # warnings' thresholds, Settings > Radios > Signal, admins, audited as Radios. key -> a number (LIMITS); not set: DEFAULTS.
 SIGNAL_SECTION = metricsinsight.SECTION
@@ -627,6 +635,8 @@ class Editor:
         self.cad.premise_visible = dict(ov.get(PREMISE_SECTION) or {})     # premise notes by category (#403)
         self.cad.em_prominent = em_prominent(ov.get(EM_SECTION))          # the Radio page's loud emergencies
         self.cad.radio_folders = radiofolders.stored(ov)                  # the Radio page's folders (#607)
+        # one name per source, every label (sizeup/radionames.py): the folders' names and the chips' shorts
+        radionames.use(names=(self.cad.radio_folders or {}).get("names") or {}, shorts=ov.get(SHORT_SECTION) or {})
         self._use_services(ov)
         self.cad._state = None
         if getattr(self.cad, "intel", None) is not None:
@@ -1211,6 +1221,8 @@ class Editor:
         Channels; blank: its own again), admins,
         audited as Radios. base: the rev the edit started from (radiofolders.rev; "" the default): someone else saved
         meanwhile -> refused, nothing written."""
+        if action == "short":
+            return self._short_op(body, op)
         cur = radiofolders.stored(self.overrides())
         base = body.get("base")
         if base is not None and base != radiofolders.rev(cur):
@@ -1231,7 +1243,7 @@ class Editor:
             audit_key = f"{FOLDERS_SECTION}/names/{key}"
             old_s = ((cur or {}).get("names") or {}).get(key) or "default"
         else:
-            raise CadError("action: set, name or reset")
+            raise CadError("action: set, name, short or reset")
         if v == cur:                                    # nothing changes: nothing written, nothing audited
             return {"ok": True, "radio_folders": radiofolders.for_viewer(cur, sees_context=self.cad.comms._sees_context(),
                                                        hidden_labels=self.cad.context_labels())}
@@ -1240,6 +1252,29 @@ class Editor:
                             else ("radios", audit_key, old_s, ((v or {}).get("names") or {}).get(key) or "default")])
         return {**out, "radio_folders": radiofolders.for_viewer(v, sees_context=self.cad.comms._sees_context(),
                                                        hidden_labels=self.cad.context_labels())}
+
+    def shorts_page(self) -> dict:
+        """{source key: short} the admins chose, as this reader may know of them (another system's: signed in only)."""
+        sees = self.cad.comms._sees_context()
+        return {k: v for k, v in radionames.clean_shorts(self.section(SHORT_SECTION)).items()
+                if sees or not radiofolders.context_key(k)}
+
+    def _short_op(self, body: dict, op: str) -> dict:
+        """short {key, short}: a channel's or talkgroup's short label for chips (Settings > Radios > Channels, beside its
+        name; sizeup/radionames.py), blank: its name. Admins, audited as Radios (radio_shorts/<key>, old -> new)."""
+        key = radiofolders.name_key(body.get("key"))
+        if radiofolders.context_key(key) and not self.cad.comms._sees_context():
+            raise CadError("key: another system's talkgroup (sign in to name it)")
+        try:
+            v = radionames.clean_short(body.get("short"))
+        except ValueError as e:
+            raise CadError(str(e)) from None
+        cur = radionames.clean_shorts(self.section(SHORT_SECTION))
+        if cur.get(key, "") == v:                       # nothing changes: nothing written, nothing audited
+            return {"ok": True, "radio_shorts": self.shorts_page()}
+        out = self._commit([(SHORT_SECTION, key, v if v else REMOVE)], op,
+                           [("radios", f"{SHORT_SECTION}/{key}", cur.get(key) or "default", v or "default")])
+        return {**out, "radio_shorts": self.shorts_page()}
 
     def _mapd_op(self, action: str, body: dict, op: str) -> dict:
         """set {key: detail_zoom | active_zoom | board_detail_zoom | board_active_zoom, value} | reset {key}: admins."""
@@ -3645,6 +3680,14 @@ class Editor:
                 f[radiofolders.KEY] = radiofolders.clean(f[radiofolders.KEY])
             except CadError as x:
                 raise CadError(f"overrides.{FOLDERS_SECTION}.{x}") from None
+        for k, v in (ov.get(SHORT_SECTION) or {}).items():    # a source's short label (sizeup/radionames.py)
+            try:
+                ok = radiofolders.is_key(k) and radionames.qualified(k) == k and bool(radionames.clean_short(v))
+            except ValueError:
+                ok = False
+            if not ok:
+                raise CadError(f"overrides.{SHORT_SECTION}: {k!r} -> {v!r} (a qualified source key -> "
+                               f"a label of 1 to {radionames.SHORT_MAX} characters)")
         for k, v in (ov.get(SVC_SECTION) or {}).items():      # a source's service (sizeup/sourcekeys.py)
             if not radiofolders.is_key(k) or sourcekeys.service_key(k) != k or v not in sourcekeys.SERVICES:
                 raise CadError(f"overrides.{SVC_SECTION}: {k!r} -> {v!r} (a qualified source key -> "
