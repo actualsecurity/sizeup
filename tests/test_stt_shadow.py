@@ -7,6 +7,7 @@ Invented clips, units and texts."""
 from __future__ import annotations
 
 import json
+import time
 
 from sizeup import sttmodels, sttpool, sttscore as S
 from sizeup.stt import LIVE
@@ -62,7 +63,9 @@ def test_on_a_hub_an_aws_channels_candidate_runs_in_shadow_and_is_scored_against
         def post(self, path, body):
             if path.endswith(("/claim", "/hello", "/state")):
                 body = dict(body, models=[Q5, QWEN] if path.endswith("/claim") else body.get("models"),
-                            caps=["challenger"])
+                            caps=["challenger", "challenger_same_model"])
+                if path.endswith("/claim"):
+                    body["try_loaded"] = [Q5, QWEN]
             elif path.endswith("/complete") and self.jobs:
                 body = dict(body, model=self.jobs[-1].get("model") or Q5)
             return call(self.url + path, "POST", body, token=self.token)
@@ -95,6 +98,53 @@ def test_on_a_hub_an_aws_channels_candidate_runs_in_shadow_and_is_scored_against
         word = app._stt_models_word()
         assert Q8 in word["try"] and Q8 not in word["want"]         # (a candidate loaded on demand: never resident)
         assert app._hub_engine("FG1") == "pin:aws"                  # (nothing switches a channel by itself)
+    finally:
+        w.close()
+        hub.close()
+        fake.close()
+
+
+def test_an_unconfigured_aws_channels_default_candidate_gets_samples(tmp_path, fake_aws, monkeypatch):
+    """The hub re-review's HIGH: an unconfigured AWS channel's candidate is today's whisper, every worker's primary. It
+    gets samples on the worker's separate try instance of it (challenger_same_model, try_loaded), never the live server;
+    a worker without that instance gives none."""
+    from tests.fake_transcribe import FakeTranscribe
+    from tests.test_app import wait
+    from tests.test_channels import AWS_TEXT, aws_cfg
+    from tests.test_cloud import HubRun, call, hub_cfg
+    from tests.test_stt_pool import FakeWorker, pending_event, send
+
+    monkeypatch.setattr(sttpool, "CHALL_QUIET_S", 0.0)
+    monkeypatch.setattr(S, "SHADOW_PCT", 100.0)
+    loaded = {"try": []}
+
+    class PrimaryWorker(FakeWorker):
+        def post(self, path, body):
+            if path.endswith(("/claim", "/hello", "/state")):
+                body = dict(body, models=[Q5] if path.endswith("/claim") else body.get("models"),
+                            caps=["challenger", "challenger_same_model"])
+                if path.endswith("/claim"):
+                    body["try_loaded"] = list(loaded["try"])
+            elif path.endswith("/complete") and self.jobs:
+                body = dict(body, model=self.jobs[-1].get("model") or Q5)
+            return call(self.url + path, "POST", body, token=self.token)
+
+    fake = FakeTranscribe(phrases={500: AWS_TEXT})
+    hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
+    app = hub.app
+    app._pool_class = lambda item, key: LIVE
+    w = PrimaryWorker(hub.url, app.hub.workers.add("gpu-1"), text="Engine 61 on location").start()
+    try:
+        assert app.stt_choices.candidates("FG1", "fire") == [Q5]     # (unconfigured: today's whisper)
+        send(hub, pending_event("FG1-71"))                            # no separate instance yet: no sample
+        assert wait(lambda: app.stt_runs.of("FG1-71") != [], 20)
+        time.sleep(1.0)
+        assert not any(r["role"] == "shadow" for r in app.stt_runs.of("FG1-71")) and w.jobs == []
+        loaded["try"] = [Q5]                                          # (its separate try instance, loaded beside)
+        assert wait(lambda: Q5 in app.sttpool.workers["gpu-1"].try_models, 10)   # (its next claim says so)
+        send(hub, pending_event("FG1-72", seq=2))
+        assert wait(lambda: any(r["role"] == "shadow" and r["model"] == Q5 for r in app.stt_runs.of("FG1-72")), 30)
+        assert w.jobs[-1]["challenger"] is True and w.jobs[-1]["model"] == Q5
     finally:
         w.close()
         hub.close()

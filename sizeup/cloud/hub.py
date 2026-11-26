@@ -2383,7 +2383,7 @@ class HubApp(App):
         for key, at in list(self.__dict__.get("_shadow_seen", {}).items()):   # (#878: an AWS channel's candidates,
             if now - at <= 3600.0:                                              # while its clips come)
                 for m in ch.candidates(key, ch.service_of(key)):
-                    if m in ch.catalog and m not in want and m not in tries:
+                    if m in ch.catalog and m not in tries:   # (one served live: a separate try instance)
                         tries.append(m)
         word.update({"catalog": {"commit": build, "sha256": ch.digest}, "want": want,
                      "try": tries[:sttmodels.WANT_MAX]})

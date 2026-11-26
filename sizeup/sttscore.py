@@ -317,6 +317,8 @@ def shadow_summary(samples: list[dict], edits: list[tuple] = ()) -> dict:
             "time": {"aws": t_aws, "model": t_cand, "n": len(tpairs)},
             "edit": {"aws": e_aws, "model": e_cand, "n": len(edits)},
             "verdict": f"matches or beats AWS on {n} clips" if ok else "not yet", "ok": ok}
+# (on AWS's own 8 kHz input: a GPU live would get the station's 16 kHz, so the evidence understates it; and agreement
+# at SHADOW_AGREE_MIN means it matches AWS: "beats" needs the time or the edits, where AWS can lose)
 
 
 def sampled(clip_id: str, model: str, pct: float) -> bool:

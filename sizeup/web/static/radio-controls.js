@@ -1889,6 +1889,8 @@ window.RadioControls = (() => {
       sh.className = "tg-shadow sm " + (best && best.ok ? "ok" : "dim");
       const pct = (x) => (x == null ? "—" : `${Math.round(x * 100)}%`);
       sh.title = (sb.on ? `GPU candidates decode ${sb.pct}% of its clips in shadow, AWS the reference (idle GPU only)`
+                          + "\nOn AWS's 8 kHz input: a GPU live would get the station's 16 kHz (this understates it)"
+                          + "\nAgreement 80%+ means it matches AWS, not that it beats it"
                         : "Shadow off: no GPU candidate is tried on its clips")
         + (sb.models || []).map((m) => `\n${m.model}: ${m.verdict} · ids ${pct(m.ids)} (${m.ids_n}) · agree ${pct(m.agree)}`
           + (m.time.n ? ` · time ${pct(m.time.model)} vs ${pct(m.time.aws)} (${m.time.n})` : "")
