@@ -62,6 +62,7 @@ import time
 from datetime import datetime
 from typing import Callable
 
+from sizeup import logscrub
 from sizeup.cad.store import OPERATOR_MAX, TZ, CadError
 
 SECTION = "alarms"                         # settings_overrides section (audited under "system")
@@ -730,7 +731,7 @@ class Alarms:
                          max(1.0, now - end) if late else 0.0)).lastrowid
                 a = self.get(aid)
                 self.log(f"alarms: {'DRILL ' if a['drill'] else ''}{level.upper()} {line(a)}"
-                         + (f": {text}" if text else ""))
+                         + (f" ({logscrub.said(text)})" if text else ""))     # (never the words)
                 if level == "alarm":
                     pushed = a
             else:

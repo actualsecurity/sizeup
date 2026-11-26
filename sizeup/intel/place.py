@@ -31,6 +31,13 @@ Spoken forms beyond what a page says (radiogeo depth):
     "I-95 northbound exit 21", "287 mile marker 10"   the highway exit or marker (the place search, when given)
 Per-domain thresholds (DOMAIN_PARAMS): police transcripts are noisier than a page, so a reading needs a higher score to
 be confirmed and a sound-alike street must be closer. pagegeo's own values (pages) are unchanged.
+Town prior (scope "prefer", engine.py _town_prior): on a source shared by several towns, the dispatching department's
+town (its talker's label, Settings > Radios; sizeup/intel/talkers.py) is read first, as a callsign's is, and a reading
+there beats one elsewhere within PRIOR_BONUS of its score. A preference only, and it never confirms: the reading over
+every town is always made too, and only it may confirm (a reading of the talker's town alone, or a corner or block
+picked there, is unconfirmed unless the reading over every town confirms the same place; the other town stays an
+alternative). Words that name a town ("... in <Town>") drop it, a confirmed or more precise reading elsewhere still
+wins, and a callsign said (below) comes first, as before.
 HQ narrowing: a headquarters callsign said alone (data/pd_units.json, on its own system and service: police "908" is
 Port Chester PD's, "266" Rye PD's) holds the reading to that department's town first.
 WHERE score: the locator's, + READBACK_BONUS for each further transmission in the window that repeats the street, -
@@ -61,6 +68,7 @@ RANK = {"address": 0, "intersection": 1, "block": 2, "landmark": 3, "street": 4,
 DOMAIN_PARAMS = {"police": {"confirm": 0.8, "rival": 0.1, "rival_m": 200, "sound_min": 0.7, "corner_m": 200}}
 CORNER_M = 200.0               # "N <street> at <cross>": the address confirms only this close to where they meet
 READBACK_BONUS, RIVAL_PENALTY = 0.08, 0.15
+PRIOR_BONUS = 0.1              # the talker's town prior (scope "prefer"): a reading there wins a near tie only
 SUFFIX = (r"(?:st|street|ave|avenue|av|rd|road|pl|place|ln|lane|dr|drive|blvd|boulevard|ct|court|pkwy|parkway|ter|terrace|"
           r"way|hwy|highway|tpke|turnpike|cir|circle)")
 STREET = rf"((?:[a-z]+\s+){{0,3}}?[a-z]+\s+{SUFFIX})"
@@ -195,6 +203,28 @@ def hq_towns(text: str, system: str, service: str) -> list[str]:
     return out
 
 
+DEPT_AFTER = re.compile(r"\s+(?:pd|police|fd|fire|ems|department|dept)\b", re.I)
+
+
+def prior_towns(text: str, towns, prefer) -> list[str]:
+    """The talker's town prior (scope "prefer": the dispatching department's town, engine.py _town_prior), kept only on
+    a source shared by several towns and only while the words name none of them as a place ("... in <Town>": that
+    town wins, never the prior; "<Town> PD" is who, not where). [] otherwise: read as before."""
+    towns = [t for t in towns or () if t]
+    out = [t for t in prefer or () if t in towns]
+    if len(towns) < 2 or not out:
+        return []
+    seen: list[tuple[int, int]] = []          # longest names first: "<Town> Brook" is never also "<Town>"
+    for t in sorted(towns, key=len, reverse=True):
+        for m in re.finditer(rf"(?<![A-Za-z]){re.escape(t)}(?![A-Za-z])", text or "", re.I):
+            if any(a <= m.start() < b for a, b in seen):
+                continue
+            seen.append(m.span())
+            if not DEPT_AFTER.match(text, m.end()):
+                return []
+    return out
+
+
 def has_cue(text: str) -> bool:
     """Worth the gazetteer: an address-like phrase, an intersection, block or highway cue."""
     from sizeup.cad.radiolog import addresses_in
@@ -237,18 +267,31 @@ class Locator:
             return None
         towns = list(scope.get("towns") or ())
         hq = [t for t in hq_towns(text, system, service) if not towns or t in towns]
+        lean = [] if hq else prior_towns(text, towns, scope.get("prefer"))   # a callsign said beats who said it
         # the pack's own, else its service's (a second police pack is read as strictly as the first)
         params = DOMAIN_PARAMS.get(str(scope.get("pack") or service)) or DOMAIN_PARAMS.get(service, {})
+        only = bool(scope.get("only"))
         cands: list[Place] = []
-        for home in ([hq] if hq else []) + [towns]:
-            p = self._page(clean, tuple(home), params, only=bool(scope.get("only")))
+        if lean:
+            # the talker's town is read first, but never confirms: only the reading over every town may (the same
+            # street and cross street in two towns is no sure place, whoever says it); the other town stays an alt
+            mine = self._page(clean, tuple(lean), params, only=only)
+            every = self._page(clean, tuple(towns), params, only=only)
+            if mine is not None:
+                if not (every is not None and every.confirmed and every.label == mine.label):
+                    _unsure(mine, every)
+                cands.append(mine)
+            if every is not None:
+                cands.append(every)
+        for home in ([] if lean else ([hq] if hq else []) + [towns]):
+            p = self._page(clean, tuple(home), params, only=only)
             if p is not None:
                 cands.append(p)
                 if p.confirmed:
                     break
         for fn in (self._spoken_cross, self._block, self._highway):
             try:
-                p = fn(clean, towns, hq)
+                p = fn(clean, towns, hq, lean)
             except Exception:  # noqa: BLE001 - one form failing never loses the others
                 p = None
             if p is not None:
@@ -278,7 +321,8 @@ class Locator:
                 else:
                     addr.basis = "; ".join(x for x in (addr.basis, f"{int(d)} m from {corner}") if x)
                 break
-        best = min(cands, key=lambda p: (not p.confirmed, RANK.get(p.precision, 9), -p.where_score))
+        best = min(cands, key=lambda p: (not p.confirmed, RANK.get(p.precision, 9),
+                                         -(p.where_score + (PRIOR_BONUS if p.town in lean else 0.0))))
         rel = RELATIVE.search(clean)
         if rel:
             best.radius_m = max(best.radius_m * 2, 100.0)
@@ -314,7 +358,7 @@ class Locator:
                      label=m.label, town=m.municipality or "", confirmed=bool(g.confirmed), where_score=round(float(b.score), 3),
                      alts=[r.as_alt() for r in g.alternatives[:4]], basis=g.why or b.why())
 
-    def _spoken_cross(self, clean: str, towns: list, hq: list) -> Place | None:
+    def _spoken_cross(self, clean: str, towns: list, hq: list, lean=()) -> Place | None:
         cx = self.cross()
         if cx is None:
             return None
@@ -325,8 +369,10 @@ class Locator:
                 rows = [r for r in rows if r["town"] in hq] or rows
             if not rows:
                 continue
+            sure = len(rows) == 1 and rows[0].get("exact", 0) >= 1     # over every town (lean only orders them)
+            if lean:
+                rows = sorted(rows, key=lambda x: x["town"] not in lean)
             r = rows[0]
-            sure = len(rows) == 1 and r.get("exact", 0) >= 1
             return Place("intersection", r["lat"], r["lon"], RADIUS["intersection"] if sure else 150.0, r["label"],
                          r["town"], sure, round(float(r.get("confidence", 0.8)) * (1.0 if sure else 0.8), 3),
                          [{"label": x["label"], "lat": x["lat"], "lon": x["lon"], "kind": "intersection", "town": x["town"],
@@ -334,7 +380,7 @@ class Locator:
                          "said as two streets" if sure else f"{len(rows)} places where they meet")
         return None
 
-    def _block(self, clean: str, towns: list, hq: list) -> Place | None:
+    def _block(self, clean: str, towns: list, hq: list, lean=()) -> Place | None:
         m = BLOCK.search(clean)
         if not m:
             return None
@@ -344,6 +390,8 @@ class Locator:
                 and (not towns or c.municipality in towns)]
         if hq:
             hits = [c for c in hits if c.municipality in hq] or hits
+        elif lean:
+            hits = sorted(hits, key=lambda x: x.municipality not in lean)
         if not hits:
             return None
         c = hits[0]
@@ -352,7 +400,7 @@ class Locator:
         return Place("block", c.lat, c.lon, RADIUS["block"], label, c.municipality or "", False,
                      round(min(0.9, float(c.confidence)), 3), [], "said as a block")
 
-    def _highway(self, clean: str, towns: list, hq: list) -> Place | None:
+    def _highway(self, clean: str, towns: list, hq: list, lean=()) -> Place | None:
         m = HIGHWAY.search(clean)
         if not m or self.places is None:
             return None
@@ -364,6 +412,22 @@ class Locator:
                 return Place("landmark", r["lat"], r["lon"], 300.0, r["label"], r.get("sub") or "", False,
                              round(float(r.get("quality", 0.6)), 3), [], "highway " + r["kind"])
         return None
+
+
+def _unsure(p: Place, other: Place | None) -> None:
+    """A reading of the talker's town alone, left unconfirmed (the town prior never confirms), with the reading over
+    every town and its alternatives as its alternatives."""
+    p.confirmed = False
+    p.radius_m = max(RADIUS.get(p.precision, 0.0), 150.0)
+    alts = list(p.alts)
+    if other is not None:
+        if other.label != p.label:
+            alts.append({"label": other.label, "lat": other.lat, "lon": other.lon, "kind": other.precision,
+                         "town": other.town, "confidence": other.where_score})
+        alts += list(other.alts)
+    seen = {p.label}
+    p.alts = [a for a in alts if a.get("label") not in seen and not seen.add(a.get("label"))][:4]
+    p.basis = "; ".join(x for x in (p.basis, "the talker's town first") if x)
 
 
 def _dist_m(a, b) -> float:

@@ -66,7 +66,7 @@ import numpy as np
 
 from sizeup.api.v1.switches import Switches
 from sizeup.config import P25_JOB, Config, ConfigError, airband_owner, load
-from sizeup import janitor, tz
+from sizeup import janitor, logscrub, tz
 from sizeup.cad import Cad
 from sizeup.cad.alarms import STUCK_WITHIN_S
 from sizeup.cad.api import CadApi
@@ -348,7 +348,7 @@ class WhisperService:
     def __init__(self, binary: str, model: str, port: int, threads: int, beam_size: int = 0,
                  state_path: str | Path | None = None):
         threads = min(int(threads or 0) or whisper_threads(), whisper_threads())   # (start-whisper does the same, #300)
-        self.argv = [binary, "-m", model, "--host", "127.0.0.1", "--port", str(port), "-t", str(threads)]
+        self.argv = [binary, "-m", model, "--host", "127.0.0.1", "--port", str(port), "-l", "en", "-t", str(threads)]
         if beam_size > 1:
             self.argv += ["-bs", str(beam_size)]
         self.port, self.state, self.detail = port, "starting", ""
@@ -951,7 +951,7 @@ class App:
                                     context=cfg.atc_context, context_s=cfg.atc_context_s, log=log)
                 log(f"atc: airport pre-alerts from {', '.join(airband)} ({len(self.atc.rules.rules)} rules)")
             except (OSError, ValueError, KeyError) as e:
-                log(f"atc: WARNING the pre-alert rules didn't load ({type(e).__name__}: {e}): no HPN ATC pre-alerts")
+                log(f"atc: WARNING the pre-alert rules didn't load ({type(e).__name__}): no HPN ATC pre-alerts")   # (never {e}: rule text)
         # ... and the ones that build up over several transmissions (#369, sizeup/airport_watch.py): an abnormal
         # go-around followed through its frequency changes (_atc, _atc_view), "alert level N" on 60 Control (the CAD's)
         self.cad.airport_watch.configure(cfg.channels, self._atc_aircraft, cfg.atc_alert_level_incident,
@@ -1017,7 +1017,7 @@ class App:
             from sizeup.geo.pagegeo import locate_page
             return locate_page(self.gaz, d.text, tone_departments).as_geo()
         except Exception as e:
-            log(f"geocode error for {d.location!r}: {type(e).__name__}: {e}")
+            log(f"geocode error ({len(d.location or '')} characters): {type(e).__name__}")     # (never the address)
             return None
 
     def _geocode_text(self, q: str) -> list[dict]:
@@ -1026,7 +1026,7 @@ class App:
             return [{k: getattr(m, k) for k in ("label", "lat", "lon", "kind", "municipality", "precision")}
                     | {"confidence": round(float(m.confidence), 2)} | self._geocode_parts(m) for m in self.gaz.candidates(q)[:20]]
         except Exception as e:
-            log(f"geocode error for {q!r}: {type(e).__name__}: {e}")
+            log(f"geocode error ({len(q or '')} characters): {type(e).__name__}")   # (never what was typed: an address)
             return []
 
     @staticmethod
@@ -1864,8 +1864,14 @@ class App:
         for r in rows:
             r["tier_set"] = r["tier"] is not None
             if r["tier"] is None:
-                r["tier"] = tiers.derived(r["record"], self.channel_pref(r["key"])["transcribe"],
-                                          r["encrypted"])
+                tx = bool(self.channel_pref(r["key"])["transcribe"])
+                r["tier"] = tiers.derived(r["record"], tx, r["encrypted"])
+                # the switches beside the tier (Settings > Radios): the county's Transcribe is its channel choice and
+                # it has no Alerts (None: its pre-alerts are the intel packs', tiers.COUNTY_ALERTS)
+                r["transcribe"], r["alerts"] = tx, None
+            else:
+                sw = tiers.switches(r["tier"])
+                r["transcribe"], r["alerts"] = sw["transcribe"], sw["alerts"]
         return rows
 
     def p25_systems_state(self) -> list[dict]:
@@ -2100,12 +2106,10 @@ class App:
             self._atc(item)
             if item.status == stt_quality.UNCLEAR:      # (a late call's old words: never asked again, #747)
                 self._unclear(item, traffic_key(item), quiet=bool(getattr(item, "late", False)))
-            if item.status in ("no_speech", "pending"):
-                pass                                    # (a key-up said above; a row still transcribing: said with its text)
-            elif other:
-                log(f"{item.source}: transmission {item.id} ({item.status})")     # (#419: its words never in a log)
-            else:
-                log(f"{item.source}: {'[' + item.unit + '] ' if item.unit else ''}{item.text or '(' + item.status + ')'}")
+            # (its words never in a log: CloudWatch, #419; a row still transcribing is said with its fill, #927)
+            if item.status not in ("no_speech", "pending"):
+                log(f"{item.source}: transmission {item.id} ({item.status}, {logscrub.said(item.text)})"
+                    + (f" · unit {item.unit}" if item.unit and not other else ""))
             return
         if isinstance(item, Rerun):
             return self._rerun_done(item)
@@ -2117,7 +2121,7 @@ class App:
         self._save_page(page)
         self._page_to_cad(page)                     # its text in the log (before an event links it)
         self._emit("page_text", self._page_doc(page))
-        log(f"{page.label} {page.kind}: {page.raw or '(' + page.status + ')'}"
+        log(f"{page.label} {page.kind} {page.id}: {page.status}, {logscrub.said(page.raw)}"     # (never its words)
             + {True: " [read twice]", False: " [not read twice]"}.get(page.read_twice, ""))
         if page.status == stt_quality.UNCLEAR:
             self._unclear(page, page.label)
@@ -2202,12 +2206,9 @@ class App:
             log(f"speech-to-text: {item.id}: withdrawn by the hub, its text kept here only")
         else:
             self._emit("retext", self._fill_doc(item, pool))
-        if item.status == "no_speech":
-            return
-        if getattr(item, "system", ""):
-            log(f"{item.source}: transmission {item.id} ({item.status})")     # (#419: its words never in a log)
-        else:
-            log(f"{item.source}: {'[' + item.unit + '] ' if item.unit else ''}{item.text or '(' + item.status + ')'}")
+        if item.status != "no_speech":         # (its words never in a log: CloudWatch, #419)
+            log(f"{item.source}: transmission {item.id} ({item.status}, {logscrub.said(item.text)})"
+                + (f" · unit {item.unit}" if item.unit and not getattr(item, "system", "") else ""))
 
     @staticmethod
     def _fill_doc(item: Traffic, pool: bool = False) -> dict:
@@ -2279,10 +2280,10 @@ class App:
         name one of ours (IncidentStore.on_page). Returns the incident, or None."""
         inc = self.store.on_page(page.id, depts, d, at=page.start)
         if inc:
-            where = inc.geo["label"] if inc.geo else (inc.location or "location not found")
-            if inc.geo and inc.geo.get("confirmed") is False:
-                where = f"{inc.location or where} (location unconfirmed: {inc.geo.get('why') or 'not sure'}; best {where})"
-            log(f"INCIDENT {inc.incident_type} · {where} · {', '.join(inc.departments)}")
+            # (never its type, its address or its words in a log: an EMS type is a medical detail)
+            log(f"INCIDENT {inc.id} · {inc.category or 'call'} · "
+                f"{('location unconfirmed' if inc.geo.get('confirmed') is False else 'located') if inc.geo else 'no location'}"
+                f" · {', '.join(inc.departments)}")
             try:
                 ev = self.cad.from_monitor(inc)
                 if ev and tones_half is not None:       # its tones came as a transmission of their own
@@ -3025,7 +3026,15 @@ class App:
             page = next((p for p in self.pages if p.id == cid), None)
         item = page if page is not None else next(
             (x for x in list(self.store.loose) + [x for i in self.store.incidents for x in i.traffic] if x.id == cid), None)
+        had = item is not None and getattr(item, "status", "") == "done" and bool(
+            getattr(item, "raw" if page is not None else "text", ""))
         text, status, unclear = self._screen(item, text, status, language)    # (sizeup/stt_quality.py)
+        if unclear and had:                  # a re-run (or a late engine) that looped never blanks clean words: they
+            for k in ("quality", "unclear_text"):      # stay; only its run is kept (stt_runs, "unclear")
+                vars(item).pop(k, None)
+            log(f"{why} {cid}: {stt_quality.label(unclear['quality']).lower()} from {model or 'unknown'}: "
+                "the text it had stays")
+            return False
         alt = self._screen_alt(item, alt)
         if page is not None:
             if page.raw != text and (page.raw or page.status not in ("pending", "remote")):
@@ -3060,9 +3069,9 @@ class App:
             if not late and text:
                 self._atc(t, text)
         if changed:
-            # (another P25 system's words are never in a log, #419)
-            log(f"{why} {cid}: " + ("(text changed)" if self.clip_is_context(cid)
-                                    else text or ("(unclear)" if unclear else "(no speech)")))
+            # (no transcript's words are ever in a log: CloudWatch; #419 masked only another P25 system's)
+            log(f"{why} {cid}: text changed ({logscrub.said(text)}{', unclear' if unclear and not text else ''}, "
+                f"{model or '?'})")
         self._emit("retext", {"id": cid, "text": text, "status": status, "confidence": confidence, "model": model,
                               # (#927) the engine that wrote it, for the hub's choice between engines' texts
                               "engine": STATION_AWS if model.startswith(channels_model()) else STATION_WHISPER,
@@ -3499,7 +3508,7 @@ class App:
             try:
                 r.tick()
             except Exception as e:  # noqa: BLE001 - the aircraft layer goes on
-                log(f"atc vocabulary: {type(e).__name__}: {e}")
+                log(f"atc vocabulary: {type(e).__name__}")   # (never {e}: it can quote a term)
 
     def _intel_listen(self, intel):
         """The pre-alert pushes' "Listen" link (sizeup/intel/listen.py): the transmissions around it, stitched, behind a
@@ -3886,8 +3895,7 @@ class App:
         if getattr(item, "status", "") in ("error", "skipped") and job.alt is None and (not job.rerun or job.catchup):
             log(f"aws transcribe: {job.kind} {job.id}: a late answer, and the fallback had none: it is the text")
             return self._aws_done(job, text, conf)
-        log(f"aws transcribe: {job.kind} {job.id}: a late answer, kept as the alternative"
-            + ("" if self.clip_is_context(job.id) else f": {text}"))
+        log(f"aws transcribe: {job.kind} {job.id}: a late answer, kept as the alternative ({logscrub.said(text)})")
         self._set_alt(job.id, text, f"{channels_model()} (late)")
 
     def _aws_changed(self) -> None:
@@ -5593,17 +5601,29 @@ class App:
         return None
 
     def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None,
-                      tier: str | None = None, system: str = "") -> str | None:
+                      tier: str | None = None, system: str = "", transcribe: bool | None = None,
+                      alerts: bool | None = None) -> str | None:
         """POST /api/talkgroup: record = keep its calls; main = main list + attach to our incident. Another system's
-        talkgroup (#409: `system`, "" = the county's): tier = alert | text | record | off | activity."""
+        talkgroup (#409: `system`, "" = the county's): tier = alert | text | record | off | activity, or the switches
+        transcribe / alerts (with record), written as the tier they make (tiers.from_switches). The county's
+        Transcribe is its channel choice (/api/cad/settings/channels) and it has no Alerts: refused here."""
         if not self.p25:
             return "no P25 configured"
         qualified = system == self.tg.county             # sent as the county's source ("p25:westchester:<n>"): no doubt
         system = "" if system == self.tg.county else str(system or "")
         if system and not self.tg.known(int(tg), system):
             return f"no talkgroup {tg} on {system}"
+        if tier is not None and (transcribe is not None or alerts is not None):
+            return tiers.BOTH
         if tier is not None:
             return self.set_talkgroup_tier(tg, tier, system)
+        if transcribe is not None or alerts is not None:
+            if not system:
+                return (tiers.COUNTY_ALERTS if alerts is not None
+                        else "the county's Transcribe is its channel choice: /api/cad/settings/channels")
+            t, why = tiers.from_switches(self.tg.tier(int(tg), system), bool(self.tg.info[(system, int(tg))].get(
+                "encrypted")), record, transcribe, alerts)
+            return why or self.set_talkgroup_tier(tg, t, system)
         if not system and not qualified and (owners := self.tg.elsewhere(int(tg))):
             # a bare number is the county's: this one is another system's talkgroup (its Main / Record would have
             # landed on a county talkgroup that doesn't exist, an "Unknown" card): never written

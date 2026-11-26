@@ -17,13 +17,15 @@ UNCLEAR, never a confident transcript.
                   "thanks for watching"), or one that says one of STOCK_IN anywhere ("please subscribe")
     no_words      only punctuation or symbols
     not_english   whisper wrote another language (the radio here is English): the engine said so (language, from its
-                  verbose_json, when it is there), or over FOREIGN_LETTERS of the letters are non-ASCII, or over
-                  FOREIGN_SHARE of the words are other languages' function words (FOREIGN: Spanish, German, French,
-                  Portuguese, Icelandic ones no English sentence uses) and under ENGLISH_SHARE are English ones. A few
-                  accented place names, unit IDs and numbers in English stay English
+                  verbose_json, when it is there), or over FOREIGN_LETTERS of the letters are ones no Spanish or
+                  English name uses (NORDIC: þ ð æ ø å ö œ ß), or, in FOREIGN_MIN_WORDS words or more, over FOREIGN_SHARE
+                  are other languages' function words (FOREIGN: none a local place name is made of: no "el", "los",
+                  "del", "las") and under ENGLISH_SHARE are English ones. Accented place names and surnames ("José
+                  Peña", "El Camino Del Rio"), unit IDs and numbers in English stay English
 
-Never unclear: words with one of SAFETY in them ("mayday", "evacuate", "firefighter down" ...): a loop of those is
-still the text (an urgent call is never blanked; the alarms read it either way).
+Safety words (SAFETY: "mayday", "evacuate", "firefighter down" ...) are said again and again on purpose, often fast: a
+text with one is never judged by the fast-repeat rule (REPEAT_MIN in a row). A real loop (LOOP_MIN in a row, the
+cover rule, too many words for the clip) is unclear whatever it says: the alarms read an unclear row's words anyway.
 
 What happens to an unclear transcript (sizeup/app.py App._screen, on the CAD of record: the hub, or all-in-one): its
 status is UNCLEAR and its text "" (so nothing that reads the text acts on it: intel and its model, pre-alerts, page
@@ -46,7 +48,8 @@ LOOP_MIN = 8                             # a phrase this many times in a row: a 
 LOOP_MIN_ONE = 12                        # ... a single word
 REPEAT_MIN = 4                           # ... this many (a single word: REPEAT_MIN_ONE) only faster than LOOP_WPS
 REPEAT_MIN_ONE = 6
-LOOP_WPS = 4.0                           # (a call repeated on purpose is said slower than this: 2-3 words a second)
+LOOP_WPS = 6.0                           # (a call repeated on purpose, digits and all, is said slower than this; a loop
+                                         # runs at 100+ words a second)
 REPEAT_MAX_N = 12                        # phrases of up to this many words
 REPEAT_COVER = 0.5                       # ... or one phrase, LOOP_MIN times anywhere, over this share of the words
 REPEAT_COVER_WORDS = 16                  # (only in a text this long: a short one is judged by the runs alone)
@@ -61,13 +64,14 @@ STOCK_IN = ("thanks for watching", "thank you for watching", "please subscribe",
             "subscribe to my channel", "subtitles by", "amara org", "castingwords", "see you in the next video")
 SAFETY = re.compile(r"\b(mayday|emergency|evacuat\w*|help|get out|priority|urgent|firefighter down|man down|"
                     r"officer down|shots? fired|trapped|collapse\w*|abandon)\b")
-FOREIGN_MIN_WORDS = 5                    # (a shorter text is never judged by its language)
-FOREIGN_LETTERS = 0.15                   # non-ASCII letters, as a share of all letters
+FOREIGN_MIN_WORDS = 8                    # (a shorter text is never judged by its words)
+NORDIC = frozenset("þðæøåöœß")            # letters no Spanish (or English) name uses
+FOREIGN_LETTERS = 0.03                   # ... as a share of all letters (and two at least)
 FOREIGN_SHARE = 0.25                     # other languages' function words, as a share of the words ...
 ENGLISH_SHARE = 0.15                     # ... with English function words under this share
 FOREIGN = frozenset({
     # Spanish
-    "el", "los", "las", "que", "del", "por", "para", "una", "pero", "muy", "también", "tambien", "usted", "nosotros",
+    "que", "por", "para", "una", "pero", "muy", "también", "tambien", "usted", "nosotros",
     "hay", "yo", "señor", "esta", "está", "estoy", "aquí", "aqui", "ahora", "bueno", "gracias", "porque", "cuando",
     # German
     "der", "das", "und", "ist", "nicht", "ich", "wir", "ein", "eine", "mit", "auf", "für", "fur", "auch", "sehr",
@@ -78,7 +82,9 @@ FOREIGN = frozenset({
     # Portuguese
     "não", "você", "isso", "muito", "obrigado", "então", "entao",
     # Icelandic
-    "og", "að", "ekki", "það", "ég", "við", "hún", "sem", "með", "þetta", "já", "nei", "eða"})
+    "og", "að", "ekki", "það", "ég", "við", "hún", "sem", "með", "þetta", "já", "nei", "eða",
+    # ... as speech-to-text writes it without its letters
+    "eg", "thad", "thetta", "hann", "hvar", "hvad", "mjog", "nuna", "fyrir", "eftir", "takk", "vid"})
 ENGLISH = frozenset({"the", "and", "of", "to", "is", "a", "on", "at", "you", "we", "it", "that", "for", "with", "are",
                      "be", "this", "have", "i", "he", "she", "they", "out", "up", "go", "your", "from", "copy", "can",
                      "will", "there", "what", "just", "get", "in", "my", "our"})
@@ -95,11 +101,12 @@ def not_english(text: str, ws: list[str], language: str | None = None) -> bool:
     lang = str(language or "").strip().lower()
     if lang and lang not in ("en", "english") and not lang.startswith("en-"):
         return True
+    letters = [c for c in str(text).lower() if c.isalpha()]
+    nordic = sum(1 for c in letters if c in NORDIC)
+    if nordic >= 2 and nordic / len(letters) > FOREIGN_LETTERS:
+        return True
     if len(ws) < FOREIGN_MIN_WORDS:
         return False
-    letters = [c for c in str(text) if c.isalpha()]
-    if letters and sum(1 for c in letters if ord(c) > 127) / len(letters) > FOREIGN_LETTERS:
-        return True
     foreign = sum(1 for w in ws if w in FOREIGN) / len(ws)
     english = sum(1 for w in ws if w in ENGLISH) / len(ws)
     return foreign > FOREIGN_SHARE and english < ENGLISH_SHARE
@@ -144,11 +151,12 @@ def cover(ws: list[str]) -> float:
     return best
 
 
-def repeated(ws: list[str], seconds: float | None = None) -> bool:
+def repeated(ws: list[str], seconds: float | None = None, safety: bool = False) -> bool:
+    """A loop. safety: the text says a safety word (never judged by the fast-repeat rule alone)."""
     times, n = longest_run(ws)
     if times >= (LOOP_MIN_ONE if n == 1 else LOOP_MIN):
         return True
-    fast = seconds is not None and seconds > 0 and len(ws) > LOOP_WPS * float(seconds)
+    fast = not safety and seconds is not None and seconds > 0 and len(ws) > LOOP_WPS * float(seconds)
     if fast and times >= (REPEAT_MIN_ONE if n == 1 else REPEAT_MIN):
         return True
     return len(ws) >= REPEAT_COVER_WORDS and cover(ws) > REPEAT_COVER
@@ -164,11 +172,9 @@ def assess(text: str, seconds: float | None = None, language: str | None = None)
     if not ws:
         return "no_words"
     said = " ".join(ws).replace("'", "")
-    if SAFETY.search(said):
-        return ""                        # an urgent call's words are never blanked, loop or not
     if said in STOCK or any(p in said for p in STOCK_IN):
         return "stock_phrase"
-    if repeated(ws, seconds):
+    if repeated(ws, seconds, bool(SAFETY.search(said))):
         return "repeated"
     if not_english(raw, ws, language):
         return "not_english"

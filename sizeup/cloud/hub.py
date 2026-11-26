@@ -104,7 +104,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
-from sizeup import channels, sourcekeys, stt_quality, stt_terms
+from sizeup import channels, sourcekeys, stt_quality, stt_terms, tiers
 from sizeup import tz
 from sizeup import app as app_mod
 from sizeup import fence as fence_mod
@@ -173,6 +173,7 @@ EXTRA = re.compile(r"[a-z][a-z0-9_]{0,30}")      # a transmission's field names,
 
 LANDED = ("done", "no_speech", stt_quality.UNCLEAR)    # a transcript is in (unclear: its words kept apart, its text "")
 UNCLEAR_TRIED_MAX = 5000      # clips an unclear transcript was asked again of another engine for, remembered (once each)
+UNCLEAR_AWS_SHARE = 0.9       # ... of AWS only while its pool has spent under this share of its monthly limit
 
 
 class StationOffline(RuntimeError):
@@ -751,6 +752,11 @@ class Hub:
         # Record / Main / Transcribe) as its own page has it (App.talkgroups_state), from the tier each carries
         self.talkgroups = [dict(r, tier_set=r.get("tier") is not None) if isinstance(r, dict) and "tier_set" not in r
                            else r for r in tgs]
+        # the switches beside the tier (App.talkgroups_state): from its tier when a station from before them sent none
+        self.talkgroups = [r if not isinstance(r, dict) or "alerts" in r else
+                           dict(r, transcribe=r.get("tier") in tiers.TRANSCRIBED,
+                                alerts=r.get("tier") == tiers.ALERT if r.get("tier_set") else None)
+                           for r in self.talkgroups]
         if self.talkgroups:     # a source's re-tag that waited for what the station lists (its automatic service)
             getattr(getattr(self.app, "cad", None), "retag_resume", lambda **k: None)(rows_came=True)
 
@@ -1080,6 +1086,7 @@ class HubApp(App):
         self._aws_late_wait: set[str] = set()          # timed out, not a priority channel: AWS's late answer is the text
         self._unclear_tried: dict[str, float] = {}     # id -> when its unclear transcript went to another engine (once)
         self._unclear_lock = threading.Lock()
+        self._unclear_station: set[str] = set()       # ids re-asked of the station's whisper: its result is no re-run's
         self._pending_seen: dict[str, float] = {}      # page id -> when the sweep first saw it waiting for whisper
         self._aws_was_ok: bool | None = None           # AWS could take audio at the last sweep (_aws_resend)
         self._stt_cond = threading.Condition()          # an STT input stored (read_stt_audio's wait_s)
@@ -1117,7 +1124,8 @@ class HubApp(App):
             reg.stations_on(wid.removeprefix(STATION_PREFIX)) if wid.startswith(STATION_PREFIX) else reg.active(wid)))
         # a station's whisper is a pool worker under its own station identity (#639 phase 2): no token more to issue,
         # rotate or revoke; revoking the station ends its worker too
-        self.stt_api = WorkerApi(reg, self.sttpool, self._may_write_audio, log, station=self.hub.station_of)
+        self.stt_api = WorkerApi(reg, self.sttpool, self._may_write_audio, log, station=self.hub.station_of,
+                                 src_fast=self._station_stt_fast)
         from sizeup.cloud.metricsbackup import S3Copies
         self.stt_runs = sttruns.Runs(state / "stt.sqlite" if state else ":memory:", may_write=self._may_write_audio,
                                      backup=S3Copies.from_env("stt") if state else None, exists=self._clips_logged,
@@ -1314,7 +1322,11 @@ class HubApp(App):
                               str(d.get("status") or "done"), d.get("confidence"), role=role,
                               vocab_v=str(d.get("vocab_v") or "")[:80])
         elif kind == "rerun":                         # a re-run on the station is over (changed, same or failed)
-            self._rerun_finish(self._id(d), str(d.get("result") or "")[:200], str(d.get("model") or "")[:80])
+            with self._unclear_lock:
+                asked = self._id(d) in self._unclear_station
+                self._unclear_station.discard(self._id(d))
+            if not asked:                             # (an unclear clip re-asked by the hub: nobody's re-run)
+                self._rerun_finish(self._id(d), str(d.get("result") or "")[:200], str(d.get("model") or "")[:80])
         elif kind == "alt_text":                      # "both" re-run: the station's whisper text, to compare
             self._set_alt(self._id(d), str(d.get("text") or ""), str(d.get("model") or "")[:80])
         elif kind == "alarm":                         # the P25 emergency button, ahead of its transcript (#128)
@@ -1526,7 +1538,9 @@ class HubApp(App):
         that can take it now: a whisper's to Amazon Transcribe (its budget allowing), else (or AWS's) to the station's
         whisper as a re-run. Its answer is checked the same way; still unclear, it stays so. Never for a catch-up or a
         late call (old words), a "both" channel (AWS is asked already), a standby, or whisper's stock phrase on noise
-        (stt_quality.REQUEUE: only a loop or too many words). AWS's answer is no person's re-run (AwsJob.requeue)."""
+        (stt_quality.REQUEUE: only a loop or too many words). AWS only under UNCLEAR_AWS_SHARE of its pool's monthly
+        limit (live clips keep the rest). Its answer is no person's re-run: no re-run result on the row (AwsJob.requeue;
+        the station's: _unclear_station)."""
         super()._unclear(item, key, quiet)
         cid = str(getattr(item, "id", "") or "")
         if (quiet or not cid or getattr(item, "quality", "") not in stt_quality.REQUEUE or not self._may_write_audio()
@@ -1543,6 +1557,14 @@ class HubApp(App):
         if engine != "aws" and self.aws is not None:
             from sizeup.transcribe import is_context
             ok, why = self.aws.available(key if is_context(key) else None)
+            if ok:
+                try:
+                    from sizeup.transcribe import CONTEXT as CONTEXT_POOL
+                    sp = self.aws.spent(CONTEXT_POOL if is_context(key) else "")
+                    if float(sp["limit_usd"]) > 0 and float(sp["usd"]) >= UNCLEAR_AWS_SHARE * float(sp["limit_usd"]):
+                        ok, why = False, f"re-asks stop at {UNCLEAR_AWS_SHARE:.0%} of the monthly limit"
+                except Exception:  # noqa: BLE001 - no spend known: AWS's own check stands
+                    pass
             pcm = self._rerun_pcm(item) if ok else None
             if pcm is not None:
                 self.aws.submit(key, AwsJob("traffic" if page is None else "page", cid, key, page=page, rerun=True,
@@ -1553,8 +1575,21 @@ class HubApp(App):
                          f"({why if not ok else 'no clip here'})")
         if engine == "station-whisper":
             return                             # (no other whisper to ask: it stays unclear)
-        threading.Thread(target=self._rerun_station, args=([cid],), name="hub-unclear-rerun", daemon=True).start()
+        with self._unclear_lock:
+            self._unclear_station.add(cid)
+        threading.Thread(target=self._unclear_rerun, args=(cid,), name="hub-unclear-rerun", daemon=True).start()
         self.hub.log(f"speech-to-text {cid}: unclear from {engine}: asked of the station's whisper")
+
+    def _unclear_rerun(self, cid: str) -> None:
+        """The station's whisper on an unclear clip: no re-run result either way (a failure: it stays unclear)."""
+        try:
+            n = self._station_rerun([cid])
+        except ValueError as e:
+            n = 0
+            self.hub.log(f"speech-to-text {cid}: the station's whisper can't re-ask it: {str(e)[:120]}")
+        if not n:
+            with self._unclear_lock:
+                self._unclear_station.discard(cid)
 
     def _aws_late(self, job, text: str, conf) -> None:
         self._stt_ran(job.id, "aws", channels_model(), text, "done" if text else "no_speech", conf, key=job.channel,
@@ -1867,7 +1902,7 @@ class HubApp(App):
             self._save_page(item)
             self._stt_row(item.id, "pending", sttpool.PENDING_MODEL)
         try:                                      # (its vocab_v: the term list in this very prompt, or none)
-            prompt, vocab_v = self._prompt_v(item)
+            prompt, vocab_v = self._pool_prompt_v(item)
         except Exception:  # noqa: BLE001 - no prompt is still a transcript
             prompt, vocab_v = "", ""
         job = sttpool.Job(item.id, cls, key, "page" if page is not None else "traffic", len(pcm) / 8000.0,
@@ -1879,24 +1914,45 @@ class HubApp(App):
         self.sync()
         return True
 
+    def _station_stt_fast(self) -> bool:
+        """The station's STT lane is woken by the events' ack (#678: its last status says stt_input.wake_on_ack), so each
+        STT input follows its event at once and a pool job's audio waits only its class's budget (sttpool.SRC_WAIT_S).
+        A station from before it (the hub deploys first) sends the input ~2 s after its event: the old wait for it."""
+        # TODO(multi-station): one station today, so its last status; with several, read the job's own station's
+        st = self.hub.status
+        si = st.get("stt_input") if isinstance(st, dict) else None
+        return isinstance(si, dict) and si.get("wake_on_ack") is True
+
+    def _pool_prompt_v(self, item) -> tuple[str, str]:
+        """A pool job's whisper prompt and its vocab_v: none for the airband (an ATC prompt costs words and makes
+        large-v3-turbo loop on a weak AM clip), else the source's own (_prompt_v). The station's own whisper keeps its."""
+        if item is None or self._kind.get(getattr(item, "source", "")) == "airband":
+            return "", ""
+        return self._prompt_v(item)
+
     def _pool_audio_of(self, cid: str, page, pcm):
         """A pool job's audio, read when its worker asks (on that request's thread, never the events'): the station's
         own whisper input (#671's stt-src, waited for up to POOL_AUDIO_WAIT_S: it comes on its own lane) at 16 kHz with
-        0.5 s of silence each side, exactly what whisper-server would get on the station; else the listening clip."""
+        0.5 s of silence each side, exactly what whisper-server would get on the station; else the listening clip.
+        audio.input: which it gave last ("stt-src" | "listening-8k" | ""), stamped on the run (#678)."""
         def audio(wait_s: float = 0.0) -> bytes | None:
             import numpy as np
             sa = None
+            audio.input = ""
             try:
                 sa = self.read_stt_audio(cid, float(getattr(page, "voice_offset_s", 0.0) or 0.0) if page is not None
                                          else 0.0, wait_s=min(POOL_AUDIO_WAIT_S, wait_s))
             except Exception as e:  # noqa: BLE001 - the listening clip then
                 self.hub.log(f"stt pool: {cid}: no STT input ({type(e).__name__})")
-            if sa is not None and sa.input == "stt-src" and sa.rate == 16000:
+            if sa is not None and sa.input == sttinput.INPUT_SRC and sa.rate == 16000:
                 pad = np.zeros(8000, dtype=np.float32)
+                audio.input = sttinput.INPUT_SRC
                 return wav_bytes(np.concatenate([pad, np.asarray(sa.pcm, dtype=np.float32) / 32768.0, pad]), 16000)
-            if pcm is not None:
-                return self._pool_wav(pcm)
-            return self._pool_wav(sa.pcm) if sa is not None and sa.rate == 8000 else None
+            if pcm is not None or (sa is not None and sa.rate == 8000):
+                audio.input = sttinput.INPUT_LISTENING
+                return self._pool_wav(pcm if pcm is not None else sa.pcm)
+            return None
+        audio.input = ""
         return audio
 
     def pool_word(self, sid: str = "") -> dict:
@@ -1928,7 +1984,7 @@ class HubApp(App):
                 self._save_page(item)
                 self._stt_row(item.id, "pending", sttpool.PENDING_MODEL)
         try:                                      # (its vocab_v: the term list in this very prompt, or none)
-            prompt, vocab_v = self._prompt_v(item)
+            prompt, vocab_v = self._pool_prompt_v(item)
         except Exception:  # noqa: BLE001 - no prompt is still a transcript
             prompt, vocab_v = "", ""
         seconds = len(pcm) / 8000.0 if pcm is not None else max(0.0, float(item.end) - float(item.start))
@@ -2020,7 +2076,9 @@ class HubApp(App):
                       prompted=stt_time.prompted(job.prompt, job.clip_end),     # (#727)
                       wait_s=job.claimed_at - job.queued_at if job.claimed_at else None,
                       run_s=done_at - job.claimed_at if job.claimed_at else None,
-                      prompt_v=sttruns.prompt_version(job.prompt), cls=job.cls, clip_end=job.clip_end, vocab_v=vocab_v)
+                      prompt_v=sttruns.prompt_version(job.prompt), cls=job.cls, clip_end=job.clip_end, vocab_v=vocab_v,
+                      stt_input=str(getattr(job.audio, "input", "") or ""),
+                      language=str(res.get("language") or ""))
 
     def _pool_fallback(self, job: sttpool.Job, why: str) -> None:
         """No text from the pool in time: an AWS-channel clip the AWS way (and the station's whisper if AWS can't). A
@@ -2082,7 +2140,7 @@ class HubApp(App):
             return False, "no recording"
         item = self._find(cid)[0]
         try:                                      # (its vocab_v: the term list in this very prompt, or none)
-            prompt, vocab_v = self._prompt_v(item) if item is not None else ("", "")
+            prompt, vocab_v = self._pool_prompt_v(item)
         except Exception:  # noqa: BLE001 - no prompt is still a transcript
             prompt, vocab_v = "", ""
         end = row.get("start")
@@ -2100,16 +2158,19 @@ class HubApp(App):
     def _stt_ran(self, cid: str, engine: str, model: str, text: str, status: str, conf, *, key: str = "", item=None,
                  prompted: bool | None = None,
                  role: str = "text", words=None, queued_at=None, engine_start=None, worker: str = "", prompt_v: str = "",
-                 cls=None, clip_end=None, wait_s=None, run_s=None, vocab_v: str | None = None) -> None:
+                 cls=None, clip_end=None, wait_s=None, run_s=None, vocab_v: str | None = None,
+                 stt_input: str | None = None,
+                 language: str = "") -> None:
         """A transcript as an engine wrote it, kept (sizeup/sttruns.py), and its latency (transmission end -> text
-        here) counted for Health when it is the text of record. Never in the way of the transcript."""
+        here) counted for Health when it is the text of record. Never in the way of the transcript. stt_input: the
+        audio it heard (#678; None: the engine's own, sttruns.engine_input)."""
         try:
             if item is None:
                 item = self._find(cid)[0]
             if status == stt_quality.UNCLEAR and not text:      # (the item's text is "": the engine's words, kept apart)
                 text = str(getattr(item, "unclear_text", "") or "")
             elif status == "done" and text and stt_quality.assess(text, App._clip_seconds(item) if item is not None
-                                                                   else None):
+                                                                   else None, language):
                 status = stt_quality.UNCLEAR                    # (a loop, noise: the run says so, with its engine)
             if not key and item is not None:
                 key = traffic_key(item) if isinstance(item, Traffic) else str(getattr(item, "label", "") or "")
@@ -2131,7 +2192,7 @@ class HubApp(App):
                               run_s=run_s if run_s is not None else (now - engine_start if engine_start else None),
                               keyup=getattr(item, "keyup", None),     # (a cut transmission's piece, the radio's split)
                               call_id=str(getattr(item, "call_id", "") or ""), turn=getattr(item, "turn", None),
-                              check=check)
+                              check=check, input=sttruns.engine_input(engine) if stt_input is None else stt_input)
             if role == "text" and clip_end is not None:
                 self.stt_latency.add(key, engine, now - clip_end, target=cls in sttruns.TARGET_CLASSES)
         except Exception as e:  # noqa: BLE001 - bookkeeping
@@ -2605,7 +2666,24 @@ class HubApp(App):
             self._switch("set_antenna_groups", groups)
 
     def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None,
-                      tier: str | None = None, system: str = "") -> str | None:
+                      tier: str | None = None, system: str = "", transcribe: bool | None = None,
+                      alerts: bool | None = None) -> str | None:
+        if tier is not None and (transcribe is not None or alerts is not None):
+            return tiers.BOTH
+        if tier is None and (transcribe is not None or alerts is not None):
+            # the switches: written as the tier they make of the one the station last said (App.set_talkgroup), so a
+            # station from before the switches takes them too
+            if not system or system == sourcekeys.COUNTY:
+                return (tiers.COUNTY_ALERTS if alerts is not None
+                        else "the county's Transcribe is its channel choice: /api/cad/settings/channels")
+            src = sourcekeys.p25(system, int(tg))
+            row = next((r for r in self.hub.talkgroups if isinstance(r, dict) and r.get("source") == src), None)
+            if row is None or not row.get("tier_set"):
+                return f"no talkgroup {tg} on {system}"
+            tier, why = tiers.from_switches(row.get("tier"), bool(row.get("encrypted")), record, transcribe, alerts)
+            if why:
+                return why
+            record = None
         if system == sourcekeys.COUNTY and tier is None and "p25_systems" not in (self.hub.status or {}):
             system = ""                                # the county's, to a station from before #409: as it always went
         if tier is not None or system:                 # (#409: a station from before this refuses the extra arguments)
