@@ -382,7 +382,7 @@ def test_a_chattering_squelch_is_a_hint_not_an_alert():
     m = r.h.model()
     assert "squelch chattering: 4.2 short opens/min" in m["channels"][0]["hint"] and m["channels"][0]["short_per_min"] == 4.2
     assert "raise Open" in m["channels"][0]["hint"]
-    assert "raise Open" not in m["channels"][1]["hint"] and "check antenna" in m["channels"][1]["hint"]   # paging: read-only
+    assert "raise Open" in m["channels"][1]["hint"]          # paging too: inside its guard (tests/test_paging_squelch.py)
     assert m["hints"][0]["channel"] == "FG1" and r.keys() == [] and r.n.msgs == []
 
 def test_the_model_has_what_the_panel_shows():

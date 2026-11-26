@@ -216,7 +216,8 @@ def squelch_data(admin=True, status=200):
                       mi.DEFAULTS, NOW)
     page = mi.suggest(floor_minutes(NOW - 7 * DAY, 7 * 1440, kind="paging"),
                       transmissions(NOW - 7 * DAY, 7 * DAY, [22.0] * 30, kind="page"), mi.DEFAULTS, NOW)
-    row = lambda key, kind, run=(10.0, 6.0): {"key": key, "kind": kind, "editable": kind == "traffic", "set": {}, "state": "ok",
+    row = lambda key, kind, run=(10.0, 6.0): {"key": key, "kind": kind, "editable": kind in ("traffic", "paging"), "set": {},
+                             "state": "ok",
                              "default": {"open_db": 10.0, "close_db": 6.0, "min_open_s": 0.3},
                              "running": {"open_db": run[0], "close_db": run[1], "min_open_s": 0.3}, "hiss_db": 2.4,
                              "quieting_db": 3.1, "short_per_min": 0.2, "keyups": None}
@@ -263,6 +264,41 @@ def test_no_suggestions_for_someone_who_isnt_an_admin_or_off_the_hub(tmp_path):
     assert "Suggested" not in out["head"] and out["applies"] == 0 and out["fetched"] == []    # never even asked
     out = run(tmp_path, SQUELCH, squelch_data(status=403))
     assert "Suggested" not in out["head"] and out["applies"] == 0
+
+
+PAGING_ROW = r"""
+load("squelch-panel.js");
+global.canDo = () => data.admin;
+global.operator = () => "KM";
+global.posted = [];
+global.api = async (m, p, b) => { if (m === "POST") { posted.push([p, b]); return { ok: true }; } return data.squelch; };
+const box = new N("div");
+SquelchPanel.mount(box);
+for (let i = 0; i < 10; i++) await flush();
+const south = all(box, (n) => n.tag === "input" && (n.attrs["aria-label"] || "").startsWith("South 2"));
+const inputs = south.map((n) => ({ l: n.attrs["aria-label"], disabled: n.disabled, warn: n.className.includes("warn"),
+                                   title: n.title }));
+const close = south.find((n) => n.attrs["aria-label"] === "South 2 Close");
+close.value = "13"; close.on.change[0]();
+for (let i = 0; i < 10; i++) await flush();
+console.log(JSON.stringify({ inputs, posted }));
+"""
+
+
+def test_paging_open_and_close_are_editable_for_an_admin_with_the_guard_on_hover(tmp_path):
+    """Paging (sizeup/cad/settings.py _paging_guard): Open / Close inputs for an admin, Min stays the receiver's; an Open
+    within 6 dB of the pages is amber; a Close goes up with the Open it sits under."""
+    data = squelch_data()
+    data["squelch"]["channels"][1]["running"] = {"open_db": 17.0, "close_db": 13.0, "min_open_s": 0.3}   # pages at 22
+    out = run(tmp_path, PAGING_ROW, data)
+    o, c, m = out["inputs"]
+    assert (o["l"], o["disabled"], c["disabled"], m["disabled"]) == ("South 2 Open", False, False, True)
+    assert o["warn"] and "Guard: idle max" in o["title"] and "pages 22 − 6 dB" in o["title"]
+    assert "pages could be missed" in o["title"] and not c["warn"]
+    assert out["posted"] == [["/api/cad/settings/squelch", {"action": "set", "key": "South 2", "close_db": 13,
+                                                            "open_db": 17, "operator": "KM"}]]
+    out = run(tmp_path, PAGING_ROW, squelch_data(admin=False))
+    assert all(i["disabled"] for i in out["inputs"])                  # not an admin: read only
 
 
 # -- Health -----------------------------------------------------------------------------------------------------------

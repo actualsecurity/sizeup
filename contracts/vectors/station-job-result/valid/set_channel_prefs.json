@@ -6,6 +6,7 @@
     "tones": 1,
     "squelch": {"Fireground 1": {"open_db": 13.0, "min_open_s": 0.5}},
     "squelch_ok": true,
+    "squelch_paging_ok": true,
     "deny_ok": true,
     "promote_ok": true,
     "promote_p25_ok": true,

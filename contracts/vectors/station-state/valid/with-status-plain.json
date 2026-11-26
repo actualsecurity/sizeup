@@ -80,6 +80,7 @@
       "tones": 0,
       "squelch": {},
       "squelch_ok": true,
+      "squelch_paging_ok": true,
       "deny_ok": true,
       "promote_ok": true,
       "promote_p25_ok": true,

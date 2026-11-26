@@ -143,7 +143,8 @@ GET  /api/cad/stt                         Settings > Radios > Vocabulary: {vocab
 GET  /api/cad/squelch                     Settings > Radios > Squelch: {channels: [{key, set, default, running, hiss_db,
                                           quieting_db, floor_db, short_per_min}], sync, chatter_per_min, ranges}
 POST /api/cad/settings/squelch            {action: set {key, open_db?, close_db?, min_open_s?: null = default} | reset {key}}:
-                                          an FM channel's squelch, applied live on the station (sizeup/channels.py): admins
+                                          an FM channel's squelch, applied live on the station (sizeup/channels.py): admins;
+                                          a paging channel's Open / Close only, guarded (settings.py _paging_guard)
 POST /api/cad/settings/signal_metrics    {action: set {key, value} | reset {key}}: the suggested squelch's margin and the
                                           shift warnings' thresholds (sizeup/cloud/metricsinsight.py, #606): admins, audited
 GET  /api/cad/export/<name>.csv           incidents | calls | unit-history | event-log, the sheet's columns

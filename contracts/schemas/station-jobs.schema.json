@@ -936,7 +936,7 @@
         },
         {
           "type": "object",
-          "description": "squelch: per FM traffic channel label, the squelch numbers set on the hub; {} for none. What does not fit the station's channels is left out there, never refused.",
+          "description": "squelch: per FM traffic channel label, the squelch numbers set on the hub, and per paging channel its `open_db` / `close_db` (only to a station whose status has `channels.squelch_paging_ok`); {} for none. What does not fit the station's channels is left out there, never refused.",
           "additionalProperties": {
             "type": "object",
             "description": "One channel's squelch.",

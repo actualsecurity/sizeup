@@ -14,7 +14,7 @@ Records (one small JSON object each; "k" its kind, "s" its subject, "at" its tim
             when read: half the bytes)
     tx      each transmission as the squelch closed it (App._segment): kind voice | page | burst (only a radio-ID burst)
             | noise (kept, no speech, no ID), its start, length ("dur"), quieting / carrier over the floor ("q"), at
-            open and close ("qo", "qc"), the hiss it was measured against ("hiss"; AM: "floor" dBFS, "cf" the carrier
+            open and close ("qo", "qc"), its strongest ("qx"), the hiss it was measured against ("hiss"; AM: "floor" dBFS, "cf" the carrier
             dBFS, "snr" the voice's SNR), a background carrier ("bg"), why it ended ("why"), an ID decoded ("id")
     cc      each P25 system's control channel, each minute ("s": "p25" the county's, "p25:<system>" another's): the
             decode rate as trunk-recorder logs it every 3 s (avg "rate", "lo", "hi", lines "n"), retunes, voice grants
@@ -134,7 +134,7 @@ class Collector:
         """One transmission as its squelch closed it (radio/fm.py / radio/am.py Segment): numbers only, never audio."""
         r: dict = {"k": "tx", "s": str(label)[:80], "at": round(float(seg.start), 3),
                    "dur": round(float(seg.end - seg.start), 2), "kind": kind, "q": _r1(seg.quieting_db)}
-        for key, attr in (("qo", "q_open"), ("qc", "q_close"), ("floor" if am else "hiss", "hiss_db"),
+        for key, attr in (("qo", "q_open"), ("qc", "q_close"), ("qx", "q_max"), ("floor" if am else "hiss", "hiss_db"),
                           ("bg", "floor_db"), ("cf", "carrier_dbfs"), ("snr", "snr_db")):
             v = getattr(seg, attr, None)
             if v is not None:
