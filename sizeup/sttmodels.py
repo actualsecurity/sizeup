@@ -54,9 +54,6 @@ LLM_PRIORITIES = ("yield", "keep")      # "yield": speech first, the LLM gives i
 # the hub-wide default here (stt_models.llm_priority, sent only once an admin set one) > worker.toml's ("yield" by
 # default: speech first). The hub never sends one an admin didn't set, so it never hides a per-worker value.
 DEFAULT_LLM_PRIORITY = ""
-# a champion change on a pre-alert channel (#728: intel is told before it applies): kept in hub.sqlite meta, newest last
-CHANGES_META = "stt_champion_log"
-CHANGES_MAX = 200
 
 
 def load(path: Path | str = PINS) -> tuple[dict, str]:
@@ -148,7 +145,7 @@ class Choices:
             catalog, digest = load()
         self.catalog, self.digest = catalog, digest
         self.llms = load_llms() if llms is None else llms
-        self._lock = threading.RLock()        # (set() calls its before hook holding it: note_change takes it again)
+        self._lock = threading.RLock()        # (set() and promote() call their before hook holding it)
         self._cache: tuple[float, dict] = (0.0, {})
 
     def settings(self) -> dict:
@@ -312,22 +309,6 @@ class Choices:
         return {"model": self.llm(), "default": DEFAULT_LLM if DEFAULT_LLM in self.llms else "",
                 "priority": self.llm_priority(), "priorities": list(LLM_PRIORITIES),
                 "catalog": [dict(e) for e in self.llms.values()]}
-
-    # -- champion changes (intel is told first on a pre-alert channel) ------------------------------------------------
-
-    def changes(self, since: float = 0.0) -> list[dict]:
-        """The champion changes kept (newest last), after `since`: what the intel session reads (HubApp.stt_champion_log)."""
-        try:
-            rows = json.loads(self.mdb.get(CHANGES_META, "") or "[]")
-        except ValueError:
-            rows = []
-        return [r for r in rows if isinstance(r, dict) and float(r.get("at") or 0) > since] if isinstance(rows, list) else []
-
-    def note_change(self, row: dict) -> None:
-        with self._lock:
-            rows = self.changes()
-            rows.append(row)
-            self.mdb.put(CHANGES_META, json.dumps(rows[-CHANGES_MAX:], separators=(",", ":"), sort_keys=True))
 
     def panel(self) -> dict:
         """Settings: the catalog (id, kind, what, services, context default), the defaults by service and each

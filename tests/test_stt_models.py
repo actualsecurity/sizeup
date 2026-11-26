@@ -507,3 +507,45 @@ def test_a_channel_that_never_decodes_on_a_gpu_live_has_no_resident_model():
     c.set("HPN Tower", {"model": ATC})
     assert c.want({"tg:307": "fire", "HPN Tower": "air"}, off_gpu={"HPN Tower"}) == [QWEN]   # (pinned AWS: no VRAM)
     assert c.want({"tg:307": "fire"}, off_gpu={"HPN Tower"}) == [QWEN]
+
+
+def test_intels_read_of_the_champion_changes_its_keys_and_retention(tmp_path):
+    """champion_changes(since, until, channel): [{at, channel, old, new, why}], channel the radio log's source key
+    (radio_traffic.source), kept in hub.sqlite at least 90 days and each channel's last 20 whatever their age; the log
+    says how many listeners heard it (none registered: none), never "intel told" by itself."""
+    from sizeup.cloud import hubstore
+    from tests.test_cloud import HubRun, hub_cfg
+    Q8 = "large-v3-turbo-q8_0"
+    hub = HubRun(hub_cfg(tmp_path))
+    try:
+        app = hub.app
+        lines = []
+        real_log = app.hub.log
+        app.hub.log = lambda m: (lines.append(str(m)), real_log(m))
+        t0 = time.time()
+        app.stt_champion_change("tg:307", "", QWEN, "Admin A", "settings")
+        app.stt_champion_change("FG1", "", Q8, "Admin A", "promote")
+        app.stt_champion_change("tg:307", QWEN, "", "system: automatic rollback", "rollback")
+        rows = app.champion_changes()
+        assert [r["why"] for r in rows] == ["settings", "promote", "rollback"]
+        assert set(rows[0]) == {"at", "channel", "old", "new", "why"} and rows[0]["at"] >= t0
+        src = app.channel_source("tg:307")
+        assert src.startswith("p25:") and rows[0]["channel"] == src and rows[1]["channel"] == app.channel_source("FG1")
+        assert [r["why"] for r in app.champion_changes(channel=src)] == ["settings", "rollback"]
+        assert app.champion_changes(since=rows[2]["at"]) == [rows[2]] and app.champion_changes(until=rows[0]["at"]) == [rows[0]]
+        assert any("0 listener(s) told" in m for m in lines) and not any("intel told" in m for m in lines)
+        app.stt_champion_hooks.append(lambda r: None)
+        app.stt_champion_change("FG1", Q8, "", "Admin A", "settings")
+        assert any("1 listener(s) told" in m for m in lines)
+        # retention: older than 90 days goes, but never a channel's last 20
+        db = app.mdb
+        old = t0 - hubstore.CHAMPION_KEEP_S - 86400
+        for i in range(25):
+            db.champion_add(old + i, "p25:county:999", "tg:999", "", Q8, "settings")
+        db.champion_add(old, "fm:Quiet", "Quiet", "", Q8, "settings")
+        db.champion_add(t0, "p25:county:999", "tg:999", Q8, "", "rollback")       # (a prune on each add)
+        assert len(db.champion_changes(channel="p25:county:999")) == 1 + 19        # (its last 20, the new one counted)
+        assert len(db.champion_changes(channel="fm:Quiet")) == 1                    # (a long-unchanged channel keeps it)
+        assert "Engine" not in json.dumps(db.champion_changes())                    # (ids, keys, reasons: never words)
+    finally:
+        hub.close()
