@@ -711,6 +711,7 @@ def test_a_worker_handing_back_goes_to_aws_at_once(tmp_path, quick):
         assert wait(lambda: hub.app.sttpool.ready_forced(URGENT)[0], 5)
         send(hub, pending_event("FG1-5"))
         assert wait(lambda: row(hub, "FG1-5").get("text") == AWS_TEXT + ".", 20)
+        assert wait(lambda: w.answers, 5)                        # (its release's answer: just after the text)
         fb = hub.app.sttpool.stats()["fallbacks"]
         # (handed back in time: "released"; under a loaded test box its 1 s lease may run out first: "lease", the same
         # way on to AWS)
