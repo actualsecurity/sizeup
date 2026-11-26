@@ -2916,6 +2916,7 @@ class Models:
         self.enabled = bool(cfg.managed_models)
         self.program: Callable[[str], str] = lambda p: p   # worker.toml's program -> the one to run (Runtimes.program)
         self.disk = shutil.disk_usage
+        self.paused = False                      # a runtime switch: no server starts (Worker._swap)
         if cfg.catalog_file:
             self._load_local(cfg.catalog_file)
         else:
@@ -3279,7 +3280,12 @@ class Models:
                 self._later(mid, "can't start its server")
                 return None
             with self._lock:
-                self.servers[mid] = s
+                late = self.paused                # (a runtime switch began meanwhile: its program may be going)
+                if not late:
+                    self.servers[mid] = s
+            if late:
+                proc.stop()
+                return None
             self.status[mid] = "loading"
             log.info("models: %s: %s on port %d", mid, "llama-server" if e["kind"] == "llama-asr" else "whisper-server",
                      port)
@@ -3300,7 +3306,8 @@ class Models:
         return True
 
     def stop_all(self, why: str, kinds: tuple | None = None) -> None:
-        """Every server stopped (kinds: only those of these kinds: a runtime switch)."""
+        """Every server stopped (kinds: only those of these kinds: a runtime switch, with `paused` set first so that
+        no start slips in after it)."""
         for mid, s in list(self.servers.items()):
             if kinds is None or s.kind in kinds:
                 self.stop(mid, why)
@@ -3601,8 +3608,7 @@ class Runtimes:
         self.state_path = Path(cfg.state_dir) / "runtimes.json"
         self.disk = shutil.disk_usage
         self._lock = threading.Lock()
-        self._sig: tuple | None = None
-        self._doc: dict = {}
+        self._cache: tuple = (None, {})            # runtimes.json's (stat signature, content): one attribute (threads)
         self._marks: dict = {}                     # folder -> (its marker's stat signature, its marker)
         self._legacy: dict = {}                    # rt -> (its program's signature, its build)
         self._final_fails: dict = {}               # zip sha256 -> final download failures
@@ -3617,15 +3623,19 @@ class Runtimes:
             sig = (st.st_mtime_ns, st.st_size)
         except OSError:
             sig = None
-        if sig != self._sig:
-            self._sig, self._doc = sig, (read_json(self.state_path) if sig else {})
-        return self._doc
+        cached = self._cache
+        if sig != cached[0] or sig is None:
+            doc = read_json(self.state_path) if sig else {}
+            cached = (sig if doc or sig is None else None, doc)    # (an empty read: read again next time)
+            self._cache = cached
+        return cached[1]
 
     def _rec(self, rt: str) -> dict:
         r = self.doc().get(rt)
         return r if isinstance(r, dict) else {}
 
-    def _change(self, rt: str, fn: Callable[[dict], object]):
+    def _change(self, rt: str, fn: Callable[[dict], object], strict: bool = False):
+        """fn(runtimes.json's record of rt), then written. strict: an OSError is raised (else logged)."""
         with self._lock:
             doc = read_json(self.state_path)
             r = doc.get(rt) if isinstance(doc.get(rt), dict) else {}
@@ -3634,8 +3644,11 @@ class Runtimes:
             try:
                 write_json(self.state_path, doc)
             except OSError as e:
+                if strict:
+                    raise
                 log.warning("runtimes: can't write runtimes.json: %s", e.strerror or e)
-            self._sig, self._doc = None, {}
+            finally:
+                self._cache = (None, {})
             return out
 
     # -- where things are
@@ -3692,6 +3705,8 @@ class Runtimes:
         if held is None or held[0] != sig:
             doc = read_json(p)
             held = (sig, doc if doc.get("build") == build else {})
+            if not held[1]:
+                return {}                          # (never cached: a read Windows refused for a moment is read again)
             self._marks[str(p)] = held
         return held[1]
 
@@ -3857,8 +3872,11 @@ class Runtimes:
             if self.disk(self.root / rt).free < need:
                 self._later(rt, f"{want}: no disk space ({need / 1e9:.1f} GB)", MODEL_RETRY_S)
                 return False
+            r = self._rec(rt)
+            if want in (r.get("active"), r.get("prev")) and final.exists():
+                raise OSError(f"{want} is in use: not unpacked over")   # (never the running build's folder)
             self.status[rt] = f"unpacking {want}"
-            for p in (tmp, final):                     # (a torn earlier try: never the running build, which is ready)
+            for p in (tmp, final):                     # (a torn earlier try)
                 if p.exists():
                     shutil.rmtree(p)
             tmp.mkdir(parents=True)
@@ -3921,7 +3939,7 @@ class Runtimes:
         def f(r):
             r["pending"] = {"to": to, "from": frm, "at": self.wall()}
             r["active"] = to
-        self._change(rt, f)
+        self._change(rt, f, strict=True)           # (no record of it, no rollback either: no switch)
         self.status[rt], self.built[rt] = f"switching to {to}", to
         return to, frm
 
@@ -3932,12 +3950,14 @@ class Runtimes:
         out: dict = {}
 
         def f(r):
+            nonlocal counted
             p = r.pop("pending", None)
             p = p if isinstance(p, dict) else {}
             to, frm = str(p.get("to") or RUNTIMES[rt]["build"]), str(p.get("from") or "")
             out["to"], out["from"] = to, frm
             if not why:
                 r.update(active=to, prev=frm, note="")
+                r.pop("interrupted", None)
                 r.pop("next", None)
                 fails = r.get("fails") if isinstance(r.get("fails"), dict) else {}
                 fails.pop(to, None)
@@ -3945,6 +3965,11 @@ class Runtimes:
                 return
             r["active"] = frm
             fails = r.get("fails") if isinstance(r.get("fails"), dict) else {}
+            if why == "interrupted":               # (twice in a row: counted, a build that takes the PC down)
+                counted = r.get("interrupted") == to
+                r["interrupted"] = to
+            else:
+                r.pop("interrupted", None)
             n = int(fails.get(to) or 0) + (1 if counted else 0)
             if counted and n >= RUNTIME_BAD_TRIES:
                 bad = r.get("bad") if isinstance(r.get("bad"), dict) else {}
@@ -4641,19 +4666,35 @@ class Worker:
                                 held=held[0] if held is not None else "")
         if not rt:
             return False
-        why = self.runtime_busy()
+        why = self.runtime_busy() or self.untestable(rt)
         if why:
             self.runtimes.waiting(rt, why)
             return False
         return self.switch_runtime(rt)
 
-    def runtime_busy(self) -> str:
-        """Why a runtime can't be switched now ("" when it can): its servers stop for a while."""
+    def untestable(self, rt: str) -> str:
+        """Why a switch of this runtime couldn't be tested now ("" it could): its test needs worker.toml's own server
+        of it (whisper_server / llm_server at the installer's path) started from the new build. Never switched
+        untested: a broken build would show only as the catalog models' failures, never rolled back."""
+        if rt == "whisper":
+            ok = self.proc is not None and self.runtimes.covers(rt, str(self.cfg.whisper_server[0]))
+            return "" if ok else "no whisper_server to test it with"
+        if self.llm_proc is None or not self.runtimes.covers(rt, str(self.cfg.llm_server[0])):
+            return "no llm_server to test it with"
+        if not self.llm_verified:
+            return "the LLM's model not checked yet"
+        if not self.stt_models.llm_room_ok:
+            return "the LLM gave its VRAM to the speech models"
+        return ""
+
+    def runtime_busy(self, drained: bool = False) -> str:
+        """Why a runtime can't be switched now ("" when it can): its servers stop for a while. drained: asked again
+        after _swap's drain (the jobs it waited for aside)."""
         if self.draining:
             return "a self-update"
-        if self.job is not None or self._inferring:
+        if not drained and (self.job is not None or self._inferring):
             return "a clip"
-        if self.llm_job is not None or self._llm_call is not None:
+        if not drained and (self.llm_job is not None or self._llm_call is not None):
             return "an LLM job"
         held = self.held()
         if held is not None:
@@ -4688,7 +4729,9 @@ class Worker:
         one before active again and the new one's backoff: counted False when it wasn't its fault). A failure: the one
         before restarted and tested too. A stop mid-test leaves the switch for the next start to roll back. True when
         the new one was kept."""
-        self.switching = what
+        with self._lock:                       # (with do_infer's: a job taken now is waited for, or released)
+            self.switching = what
+        self.stt_models.paused = True
         self._wake.set()
         try:
             end = self.clock() + UPDATE_DRAIN_S
@@ -4698,15 +4741,20 @@ class Worker:
                 self._stop.wait(0.2)
             if self.stopped:
                 return False
-            if busy():
+            late = self.runtime_busy(drained=True)     # (gaming may have begun during the drain)
+            if busy() or late:
                 if what in RUNTIMES:
-                    self.runtimes.waiting(what, "busy")
+                    self.runtimes.waiting(what, late or "busy")
                 return False
             begin()
             held = [False]
-            why = test(restart(), held)
+            try:
+                why = test(restart(), held)
+            except Exception as e:  # noqa: BLE001 - never left on an untested new one
+                log.exception("%s: its switch failed", what)
+                why = f"error: {type(e).__name__}"
             if why and self.stopped:
-                return False                       # (pending: the next start rolls it back, not counted)
+                return False                       # (pending: the next start rolls it back)
             finish(why, not held[0])
             if not why:
                 return True
@@ -4716,6 +4764,7 @@ class Worker:
             return False
         finally:
             self.switching = ""
+            self.stt_models.paused = False
             self._wake.set()
 
     def _restart_runtime(self, rt: str) -> bool:
@@ -4750,7 +4799,9 @@ class Worker:
 
         def wait(ready: Callable[[], bool], proc: WhisperProcess, name: str) -> str:
             while not self.stopped:
-                held[0] = held[0] or self.held() is not None
+                if self.held() is not None:
+                    held[0] = True                 # (the game's VRAM: rolled back now, not counted, tried again later)
+                    return "gaming or paused during its test"
                 if ready():
                     return ""
                 if not proc.running():
@@ -4767,7 +4818,11 @@ class Worker:
                 why = f"--version says {f'b{n}' if n else 'nothing'}"
             elif started:
                 why = wait(lambda: self.llm.status() == 200, self.llm_proc, "llama-server") or self.llm_answer()
+            elif build:
+                why = "llama-server wasn't started for its test"
                 self._llm_checked = -1e9           # (the LLM's own check next: jobs again)
+        elif build and not started:
+            why = "whisper-server wasn't started for its test"
         elif started:
             why = wait(self.whisper.alive, self.proc, "whisper-server")
             if not why and not self.check_whisper():
@@ -4857,7 +4912,7 @@ class Worker:
         self.hub.interrupted = False
         self._claiming = True
         try:
-            if self.stopped or self.draining:      # (the self-update's drain began after the state was read)
+            if self.stopped or self.draining or self.switching:   # (a drain began after the state was read)
                 return
             ans = self.hub.request("POST", f"{API}/claim", {"wait": self.claim_wait, "state": state,
                                                             "model": self.cfg.model, "models": self.loaded()},
@@ -5109,7 +5164,7 @@ class Worker:
         self.llm_hub.interrupted = False
         self._llm_claiming = True
         try:
-            if self.stopped or self.draining:
+            if self.stopped or self.draining or self.switching:
                 return
             ans = self.llm_hub.request("POST", f"{API}/infer/claim",
                                        {"wait": self.claim_wait, "state": self.state()[0], "models": self.models()},
@@ -5171,12 +5226,16 @@ class Worker:
                     self._inferring -= 1
                     self._busy_until = self.clock() + self.cfg.busy_grace_s
 
-        with self._lock:                       # (with do_job's: a pre-alert clip held now, or one that comes, stops it)
+        with self._lock:                       # (with do_job's: a pre-alert clip held now, or one that comes, stops it;
+            switching = bool(self.switching)   # with _swap's: a switch begun now waits for this job, or it is released)
             fast = isinstance(self.job, dict) and self.job.get("fast") is True
-            if not fast:
+            if not fast and not switching:
                 self._preempt.clear()
                 self.llm_job, self._llm_call = job, call
                 self._inferring += 1
+        if switching:
+            self._llm_release(lease, "paused")
+            return
         if fast:
             self._llm_release(lease, "preempted")
             log.info("infer %s %s: a pre-alert clip is being decoded: handed back", jid, task)

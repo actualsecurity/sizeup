@@ -497,3 +497,83 @@ def test_health_shows_the_builds_with_the_state_in_the_hover():
     js = (Path(W.__file__).parents[2] / "sizeup" / "web" / "static" / "health.js").read_text()
     assert '"Version", "Runtimes", "Load"' in js
     assert "${k} ${r[k].build" in js and "${k}: ${st(k)" in js
+
+
+# --- review fixes: gaming after the drain, errors, untestable switches, the running folder, interruptions ------------
+
+def test_gaming_that_begins_during_the_drain_stops_the_switch(tmp_path, hub, whisper, pins):
+    w, procs = worker(tmp_path, hub, whisper, pins)
+    w._claiming = True                                                     # a claim in flight: drained first ...
+    import threading
+
+    def game():
+        w.control.set(gaming=True)                                         # ... and a game starts meanwhile
+        w._claiming = False
+    threading.Timer(0.3, game).start()
+    assert not w.runtimes_step()
+    assert procs == [] and w.runtimes.active("whisper") == "" and w.switching == ""
+    assert w.runtimes.status["whisper"] == "b6000 ready, waiting: gaming"
+
+
+def test_an_error_mid_switch_rolls_back_and_counts(tmp_path, hub, whisper, pins):
+    w, procs = worker(tmp_path, hub, whisper, pins, whisper_server=[])
+    w.proc = None
+
+    def boom():
+        raise RuntimeError("a bug")
+    w.llm.check = lambda: boom() if "b13000" in procs[-1].argv[0] else ({"ok": True}, 1, 1)
+    assert not w.runtimes_step()
+    assert w.runtimes.active("llama") == "" and w.runtimes.status["llama"].startswith("rolled back: error: Runtime")
+    doc = json.loads((Path(w.cfg.state_dir) / "runtimes.json").read_text())
+    assert doc["llama"]["fails"] == {"b13000": 1} and "pending" not in doc["llama"]
+
+
+def test_never_switched_untested(tmp_path, hub, whisper, pins):
+    w, procs = worker(tmp_path, hub, whisper, pins)
+    w.llm_verified = False                                                 # llama-server couldn't start to be tested
+    w.stt_models.llm_room_ok = True
+    assert w.runtimes_step()                                               # whisper: tested, kept
+    assert not w.runtimes_step()
+    assert w.runtimes.status["llama"] == "b13000 ready, waiting: the LLM's model not checked yet"
+    w.llm_verified = True
+    w.stt_models.llm_room_ok = False
+    w.stt_models.make_plan = lambda gpu: []                               # (the speech models keep its room)
+    assert not w.runtimes_step()
+    assert w.runtimes.status["llama"].endswith("waiting: the LLM gave its VRAM to the speech models")
+    assert w.runtimes.active("llama") == ""
+    own, _ = worker(tmp_path / "own", hub, whisper, pins, whisper_server=["/opt/whisper-server", "--port", "1"],
+                    whisper_bin="whisper/Release/whisper-server.exe")
+    assert own.untestable("whisper") == "no whisper_server to test it with"
+
+
+def test_the_running_builds_folder_is_never_unpacked_over(tmp_path, pins):
+    cfg = rt_cfg(tmp_path)
+    r = runtimes(cfg, pins)
+    folder = Path(cfg.base_dir) / "runtimes" / "llama" / "b13000"
+    folder.mkdir(parents=True)
+    (folder / "llama-server.exe").write_bytes(b"running")                 # its marker unreadable for a moment
+    r._change("llama", lambda x: x.update(active="b13000"))
+    r.step(stop=lambda: False)
+    assert (folder / "llama-server.exe").read_bytes() == b"running"
+    assert r.status["llama"].startswith("b13000: unpack failed")
+
+
+def test_a_build_interrupted_twice_in_a_row_counts(tmp_path, pins):
+    cfg = rt_cfg(tmp_path)
+    r = runtimes(cfg, pins)
+    r.step(stop=lambda: False)
+    r.begin("llama")
+    assert runtimes(cfg, pins).boot() == ["llama"]                        # once: the worker stopped, not counted
+    r.begin("llama")
+    assert runtimes(cfg, pins).boot() == ["llama"]                        # twice in a row: it takes the PC down
+    doc = json.loads((Path(cfg.state_dir) / "runtimes.json").read_text())
+    assert doc["llama"]["fails"] == {"b13000": 1}
+
+
+def test_an_llm_job_taken_as_a_switch_begins_is_released(tmp_path, hub, whisper, pins):
+    w, _ = worker(tmp_path, hub, whisper, pins)
+    released = []
+    w._llm_release = lambda lease, why: released.append(why)
+    w.switching = "llama"
+    w.do_infer({"lease": "a" * 16, "id": "j", "task": "t", "messages": [], "schema": {}})
+    assert released == ["paused"] and w.llm_job is None
