@@ -66,7 +66,8 @@ AUDIO_NAME = re.compile(r"[0-9a-f]{20}")
 COMMS_CACHE_S, COMMS_CACHE_N = 10.0, 32     # GET /api/cad/comms: an answer reused this long, at most this many kept (#284)
 # GET /api/cad/comms: any of these asks for a page of a view (#415, Cad._comms_page), none: Main and Other as before
 COMMS_PAGE_PARAMS = ("view", "system", "group", "source", "service", "tier", "dept", "safety", "mute", "before", "changed", "at")
-COMMS_UNSENT = ("call_id", "turn", "updated_at")   # radio_traffic columns the Radio view never reads (#284: smaller answer)
+# radio_traffic columns the Radio view never reads (#284: smaller answer); corr_*: sent as fixed_text / fixes (#879)
+COMMS_UNSENT = ("call_id", "turn", "updated_at", "corr_text", "corr_rules", "corr_v")
 FIRE_KINDS = ("chief", "engine", "ladder", "tower", "rescue", "utility", "marine")
 PREVIEW_KEEP_S = 24 * 3600
 RETAG_DAYS = 30            # a source's service changed: its rows this recent re-tagged (Cad.retag_services)

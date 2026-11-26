@@ -2106,6 +2106,7 @@ class HubApp(App):
             now = time.time()
             if not self._may_write_audio():      # a standby (or a lease running out) writes nothing (#501)
                 return
+            corr = self._vocab_fix(key, text)
             if vocab_v is None:                  # (the item's own: whisper's prompt or AWS's stream, sizeup/stt_terms.py)
                 vocab_v = str(getattr(item, "vocab_v", "") or "")
             self.stt_runs.add(cid, engine, text=text, status=status, model=model, worker=worker, prompt_v=prompt_v,
@@ -2116,7 +2117,8 @@ class HubApp(App):
                               run_s=run_s if run_s is not None else (now - engine_start if engine_start else None),
                               keyup=getattr(item, "keyup", None),     # (a cut transmission's piece, the radio's split)
                               call_id=str(getattr(item, "call_id", "") or ""), turn=getattr(item, "turn", None),
-                              check=check, input=sttruns.engine_input(engine) if stt_input is None else stt_input)
+                              check=check, corr=corr,
+                              input=sttruns.engine_input(engine) if stt_input is None else stt_input)
             if role == "text" and clip_end is not None:
                 self.stt_latency.add(key, engine, now - clip_end, target=cls in sttruns.TARGET_CLASSES)
         except Exception as e:  # noqa: BLE001 - bookkeeping
@@ -2139,6 +2141,14 @@ class HubApp(App):
         except Exception as e:  # noqa: BLE001 - bookkeeping
             self.hub.log(f"stt runs: trailing time: {type(e).__name__}: {e}")
             return None
+
+    def _vocab_fix(self, key: str, text: str):
+        """The post-ASR vocabulary correction of an engine's raw text on its channel (#879, sizeup/stt_correct.py):
+        kept with the run, the raw text never changed (the text of record's is on its radio log row: App._corr_put).
+        None: not on there (or no list); v PENDING: its list's matcher not built yet. Never on a standby."""
+        if not self._may_write_audio():
+            return None
+        return self._corr_of(key, text)
 
     def _prompt_time(self, cid: str, d: dict) -> None:
         """The station's retext says whether whisper's prompt carried the clip's own time: kept on the transmission

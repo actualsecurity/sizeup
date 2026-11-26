@@ -101,6 +101,7 @@ from sizeup.cad import tonelist
 from sizeup.radio.tones import ToneEvent, TonePlan, base_name
 from sizeup.talkers import talker_prompt
 from sizeup import channels, stt_quality, stt_terms
+from sizeup import stt_correct
 from sizeup.stt import (CATCHUP, CATCHUP_MAX_CLIP_S, CATCHUP_NOTE, CLASS_NAMES, CONTEXT, CONTEXT_FALLBACK, HIGH, LIVE, LOW,
                         RERUN, SHED, URGENT, Transcriber, WhisperClient, radio_voice, wav_bytes)
 from sizeup.talkgroups import TalkgroupPrefs
@@ -2091,6 +2092,8 @@ class App:
                 del item.raw_audio
             # which model wrote this text (the station's, when the hub replays it)
             item.model = getattr(item, "model", "") or Path(self.cfg.stt_model).name  # type: ignore[attr-defined]
+            # its channel's terms put back (#879): beside the raw text before anything stores or reads it
+            self._corr_put(item, self._corr_of(traffic_key(item), item.text))
             self._emit("traffic", dict(item.as_dict(), attach=attach, pairs=pairs), item.id)
             self.store.on_traffic(item, attach=attach)
             self._to_cad(item)
@@ -2292,6 +2295,8 @@ class App:
                                      # (#747) from while sizeup was down: logged, never told to what alerts
                                      "late": bool(getattr(t, "late", False)),
                                      "vocab_v": getattr(t, "vocab_v", "") or "",     # the term list that biased it
+                                     # (#879) its channel's terms put back, beside the raw text (_corr_put)
+                                     **{k: str(getattr(t, k, "") or "") for k in stt_correct.NO_CORR},
                                      "cut": getattr(t, "cut", "") or "",     # (#819) cut at a mid-call grant
                                      # #409: the P25 system it was heard on ("": the county's, or FM) and its tier
                                      **self._row_source(t)},
@@ -2903,6 +2908,10 @@ class App:
                 "the text it had stays")
             return False
         alt = self._screen_alt(item, alt)
+        # its channel's terms put back (#879), before the row is written; a page: never (its own parser reads it)
+        corr = None if page is not None else self._corr_of(self._corr_key(cid, item), text)
+        if isinstance(item, Traffic):
+            self._corr_put(item, corr)
         if page is not None:
             if page.raw != text and (page.raw or page.status not in ("pending", "remote")):
                 hist = list(getattr(page, "history", None) or [])
@@ -2926,7 +2935,8 @@ class App:
         late = late or bool(getattr(t, "late", False))
         try:
             self.cad.comms.retext(cid, text, status, model, alt, notify=not quiet, vocab_v=vocab_v, late=late,
-                                  quality=unclear.get("quality", ""), unclear_text=unclear.get("unclear_text", ""))
+                                  quality=unclear.get("quality", ""), unclear_text=unclear.get("unclear_text", ""),
+                                  corr=stt_correct.columns(corr))
         except Exception as e:  # the CAD must never stop the monitor
             log(f"CAD: could not update the communications log: {type(e).__name__}: {e}")
         if t is not None and (text or unclear) and not quiet:
@@ -2948,6 +2958,38 @@ class App:
                           quiet=quiet or late)
         return changed
 
+
+    # -- post-ASR vocabulary correction (#879, sizeup/stt_correct.py) ---------------------------------------
+    stt_correct = None
+
+    def _corr_of(self, key: str, text: str):
+        """The text of record's correction on its channel (a stt_correct.Result; v PENDING: its list's matcher not built
+        yet), None: off there, no list, no text. Never builds a matcher (Corrector.warm does, on the lists' thread)."""
+        c = self.stt_correct
+        if c is None or not text:
+            return None
+        return c.correct(text, key)
+
+    def _corr_key(self, cid: str, item) -> str:
+        """A transmission's channel key: its own, else its radio log row's (a row no longer held here)."""
+        if isinstance(item, Traffic):
+            return traffic_key(item)
+        if self.stt_correct is None:
+            return ""
+        try:
+            r = self.cad.store.one("SELECT channel, talkgroup, system FROM radio_traffic WHERE id = ?", (cid,))
+            return stt_correct.row_key(dict(r)) if r is not None else ""
+        except Exception:  # noqa: BLE001 - no key: no correction
+            return ""
+
+    def _corr_put(self, item, res) -> None:
+        """The correction kept on the transmission (corr_text, corr_rules, corr_v), what _to_cad writes beside the raw
+        text; the one before cleared (a new text). Nothing when this process corrects nothing (a station)."""
+        if self.stt_correct is None and not getattr(item, "corr_v", ""):
+            return
+        cols = stt_correct.columns(res)
+        for k in ("corr_text", "corr_rules", "corr_v"):      # (spelled out: tests/test_contracts_events.py reads them)
+            setattr(item, k, cols[k])
 
     # -- per-channel speech-to-text (Settings > Radios, sizeup/channels.py) --------------------------------
 
@@ -3472,6 +3514,7 @@ class App:
         channel's own vocabulary) one Amazon Transcribe vocabulary, the own phrases first, made by the leader, used on
         those channels once READY; off, any made before are deleted (term_cleanup, once this task leads)."""
         self.stt_terms = None
+        self.stt_correct = None
         self.term_vocabs = None
         self.term_cleanup = None
         if self.aws is not None:                  # every AWS transcript says which vocabulary its stream used
@@ -3491,6 +3534,10 @@ class App:
         if files is None:
             return
         self.stt_terms = stt_terms.TermStore(files, log=log, on_read=self._terms_read)
+        # post-ASR vocabulary correction (#879, sizeup/stt_correct.py): the text of record corrected before its radio
+        # log row is written (_corr_put), each engine's run records its own (HubApp._vocab_fix)
+        self.stt_correct = stt_correct.Corrector(lambda: self.stt_terms, self._own_for_key,
+                                                 self.cfg.stt_correct_channels, self.cfg.stt_correct_towns, log=log)
         if self.cfg.stt_terms_aws and self.aws is not None:
             self.term_vocabs = tv
             self.aws.term_vocabulary = self._term_vocab_for
@@ -3520,6 +3567,8 @@ class App:
             self.term_vocabs.sync(store.sets())
         if changed:
             self.stt_terms_check()
+        if self.stt_correct is not None:            # (each list's matcher built here, never on a reader's request)
+            self.stt_correct.warm(self.cfg.stt_correct_channels)
 
     def stt_terms_check(self) -> None:
         """The hub sends the station the lists' top terms when its copy differs (HubApp)."""
@@ -3564,25 +3613,21 @@ class App:
 
     def _own_for_key(self, key: str) -> str | None:
         """Which list a channel key takes ("South 2", "HPN Tower", "tg:307", "p25:mrrs:9211"): a talkgroup's service from
-        its group where it is known here; a county incident talkgroup (307, 333) is fire dispatch."""
+        its group where it is known here; a county incident talkgroup (307, 333) is fire dispatch
+        (stt_terms.own_for_channel: tools/stt_correct_eval.py takes the same rule)."""
         key = str(key or "")
-        kind = self._kind.get(key, "")
-        service = ""
+        group, listed = None, ""
         got = sources.parse(key) if channels.is_tg(key) else None
         if got is not None:
             system, tg = got
             if system == sources.COUNTY:
                 group = (self.tg.info.get(tg) or {}).get("group") or ""
-                service = sources.service(group) if group else ("fire" if tg in self.cfg.p25_incident_talkgroups else "")
             else:
                 rt = getattr(self, "systems", {}).get(system)
                 info = (rt.system.talkgroups.get(tg) or {}) if rt is not None else {}
-                service = str(info.get("service") or "")
-            key = sources.p25(system, tg)
-        elif kind:
-            key = sources.fm(key, kind)                  # (an admin's service choice is kept under fm: / air:)
-            service = sources.service(kind=kind)
-        return stt_terms.own_for(key, service, kind)
+                listed = str(info.get("service") or "")
+        return stt_terms.own_for_channel(key, self._kind.get(key, ""), group, listed,
+                                         self.cfg.p25_incident_talkgroups)
 
     def _own_vocab(self, channel: str) -> str:
         """The channel's own AWS vocabulary (whether READY or not): airband sizeup-atc, a profiled police source sizeup-pd,

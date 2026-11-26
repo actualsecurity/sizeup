@@ -14,10 +14,13 @@ schema versions, and doing it twice changes nothing).
                     around its pin's counters moved
     fts_incidents   the remarks (external content: incidents)
     fts_events      the comments: the chronology's notes, dispatch remarks and upgrades (external content: events)
-    fts_radio       every transcript (radio_traffic: what speech-to-text wrote, the second engine's, and the status words
+    fts_radio       every transcript (radio_traffic: what speech-to-text wrote, the second engine's, and the text
+                    as shown: its channel's terms put back as it was written (corr_text, #879) and the status words
                     put back by statusrepair.py, so "en route" finds a row heard as "is fine"); a trigger queues a row
-                    (fts_radio_queue) on insert and on a change of its text or rig, catch_up() indexes it. A transcript
-                    reaches an incident through radio_links
+                    (fts_radio_queue) on insert and on a change of its text or rig, catch_up() indexes it (corr_text
+                    is written in the same transaction as its text, so the trigger covers it; a new term list never
+                    rewrites a stored row's corr_text, so nothing indexed goes stale with it: no re-index). A
+                    transcript reaches an incident through radio_links
     History here    for an incident with a building key: the other numbered calls with that key (a range and each of
                     its numbers; 12A and 12 when their pins are within SAME_LOT_M), plus the calls keyed only by their
                     point within GROUP_M; for one keyed only by its point: every call within GROUP_M. The last RECENT,
@@ -322,7 +325,7 @@ class AddressHistory:
     def _index_radio(self, limit: int = BATCH) -> int:
         """Index up to limit queued transcripts: read, repair (outside the lock), then one short write."""
         rows = self.store.q("SELECT t.rowid AS rid, t.id, t.text, t.alt_text, t.channel, t.talkgroup, t.rig, t.dispatcher, "
-                            "t.system "
+                            "t.system, t.corr_text, t.corr_rules "
                             "FROM fts_radio_queue q JOIN radio_traffic t ON t.rowid = q.rid ORDER BY q.rid DESC LIMIT ?",
                             (limit,))
         gone = [r["rid"] for r in self.store.q("SELECT q.rid FROM fts_radio_queue q LEFT JOIN radio_traffic t "
@@ -333,7 +336,7 @@ class AddressHistory:
         shown = [dict(r) for r in rows]
         if fix is not None:
             try:
-                fix(shown)                              # the status words put back (statusrepair.py): "fixed_text"
+                fix(shown)                              # its terms (#879) and status words put back: "fixed_text"
             except Exception as e:  # noqa: BLE001 - the heard text is still indexed
                 self.log(f"CAD history: status repair: {type(e).__name__}")
         # another P25 system's transcript (#419, context) is never indexed: a search would show its words to anyone
