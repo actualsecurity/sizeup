@@ -576,7 +576,8 @@ def test_a_pre_alert_job_gets_the_stt_input_that_comes_in_time_and_never_waits_2
     token = hub.app.hub.workers.add("gpu-1", "Test box")
     w = FakeWorker(hub.url, token).start()
     try:
-        assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
+        auto(hub, "FG1")                                   # (a GPU worker first: Auto, #896)
+        assert wait(lambda: hub.app.sttpool.ready_forced(URGENT)[0], 5)
         item, samples = _stt_item(1, "FG1-30")
         threading.Timer(0.3, lambda: call(hub.url + "/api/station/stt", "POST", {"v": 1, "items": [item]})).start()
         send(hub, pending_event("FG1-30"))
@@ -608,7 +609,8 @@ def test_an_stt_input_that_comes_before_its_event_is_what_the_worker_hears(tmp_p
     token = hub.app.hub.workers.add("gpu-1", "Test box")
     w = FakeWorker(hub.url, token).start()
     try:
-        assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
+        auto(hub, "FG1")                                   # (a GPU worker first: Auto, #896)
+        assert wait(lambda: hub.app.sttpool.ready_forced(URGENT)[0], 5)
         item, samples = _stt_item(1, "FG1-50")
         assert call(hub.url + "/api/station/stt", "POST", {"v": 1, "items": [item]})[0] == 200    # before its event
         send(hub, pending_event("FG1-50"))
@@ -639,7 +641,8 @@ def test_a_station_whose_lane_is_not_woken_on_ack_keeps_the_old_2_s_wait(tmp_pat
     token = hub.app.hub.workers.add("gpu-1", "Test box")
     w = FakeWorker(hub.url, token).start()
     try:
-        assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
+        auto(hub, "FG1")                                   # (a GPU worker first: Auto, #896)
+        assert wait(lambda: hub.app.sttpool.ready_forced(URGENT)[0], 5)
         item, samples = _stt_item(1, "FG1-40")
         threading.Timer(0.3, lambda: call(hub.url + "/api/station/stt", "POST", {"v": 1, "items": [item]})).start()
         send(hub, pending_event("FG1-40"))
