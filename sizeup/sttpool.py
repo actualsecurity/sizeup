@@ -109,6 +109,13 @@ def rank(job) -> int:
     return 2 if job.bg else 1 if job.norm else 0
 
 
+def priority(job) -> bool:
+    """A priority-tier job (rank 0): what the pre-alert speed gate measures, what background and Auto · normal work
+    yields to, and what never waits behind either. Never a shadow copy (the latency guard's probe) nor a clip placed on
+    the stations (station_only: background or Auto · normal); a lower tier (a future challenger's) ranks above 0."""
+    return rank(job) == 0 and not job.extra.get("shadow") and not job.extra.get("station_only")
+
+
 def _extra(job) -> float:
     if job.extra.get("station_only") or job.norm:
         return PER_AUDIO_S * max(0.0, job.seconds)
@@ -198,8 +205,9 @@ class Worker:
     fails: int = 0
     cool_until: float = 0.0
     cools: int = 0                              # cooldowns in a row (no job done since): each one twice as long
-    fast: deque = field(default_factory=deque)  # (at, claim -> text s) of its pre-alert jobs, FAST_WINDOW_S; a lease
-                                                # it lost counts as the whole cap (a gaming take-back doesn't count)
+    fast: deque = field(default_factory=deque)  # (at, claim -> text s) of its priority pre-alert jobs, FAST_WINDOW_S; a
+                                                # lease it lost counts as the whole cap (a gaming take-back doesn't
+                                                # count, nor any Auto · normal or background job: priority() only)
     probe_at: float = 0.0                       # its last pre-alert probe while slow
     done: int = 0
     lost: int = 0
@@ -735,7 +743,8 @@ class Pool:
                         job = self._best(w, now)
                         if job is not None:
                             self._queue.remove(job)
-                            if job.cls in FAST_CLASSES and (self._fast_s(w, now) or 0.0) > PREALERT_MAX_SERVICE_S:
+                            if job.cls in FAST_CLASSES and priority(job) and \
+                                    (self._fast_s(w, now) or 0.0) > PREALERT_MAX_SERVICE_S:
                                 w.probe_at = now               # a slow worker's probe: the next one PROBE_S on
                             return self._lease(job, w, now)
                     left = end - time.monotonic()
@@ -785,7 +794,10 @@ class Pool:
         whole cap when the lease was lost (ran out, the worker unheard); a job handed back or taken back on gaming or a
         pause isn't slowness and isn't counted."""
         w = self.workers.get(job.worker)
-        if w is not None and job.cls in FAST_CLASSES and job.lease in self._leases and (took is not None or lost):
+        # (only a priority job's: an Auto · normal or background clip of a pre-alert class, the latency guard's shadow
+        # copy, is decoded under its own longer lease and says nothing of how quick the worker is on pre-alert clips)
+        if w is not None and job.cls in FAST_CLASSES and priority(job) and job.lease in self._leases and (
+                took is not None or lost):
             w.fast.append((self.clock(), took if took is not None else BUDGETS[job.cls][2]))
         self._leases.pop(job.lease, None)
         if w is not None:
