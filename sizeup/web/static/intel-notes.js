@@ -74,7 +74,26 @@ window.IntelNotes = (() => {
     for (const n of d.notes) list.append(st.editing === n.id ? form(host, n) : noteRow(host, n));
     const kids = [head, list];
     if (st.editing === null || st.editing === "new") kids.push(st.editing === "new" ? form(host, null) : addBtn(host));
+    if (d.audit && d.audit.length) kids.push(audit(d.audit));
     host.replaceChildren(...kids);
+  }
+  // admins: every change, folded (who, when, which fields; the words are in the notes and the export)
+  function audit(rows) {
+    const box = el("details", "nt-audit");
+    const sum = el("summary", "dim small", `Changes · ${rows.length}`);
+    sum.title = "Every add, edit, delete and done of these notes (admins)";
+    const ol = el("ol", "list nt-audit-list");
+    for (const a of rows) {
+      let what = "";
+      try {
+        const b = a.before ? JSON.parse(a.before) : {}, f = a.after ? JSON.parse(a.after) : {};
+        if (a.action === "edit") what = Object.keys(f).filter((k) => JSON.stringify(f[k]) !== JSON.stringify(b[k])).join(", ");
+        if (a.action === "done") what = f.done || "not yet";
+      } catch (e) { what = ""; }
+      ol.append(el("li", "dim small", [`note ${a.note_id}`, a.action, what, a.operator, when(a.at)].filter(Boolean).join(" · ")));
+    }
+    box.append(sum, ol);
+    return box;
   }
   function addBtn(host) {
     const b = el("button", "sm", "+ Note");
@@ -109,7 +128,10 @@ window.IntelNotes = (() => {
       e.addEventListener("click", () => { st.editing = n.id; draw(host); });
       const x = el("button", "sm quiet danger-quiet", "Delete");
       x.type = "button";
-      x.addEventListener("click", () => write(host, `/api/cad/intel/notes/${n.id}`, { delete: true }, "Note deleted"));
+      x.addEventListener("click", async () => {
+        if (window.UI && UI.confirm && !(await UI.confirm("Delete this note? Its tags leave the feedback too.", { ok: "Delete" }))) return;
+        write(host, `/api/cad/intel/notes/${n.id}`, { delete: true }, "Note deleted");
+      });
       acts.append(e, x);
     }
     if (st.data && st.data.admin) {                   // the review queue's "done / PR #" (admins)

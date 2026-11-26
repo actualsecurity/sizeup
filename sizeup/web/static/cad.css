@@ -931,7 +931,9 @@
   .q-intel-all { margin-inline-start: auto; }
   /* notes and tags (intel-notes.js): the row's chip, More info's notes, the incident's */
   .il-filters #il-q { flex: 1 1 10rem; }
-  .nt-count { cursor: pointer; }
+  .nt-count { font-variant-numeric: tabular-nums; }
+  .nt-audit summary { cursor: pointer; }
+  .nt-audit-list { margin: 0; }
   .nt-review { border-color: var(--warn); color: var(--warn); }
   .nt-notes { margin: 0; }
   .nt-note { display: flex; flex-direction: column; gap: var(--s-1); padding-block: var(--s-1); }

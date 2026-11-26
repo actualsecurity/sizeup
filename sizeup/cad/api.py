@@ -429,6 +429,7 @@ from sizeup.cad.service import Cad
 from sizeup.cad.settings import LastAdmin
 from sizeup.cad.store import TZ, CadError
 from sizeup.datasources import TooSoon
+from sizeup.intel.notes import Forbidden as NoteForbidden
 
 
 class NeedsConfirm(CadError):
@@ -513,10 +514,10 @@ WRITES = (
     (HINT, "dispatch"),                                                     # a status suggested from the radio (#37)
     (OOS_NOTICE, "dispatch"),                                               # an out-of-service unit back in service
     (re.compile(r"/api/cad/intel/\d{1,9}/dismiss"), "dispatch"),             # a radio pre-alert that is nothing
-    (re.compile(r"/api/cad/intel/\d{1,9}/feedback"), "read"),                # ... a vote on it: anyone signed in
-    (INTEL_NOTES, "read"),                                                  # ... a note on it: anyone signed in
+    (re.compile(r"/api/cad/intel/\d{1,9}/feedback"), "active"),              # ... a vote on it: anyone signed in, active
+    (INTEL_NOTES, "active"),                                                # ... a note on it: the same
     (re.compile(r"/api/cad/intel/notes/\d{1,9}/done"), "admin"),             # ... a note acted on (the review queue)
-    (re.compile(r"/api/cad/intel/notes/\d{1,9}"), "read"),                   # ... its edit: the author or an admin (notes.py)
+    (re.compile(r"/api/cad/intel/notes/\d{1,9}"), "active"),                 # ... its edit: the author or an admin (notes.py)
     (ALARM_ACK, "dispatch"),                                                # an emergency alarm seen (#128)
     (ALARM_CLEAR, "dispatch"),                                              # ... and resolved: its window closed
     (REMINDER_ACK, "dispatch"),                                             # a reminder OK'd: quiet for everyone
@@ -783,7 +784,24 @@ def _toggles(b) -> str:
     return ", ".join(f"{k} {'on' if b[k] else 'off'}" for k in ("record", "main") if b.get(k) is not None)
 
 
+def _intel_note(m, b, o, c):
+    """An intel note's change in the person's activity: which, never its words (sizeup/intel/notes.py)."""
+    n = (o or {}).get("note") or {}
+    tags = ", ".join(n.get("tags") or [])
+    if m.re is INTEL_NOTES:
+        return (f"Added a note on radio pre-alert {m.group(1)}" + (f" ({tags})" if tags else ""), "")
+    if m.group(2):
+        return (f"Marked note {m.group(1)} done" + (f": {_clip(b.get('done'), 40)}" if b.get("done") else " (not yet)"), "")
+    if b.get("delete"):
+        return (f"Deleted note {m.group(1)}", "")
+    if (o or {}).get("unchanged"):
+        return None
+    return (f"Edited note {m.group(1)}" + (f" ({tags})" if tags else ""), "")
+
+
 DOES = (
+    (INTEL_NOTES, _intel_note),
+    (INTEL_NOTE, _intel_note),
     (re.compile(r"/api/cad/incident"), _created),
     (INCIDENT_CHANNEL, lambda m, b, o, c: (f"{'Removed' if b.get('remove') else 'Added'} channel TG {_clip(b.get('talkgroup'), 12)} "
                                            f"on {_number(c, int(m.group(1))) or 'event ' + m.group(1)}",
@@ -918,6 +936,8 @@ class CadApi:
             self.refused(path, who, f"signed in as {who.email}: {e}", client)
             return _json(403, {"error": f"signed in as {who.email}: {e}"})
         need = needs(path, body)
+        if need == "active" and (st["active"] or st.get("bootstrap")):
+            return None                    # a write any signed-in person may make, never a deactivated one's
         if need in MAY.get(st["may"], ("read",)):
             return None
         ask = f" (ask {', '.join(st['admins'])})" if st["admins"] else ""
@@ -1510,6 +1530,10 @@ class CadApi:
             if signed:
                 self.refused(path, who, "the last admin", client)
             return _json(409, {"error": str(e)})
+        except NoteForbidden as e:             # an intel note not this person's (sizeup/intel/notes.py): refused, logged
+            if signed:
+                self.refused(path, who, str(e), client)
+            return _json(403, {"error": str(e)})
         except NeedsConfirm as e:              # live: the page asks (the error is the question), then sends confirm
             return _json(409, {"error": str(e), "confirm": True})
         except TooSoon as e:                   # a data source's Refresh now, refused (#186): rate limit, running, resting

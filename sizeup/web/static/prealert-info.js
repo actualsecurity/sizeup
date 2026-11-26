@@ -269,6 +269,8 @@ window.PrealertInfo = (() => {
         o.delivery ? (o.delivery.ok ? `ntfy took it (HTTP ${o.delivery.status}${o.delivery.id ? `, message ${o.delivery.id}` : ""})`
           : `ntfy didn't take it: ${o.delivery.error || o.delivery.status}`) : "Queued: no answer from ntfy yet"],
       ["Votes", fb.join("; ")],
+      ["Tags", Object.entries(o.note_tags || {}).map(([t, n]) => `${(window.IntelNotes && IntelNotes.TAGS[t]) || t}${n > 1 ? ` ×${n}` : ""}`).join(" · "),
+        "Its notes' tags (Notes)"],
     ]));
     return kids;
   }

@@ -13,12 +13,19 @@ What reads them later:
     More info             every note in full, with the forms (static/intel-notes.js)
     the incident          the notes of the events linked to it (near_incident, incident_id): GET
                           /api/cad/incident/<id>/intel, the incident view's Intel notes
-    tuning                each tag is also a verdict in intel_feedback (TAG_VERDICT; note_id its note; the rules list
-                          and the rule set's hash as the event had them), the store the rules' and the model's tuning
-                          read; rewritten on every edit, removed with the note. false_garbled_audio is a "garbled" row
-                          per transmission (traffic_id set): the speech-to-text side's pointer to the clips. There is no
+    tuning                each tag is also a verdict in intel_feedback, once per note (TAG_VERDICT; note_id its note,
+                          traffic_id NULL; the rules list and the rule set's hash as the event had them), the store the
+                          rules' and the model's tuning read; a note with corrections and no tag: one "corrected" row.
+                          Rewritten on every edit, removed with the note; never counted as a person's vote (the Intel
+                          page's and More info's votes are the rows with no note_id). false_garbled_audio also writes a
+                          "garbled_tx" row per transmission (traffic_id set): the speech-to-text side's pointer to the
+                          clips, labelled per transmission so a count of "garbled" stays one per note. There is no
                           speech-to-text feedback or label table to write to (stt_corrections are admins' corrected
-                          transcripts, stt_runs.label_flag the time check's): intel_feedback is where it is kept
+                          transcripts, stt_runs.label_flag the time check's; the experiment log, #876, isn't built):
+                          intel_feedback is where it is kept
+    the clips             a noted event's transmissions are keepers while the note exists (sizeup/cad/comms.py: never
+                          pruned, their audio a record, as a hand-corrected transmission's), so its pointers never go
+                          stale
     the export            admins: GET /api/cad/intel/export.csv | .jsonl?from=&to= (and the Intel page's filters): each
                           event with its notes, tags, scores, rule hits, the model's record, verdicts and transcripts.
                           It holds names and what was said: it stays on the hub until an admin downloads it (in their
@@ -38,6 +45,8 @@ from sizeup.cad.store import CadError
 TAGS = ("should_have_pushed", "false_garbled_audio", "wrong_place", "wrong_category", "out_of_area", "late",
         "rule_to_add")
 REVIEW_TAGS = ("rule_to_add", "wrong_category", "should_have_pushed", "false_garbled_audio")
+TX_VERDICT = "garbled_tx"          # false_garbled_audio, per transmission (traffic_id): the speech-to-text side's
+CORRECTED = "corrected"            # a note with corrections and no tag
 TAG_VERDICT = {"should_have_pushed": "should_push", "false_garbled_audio": "garbled", "wrong_place": "wrong_place",
                "wrong_category": "wrong_type", "out_of_area": "out_of_area", "late": "late", "rule_to_add": "rule_to_add"}
 LEVELS = ("push", "map", "log", "none")
@@ -46,6 +55,10 @@ PLACE_MAX = 200
 DONE_MAX = 120
 EXPORT_MAX = 5000
 FIELDS = ("text", "tags", "corrected_category", "corrected_place", "corrected_level")
+
+
+class Forbidden(CadError):
+    """Not this person's to change (its author or an admin; done: admins): the API's 403, in their activity."""
 
 
 def _who(operator: str) -> str:
@@ -177,7 +190,7 @@ class IntelNotes:
     @staticmethod
     def _may(r: dict, email: str, admin: bool) -> None:
         if not admin and not (email and (r["author_email"] or "").lower() == email.lower()):
-            raise CadError("only its author or an admin may change a note")
+            raise Forbidden("only its author or an admin may change a note")
 
     def _feedback(self, db, note: dict, ev: dict, at: float) -> None:
         """The note's tags as intel_feedback verdicts (the tuning's store), replacing what it wrote before."""
@@ -188,14 +201,17 @@ class IntelNotes:
         except ValueError:
             tags, tids = [], []
         corrected = {k: note[f"corrected_{k}"] for k in ("place", "level") if note[f"corrected_{k}"]}
-        for t in tags:
-            v = TAG_VERDICT[t]
-            for tid in (tids or [None]) if t == "false_garbled_audio" else [None]:
-                db.execute("INSERT INTO intel_feedback (event_id, traffic_id, verdict, corrected, corrected_category, rules, "
-                           "ruleset_hash, operator, at, note_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                           (note["event_id"], tid, v, json.dumps(corrected) if corrected else "",
-                            note["corrected_category"][:40], ev["rules"] or "[]", ev["ruleset_hash"] or "",
-                            note["author"][:120], at, note["id"]))
+        rows = [(TAG_VERDICT[t], None) for t in tags]                      # once per note
+        if not tags and (corrected or note["corrected_category"]):
+            rows.append((CORRECTED, None))
+        if "false_garbled_audio" in tags:
+            rows += [(TX_VERDICT, tid) for tid in tids]                      # the clips, labelled per transmission
+        for v, tid in rows:
+            db.execute("INSERT INTO intel_feedback (event_id, traffic_id, verdict, corrected, corrected_category, rules, "
+                       "ruleset_hash, operator, at, note_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                       (note["event_id"], tid, v, json.dumps(corrected) if corrected else "",
+                        note["corrected_category"][:40], ev["rules"] or "[]", ev["ruleset_hash"] or "",
+                        note["author"][:120], at, note["id"]))
 
     @staticmethod
     def _audit(db, nid: int, eid: int, action: str, op: str, at: float, before, after) -> None:
@@ -220,21 +236,27 @@ class IntelNotes:
         return {"ok": True, "note": self.shown(note, email, body.get("_may") == "admin")}
 
     def edit(self, nid: int, body: dict) -> dict:
-        cur = self._note(nid)
         op, email = str(body.get("operator") or "")[:160], str(body.get("_email") or "")
         admin = body.get("_may") == "admin"
-        self._may(cur, email, admin)
         now = self.cad.clock()
-        ev = self._event(cur["event_id"])
-        before = {k: cur[k] for k in FIELDS}
-        if body.get("delete"):
-            with self.engine.events._w() as db:
+        with self.engine.events._w() as db:            # read and written in one transaction: never an older copy
+            r = db.execute("SELECT * FROM intel_notes WHERE id = ?", (int(nid),)).fetchone()
+            if r is None:
+                raise CadError(f"no note {nid}")
+            cur = dict(r)
+            self._may(cur, email, admin)
+            e = db.execute("SELECT id, rules, ruleset_hash, traffic_ids FROM intel_events WHERE id = ?",
+                           (cur["event_id"],)).fetchone()
+            ev = dict(e) if e else {"id": cur["event_id"], "rules": "[]", "ruleset_hash": "", "traffic_ids": "[]"}
+            before = {k: cur[k] for k in FIELDS}
+            if body.get("delete"):
                 db.execute("DELETE FROM intel_notes WHERE id = ?", (int(nid),))
                 db.execute("DELETE FROM intel_feedback WHERE note_id = ?", (int(nid),))
                 self._audit(db, int(nid), cur["event_id"], "delete", op, now, {**before, "author": cur["author"]}, None)
-            return {"ok": True, "deleted": int(nid)}
-        n = self._clean(body, cur)
-        with self.engine.events._w() as db:
+                return {"ok": True, "deleted": int(nid)}
+            n = self._clean(body, cur)
+            if n == before:                            # nothing changed: no write, no audit row
+                return {"ok": True, "note": self.shown(cur, email, admin), "unchanged": True}
             db.execute("UPDATE intel_notes SET text = ?, tags = ?, corrected_category = ?, corrected_place = ?, "
                        "corrected_level = ?, updated_at = ? WHERE id = ?",
                        (n["text"], n["tags"], n["corrected_category"], n["corrected_place"], n["corrected_level"], now,
@@ -246,9 +268,9 @@ class IntelNotes:
 
     def done(self, nid: int, body: dict) -> dict:
         """An admin's "done / PR #": the change it asked for is made ("" again: not yet)."""
+        if body.get("_may") != "admin":
+            raise Forbidden("marking a note done is for admins")
         cur = self._note(nid)
-        if body.get("_may") not in ("admin", None):
-            raise CadError("admins only")
         d = str(body.get("done") or "").strip()[:DONE_MAX]
         op = str(body.get("operator") or "")[:160]
         now = self.cad.clock()
@@ -267,6 +289,7 @@ class IntelNotes:
         il = self.cad.intel_admin.eventlog
         ids = il.ids(q, EXPORT_MAX)
         rows = self._export_rows(ids)
+        from sizeup.cad.export import _cell
         if fmt == "jsonl":
             return "".join(json.dumps(r, separators=(",", ":"), default=str) + "\n" for r in rows).encode(), len(rows)
         out = io.StringIO()
@@ -287,7 +310,7 @@ class IntelNotes:
                 + "".join(f" ({k} -> {n['corrected_' + k]})" for k in ("category", "place", "level") if n["corrected_" + k])
                 + (f" done: {n['done']}" if n["done"] else "") for n in r["notes"])
             flat["transcripts"] = " || ".join(f"{t['id']}: {t['text']}" for t in r["transcripts"])
-            w.writerow([flat.get(c, "") if flat.get(c) is not None else "" for c in cols])
+            w.writerow([_cell(flat.get(c)) if flat.get(c) is not None else "" for c in cols])   # (never a formula)
         return out.getvalue().encode(), len(rows)
 
     def _export_rows(self, ids: list[int]) -> list[dict]:

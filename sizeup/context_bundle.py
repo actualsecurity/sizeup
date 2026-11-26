@@ -476,8 +476,16 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
                          *addrkey.bbox(lat, lon), CAP["site_prealerts"] * 3)) if exact else []
     prior = [p for p in prior if (e["place"] and (p["label_full"] or "").lower() == e["place"].lower())
              or (p["lat"] is not None and addrkey.meters(lat, lon, p["lat"], p["lon"]) <= addrkey.GROUP_M)]
+    # people's votes only: a note's tags are its own (sizeup/intel/notes.py), never counted as votes (#913 review F1)
     feedback = cad.store.q("SELECT verdict, operator, at, corrected_category FROM intel_feedback WHERE event_id = ? "
-                           "ORDER BY at DESC, id DESC LIMIT ?", (e["id"], CAP["feedback"]))
+                           "AND note_id IS NULL AND traffic_id IS NULL ORDER BY at DESC, id DESC LIMIT ?", (e["id"], CAP["feedback"]))
+    note_tags: dict = {}
+    for n in cad.store.q("SELECT tags FROM intel_notes WHERE event_id = ?", (e["id"],)):
+        try:
+            for t in json.loads(n["tags"] or "[]"):
+                note_tags[t] = note_tags.get(t, 0) + 1
+        except ValueError:
+            pass
     votes = [dict(f) if admin else {k: f[k] for k in ("verdict", "at", "corrected_category")} for f in feedback]   # who: admins
     now_hash = cad.intel.ruleset_hash() if hasattr(cad.intel, "ruleset_hash") else ""
     status_by = e.get("dismissed_by") or ""
@@ -524,9 +532,11 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
                     "feedback": votes, "pushed": e["pushed_at"] is not None,
                     "pushed_at": e["pushed_at"], "suppressed": e["suppressed"], "delivery": e.get("delivery"),
                     # why it didn't push, as the Intel page says it (sizeup/intel/eventlog.py): {key, label, tip, detail}
-                    "held": _held(cad, e["id"])},
+                    "held": _held(cad, e["id"]),
+                    "note_tags": note_tags},             # {tag: how many of its notes have it}
     }
-    rev = [raw["updated_at"], e["status"], len(feedback), feedback[0]["at"] if feedback else 0, raw.get("delivery") or ""]
+    rev = [raw["updated_at"], e["status"], len(feedback), feedback[0]["at"] if feedback else 0, raw.get("delivery") or "",
+           sorted(note_tags.items())]
     return out, rev
 
 

@@ -20,7 +20,7 @@ from sizeup.cloud.access import Identity
 from sizeup.intel import notes as notes_mod
 from tests.test_intel_page import (NODE, STATIC, T0, heard, listing, needs_node, run_node, save,  # noqa: F401
                                    site)
-from tests.test_roles import CASEY, JORDAN, VAL, call
+from tests.test_roles import CASEY, DEE, JORDAN, VAL, call
 
 VALN, JORDANN, CASEYN = "Val <val@example.org>", "Jordan <jordan@example.org>", "Casey <casey@example.org>"
 
@@ -51,7 +51,9 @@ def test_anyone_signed_in_adds_the_author_edits_an_admin_any(site):
     row = cad.store.one("SELECT author, author_email FROM intel_notes WHERE id = ?", (nid,))
     assert row == {"author": VALN, "author_email": VAL}                       # who signed in, not what the page said
     code, out = call(api, f"/api/cad/intel/notes/{nid}", {"text": "not mine"}, JORDAN)
-    assert code == 400 and "author or an admin" in out["error"]
+    assert code == 403 and "author or an admin" in out["error"]
+    refused = [a for a in cad.activity.rows(JORDAN) if a["kind"] == "refused"]
+    assert refused and "author or an admin" in refused[0]["summary"]              # refused, in their activity
     clock.t += 30
     assert call(api, f"/api/cad/intel/notes/{nid}", {"text": "a man waving a machete outside the deli, Car 3 there"}, VAL)[0] == 200
     assert call(api, f"/api/cad/intel/notes/{nid}", {"tags": ["rule_to_add"]}, CASEY)[0] == 200
@@ -59,7 +61,7 @@ def test_anyone_signed_in_adds_the_author_edits_an_admin_any(site):
     [n] = d["notes"]
     assert n["text"].endswith("Car 3 there") and n["tags"] == ["rule_to_add"] and n["edited"] and not n["may_edit"]
     assert "audit" not in d
-    assert call(api, f"/api/cad/intel/notes/{nid}", {"delete": True}, JORDAN)[0] == 400
+    assert call(api, f"/api/cad/intel/notes/{nid}", {"delete": True}, JORDAN)[0] == 403
     assert call(api, f"/api/cad/intel/notes/{nid}", {"delete": True}, CASEY)[0] == 200
     assert jget(api, f"/api/cad/intel/{e.id}/notes", VAL)[1]["notes"] == []
 
@@ -71,6 +73,18 @@ def test_nobody_without_a_sign_in(site):
     assert get(api, f"/api/cad/intel/{e.id}/notes", None)[0] == 403
     assert add(api, e.id, None, text="x")[0] == 400                 # refused (the sign-in gate), nothing written
     assert cad.store.one("SELECT COUNT(*) AS n FROM intel_notes")["n"] == 0
+
+
+def test_a_deactivated_account_neither_notes_nor_votes(site):
+    """#913 review F4: a note and a vote are writes: a signed-in person whose account is active."""
+    cad, _clock = site
+    e = save(cad)
+    api = CadApi(cad)
+    nid = add(api, e.id, VAL, text="Car 3 there")[1]["note"]["id"]
+    assert add(api, e.id, DEE, text="x")[0] == 403
+    assert call(api, f"/api/cad/intel/{e.id}/feedback", {"verdict": "useful"}, DEE)[0] == 403
+    assert call(api, f"/api/cad/intel/notes/{nid}", {"delete": True}, DEE)[0] == 403
+    assert cad.store.one("SELECT COUNT(*) AS n FROM intel_notes")["n"] == 1
 
 
 def test_a_note_needs_something_and_only_known_tags_and_values(site):
@@ -95,6 +109,7 @@ def test_every_change_is_audited_with_before_and_after(site):
     call(api, f"/api/cad/intel/notes/{nid}", {"text": "second"}, VAL)
     call(api, f"/api/cad/intel/notes/{nid}/done", {"done": "PR #123"}, CASEY)
     call(api, f"/api/cad/intel/notes/{nid}", {"delete": True}, VAL)
+    call(api, f"/api/cad/intel/notes/{nid}", {"text": "second"}, VAL)                # the same again: no row
     a = jget(api, f"/api/cad/intel/{e.id}/notes", CASEY)[1]["audit"]
     assert [(x["action"], x["operator"]) for x in a] == [("add", "Val"), ("edit", "Val"), ("done", "Casey"), ("delete", "Val")]
     assert json.loads(a[1]["before"])["text"] == "first" and json.loads(a[1]["after"])["text"] == "second"
@@ -113,14 +128,39 @@ def test_tags_are_verdicts_tuning_reads_rewritten_on_edit_removed_on_delete(site
     fb = lambda: cad.store.q("SELECT verdict, traffic_id, corrected_category, rules, ruleset_hash, operator FROM intel_feedback "  # noqa: E731
                              "WHERE note_id = ? ORDER BY id", (nid,))
     rows = fb()
-    assert [(r["verdict"], r["traffic_id"]) for r in rows] == [("garbled", "c1-t0"), ("garbled", "c1-t1"), ("wrong_type", None)]
-    assert rows[2]["corrected_category"] == "mva_injury" and rows[0]["ruleset_hash"] == "abc123"
+    # each tag once per note; the clips per transmission under their own verdict (the speech-to-text side's)
+    assert [(r["verdict"], r["traffic_id"]) for r in rows] == [("garbled", None), ("wrong_type", None),
+                                                              ("garbled_tx", "c1-t0"), ("garbled_tx", "c1-t1")]
+    assert rows[1]["corrected_category"] == "mva_injury" and rows[0]["ruleset_hash"] == "abc123"
     assert json.loads(rows[0]["rules"]) == [["pd.shots", 1, 0.7]] and rows[0]["operator"] == VALN
     call(api, f"/api/cad/intel/notes/{nid}", {"tags": ["should_have_pushed"]}, VAL)
     assert [(r["verdict"], r["traffic_id"]) for r in fb()] == [("should_push", None)]
     call(api, f"/api/cad/intel/notes/{nid}", {"delete": True}, VAL)
     assert fb() == []
     assert set(notes_mod.TAG_VERDICT.values()) <= set(__import__("sizeup.intel.events", fromlist=["VERDICTS"]).VERDICTS)
+    # corrections and no tag: one "corrected" row
+    nid2 = add(api, e.id, VAL, corrected_place="12 Example Road, Rye")[1]["note"]["id"]
+    [r] = cad.store.q("SELECT verdict, corrected FROM intel_feedback WHERE note_id = ?", (nid2,))
+    assert r["verdict"] == "corrected" and json.loads(r["corrected"]) == {"place": "12 Example Road, Rye"}
+
+
+def test_a_notes_tags_are_never_votes(site):
+    """#913 review F1: one note tagged garbled + should_have_pushed on a 3-transmission event is no vote of its author's."""
+    cad, _clock = site
+    e = save(cad, traffic_ids=["c1-t0", "c1-t1", "c1-t2"])
+    api = CadApi(cad)
+    add(api, e.id, VAL, text="cut out", tags=["false_garbled_audio", "should_have_pushed"])
+    call(api, f"/api/cad/intel/{e.id}/feedback", {"verdict": "useful"}, JORDAN)
+    [row] = listing(cad, who=VAL)["events"]
+    assert row["votes"] == {"useful": 1} and row["mine"] == []
+    assert row["notes"]["tags"] == ["false_garbled_audio", "should_have_pushed"]
+    b = jget(api, f"/api/cad/prealerts/intel/{e.id}", VAL)[1]["outcome"]
+    assert [f["verdict"] for f in b["feedback"]] == ["useful"]
+    assert b["note_tags"] == {"false_garbled_audio": 1, "should_have_pushed": 1}
+    # Val's own vote is still one of its own, the note untouched
+    assert call(api, f"/api/cad/intel/{e.id}/feedback", {"verdict": "should_push"}, VAL)[1]["removed"] is False
+    assert call(api, f"/api/cad/intel/{e.id}/feedback", {"verdict": "should_push"}, VAL)[1]["removed"] is True
+    assert cad.store.one("SELECT COUNT(*) AS n FROM intel_feedback WHERE note_id IS NOT NULL AND verdict = 'should_push'")["n"] == 1
 
 
 # -- the review queue and the page's filters ---------------------------------------------------------------------------
@@ -142,6 +182,16 @@ def test_the_review_queue_spans_every_date_until_done(site):
     assert listing(cad, review=1)["events"] == []
     cad.intel.events.prune(clock.t)                                          # 200 days: kept, its note keeps it
     assert cad.store.one("SELECT id FROM intel_events WHERE id = ?", (old.id,)) is not None
+    # by the note's time: an old event noted now is in a review of the last day (#913 review F3)
+    n2 = add(api, old.id, VAL, text="and again", tags=["wrong_category"])[1]["note"]["id"]
+    day = __import__("datetime").datetime.fromtimestamp(clock.t, __import__("sizeup.cad.store", fromlist=["TZ"]).TZ)
+    one_day = {"from": day.strftime("%Y-%m-%d"), "review": 1}
+    assert [e["id"] for e in listing(cad, **one_day)["events"]] == [old.id]
+    call(api, f"/api/cad/intel/notes/{n2}/done", {"done": "PR #124"}, CASEY)
+    assert listing(cad, **one_day)["events"] == []
+    # the notes' words and tags reach it too, past the 92 days of the plain view (F2)
+    assert [e["id"] for e in listing(cad, q="rule")["events"]] == [old.id]
+    assert [e["id"] for e in listing(cad, tag="rule_to_add")["events"]] == [old.id]
 
 
 def test_note_words_tags_and_the_rows_count_chip(site):
@@ -190,9 +240,38 @@ def test_the_export_is_the_admins_with_notes_hits_model_and_transcripts(site):
     assert [(a["kind"], a["summary"]) for a in acts] == [("search", "Intel export (CSV): 1 event"),
                                                          ("search", "Intel export (JSONL): 1 event")]
     assert "machete" not in json.dumps(acts)                                  # the count only, never the notes
+    added = [a for a in cad.activity.rows(VAL) if "note" in a["summary"]]
+    assert [a["summary"] for a in added] == [f"Added a note on radio pre-alert {e.id} (rule_to_add)"]
     # the page's filters select what goes out
     code, raw, *_ = CadApi(cad).get("/api/cad/intel/export.jsonl", "tag=late", Identity(email=CASEY))
     assert code == 200 and raw == b""
+
+
+def test_the_csv_never_carries_a_formula(site):
+    """#913 review F7: export.py's guard on every cell (a place or a source as heard could start with "=")."""
+    cad, _clock = site
+    save(cad, precision="address", label_full="=HYPERLINK(\"http://example.org\")", source_key="@example", lat=41.0, lon=-73.7)
+    _c, raw, *_ = CadApi(cad).get("/api/cad/intel/export.csv", "", Identity(email=CASEY))
+    [row] = list(csv.DictReader(io.StringIO(raw.decode())))
+    assert row["place"].startswith("'=") and row["source_key"] == "'@example"
+    assert row["lon"] == "-73.7"                                      # a number stays a number
+
+
+def test_a_noted_events_transmissions_are_kept_while_the_note_is(site):
+    """#913 review F8: the note's pointers never go stale: its transmissions are keepers, their audio a record."""
+    cad, clock = site
+    from tests.test_intel import ctx_row
+    for tid in ("n1", "n2", "x1"):
+        cad.comms.record(ctx_row(tid, "test transmission", T0 - 400 * 86400))
+    e = save(cad, traffic_ids=["n1", "n2"])
+    api = CadApi(cad)
+    nid = add(api, e.id, VAL, text="garbled", tags=["false_garbled_audio"])[1]["note"]["id"]
+    assert cad.comms.kept_for_events(["n1", "n2", "x1"]) >= {"n1", "n2"} and "x1" not in cad.comms.kept_for_events(["x1"])
+    cad.comms.prune()
+    left = {r["id"] for r in cad.store.q("SELECT id FROM radio_traffic WHERE id IN ('n1', 'n2', 'x1')")}
+    assert left == {"n1", "n2"}
+    call(api, f"/api/cad/intel/notes/{nid}", {"delete": True}, VAL)
+    assert "n1" not in cad.comms.kept_for_events(["n1"])
 
 
 # -- the incident's view -------------------------------------------------------------------------------------------------

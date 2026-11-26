@@ -276,15 +276,18 @@ class IntelLog:
         from sizeup.intel.notes import REVIEW_TAGS, TAGS
         now = self.cad.clock()
         review = one("review", 4) in ("1", "true", "yes")
+        # by the notes (their words, a tag): every event kept, a noted one up to a year (#913 review F2)
+        noted = review or bool(one("q", 200)) or bool(one("tag", 200))
+        span = NOTES_SPAN_S if noted else SPAN_MAX_S
         until = _when(one("to", 40), True)
         since = _when(one("from", 40), False)
         until = now + 60 if until is None else until
-        if since is None:              # the review queue: every date kept (a note keeps its event a year)
-            since = until - (NOTES_SPAN_S if review else DEFAULT_S) if one("to") or review else now - DEFAULT_S
+        if since is None:
+            since = until - (span if noted else DEFAULT_S) if one("to") or noted else now - DEFAULT_S
         if until <= since:
             raise CadError("to: after from")
-        if until - since > (NOTES_SPAN_S if review else SPAN_MAX_S):
-            since = until - (NOTES_SPAN_S if review else SPAN_MAX_S)
+        if until - since > span:
+            since = until - span
         try:
             page = max(0, int(one("page", 6) or 0))
             size = min(PAGE_MAX, max(1, int(one("size", 4) or PAGE_SIZE)))
@@ -323,12 +326,15 @@ class IntelLog:
             where.append("id IN (SELECT n.event_id FROM intel_notes n, json_each(n.tags) t WHERE t.value IN "
                          f"({', '.join(':tg%d' % i for i in range(len(tags)))}))")
             args.update({f"tg{i}": s for i, s in enumerate(tags)})
-        if review:                     # tagged for a rule or model change and not acted on yet
-            where.append("id IN (SELECT n.event_id FROM intel_notes n, json_each(n.tags) t WHERE n.done = '' AND t.value IN "
+        if review:                     # tagged for a rule or model change and not acted on yet: by the NOTE's time (its
+            # last change in the range), never the event's, so an item never drops out while it is kept (F3)
+            where.append("id IN (SELECT n.event_id FROM intel_notes n, json_each(n.tags) t WHERE n.done = '' AND "
+                         "n.updated_at >= :since AND n.updated_at < :until AND t.value IN "
                          f"({', '.join(':rv%d' % i for i in range(len(REVIEW_TAGS)))}))")
             args.update({f"rv{i}": s for i, s in enumerate(REVIEW_TAGS)})
         inner = (f"SELECT {', '.join('e.' + c.strip() for c in COLS.split(','))}, {HELD_SQL} AS held, "
-                 f"{DECIDED_SQL} AS decided FROM intel_events e WHERE e.first_at >= :since AND e.first_at < :until")
+                 f"{DECIDED_SQL} AS decided FROM intel_events e WHERE "
+                 + ("1" if review else "e.first_at >= :since AND e.first_at < :until"))
         return {"inner": inner, "outer": " AND ".join(where) or "1", "args": args, "since": since, "until": until,
                 "page": page, "size": size, "now": now}
 
@@ -340,7 +346,7 @@ class IntelLog:
         # a poll (the page's own, ?poll=1) counts again only when the events changed: the same filters, the same total
         fkey = json.dumps([sorted((k, v) for k, v in q.items() if k not in ("page", "poll")), self.classes()])
         hit = self._totals.get(fkey)
-        if one("poll", 4) == "1" and hit is not None and hit[0] == rev:
+        if str((q.get("poll") or [""])[0]) == "1" and hit is not None and hit[0] == rev:
             total = hit[1]
         else:
             total = store.one(f"SELECT COUNT(*) AS n FROM ({inner}) WHERE {outer}", args)["n"]
@@ -371,16 +377,6 @@ class IntelLog:
         return [r["id"] for r in self.cad.store.q(
             f"SELECT id FROM ({f['inner']}) WHERE {f['outer']} ORDER BY first_at DESC, id DESC LIMIT :lim",
             {**f["args"], "lim": int(limit)})]
-
-    def rows_by_id(self, ids: list[int]) -> list[dict]:
-        """These events as the page's rows (level, would, held, decided ...), whatever their date."""
-        if not ids:
-            return []
-        args = {"since": 0, "until": 1e12, **self.classes(), "ids": json.dumps([int(i) for i in ids])}
-        inner = (f"SELECT {', '.join('e.' + c.strip() for c in COLS.split(','))}, {HELD_SQL} AS held, "
-                 f"{DECIDED_SQL} AS decided FROM intel_events e WHERE e.id IN (SELECT value FROM json_each(:ids))")
-        names = source_names(self.cad)
-        return [self.row(r, names, {}, []) for r in self.cad.store.q(f"SELECT * FROM ({inner})", args)]
 
     def rows_by_id(self, ids: list[int]) -> list[dict]:
         """These events as the page's rows (level, would, held, decided ...), whatever their date."""
