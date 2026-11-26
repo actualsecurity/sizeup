@@ -14,7 +14,7 @@ from sizeup.intel import listen as L
 from sizeup.intel import rules as rules_mod
 from sizeup.intel.engine import IntelEngine, LiveSink
 from sizeup.intel.events import MemoryEvents
-from tests.log_sentinel import assert_no_sensitive
+from tests.log_sentinel import assert_no_sensitive, exception_text_in_logs
 from tests.test_intel import Clock, row
 
 PHRASE = "ZZQ-SENTINEL-PHRASE"         # an admin's rule phrase
@@ -176,15 +176,85 @@ def test_the_sentinel_itself_catches_every_path(log_sentinel):
     assert_no_sensitive([f"{SAID[:-1]} nothing"], SENSITIVE)          # a list of lines (a component's log=) works too
 
 
-def test_no_intel_log_call_quotes_an_exceptions_text():
-    """A static backstop: no log call in sizeup/intel (or the modules beside it) puts an exception's text in the line
-    ({e}, {err}, str(e), repr(e), e.args): its type name only."""
-    import re
+
+def _ours():
     from pathlib import Path
     root = Path(__file__).resolve().parent.parent / "sizeup"
-    files = sorted((root / "intel").glob("*.py")) + [p for p in (root / "context_bundle.py", root / "talkers.py")
-                                                     if p.exists()]
-    call = re.compile(r"\b(?:log|print|warning|error|info|debug|exception)\((?:[^()]|\([^()]*\))*\)", re.S)
-    quoted = re.compile(r"\{(?:e|err|exc|ex)(?:![rs])?\}|\b(?:str|repr)\((?:e|err|exc|ex)\)|\b(?:e|err|exc|ex)\.args")
-    bad = [f"{p.name}: {m.group(0)[:120]}" for p in files for m in call.finditer(p.read_text()) if quoted.search(m.group(0))]
-    assert bad == []
+    return [*sorted((root / "intel").glob("*.py")),
+            *(p for p in (root / "notify.py", root / "context_bundle.py", root / "talkers.py") if p.exists())]
+
+
+def test_no_intel_or_notify_log_call_carries_an_exceptions_text():
+    """The static backstop (tests/log_sentinel.py exception_text_in_logs): no log call in sizeup/intel, notify.py (or
+    the modules beside them) reads an exception but for its type, status or code."""
+    assert exception_text_in_logs(_ours()) == []
+
+
+BAD = {
+    "nested parens": "def f():\n    try:\n        g()\n    except ValueError as e:\n        log(f'x ({str(e)[:40]})')\n",
+    "format spec": "def f():\n    try:\n        g()\n    except ValueError as e:\n        self.log(f'{e:>10}')\n",
+    "an attribute": "def f():\n    try:\n        g()\n    except OSError as e:\n        log(f'{e.reason}')\n",
+    "% format": "def f():\n    try:\n        g()\n    except OSError as e:\n        print('x %s' % e)\n",
+    "logging args": "def f():\n    try:\n        g()\n    except OSError as e:\n        logger.warning('x %s', e)\n",
+    ".format": "def f():\n    try:\n        g()\n    except OSError as err:\n        sys.stderr.write('x {}'.format(err))\n",
+    "via a name": "def f():\n    try:\n        g()\n    except OSError as e:\n        msg = f'{e}'\n    log(msg)\n",
+    "via two names": "def f():\n    try:\n        g()\n    except OSError as e:\n        m = repr(e)\n    m2 = 'x' + m\n    self.log(m2)\n",
+    "via an attribute": ("def f(self):\n    for _ in range(3):\n        try:\n            g()\n        except OSError as exc:\n"
+                         "            self.last = str(exc)\n    self.log(f'not sent ({self.last})')\n"),
+    "another name": "def f():\n    try:\n        g()\n    except Exception as ex:\n        engine.log(repr(ex))\n",
+    "a keyword": "def f():\n    try:\n        g()\n    except Exception as e:\n        emit_error(msg=f'{e}')\n",
+    ".exception()": "def f():\n    try:\n        g()\n    except Exception:\n        logger.exception('x')\n",
+    "exc_info=": "def f():\n    try:\n        g()\n    except Exception:\n        log.info('x', exc_info=True)\n",
+    "a module's own": "try:\n    g()\nexcept ImportError as e:\n    print(f'no module: {e}')\n",
+}
+
+GOOD = {
+    "its type": "def f():\n    try:\n        g()\n    except ValueError as e:\n        log(f'x ({type(e).__name__})')\n",
+    "status and code": ("def f():\n    try:\n        g()\n    except OSError as e:\n"
+                        "        code = str(getattr(e, 'code', '') or type(e).__name__)\n        log(f'{e.status} {code}')\n"),
+    "another e outside": ("def f(evs):\n    try:\n        g()\n    except ValueError as e:\n        log(type(e).__name__)\n"
+                          "    for e in evs:\n        log(f'event {e.id}')\n"),
+    "another function's msg": ("def f():\n    try:\n        g()\n    except OSError as e:\n        msg = str(e)\n"
+                               "        raise X(msg)\n\ndef h(msg):\n    log(msg)\n"),
+    "an exception raised": "def f():\n    try:\n        g()\n    except OSError as e:\n        raise NotifyError(f'x {e}') from None\n",
+}
+
+
+@pytest.mark.parametrize("name", list(BAD))
+def test_the_static_check_catches(name):
+    assert exception_text_in_logs([(name, BAD[name])]), name
+
+
+@pytest.mark.parametrize("name", list(GOOD))
+def test_the_static_check_lets_be(name):
+    assert exception_text_in_logs([(name, GOOD[name])]) == [], name
+
+
+# -- the push itself (sizeup/notify.py): an intel pre-alert's title holds the town or the highway ------------------------
+
+@pytest.mark.parametrize("fails", ["http", "unreachable", "protected"])
+def test_a_push_not_sent_logs_its_lane_and_length_never_the_title(log_sentinel, monkeypatch, fails):
+    import io
+    from urllib.error import HTTPError, URLError
+
+    from sizeup import notify
+
+    def urlopen(req, timeout=None):
+        if fails == "http":
+            raise HTTPError("https://ntfy.example/", 429, f"too many {PLACE}", {},
+                            io.BytesIO(f'{{"error": "limit for {PLACE} at {TOWN}"}}'.encode()))
+        raise URLError(f"no route to {PLACE} ({TOWN})")
+    monkeypatch.setattr(notify, "urlopen", urlopen)
+    prot = (lambda: ["zzq-sentinel-topic-protected-0001"]) if fails == "protected" else None
+    topic = "zzq-sentinel-topic-protected-0001" if fails == "protected" else "zzq-sentinel-test-topic-0001"
+    n = notify.Notifier("https://ntfy.sh", topic, log=log_sentinel.log, sleep=lambda s: None, lane="intel")
+    if prot:
+        n.protected = prot
+    outcome = []
+    title = f"PD · shots fired · {PLACE}, {TOWN}"
+    assert n.send(title, f"{SAID} at {PLACE}", done=outcome.append) and n.flush(5)
+    lines = assert_no_sensitive(log_sentinel, SENSITIVE)
+    assert any(f"notify: not sent ({n.last_error}): intel, {len(title)} chars" in x for x in lines), lines
+    assert n.last_error == {"http": "HTTP 429", "unreachable": "unreachable (URLError)",
+                            "protected": "a protected topic"}[fails]
+    assert outcome and outcome[0]["error"] == n.last_error and outcome[0]["ok"] is False

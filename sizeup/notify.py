@@ -112,6 +112,7 @@ class NotifyError(RuntimeError):
 class NotifyOff(NotifyError):
     """Outbound is off in this process (sizeup/outbound.py): never retried, the message is dropped at once."""
     final = True
+    code = "outbound off"          # what failure() says of it
 
 
 @dataclass(frozen=True)
@@ -241,7 +242,9 @@ def publish(server: str, topic: str, title: str, body: str, priority: int | str 
     (Pushes.protected()). The static backstop (always_protected()) is refused here whatever protected is: this is the
     function that makes the request, so no caller can reach such a topic through it."""
     if always_protected(topic):
-        raise NotifyError(PROTECTED_WHY)
+        err = NotifyError(PROTECTED_WHY)
+        err.code = "a protected topic"  # type: ignore[attr-defined]
+        raise err
     server = (server or DEFAULT_SERVER).rstrip("/")
     from sizeup import outbound
     if off := outbound.check("ntfy", server):     # a hub on a restored copy never pushes (sizeup/outbound.py)
@@ -273,7 +276,9 @@ def publish(server: str, topic: str, title: str, body: str, priority: int | str 
         err.status = e.code  # type: ignore[attr-defined]
         raise err from None
     except (URLError, OSError, TimeoutError) as e:
-        raise NotifyError(f"can't reach {urlsplit(server).hostname}: {getattr(e, 'reason', e)}") from None
+        err = NotifyError(f"can't reach {urlsplit(server).hostname}: {getattr(e, 'reason', e)}")
+        err.code = f"unreachable ({type(e).__name__})"  # type: ignore[attr-defined]
+        raise err from None
     try:
         out = json.loads(raw or b"{}")
     except ValueError:
@@ -287,8 +292,9 @@ class Notifier:
 
     def __init__(self, server: str, topic: str, log: Callable[[str], None] = print,
                  sleep: Callable[[float], None] = time.sleep, retries: tuple[float, ...] = RETRIES,
-                 protected: Callable[[], Iterable[str]] | None = None):
+                 protected: Callable[[], Iterable[str]] | None = None, lane: str = ""):
         self.server, self.topic, self.log = (server or DEFAULT_SERVER).rstrip("/"), (topic or "").strip(), log
+        self.lane = lane                                # what a log line calls it ("main", "intel"): never the topic
         self.sleep, self.retries = sleep, retries
         self.protected = protected or (lambda: ())      # asked again at every request: Settings can add to it any time
         why = (server_problem(self.server) or topic_problem(self.topic, self._protected())) if self.topic else ""
@@ -322,7 +328,7 @@ class Notifier:
         try:
             self._q.put_nowait((title, body, priority, tuple(tags), click, Who.of(who), tuple(actions or ()), done))
         except queue.Full:
-            self.log("notify: too many waiting: dropped " + repr(title[:80]))
+            self.log(f"notify: too many waiting: dropped ({self._what(title)})")
             return False
         with self._lock:
             if self._thread is None or not self._thread.is_alive():
@@ -357,7 +363,9 @@ class Notifier:
                 prot = self._protected()
                 # protected since this Notifier was made (or, the static backstop, always)
                 if UNKNOWN in prot or always_protected(self.topic) or topic_problem(self.topic, prot):
-                    raise NotifyError("not sent: a protected topic (one sizeup subscribes to)")
+                    err = NotifyError("not sent: a protected topic (one sizeup subscribes to)")
+                    err.code = "a protected topic"  # type: ignore[attr-defined]
+                    raise err
                 out = publish(self.server, self.topic, title, body, priority, tags, click, who=who, actions=actions)
                 self.sent += 1
                 self.last_error = ""
@@ -366,7 +374,7 @@ class Notifier:
                 _done(done, {"ok": True, "at": self.last_at, "status": 200, "id": str((out or {}).get("id") or "")[:64]})
                 return
             except NotifyError as e:
-                self.last_error = str(e)
+                self.last_error = failure(e)
                 status = getattr(e, "status", 0)
                 if getattr(e, "final", False) or (status and status != 429 and status < 500):   # refused for good
                     break
@@ -374,8 +382,21 @@ class Notifier:
                     self.sleep(self.retries[attempt])
         self.failed += 1
         self.last_at, self.last_ok = time.time(), False
-        self.log(f"notify: not sent ({self.last_error}): {title[:80]}")
+        self.log(f"notify: not sent ({self.last_error}): {self._what(title)}")
         _done(done, {"ok": False, "at": self.last_at, "status": status, "error": self.last_error[:200]})
+
+
+    def _what(self, title) -> str:
+        """A push as a log line names it: its lane and its title's length. Never the title (an intel pre-alert's holds
+        the town or the highway, sizeup/intel/push.py compose()): the hub's log goes to CloudWatch."""
+        return f"{self.lane or 'push'}, {len(str(title or ''))} chars"
+
+
+def failure(e: Exception) -> str:
+    """A push not sent, as the log, Health and an intel event's delivery say it: the HTTP status, or the kind of error
+    (publish()'s code, else its type). Never the error's text, a server's answer, a host or a URL."""
+    status = getattr(e, "status", 0)
+    return f"HTTP {status}" if status else str(getattr(e, "code", "") or type(e).__name__)
 
 
 def _done(done, outcome: dict) -> None:
@@ -676,7 +697,8 @@ class Pushes:
         with self._lock:
             n = self._made.get((server, topic, ln))
             if n is None:
-                n = self._made[(server, topic, ln)] = Notifier(server, topic, self.log, protected=self.protected, **self.kw)
+                n = Notifier(server, topic, self.log, protected=self.protected, lane=ln, **self.kw)
+                self._made[(server, topic, ln)] = n
             return n
 
     def made(self, ln: str | None = None) -> list[Notifier]:
