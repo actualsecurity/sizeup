@@ -548,7 +548,8 @@ def _prob(v) -> float | None:
 
 
 def clean_result(raw: dict) -> dict:
-    """A worker's result, checked and bounded: {text, segments, words, model, timing}. ValueError."""
+    """A worker's result, checked and bounded: {text, segments, words, model, timing, language}. ValueError. language:
+    whisper's detected language when the worker sends it ("" when not: sizeup/stt_quality.py judges the words alone)."""
     text = raw.get("text")
     if not isinstance(text, str):
         raise ValueError("text: a string")
@@ -567,6 +568,7 @@ def clean_result(raw: dict) -> dict:
     timing = raw.get("timing") if isinstance(raw.get("timing"), dict) else {}
     return {"text": " ".join(text.split())[:TEXT_MAX], "segments": clean_segs, "words": words,
             "model": str(raw.get("model") or "")[:80],
+            "language": str(raw.get("language") or "")[:16] if isinstance(raw.get("language"), str) else "",
             "timing": {k: _num(timing.get(k)) for k in ("fetch_ms", "infer_ms") if _num(timing.get(k)) is not None}}
 
 
