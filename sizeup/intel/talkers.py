@@ -8,11 +8,15 @@
                                and the fireground's IDs are our rigs, never a talker label here)
     town_of(talker, towns, agency_towns) -> str
                                the talker's department's town among the source's towns, or ""
+    town_why(...) -> (town, how)   ... and how it was found: "settings" | "name" | "initials" | "" (Settings shows it)
 
 Talker(label, agency, role, console): the label as the department named it (its own entry's, else its range's: the
 admin's words, at runtime, never in this repository), split into the agency ("<Town> PD") and the role words after it
-("officer", "dispatch"); console: a dispatch console ("dispatch", "console", "desk", "control"), so its transmissions
-are the dispatcher's (a dispatch cue, never a tie by talker alone: engine.py).
+("officer", "dispatch"); console: a dispatch console, so its transmissions are the dispatcher's (never a tie by talker
+alone; the dispatch cue behind "console_cue": engine.py). A console only when the role starts with a console word
+("dispatch", "dispatcher", "console", "control", "ctrl"): never after another word's "control" ("animal control",
+"traffic control"), never a label with a portable, mobile, car or unit in it, and "HQ" or "desk" alone never are one
+("<Agency> HQ portable 2", "desk sgt").
 
 Cached: a radio is asked about once per registry revision (Registry.rev: bumped by every edit), never per row; the
 registry itself is in memory (no DB query either way).
@@ -30,8 +34,11 @@ import threading
 from dataclasses import dataclass
 
 CACHE_MAX = 4096
-CONSOLE_WORDS = frozenset({"dispatch", "dispatcher", "disp", "console", "desk", "control", "ctrl", "hq"})
-ROLE_WORDS = CONSOLE_WORDS | {"officer", "officers", "sergeant", "sgt", "lieutenant", "lt", "captain", "capt", "chief",
+CONSOLE_WORDS = frozenset({"dispatch", "dispatcher", "disp", "console", "control", "ctrl"})
+NOT_CONSOLE_BEFORE = frozenset({"animal", "traffic", "parking", "pest", "flood", "crowd"})   # "animal control"
+NOT_CONSOLE_IN = frozenset({"portable", "mobile", "car", "unit", "cars", "units"})          # a radio in the field
+ROLE_WORDS = CONSOLE_WORDS | {"hq", "desk",
+                              "officer", "officers", "sergeant", "sgt", "lieutenant", "lt", "captain", "capt", "chief",
                               "detective", "det", "supervisor", "patrol", "car", "unit", "portable", "mobile", "radio",
                               "op", "position", "pos"}
 DEPT_SUFFIXES = ("", "pd", "police", "policedepartment", "policedept", "fd", "fire", "firedepartment", "ems")
@@ -50,9 +57,11 @@ def parse(label: str) -> Talker:
     """A label as agency and role: "<Agency> PD dispatch" -> ("<Agency> PD", "dispatch", console)."""
     lab = " ".join(str(label or "").split())
     toks = lab.split(" ")
-    i = next((k for k, t in enumerate(toks) if t.lower().strip(".,:;#") in ROLE_WORDS), len(toks))
-    words = {t.lower() for t in TOKEN.findall(lab)}
-    return Talker(lab, " ".join(toks[:i]), " ".join(toks[i:]), bool(words & CONSOLE_WORDS))
+    low = [t.lower().strip(".,:;#") for t in toks]
+    i = next((k for k, t in enumerate(low) if t in ROLE_WORDS), len(toks))
+    console = (i < len(low) and low[i] in CONSOLE_WORDS and not (i and low[i - 1] in NOT_CONSOLE_BEFORE)
+               and not ({w.lower() for w in TOKEN.findall(lab)} & NOT_CONSOLE_IN))
+    return Talker(lab, " ".join(toks[:i]), " ".join(toks[i:]), console)
 
 
 def _norm(s: str) -> str:
@@ -61,18 +70,23 @@ def _norm(s: str) -> str:
 
 def town_of(t: Talker | None, towns, agency_towns=None) -> str:
     """The talker's department's town, one of `towns` (the source's); "" when not known."""
+    return town_why(t, towns, agency_towns)[0]
+
+
+def town_why(t: Talker | None, towns, agency_towns=None) -> tuple[str, str]:
+    """(town, how): how is "settings" (agency_towns), "name" or "initials" (guessed from the source's towns), or ""."""
     if t is None:
-        return ""
+        return "", ""
     towns = [str(x) for x in towns or () if x]
     agency, label = _norm(t.agency), _norm(t.label)
     for k, town in (agency_towns or {}).items():
         if _norm(k) and _norm(k) in (agency, label) and (not towns or town in towns):
-            return town
+            return town, "settings"
     if not agency:
-        return ""
+        return "", ""
     hits = [x for x in towns if any(agency == _norm(x) + s for s in DEPT_SUFFIXES)]
     if len(hits) == 1:
-        return hits[0]
+        return hits[0], "name"
     initials: dict[str, list[str]] = {}
     for x in towns:
         ws = TOKEN.findall(x.lower())
@@ -80,7 +94,7 @@ def town_of(t: Talker | None, towns, agency_towns=None) -> str:
             initials.setdefault("".join(w[0] for w in ws), []).append(x)
     hits = [x for ini, xs in initials.items() if len(xs) == 1 and any(agency == ini + s for s in DEPT_SUFFIXES)
             for x in xs]
-    return hits[0] if len(hits) == 1 else ""
+    return (hits[0], "initials") if len(hits) == 1 else ("", "")
 
 
 class Talkers:
@@ -121,5 +135,23 @@ class Talkers:
         t = parse(label) if label else None
         with self._lock:
             self.asked += 1
-            self._cache[k] = t
+            if self._rev == rev:               # an edit landed meanwhile: never cache an answer from before it
+                self._cache[k] = t
         return t
+
+    def labels(self) -> list[str]:
+        """Every label the registry gives another system's radios (its entries and ranges): Settings' town guesses."""
+        reg = self.radios
+        if reg is None:
+            return []
+        from sizeup.cad.radios import OTHER_P25
+        out: list[str] = []
+        try:
+            rows = list(reg.rows()) + list(reg.ranges())
+        except Exception:  # noqa: BLE001 - no list, no guesses shown
+            return []
+        for r in rows:
+            lab = " ".join(str(r.get("label") or "").split())
+            if r.get("system") in OTHER_P25 and lab and lab not in out:
+                out.append(lab)
+        return out

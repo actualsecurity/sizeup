@@ -28,6 +28,7 @@ OTHER_KEY = next(k for k in POLICE.scope["sources"] if k != KEY and "*" not in k
 OTHER_TG = int(OTHER_KEY.rsplit(":", 1)[-1])
 PUNCH = "Car 3, a male was punched outside the deli on Sample Street."          # an assault, no cue words
 PUNCH_CUE = "Car 3 can you respond, a male was punched outside the deli on Sample Street."
+KNIFE = "Car 3, check 12 Sample Rd for a male with a knife"                      # a weapons call: a push alone
 
 
 class FakeRadios:
@@ -42,15 +43,22 @@ class FakeRadios:
         self.calls += 1
         return self.labels.get(radio_id, "") if system == "mrrs" else ""
 
+    def rows(self):
+        return [{"system": "mrrs", "radio_id": k, "label": v} for k, v in self.labels.items()]
 
-def police(agency_towns=AGENCY_TOWNS):
-    ov = {"intel_packs": {"police": {"agency_towns": agency_towns}}} if agency_towns else {}
-    return rules_mod.load_packs(overrides=ov)
+    def ranges(self):
+        return []
 
 
-def labelled(radios=None, locate=None, agency_towns=AGENCY_TOWNS):
+def police(agency_towns=AGENCY_TOWNS, console_cue=None):
+    po = {**({"agency_towns": agency_towns} if agency_towns else {}),
+          **({"console_cue": console_cue} if console_cue else {})}
+    return rules_mod.load_packs(overrides={"intel_packs": {"police": po}} if po else {})
+
+
+def labelled(radios=None, locate=None, agency_towns=AGENCY_TOWNS, console_cue=None):
     kw = {"locate": locate} if locate is not None else {}
-    e, sink = engine(packs=police(agency_towns), **kw)
+    e, sink = engine(packs=police(agency_towns, console_cue), **kw)
     e.talkers.radios = radios if radios is not None else FakeRadios()
     return e, sink
 
@@ -66,6 +74,13 @@ def pd_rules(ev) -> list[str]:
     ("Example PD officer", "Example PD", "officer", False),
     ("Sample PD", "Sample PD", "", False),
     ("XPD console 2", "XPD", "console 2", True),
+    ("Example Animal Control", "Example Animal", "Control", False),      # another word's "control"
+    ("Traffic Control", "Traffic", "Control", False),
+    ("XPD HQ Portable 2", "XPD", "HQ Portable 2", False),                 # a radio in the field, "HQ" alone
+    ("Desk Sgt", "", "Desk Sgt", False),                                  # "desk" alone
+    ("XPD dispatch portable", "XPD", "dispatch portable", False),
+    ("XPD officer dispatch", "XPD", "officer dispatch", False),            # never past the role's first word
+    ("XPD dispatch desk", "XPD", "dispatch desk", True),
 ])
 def test_a_label_is_agency_role_and_whether_it_is_a_console(label, agency, role, console):
     t = T.parse(label)
@@ -121,10 +136,23 @@ def test_the_engine_asks_once_per_radio_not_per_row():
 
 # -- the dispatch cue ------------------------------------------------------------------------------------------------
 
+def test_the_console_cue_is_shadow_by_default_recorded_never_scored():
+    e, sink = labelled()
+    assert e.feed(row("t1", PUNCH, 1000, radio_id=CONSOLE_ID)) == []
+    shadow = [(h.rule_id, h.weight) for h in sink.hits if h.rule_id.endswith(".console")]
+    assert shadow == [("pd.dispatch_cue.console", 0.0)]
+    assert next(p for p in police() if p.name == "police").console_cue == "shadow"
+    e, sink = labelled(console_cue="off")
+    assert e.feed(row("t1", PUNCH, 1000, radio_id=CONSOLE_ID)) == []
+    assert not [h for h in sink.hits if h.rule_id.endswith(".console")]
+    with pytest.raises(ValueError):
+        police(console_cue="loud")
+
+
 def test_a_labelled_console_is_a_dispatch_cue_without_the_words():
     e, sink = engine()                                               # no registry: as before, under the threshold
     assert e.feed(row("t1", PUNCH, 1000, radio_id=CONSOLE_ID)) == []
-    e, sink = labelled()
+    e, sink = labelled(console_cue="on")
     [ev] = e.feed(row("t1", PUNCH, 1000, radio_id=CONSOLE_ID))
     assert ev.category == "assault" and pd_rules(ev).count("pd.dispatch_cue") == 1
     [cue] = [r for r in ev.rules if r[0] == "pd.dispatch_cue"]
@@ -134,19 +162,21 @@ def test_a_labelled_console_is_a_dispatch_cue_without_the_words():
 def test_the_console_cue_is_never_added_twice():
     e, _sink = engine()
     [plain] = e.feed(row("t1", PUNCH_CUE, 1000))
-    e, _sink = labelled()
-    [ev] = e.feed(row("t1", PUNCH_CUE, 1000, radio_id=CONSOLE_ID))
-    assert pd_rules(ev).count("pd.dispatch_cue") == 1 and ev.what_score == plain.what_score
+    for mode in ("on", "shadow"):
+        e, sink = labelled(console_cue=mode)
+        [ev] = e.feed(row("t1", PUNCH_CUE, 1000, radio_id=CONSOLE_ID))
+        assert pd_rules(ev).count("pd.dispatch_cue") == 1 and ev.what_score == plain.what_score
+        assert not [h for h in sink.hits if h.rule_id.endswith(".console")]      # nothing it would have added
 
 
 def test_an_officer_or_an_unlabelled_radio_gets_no_cue():
-    e, _sink = labelled()
+    e, _sink = labelled(console_cue="on")
     assert e.feed(row("t1", PUNCH, 1000, radio_id=OFFICER_ID)) == []
     assert e.feed(row("t2", PUNCH, 1000, radio_id=BLANK_ID, source=OTHER_KEY, talkgroup=OTHER_TG)) == []
 
 
 def test_a_console_row_with_no_category_words_has_no_hits():
-    e, sink = labelled()
+    e, sink = labelled(console_cue="on")
     assert e.feed(row("t1", "Car 3, call the desk when you clear.", 1000, radio_id=CONSOLE_ID)) == []
     assert sink.hits == []
 
@@ -162,7 +192,7 @@ def test_a_console_is_the_dispatcher_never_a_tie_by_talker_alone():
 
 def test_the_push_says_the_console_label_and_never_the_radio_id():
     e, sink = labelled()
-    e.feed(row("t1", PUNCH, 1000, radio_id=CONSOLE_ID))
+    e.feed(row("t1", KNIFE, 1000, radio_id=CONSOLE_ID))
     [(_ev, d)] = [x for x in sink.pushes if x[1].would_push]
     assert d.message["body"].splitlines()[-1].endswith("· Example PD dispatch")
     assert CONSOLE_ID not in d.message["body"] and CONSOLE_ID not in d.message["title"]
@@ -181,7 +211,7 @@ def test_an_unlabelled_push_reads_as_before():
 def test_with_the_pii_scrub_on_the_label_is_left_out():
     e2, sink2 = engine(settings={"intel": {"push_pii": False}}, packs=police())
     e2.talkers.radios = FakeRadios()
-    e2.feed(row("t1", PUNCH, 1000, radio_id=CONSOLE_ID))
+    e2.feed(row("t1", KNIFE, 1000, radio_id=CONSOLE_ID))
     [(_ev, d)] = sink2.pushes
     assert d.would_push and "Example PD" not in d.message["body"]
 
@@ -202,7 +232,7 @@ def test_the_dispatching_departments_town_is_the_prior():
     assert seen[-1]["prefer"] == [RYE]
     seen.clear()                                    # the officer's read-back: the window's console still says which
     e.feed(row("t2", "copy 12 Sample Street", 1010, radio_id=READBACK_ID))
-    assert all(s.get("prefer") == [RYE] for s in seen)
+    assert seen and all(s.get("prefer") == [RYE] for s in seen)
 
 
 def test_the_row_talkers_town_when_no_console_says_one():
@@ -233,12 +263,12 @@ def test_a_source_of_one_town_has_no_prior():
 
 @pytest.fixture(scope="module")
 def gaz(tmp_path_factory):
-    """Sample Rd in two towns, the same numbers in each (an invented street); nothing else."""
+    """Sample Rd in two towns, the same numbers in each, and Cross St meeting it at number 12 in both (invented)."""
     path = tmp_path_factory.mktemp("gaz") / "two-towns.sqlite"
     db = sqlite3.connect(path)
     db.executescript(SCHEMA)
     db.execute("INSERT INTO meta VALUES ('sources', '[]')")
-    db.executemany("INSERT INTO streets VALUES (?,?,?)", [(1, "sample rd", "Sample Rd")])
+    db.executemany("INSERT INTO streets VALUES (?,?,?)", [(1, "sample rd", "Sample Rd"), (2, "cross st", "Cross St")])
     addrs = []
     for town, lat in ((PC, 41.00), (RYE, 40.97)):
         for k, n in enumerate(range(2, 40, 2)):
@@ -246,7 +276,11 @@ def gaz(tmp_path_factory):
     db.executemany("INSERT INTO addresses VALUES (?,?,?,?,?,?,?)", addrs)
     db.executemany("INSERT INTO lines VALUES (?,?,?)",
                    [(1, PC, json.dumps([[-73.68, 41.00], [-73.68, 41.01]])),
-                    (1, RYE, json.dumps([[-73.68, 40.97], [-73.68, 40.98]]))])
+                    (1, RYE, json.dumps([[-73.68, 40.97], [-73.68, 40.98]])),
+                    (2, PC, json.dumps([[-73.69, 41.0005], [-73.67, 41.0005]])),         # Cross St meets it at #12
+                    (2, RYE, json.dumps([[-73.69, 40.9705], [-73.67, 40.9705]]))])
+    db.executemany("INSERT INTO intersections VALUES (?,?,?,?,?)",
+                   [(1, 2, 41.0005, -73.68, PC), (1, 2, 40.9705, -73.68, RYE)])
     db.commit()
     db.close()
     return Gazetteer(path)
@@ -271,8 +305,8 @@ def test_the_prior_through_the_engine(gaz):
     loc = P.Locator(gaz)
     for rid, town in ((CONSOLE_ID, RYE), (OTHER_ID, PC)):
         e, _sink = labelled(locate=loc)
-        [ev] = e.feed(row("t1", "Car 3, check 12 Sample Rd for a male with a knife", 1000, radio_id=rid))
-        assert ev.category == "weapons" and ev.town == town
+        [ev] = e.feed(row("t1", KNIFE, 1000, radio_id=rid))
+        assert ev.category == "weapons" and ev.town == town and not ev.confirmed
 
 
 @pytest.mark.parametrize("text, kept", [
@@ -307,3 +341,114 @@ def test_a_stand_in_place_keeps_its_town():
                                                           PC, True, 0.9))
     [ev] = e.feed(row("t1", "Car 3, check 12 Sample Rd for a male with a knife", 1000, radio_id=CONSOLE_ID))
     assert ev.town == PC                             # the prior is the locator's, never a rewrite of its answer
+
+
+# -- the prior never confirms ------------------------------------------------------------------------------------------
+
+CORNER = "respond to 12 Sample Rd at Cross St for a male with a knife"
+
+
+@pytest.mark.parametrize("prior", [None, PC, RYE])
+def test_the_prior_never_confirms_a_corner_in_two_towns(gaz, prior):
+    scope = dict(SCOPE, prefer=[prior]) if prior else SCOPE
+    p = P.Locator(gaz)(CORNER, scope)
+    assert p is not None and not p.confirmed and p.radius_m >= 150
+    if prior:
+        other = RYE if prior == PC else PC
+        assert p.town == prior and any(a.get("town") == other for a in p.alts)
+
+
+@pytest.mark.parametrize("text", [CORNER, "corner of Sample Rd and Cross St, a male with a knife"])
+def test_a_spoken_corner_in_two_towns_is_never_sure_whoever_says_it(gaz, text):
+    q = P.Locator(gaz)._spoken_cross(text, SCOPE["towns"], [], [RYE])
+    assert q is not None and q.town == RYE and not q.confirmed
+    assert any(a["town"] == PC for a in q.alts)
+
+
+def test_the_prior_never_confirms_through_the_engine(gaz):
+    e, _sink = labelled(locate=P.Locator(gaz))
+    [ev] = e.feed(row("t1", "Car 3, check 12 Sample Rd at Cross St for a male with a knife", 1000, radio_id=CONSOLE_ID))
+    assert ev.category == "weapons" and ev.town == RYE and not ev.confirmed
+
+
+# -- which talker's town -----------------------------------------------------------------------------------------------
+
+def test_the_rows_own_department_beats_an_unrelated_console():
+    seen: list = []
+    e, _sink = labelled(locate=spy_locate(seen))
+    e.feed(row("t1", "Car 5, a male with a knife at 40 Example Ave", 1000, radio_id=CONSOLE_ID))     # the Rye console
+    seen.clear()
+    radios = e.talkers.radios
+    radios.labels["7000005"] = "Sample PD officer"                                                 # a PC officer
+    radios.rev += 1
+    e.feed(row("t2", "male with a knife at 12 Sample Street", 1030, radio_id="7000005"))
+    assert seen and all(s.get("prefer") == [PC] for s in seen)
+
+
+def test_an_unlabelled_radio_never_inherits_an_unrelated_console():
+    seen: list = []
+    e, _sink = labelled(locate=spy_locate(seen))
+    e.feed(row("t1", "Car 5, a male with a knife at 40 Example Ave", 1000, radio_id=CONSOLE_ID))
+    seen.clear()
+    e.feed(row("t2", "Car 8, a male was punched at 12 Sample Street, can you respond", 1030, radio_id=BLANK_ID))
+    assert seen and all("prefer" not in s for s in seen)        # another street, unit and category: another job
+
+
+def test_an_unlabelled_radio_takes_its_jobs_console_town():
+    seen: list = []
+    e, _sink = labelled(locate=spy_locate(seen))
+    e.feed(row("t1", "Car 5, a male with a knife at 40 Example Ave", 1000, radio_id=CONSOLE_ID))
+    seen.clear()
+    e.feed(row("t2", "car 5 on scene at 40 Example Ave, male with a knife", 1030, radio_id=BLANK_ID))
+    assert seen and all(s.get("prefer") == [RYE] for s in seen)
+
+
+def test_consoles_that_disagree_give_no_prior():
+    seen: list = []
+    e, _sink = labelled(locate=spy_locate(seen))
+    e.feed(row("t1", "Car 5, a male with a knife at 40 Example Ave", 1000, radio_id=CONSOLE_ID))   # Rye
+    e.feed(row("t2", "Car 5, a male with a knife at 40 Example Ave", 1010, radio_id=OTHER_ID))     # PC
+    seen.clear()
+    e.feed(row("t3", "car 5 on scene at 40 Example Ave, male with a knife", 1030, radio_id=BLANK_ID))
+    assert seen and all("prefer" not in s for s in seen)
+
+
+@pytest.mark.parametrize("text, streets", [
+    ("check 12 Sample Rd and Cross St", {"sample", "cross"}),
+    ("on my way to the 40 block of Example Avenue", {"example"}),
+    ("I'll take place of car 3 on the way", set()),
+])
+def test_the_streets_a_transmission_names(text, streets):
+    from sizeup.intel.engine import street_names
+    assert street_names(text) == streets
+
+
+# -- Settings shows the guesses; the cache -----------------------------------------------------------------------------
+
+def test_settings_lists_each_agencys_town_and_how():
+    from sizeup.intel.admin import IntelAdmin
+    e, _sink = labelled(agency_towns={"Example PD": RYE})
+    e.talkers.radios.labels["7000006"] = "Port Chester PD officer"
+    e.talkers.radios.labels["7000007"] = "Unknown Agency dispatch"
+    pack = next(p for p in e.packs if p.name == "police")
+    got = {(g["agency"], g["town"], g["how"]) for g in IntelAdmin(None, e)._agency_guesses(pack)}
+    assert got == {("Example PD", RYE, "settings"), ("Sample PD", "", ""), ("Port Chester PD", PC, "name"),
+                   ("Unknown Agency", "", "")}
+
+
+def test_an_answer_from_before_an_edit_is_never_cached():
+    radios = FakeRadios()
+    t = T.Talkers(radios)
+    real = radios.name
+
+    def racing(system, radio_id):
+        out = real(system, radio_id)
+        radios.rev += 1                 # an edit lands while the old answer is in flight
+        return out
+
+    radios.name = racing
+    r = {"system": "mrrs", "radio_id": CONSOLE_ID}
+    t.of(r)
+    radios.name = real
+    radios.labels[CONSOLE_ID] = "Example PD desk"
+    assert t.of(r).label == "Example PD desk"

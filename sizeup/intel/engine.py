@@ -58,10 +58,13 @@ from the hub over whatever hub-to-station channel speech-to-text uses (nothing h
 
 Talkers (sizeup/intel/talkers.py; engine.talkers.radios: the CAD's Settings > Radios > Radio IDs, #844): another
 system's radio ID is looked up once per registry revision (cached, in memory) as its label, agency, role and whether it
-is a dispatch console. A console's transmission is the dispatcher's (never a tie by talker alone) and, beside a
-category's hit, gets the pack's dispatch cue ("<prefix>dispatch_cue", its weight, once) without the cue words; the
-department's town (rules.py "agency_towns", else the source's towns by name or initials) is the town prior of step 4;
-the push says who it was heard from by the label (push.compose "heard"). No registry, or an unlabelled radio: as before.
+is a dispatch console. A console's transmission is the dispatcher's (never a tie by talker alone); beside a category's
+hit it may count as the pack's dispatch cue ("<prefix>dispatch_cue", its weight, once) without the cue words: the
+pack's "console_cue" (rules.py) on; shadow, the default, only records a hit "<cue id>.console" of weight 0 where it
+would have. The department's town (rules.py "agency_towns", else the source's towns by name or initials) is the town
+prior of step 4 (_town_prior: the row's own talker's town; else the window's consoles' when they all say one town and
+one of them is on this job; else none). The push says who it was heard from by the label (push.compose "heard"). No
+registry, or an unlabelled radio: as before.
 
 The sink (no side effect happens in the engine itself):
 
@@ -82,7 +85,7 @@ How a row becomes an event, per pack whose scope it is in:
      event: the open one of this pack, category and source still within the window, or the open one at the same place
      (subject = pack:category:place), else a new one;
   4. WHERE: the window's words through locate() (only while not confirmed); on a source shared by several towns, the
-     dispatching department's town first (_town_prior: the talker's label, below), a preference only (place.py);
+     talker's department's town first (_town_prior, below), a preference that never confirms (place.py);
   5. mode = the lowest of the pack's, the category's and the rules' rung (off: no event; shadow: an event only in the
      store, never shown or pushed); policy.decide() says whether to push, push.compose() (+ scrub() with push_pii
      off) what. The rules'
@@ -713,12 +716,18 @@ class IntelEngine:
                     hits += [(r, r.w * pack.context_factor) for r in pack.rules
                              if r.id not in got and r.mode != "off" and r.hit(alt, aws)]
         tk = self.talkers.of(row)             # its radio as Settings > Radios names it (None: as before)
-        if tk is not None and tk.console and any(r.category in pack.categories and w > 0 for r, w in hits):
+        console_cue = None                    # the console cue in shadow: recorded (a hit of weight 0), never scored
+        if (tk is not None and tk.console and pack.console_cue != "off"
+                and any(r.category in pack.categories and w > 0 for r, w in hits)):
             # a labelled dispatch console's call-out is a dispatch cue without the words: the pack's own cue rule, at
-            # its own weight, once (a row that said the words has it already)
+            # its own weight, once (a row that said the words has it already); "console_cue": on adds it, shadow
+            # (the default) only records where it would have
             cue = self._dispatch_cue(pack)
             if cue is not None and cue.enabled and cue.mode != "off" and all(r.id != cue.id for r, _w in hits):
-                hits.append((cue, cue.w))
+                if pack.console_cue == "on":
+                    hits.append((cue, cue.w))
+                else:
+                    console_cue = cue
         who = tuple(x for x in (str(row.get("talker") or ""), str(row.get("radio_id") or ""),
                                 *str(row.get("rig") or "").split(","), tk.label if tk else "") if x.strip())
         win = self.windows.setdefault((pack.name, key), Window())
@@ -732,13 +741,13 @@ class IntelEngine:
             units.add(talker.lower())
         entry = Entry(at, hits, text, who, suppressed, talker, frozenset(units), disp,
                       label=tk.label if tk else "", town=self._talker_town(pack, key, tk))
+        win.entries[tid] = entry              # in the window before its place is read (_town_prior: the job's console)
         if (self.locate is not None or (pack.hw and self.highway is not None)) and not suppressed and (
                 self._could_reach(pack, win, tid, hits)
                 or any(not e.confirmed or pack.category(e.category).get("moves")
                        or (e.category in PEOPLE and MOVE_WORDS.search(text))
                        for e in self._open_for(pack, None, key, at, self._merge_span(pack)))):
             entry.place = self._where(pack, row, key, [text], list(who))
-        win.entries[tid] = entry
         win.prune(max(e.at for e in win.entries.values()), pack.window_s, keep=tid)
         changed: list[Event] = []
         if suppressed:
@@ -797,9 +806,12 @@ class IntelEngine:
                 changed += self._inference(pack, row, key, tid, win, at, cats, mine, event_of, hits)
             except Exception as e:  # noqa: BLE001 - the model never stops the rules
                 self.log(f"intel: inference: {type(e).__name__}")
-        keep = {r.id for r, _w in hits}
+        keep = {r.id for r, _w in hits} | ({f"{console_cue.id}.console"} if console_cue is not None else set())
         if known and hasattr(self.sink, "clear"):
             self.sink.clear(tid, keep)
+        if console_cue is not None:
+            self.sink.hit(Hit(tid, f"{console_cue.id}.console", console_cue.v, 0.0, rules_mod.WILD, pack.name, at,
+                              None))
         for r, w in hits:
             ev = event_of.get(r.category)
             if ev is None and r.category in (rules_mod.WILD, "routine") and len(event_of) == 1:
@@ -986,20 +998,35 @@ class IntelEngine:
         return talkers_mod.town_of(tk, pack.towns_for(key) or list(pack.area), pack.agency_towns)
 
     def _town_prior(self, pack, row: dict, key: str) -> str:
-        """The town a source shared by several towns most likely means (place.py's "prefer"): the dispatching
-        department's (this row's talker when it is a labelled console; else the latest labelled console in the window),
-        else this row's talker's department's. "" when no label says one (as before)."""
+        """The town a source shared by several towns most likely means (place.py's "prefer"), "" for none (as before):
+          1. this row's own department's (its talker's label: a console's or an officer's);
+          2. else the window's labelled consoles', only when every one of them says the same town and one of them is
+             tied to this row's job (the same street, a unit or a category both name);
+          3. else none."""
         if len(pack.towns_for(key) or pack.area) < 2:
             return ""
-        tk = self.talkers.of(row)
-        own = self._talker_town(pack, key, tk)
-        if own and tk.console:
+        own = self._talker_town(pack, key, self.talkers.of(row))
+        if own:
             return own
         win = self.windows.get((pack.name, key))
-        for _t, e in reversed(win.ordered() if win is not None else []):
-            if e.dispatcher and e.town:
-                return e.town
-        return own
+        if win is None:
+            return ""
+        tid = str(row.get("id") or "")
+        consoles = [e for t, e in win.entries.items() if t != tid and e.dispatcher and e.label and not e.suppressed]
+        towns = {e.town for e in consoles}
+        if len(towns) != 1 or "" in towns:
+            return ""
+        me = win.entries.get(tid)
+        text = me.text if me is not None else str(row.get("text") or "")
+        units = me.units if me is not None else frozenset(
+            f"{m.group(1).lower()} {m.group(2).lower()}" for m in UNIT_MENTION.finditer(text))
+        cats = {r.category for r, w in (me.hits if me is not None else ()) if w > 0 and r.category in pack.categories}
+        streets = street_names(text)
+        for c in consoles:
+            if ((streets & street_names(c.text)) or (units & c.units)
+                    or (cats & {r.category for r, w in c.hits if w > 0 and r.category in pack.categories})):
+                return next(iter(towns))
+        return ""
 
     def _outside(self, pack, ev: Event) -> bool:
         """A pack with an area: the event is elsewhere (its place's town isn't one of the area's; or, with no place,
@@ -1905,6 +1932,16 @@ class IntelEngine:
     def _span(self, name: str) -> float:
         p = self.pack(name)
         return p.window_s if p is not None else 120.0
+
+
+NOT_A_STREET = STOP_WORDS | {"my", "your", "his", "her", "their", "our", "its", "a", "an", "no", "any", "some", "on",
+                             "in", "at", "to", "of", "same", "other", "next", "first", "last", "take", "took"}
+STREET_NAME = re.compile(r"\b([a-z]+)\s+(?:" + "|".join(sorted(STREET_WORDS, key=len, reverse=True)) + r")\b")
+
+
+def street_names(text: str) -> set[str]:
+    """The streets a transmission names, by the word before the street word ("12 Sample Street" -> {"sample"})."""
+    return {m.group(1) for m in STREET_NAME.finditer((text or "").lower()) if m.group(1) not in NOT_A_STREET}
 
 
 def push_rev(keys) -> int:
