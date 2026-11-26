@@ -38,7 +38,9 @@
 // <details data-fold> group's open state from the box as it was (the rebuild keeps the scroll, the focus
 // and the folds, #111); keys() the group's layers for the event's set; refresh() after a change. An attached
 // group with top: true is drawn right under the layer list (camoverlay.js's Camera overlay, #168: by Cameras),
-// the rest at the foot of the box; attach() may return {} for a map the group isn't on.
+// the rest at the foot of the box; attach() may return {} for a map the group isn't on. A group whose panel has a title
+// (.ml-ghead > b) is folded under it to one line with its "N on" (#952: the box fits its map), open as the viewer left
+// it (fold "layers:<title>"); the rest of its head (its source) goes to the Sources fold at the box's foot.
 "use strict";
 
 window.MapLayers = (() => {
