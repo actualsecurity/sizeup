@@ -422,7 +422,7 @@ window.SearchView = (() => {
       min: () => H_MIN, max: () => Math.max(H_MIN, Math.floor(innerHeight * H_MAX_VH)),
       value: () => Math.round(box().getBoundingClientRect().height),
       set: (px, done) => {
-        sz.h = clampH(px, innerHeight);
+        sz.h = clampH(Math.max(H_MIN, px), innerHeight);       // (a drag past the top: the least, never the layout's)
         sizeMap();
         if (done) { rememberH(); mapResize(); }
         else if (!sz.frame) sz.frame = requestAnimationFrame(() => { sz.frame = 0; mapResize(); });

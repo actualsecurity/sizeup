@@ -192,7 +192,7 @@ def test_review_a_gpu_decoding_normal_work_is_busy_for_priority_and_long_clips_s
     online(p, "gpu-1")
     assert p.submit(jobs.job("norm", LOW, seconds=3.0, forced=True, norm=True))
     assert p.claim("gpu-1", 0).id == "norm"
-    assert p.ready_forced(LIVE) == (False, "gpu-1 busy")                # (never queued behind its decode: AWS)
+    assert p.ready_forced(LIVE) == (False, "gpu-1 busy (normal)")       # (never queued behind its decode: AWS)
     assert p.submit(jobs.job("prio", LIVE)) is True or True
     assert p.claim("gpu-1", 0) is None                                   # (nothing leased behind the normal decode)
     assert p.norm_place(120.0)[:2] == (False, "too long for the GPU after priority work (120 s)")

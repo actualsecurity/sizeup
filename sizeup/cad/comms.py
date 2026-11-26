@@ -249,6 +249,12 @@ class Comms:
         # "late"): only what keeps the record (the per-incident radio log), never on_text's consumers (status hints,
         # pre-alerts, possible incoming, the airport) nor on_context_text. Called after commit, like on_text.
         self.on_late_text = None
+        # traffic id -> None: the radio pre-alerts only (IntelEngine.consider), for a quiet catch-up's or a late row's
+        # text on one of our rows whose source intel pushes from (retext intel=True); never on_text's other consumers.
+        self.on_intel_text = None
+        # {channel, talkgroup, system} -> whether the radio pre-alerts push from that source (App._intel_source, set by
+        # the app): a late row recorded already transcribed on one goes to intel too. None: never.
+        self.intel_pushes = None
         # traffic id -> None: one of our rows logged with its text still to come (#927: status pending / remote, no
         # text): what needs no words (the per-incident radio log's rules: a fireground's links), never on_text's
         # consumers, which hear it once its text comes (retext). Called after commit, like on_text.
@@ -295,7 +301,10 @@ class Comms:
         late?, cut? ("grant": a P25 key-up cut where the control channel granted another radio mid-call, #819)}.
         Returns the event ids it is linked to. replace=False: skip one already logged (the startup backfill). An emergency once logged stays (a later write without the
         flag never clears it), and so does its evidence. late (#747: a P25 call from while sizeup was down): logged
-        and linked by its rules like any, told only to on_late_text. Must not be called with store.lock held: the
+        and linked by its rules like any, told to on_late_text (and, already transcribed on a push source, to the
+        intel hook too: _late_for_intel); the row's late column 1 (never cleared). Another system's row re-recorded
+        without the words it had (empty, unclear): on_context_text, so intel withdraws them.
+        Must not be called with store.lock held: the
         hooks (on_text, on_context_text, on_late_text) run on the caller's thread after commit."""
         tid = str(t["id"])
         p25 = t.get("talkgroup") is not None
@@ -322,6 +331,7 @@ class Comms:
             if have and (t.get("status") or "") in WAITING and not (t.get("text") or "").strip() \
                     and ((have["text"] or "").strip() or have["status"] in LANDED):
                 return []       # (#927) a copy still "Transcribing" (sent again) never blanks the text it has now
+            had_text = bool(have and (have["text"] or "").strip())
             tones = json.dumps(t["tones"]) if t.get("tones") else ""
             seq = json.dumps(t["tone_seq"]) if t.get("tone_seq") else ""
             known = bool(rigs) or bool(t.get("radio_id")) or bool(talker)
@@ -384,6 +394,8 @@ class Comms:
             elif have:
                 db.execute("UPDATE radio_traffic SET quality = '', unclear_text = '' WHERE id = ? AND quality != ''",
                            (tid,))
+            if t.get("late"):                   # (#747) on the row for intel; a later write without it never clears it
+                db.execute("UPDATE radio_traffic SET late = 1 WHERE id = ? AND late = 0", (tid,))
             cut = str(t.get("cut") or "")
             if cut in CUTS:                     # (#819) cut at a mid-call grant: its talker is the granted radio
                 db.execute("UPDATE radio_traffic SET cut = ? WHERE id = ?", (cut, tid))
@@ -411,6 +423,10 @@ class Comms:
             if ((t.get("text") or "").strip() or t.get("status") == "unclear") and not late:
                 self._heard_context(tid)            # committed: the intel pre-alerts, never our consumers (on_text);
                                                     # (unclear: words it had are withdrawn there, sizeup/stt_quality.py)
+            elif late and self._late_for_intel(t, system):
+                self._heard_context(tid)            # (intel scores it at air time, never pushes it)
+            elif had_text and (not (t.get("text") or "").strip() or (t.get("status") or "") == "unclear"):
+                self._heard_context(tid)            # its words gone (empty; a late one's unclear): intel withdraws them
             return out
         kind = self._everyones(tid, system)              # each kind trimmed by its own count: never by the other's
         self._logged[kind] += 1
@@ -426,9 +442,25 @@ class Comms:
             return out
         if late:
             self._heard_late(tid)
+            if self._late_for_intel(t, system, had_text):
+                self._heard_intel(tid)
         else:
             self._heard(tid)
         return out
+
+    def _late_for_intel(self, t: dict, system: str, had_text: bool = False) -> bool:
+        """A late row (#747) that came already transcribed (words, not unclear), or that had words and has none now
+        (had_text: empty, unclear; intel withdraws them), on a source the pre-alerts push from (intel_pushes): intel
+        hears it too, beside on_late_text. Never under store.lock (the check may read the store)."""
+        words = bool((t.get("text") or "").strip()) and (t.get("status") or "") != "unclear"
+        if self.intel_pushes is None or not (words or had_text):
+            return False
+        try:
+            return bool(self.intel_pushes({"channel": t.get("source") or "", "talkgroup": t.get("talkgroup"),
+                                           "system": system}))
+        except Exception as e:  # noqa: BLE001 - the row is logged whatever this does
+            self.log(f"CAD: late transcript's source: {type(e).__name__}")
+            return False
 
     def _quiet_unless_shown(self, db, tid: str) -> None:
         """In a transaction that changed only this row of radio_traffic (its text, status, other transcript, re-run): the
@@ -607,6 +639,14 @@ class Comms:
                 self.on_text(tid)
             except Exception as e:  # noqa: BLE001 - a suggestion never stops the log
                 print(f"CAD: status suggestion for {tid}: {type(e).__name__}: {e}")
+
+    def _heard_intel(self, tid: str) -> None:
+        """on_intel_text, once the write has committed: whatever it does or raises never reaches the write."""
+        if self.on_intel_text is not None:
+            try:
+                self.on_intel_text(tid)
+            except Exception as e:  # noqa: BLE001 - a pre-alert never stops the log
+                self.log(f"CAD: intel transcript {tid}: {type(e).__name__}")
 
     def _heard_late(self, tid: str) -> None:
         """on_late_text (#747), once the write has committed."""
@@ -828,7 +868,7 @@ class Comms:
 
     def retext(self, tid: str, text: str, status: str, model: str = "", alt: dict | None = None,
                notify: bool = True, vocab_v: str = "", late: bool = False, quality: str = "",
-               unclear_text: str = "", corr: dict | None = None) -> bool:
+               unclear_text: str = "", corr: dict | None = None, intel: bool = False) -> bool:
         """New text for a transmission. alt {text, model}: the other engine's transcript, kept to compare
         ("both": Amazon Transcribe's is the text, whisper's the alternative). Another P25 system's row goes to
         on_context_text only, never to on_text (as in record()). Must not be called with store.lock held: the hooks
@@ -840,7 +880,10 @@ class Comms:
         quality / unclear_text: an unclear transcript's reason and words (sizeup/stt_quality.py; its text is ""); new
         words without them clear them. corr {corr_text, corr_rules, corr_v}: the new text's vocabulary correction (#879,
         sizeup/stt_correct.py), written with it in one statement (the search index's trigger sees both); none: the
-        one before cleared."""
+        one before cleared. intel: a catch-up (notify=False) or a late row on a source the pre-alerts push from: the
+        intel hook hears it too (on_context_text for another system's row, on_intel_text for ours), and no other hook
+        beyond what notify / late already call, so a dispatch only caught up is still scored (at its air time; pushed
+        only while fresh; a late one never pushed, the row's late column says so). Never clears late."""
         with self.store.tx() as db:
             self.touch(tid)
             if alt is not None:
@@ -866,6 +909,11 @@ class Comms:
                 self._heard_late(tid)
             else:
                 self._heard(tid)
+        if n and intel and (not notify or late):     # (notify, not late: _heard / _heard_context told intel already)
+            if row is not None and sources.other_p25(row):
+                self._heard_context(tid)
+            else:
+                self._heard_intel(tid)
         return bool(n)
 
     def set_stt(self, tid: str, status: str, model: str) -> bool:

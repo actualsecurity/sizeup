@@ -22,6 +22,8 @@ Namespaces, each a known shape (anything else is refused, not trimmed):
                  "mhz:<frequency>"; from before the views, "ours" and "svc:<service>" (moved to the matching view's
                  where there is one). An earlier page's mute_police is taken and dropped (LISTEN_GONE), never kept
     search       {intel: bool} (static/search-view.js: Search's Intel events, #937; off unless turned on)
+    intel        {range: 24h | 7d | 30d | all} (static/intel-page.js: the Intel page's range when no date is set;
+                 sizeup/intel/eventlog.py RANGES)
 
 An event's own layer set (incidents.map_layers, POST /api/cad/incident/<id>) is the event's, not here.
 
@@ -139,6 +141,17 @@ def _search(v) -> dict:
     return dict(v)
 
 
+INTEL_RANGES = ("24h", "7d", "30d", "all")       # sizeup/intel/eventlog.py RANGES (tests/test_intel_range.py: the same)
+
+
+def _intel(v) -> dict:
+    if not isinstance(v, dict) or set(v) - {"range"}:
+        raise PrefsError("intel: {range: 24h | 7d | 30d | all}")
+    if "range" in v and v["range"] not in INTEL_RANGES:
+        raise PrefsError("intel.range: 24h | 7d | 30d | all")
+    return dict(v)
+
+
 def _listen_target(k) -> bool:
     if not isinstance(k, str):
         return False
@@ -198,7 +211,7 @@ def _radio_views(v) -> dict:
 
 
 NAMESPACES = {"map_layers": _map_layers, "preplan": _preplan, "reminders": _reminders, "listen": _listen,
-              "radio_views": _radio_views, "search": _search}
+              "radio_views": _radio_views, "search": _search, "intel": _intel}
 
 
 def validate(ns: str, value) -> str:

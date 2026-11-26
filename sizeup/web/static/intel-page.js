@@ -1,8 +1,15 @@
-// The Intel page (/cad#intel?level=&category=&source=&system=&decided=&held=&status=&q=&tag=&review=&from=&to=&page=): every radio intel
+// The Intel page (/cad#intel?level=&category=&source=&system=&decided=&held=&status=&q=&tag=&review=&from=&to=&range=&page=): every radio intel
 // event at every level and status, pushed or not, and why one wasn't pushed (GET /api/cad/intel/list,
-// sizeup/intel/eventlog.py: filtered and paged on the hub, 50 a page, newest first; the last 24 h unless a date is
-// set). Admin decision, 2026-11-25: "a page in the app where we can view these intel events even if they do not
-// trigger". Anyone signed in (the tab shows only when the state carries intel).
+// sizeup/intel/eventlog.py: filtered and paged on the hub, 50 a page, newest first). Admin decision, 2026-11-25: "a
+// page in the app where we can view these intel events even if they do not trigger". Anyone signed in (the tab shows
+// only when the state carries intel).
+//
+// The range (admin, 2026-11-26: "why am I only seeing back to the 25th?"): a chip by the count says what the list
+// covers ("Last 24 h", or the dates), and the quick picks 24 h / 7 d / 30 d / All (every event kept) set it with no
+// date. The pick is the person's (me-prefs.js "intel", localStorage RANGE_KEY this browser's copy); the hash's range=
+// wins. The hub counts the filters' events before the range (older): the list's last row says how many, with All.
+// Paging holds the first page's newest id (upto): an event saved while paging never pushes a row onto the next page
+// twice.
 //
 // A row: time (with "N other calls" in its window, each a link) · category · level (→ the level it would have had if not held) · source · place + precision ·
 // score and its parts (rule weights; the model's as "model 95%") · why it didn't push · Useful / Noise / Should
@@ -22,7 +29,12 @@
 // total moved, and on Refresh; the pins redrawn only when
 // they differ. A pin's click selects its row (scrolled to); a placed row's click selects and centres its pin, a
 // second click (or Enter) its More info. The Map button hides it (and reads nothing); a phone starts with it hidden;
-// remembered per viewer (localStorage "sizeup.intelMap", in try/catch).
+// remembered per viewer (localStorage "sizeup.intelMap", in try/catch). Fitted to the pins on new filters, and again
+// when the pins change while the viewer hasn't moved the map (a drag, a zoom, a row's centring) since. Pins at the
+// same point (one street's, one corner's) carry a count badge (intel-map.js); a click there steps through them.
+// Its height: dragged by its bottom edge (Panels.separator, the incident's and Search's maps' handle), the arrow keys
+// on the focused handle, Home or a double-click resets; H_MIN px to 85% of the window; remembered per viewer
+// (localStorage H_KEY {h}, like Search's map).
 // A vote is one per person (Useful / Noise one of the two; the same one again takes it back): its row's buttons are
 // disabled from the click until the hub answers.
 //
@@ -30,13 +42,20 @@
 "use strict";
 
 window.IntelPage = (() => {
-  const KEYS = ["level", "category", "source", "system", "decided", "held", "status", "q", "tag", "review", "from", "to"];
+  const KEYS = ["level", "category", "source", "system", "decided", "held", "status", "q", "tag", "review", "from", "to", "range"];
   const POLL_MS = 30000;
   const POLL_SPAN_S = 7 * 86400;
+  // the quick picks (eventlog.py RANGES): seconds back, the chip's words; "all": every event kept (90 days)
+  const RANGES = { "24h": [86400, "Last 24 h"], "7d": [7 * 86400, "Last 7 d"], "30d": [30 * 86400, "Last 30 d"],
+                   all: [92 * 86400, "All"] };
+  const RANGE_KEY = "sizeup.intelRange";
+  const H_KEY = "sizeup.intelMapH", H_MIN = 160, H_MAX_VH = 0.85;
   const st = { q: {}, page: 0, seq: 0, data: null, sig: "", rows: new Map(), facetSig: "", timer: null, busy: new Set(),
-               open: false, sel: null };
+               open: false, sel: null, hashRange: "", upto: null, uptoQs: null };
   // the map: m its MapLibre map, pins its IntelMap layer, key what it last read for, fit the filters it last fitted
-  const mp = { on: null, m: null, pins: null, ready: false, key: "", seq: 0, fit: null, data: null, qs: "", pending: false };
+  // moved: the viewer moved the map since it was last fitted (the pins changing then keep the view)
+  const mp = { on: null, m: null, pins: null, ready: false, key: "", seq: 0, fit: null, data: null, qs: "", pending: false,
+               moved: false };
   const MAP_KEY = "sizeup.intelMap";
   const LEVELS = { push: "pushed", held: "at push, not pushed", map: "on the card and the map", log: "logged only",
                    shadow: "counted only" };
@@ -57,11 +76,35 @@ window.IntelPage = (() => {
     return p;
   }
 
+  // ---- the range: the person's pick (the hash's wins) ------------------------------------------------------------
+  const okRange = (r) => (Object.prototype.hasOwnProperty.call(RANGES, r) ? r : "");
+  let pref = "24h";
+  try { pref = okRange(localStorage.getItem(RANGE_KEY)) || "24h"; } catch (_) { /* this page view only */ }
+  function keepPref(r) {
+    pref = okRange(r) || "24h";
+    try { localStorage.setItem(RANGE_KEY, pref); } catch (_) { /* this page view only */ }
+  }
+  if (window.MePrefs) {
+    let had = false;
+    try { had = localStorage.getItem(RANGE_KEY) !== null; } catch (_) { /* none */ }
+    MePrefs.register("intel", { get: () => ({ range: pref }), hadLocal: had, apply: (v) => {
+      const was = pref;
+      keepPref(v && v.range);
+      // open on the person's range (no date, none in the hash): read again on theirs
+      // (the first page, and Refresh shown or not for it: submit())
+      if (st.open && pref !== was && !st.hashRange && !st.q.from && !st.q.to) { st.q.range = pref; submit(0, pref); }
+    } });
+  }
+  // the range a query reads: none with a date (the dates are the range) or the notes' filters (the hub's own)
+  const rangeOf = (q) => (q.from || q.to || q.q || q.tag || q.review ? "" : okRange(q.range) || "24h");
+
   // ---- open / close (cad.js route) -------------------------------------------------------------------------------
   function open(qs) {
     const p = new URLSearchParams(qs || "");
     const was = mapQs();
     st.q = Object.fromEntries(KEYS.map((k) => [k, p.get(k) || ""]));
+    st.hashRange = okRange(st.q.range);
+    st.q.range = st.q.from ? "" : st.hashRange || pref;
     if (mapQs() !== was && st.sel != null) select(null);       // other filters: nothing selected
     st.sig = "";                                 // render() reaches the map with the answer to these filters
     st.page = Math.max(0, Number(p.get("page")) || 0);
@@ -78,6 +121,7 @@ window.IntelPage = (() => {
     c.value = st.q.category;
     st.open = true;
     show($("#il-refresh"), !live());
+    picks();
     mapShow(mapOn(), false);
     run();
     timer();
@@ -91,8 +135,8 @@ window.IntelPage = (() => {
   // polled: the newest page of the default view, a short span, no filter (a long or filtered view: Refresh)
   function live() {
     if (st.page || st.q.to) return false;
-    if (KEYS.some((k) => k !== "from" && st.q[k])) return false;
-    if (!st.q.from) return true;
+    if (KEYS.some((k) => k !== "from" && k !== "range" && st.q[k])) return false;
+    if (!st.q.from) return RANGES[rangeOf(st.q)][0] <= POLL_SPAN_S;
     const t = Date.parse(st.q.from);
     const since = Number.isNaN(t) ? Number(st.q.from) * 1000 : t;
     return !Number.isNaN(since) && Date.now() - since <= POLL_SPAN_S * 1000;
@@ -129,17 +173,35 @@ window.IntelPage = (() => {
       a.href = `/api/cad/intel/export.${f}${qs ? `?${qs}` : ""}`;
     }
   }
-  function submit(page = 0) {
+  // range: a quick pick (the dates cleared); else the one shown, kept in the hash only when it isn't the person's own
+  function submit(page = 0, range = "") {
     const q = {};
+    if (range) { $("#il-from").value = ""; $("#il-to").value = ""; }
     for (const k of ["level", "category", "decided", "held", "status", "q", "tag", "from", "to"]) q[k] = $(`#il-${k}`).value.trim();
     q.review = $("#il-review").getAttribute("aria-pressed") === "true" ? "1" : "";
     const s = $("#il-source").value;
     q.source = s.startsWith("s:") ? s.slice(2) : "";
     q.system = s.startsWith("y:") ? s.slice(2) : "";
+    const r = q.from ? "" : range || st.q.range || pref;
+    q.range = r && r !== pref ? r : "";
     const qs = params(q, page).toString();
     const h = "#intel" + (qs ? `?${qs}` : "");
-    if (location.hash === h) { st.q = q; st.page = page; show($("#il-refresh"), !live()); timer(); return run(); }
+    if (location.hash === h) {
+      st.q = { ...q, range: r }; st.hashRange = q.range; st.page = page;
+      show($("#il-refresh"), !live()); picks(); timer(); return run();
+    }
     location.hash = h;                         // route() -> open() -> run()
+  }
+  function pick(r) {
+    if (!okRange(r)) return;
+    keepPref(r);
+    if (window.MePrefs) MePrefs.changed("intel");              // the person's, on the hub (#823)
+    submit(0, r);
+  }
+  // the quick picks: the range shown pressed (none with dates or the notes' filters)
+  function picks() {
+    const r = rangeOf(st.q);
+    for (const b of $("#il-picks").children || []) if (b.dataset) b.setAttribute("aria-pressed", String(b.dataset.range === r));
   }
 
   async function run(quiet = false) {
@@ -148,6 +210,7 @@ window.IntelPage = (() => {
     try {
       const p = params(st.q, st.page);
       if (quiet) p.set("poll", "1");
+      if (st.page && st.upto != null && st.uptoQs === mapQs()) p.set("upto", String(st.upto));   // the first page's newest
       const d = await api("GET", `/api/cad/intel/list?${p}`);
       if (seq !== st.seq) return;
       render(d);
@@ -191,9 +254,11 @@ window.IntelPage = (() => {
 
   // ---- the rows ----------------------------------------------------------------------------------------------------
   function render(d) {
-    const sig = JSON.stringify([d.events, d.total, d.page, d.size]);
+    const sig = JSON.stringify([d.events, d.total, d.page, d.size, d.older, d.older_more]);
     st.data = d;
+    if (d.upto != null && (!d.page || st.uptoQs !== mapQs())) { st.upto = d.upto; st.uptoQs = mapQs(); }
     facets(d);
+    chip(d);                                   // (its text only when it changed)
     mapRead(d);                                // (its own key: an event moved on another page reads it; a vote not)
     if (sig === st.sig) return;                // the same answer (a poll): nothing redrawn
     st.sig = sig;
@@ -211,13 +276,45 @@ window.IntelPage = (() => {
     });
     st.rows = keep;
     if (st.sel != null) selLink();
-    if (!trs.length) body.replaceChildren(row0("No intel events"));
-    else if (trs.length !== body.children.length || trs.some((tr, i) => body.children[i] !== tr)) body.replaceChildren(...trs);
     const pages = Math.max(1, Math.ceil(d.total / d.size));
+    if (!trs.length) trs.push(row0("No intel events"));
+    if (d.older > 0 && d.page + 1 >= pages) trs.push(olderRow(d.older_more ? `${d.older}+` : d.older));      // the list's end: what a longer range adds
+    if (trs.length !== body.children.length || trs.some((tr, i) => body.children[i] !== tr)) body.replaceChildren(...trs);
     setText($("#il-page"), d.total > d.size ? `Page ${d.page + 1} of ${pages}` : "");
     $("#il-prev").disabled = d.page <= 0;
     $("#il-next").disabled = d.page + 1 >= pages;
     show($("#il-prev").parentElement, d.total > d.size);
+  }
+
+  // the range chip: what the list covers (the pick's words, or the dates), its exact span on hover
+  // a day (and its year, yr: a span over a new year or a long one, the notes' year)
+  const day = (unix, yr) => new Intl.DateTimeFormat("en-US", { timeZone: tz(), month: "2-digit", day: "2-digit",
+    ...(yr ? { year: "numeric" } : {}) }).format(new Date(unix * 1000));
+  const whenY = (unix, yr) => (yr ? `${day(unix, true)} ${when(unix).split(" ")[1] || ""}`.trim() : when(unix));
+  const yearOf = (unix) => new Intl.DateTimeFormat("en-US", { timeZone: tz(), year: "numeric" }).format(new Date(unix * 1000));
+  const LONG_S = 300 * 86400;
+  function chip(d) {
+    const c = $("#il-range");
+    const r = okRange(d.range);
+    const end = Math.min(d.until, d.now || d.until);
+    const yr = end - d.since > LONG_S || yearOf(d.since) !== yearOf(end - 1);
+    const text = r ? RANGES[r][1] : st.q.review === "1" ? "Every date" : `${day(d.since, yr)} – ${day(end - 1, yr)}`;
+    setText(c, text);
+    c.title = `${whenY(d.since, yr)} – ${whenY(end, yr)}` + (r === "all" ? " (every event kept)" : "");
+  }
+  function olderRow(n) {
+    const tr = el("tr", "il-older");
+    const td = Object.assign(el("td", "dim small", `Older: ${n}`), { colSpan: 8 });
+    td.title = "These filters' events before this range";
+    if (rangeOf(st.q) !== "all" || st.q.from || st.q.to) {
+      const b = el("button", "sm quiet", "All");
+      b.type = "button";
+      b.title = "Every event kept (90 days)";
+      b.addEventListener("click", () => pick("all"));
+      td.append(" ", b);
+    }
+    tr.append(td);
+    return tr;
   }
 
   function cell(cls, ...kids) {
@@ -233,7 +330,7 @@ window.IntelPage = (() => {
     if (e.id === st.sel) tr.classList.add("il-sel");
     if (e.lat != null) tr.title = "Click: More info (its pin first, while the map shows)";
     tr.addEventListener("click", () => {        // on the map first (when it shows and the event has a pin)
-      if (st.sel !== e.id && mapShown() && pinned(e.id)) { select(e.id); mp.pins.center(e.lat, e.lon); } else go();
+      if (st.sel !== e.id && mapShown() && pinned(e.id)) { select(e.id); mp.moved = true; mp.pins.center(e.lat, e.lon); } else go();
     });
     tr.addEventListener("keydown", (ev) => { if (ev.key === "Enter" && ev.target === tr) go(); });
     // time (and the status, when it is no longer open)
@@ -412,6 +509,7 @@ window.IntelPage = (() => {
         || !cad.scene.home) return;
     if (!mp.m) {
       mp.m = plainMap($("#il-map"), cad.scene);
+      mp.m.on("movestart", (e) => { if (e && e.originalEvent) mp.moved = true; });     // the viewer's own drag or zoom
       mp.m.on("load", () => {
         mp.pins = IntelMap.attach(mp.m, "il", { pick: picked });
         mp.ready = true;
@@ -420,12 +518,17 @@ window.IntelPage = (() => {
       return;
     }
     if (!mp.ready) return;
-    mp.pins.set(m.pins);
+    const drawn = mp.pins.set(m.pins);
     mp.pins.select(st.sel);
-    if (mp.qs !== mp.fit) {                    // new filters: fitted to them; the same filters read again keep the view
-      const b = mp.pins.bounds();
-      if (b) { mp.fit = mp.qs; mp.m.fitBounds(b, { padding: 40, maxZoom: 16, duration: 0 }); }
-    }
+    // new filters: fitted to their pins; the same filters' pins changed: fitted again unless the viewer moved the map
+    if (mp.qs !== mp.fit || (drawn && !mp.moved)) mapFit();
+  }
+  function mapFit() {
+    const b = mp.pins && mp.pins.bounds();
+    if (!b) return;
+    mp.fit = mp.qs;
+    mp.moved = false;
+    mp.m.fitBounds(b, { padding: 40, maxZoom: 16, duration: 0 });
   }
   // a pin's click: its row selected and scrolled to (on this page), else its More info a click away
   function picked(id) {
@@ -448,8 +551,55 @@ window.IntelPage = (() => {
     if (on) off.href = window.PrealertInfo ? PrealertInfo.href("intel", id) : `#prealert/intel/${id}`;
   }
 
+  // ---- the map's height: dragged by its bottom edge (Panels.separator, as Search's and the incident's maps) ----------
+  function clampH(want, vh) {
+    if (want == null || !Number.isFinite(want) || want <= 0) return null;
+    const hi = Math.max(H_MIN, Math.floor(vh * H_MAX_VH));
+    return Math.round(Math.max(H_MIN, Math.min(hi, want)));
+  }
+  const sz = { h: null, sep: null, frame: 0 };
+  try {
+    const v = (JSON.parse(localStorage.getItem(H_KEY) || "{}") || {}).h;
+    sz.h = Number.isFinite(v) && v > 0 ? v : null;
+  } catch (_) { /* the layout's own */ }
+  function sizeMap() {
+    const box = $("#il-mapbox-in");
+    if (!box || !box.style) return;
+    const h = clampH(sz.h, innerHeight);
+    if (h == null) box.style.removeProperty("--il-map-h"); else box.style.setProperty("--il-map-h", `${h}px`);
+    if (sz.sep) sz.sep.sync();
+  }
+  function mapResize() { if (mp.m) { try { mp.m.resize(); } catch (_) { /* gone */ } } }
+  // the size settled (a drag ended, a key, a reset): remembered; the pins fitted again unless the viewer moved the map
+  function settled() {
+    try { localStorage.setItem(H_KEY, JSON.stringify({ h: sz.h })); } catch (_) { /* this page view only */ }
+    mapResize();
+    if (mp.ready && !mp.moved) mapFit();
+  }
+  function sizer() {                         // panels.js loads after this file: made once it has
+    const hd = $("#il-map-h");
+    if (sz.sep || !window.Panels || !Panels.separator || !hd || !hd.style) return;
+    const box = $("#il-mapbox-in");
+    sz.sep = Panels.separator(hd, {
+      orient: "horizontal", grow: 1, label: "Resize the map", controls: "il-mapbox-in",
+      min: () => H_MIN, max: () => Math.max(H_MIN, Math.floor(innerHeight * H_MAX_VH)),
+      value: () => Math.round(box.getBoundingClientRect().height),
+      set: (px, done) => {
+        sz.h = clampH(Math.max(H_MIN, px), innerHeight);       // (a drag past the top: the least, never the layout's)
+        sizeMap();
+        if (done) settled();
+        else if (!sz.frame) sz.frame = requestAnimationFrame(() => { sz.frame = 0; mapResize(); });
+      },
+      reset: () => { sz.h = null; sizeMap(); settled(); },
+    });
+  }
+
   function wire() {
     if (!$("#il-filters")) return;
+    sizeMap();
+    sizer();
+    if (typeof addEventListener === "function") addEventListener("resize", sizeMap);     // (85% of the window: again)
+    for (const b of $("#il-picks").children || []) if (b.dataset && b.dataset.range) b.addEventListener("click", () => pick(b.dataset.range));
     $("#il-map-btn").addEventListener("click", mapToggle);
     $("#il-filters").addEventListener("submit", (ev) => { ev.preventDefault(); submit(0); });
     for (const k of ["level", "category", "source", "decided", "held", "status", "q", "tag", "from", "to"]) {
@@ -468,5 +618,5 @@ window.IntelPage = (() => {
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", wire); else wire();
 
-  return { open, close, render, run, row, _mp: mp, href: (q) => "#intel" + (q ? `?${params(q, 0)}` : "") };
+  return { open, close, render, run, row, clampH, H_MIN, H_MAX_VH, _mp: mp, href: (q) => "#intel" + (q ? `?${params(q, 0)}` : "") };
 })();
