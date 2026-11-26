@@ -134,6 +134,7 @@ from sizeup import radionames
 from sizeup.cad import alarms as alarms_mod
 from sizeup.cad import commonplaces, dispatcher, eta, feedtypes, mapview, radiofolders, radioviews, reminders, runcards, tonelist
 from sizeup.cad import lists as lists_mod
+from sizeup.cad import notif as notif_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
 from sizeup.cad.store import OPERATOR_MAX, SCHEMA_VERSION, TZ, CadError
 from sizeup import audiostore, errwatch, polly, sourcekeys
@@ -188,6 +189,10 @@ PAGE_SECTION[DEPT_SECTION] = "dispatch"
 # admins, audited as Lists. key "<feed>|<code>" -> {"type", "subtype"}.
 FT_SECTION = feedtypes.SECTION
 PAGE_SECTION[FT_SECTION] = "lists"
+# A notification's sub-type and hydrants from its comments (sizeup/cad/notif.py): Settings > Lists > Notification rules,
+# admins, audited as Lists. key "rules" -> [rule], "auto_close" -> true | false (default false).
+NOTIF_SECTION = notif_mod.SECTION
+PAGE_SECTION[NOTIF_SECTION] = "lists"
 # The push topics by kind (sizeup/notify.py Pushes): Settings > System > Push notifications, audited as System.
 NOTIFY_SECTION = "notify"
 PAGE_SECTION[NOTIFY_SECTION] = "system"
@@ -302,11 +307,12 @@ WALL_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}")      # sizeup/roads.py CAMERA_ID
 MAX_WALL_IDS = 200
 AUDIT_SECTIONS = ("lists", "run cards", "units", "dispatch", "users", "system", "radios")
 LIST_FIELDS = {"event_types": ("color",), "event_subtypes": (), "dispositions": (), "received_via": (),
-               "unit_statuses": ("role", "bg", "fg"), "location_qualifiers": ("short", "spoken")}
+               "unit_statuses": ("role", "bg", "fg"), "location_qualifiers": ("short", "spoken"), "notification_kinds": ()}
 LIST_CODE = {"event_types": CODE, "event_subtypes": CODE, "dispositions": LONG_CODE, "received_via": LONG_CODE,
-             "unit_statuses": LONG_CODE, "location_qualifiers": CODE}
+             "unit_statuses": LONG_CODE, "location_qualifiers": CODE, "notification_kinds": CODE}
 LIST_TITLES = {"event_types": "Event types", "event_subtypes": "Event subtypes", "dispositions": "Dispositions",
-               "received_via": "Received via", "unit_statuses": "Unit statuses", "location_qualifiers": "Location qualifiers"}
+               "received_via": "Received via", "unit_statuses": "Unit statuses", "location_qualifiers": "Location qualifiers",
+               "notification_kinds": "Notification sub-types"}
 WORDING = (("new", "First dispatch"), ("add_on", "Added to the assignment"), ("upgrade", "Upgrade"),
            ("full_response", "Full department response"), ("remarks", "Dispatcher remarks"), ("lead_in", "Lead-in"),
            ("lead_in_joint", "Lead-in with a joint department"), ("new_no_location", "First dispatch, no location"),
@@ -381,6 +387,8 @@ def overlay(d: dict, ov: dict) -> dict:
         have = d.get(sec)
         if have is None and sec == "location_qualifiers":   # a data file without its own: the defaults are its items
             have = [dict(q) for q in lists_mod.DEFAULT_QUALIFIERS]
+        if have is None and sec == "notification_kinds":
+            have = [dict(q) for q in lists_mod.DEFAULT_NOTIF_KINDS]
         items = [x if isinstance(x, dict) else {"code": x} for x in have or []]
         by = {str(x.get("code")): x for x in items}
         order = list(by)
@@ -646,6 +654,7 @@ class Editor:
         if was != self.cad.hydrants_assume_c and getattr(self.cad, "hydrants", None) is not None:
             self.cad.hydrants.display_changed()          # the layer drawn again, every page
         self.cad.dongle_auto_replace = (ov.get(SWAP_SECTION) or {}).get("auto_critical") is True   # off by default
+        self.cad.notif_cfg = notif_mod.config(ov.get(NOTIF_SECTION), L)     # notification rules (sizeup/cad/notif.py)
         self.cad.map_display = mapview.display_zooms(ov.get(MAPD_SECTION))     # the maps' rigs by zoom (#376)
         self.cad.premise_visible = dict(ov.get(PREMISE_SECTION) or {})     # premise notes by category (#403)
         self.cad.em_prominent = em_prominent(ov.get(EM_SECTION))          # the Radio page's loud emergencies
@@ -745,6 +754,9 @@ class Editor:
             add(q("SELECT location_qualifier AS k, COUNT(*) AS n FROM incidents GROUP BY location_qualifier"))
             if q("SELECT 1 FROM sqlite_master WHERE name = 'hydrants'"):
                 add(q("SELECT location_qualifier AS k, COUNT(*) AS n FROM hydrants GROUP BY location_qualifier"))
+        elif sec == "notification_kinds":             # notifications that have one (sizeup/cad/notif.py)
+            if q("SELECT 1 FROM sqlite_master WHERE name = 'notif_incidents'"):
+                add(q("SELECT kind AS k, COUNT(*) AS n FROM notif_incidents GROUP BY kind"))
         elif sec == "unit_statuses":
             add(q("SELECT status AS k, COUNT(*) AS n FROM units GROUP BY status"))
             add(q("SELECT old_status AS k, COUNT(*) AS n FROM unit_history GROUP BY old_status"))
@@ -832,6 +844,7 @@ class Editor:
         out["boards"] = [{"id": b["id"], "title": b["title"], **lists_mod.board_meta(b)} for b in L.unit_boards]
         out["type_subtypes"] = self._map_page(L, ov)
         out["feed_types"] = self.feed_types_page(ov)
+        out[NOTIF_SECTION] = notif_mod.page(ov.get(NOTIF_SECTION), L)
         out["dispatch"] = self._dispatch_page(L, ov)
         out["reminders"] = reminders.page(ov.get(REM_SECTION))
         out["operators"] = self.operators()
@@ -1647,7 +1660,8 @@ class Editor:
               channels_mod.SQUELCH_SECTION: self._squelch_op,
               "places": self._places_op, COMMON_SECTION: self._common_op, ADDR_SECTION: self._addresses_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
               NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, HYD_SECTION: self._hyd_op, SWAP_SECTION: self._swap_op, REM_SECTION: self._rem_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, FM_MAIN_SECTION: self._fm_main_op, SIGNAL_SECTION: self._signal_op, FOLDERS_SECTION: self._folders_op, VIEWS_SECTION: self._views_op, SVC_SECTION: self._services_op, RET_SECTION: self._retention_op,
-              TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, LOGS_SECTION: self._logs_op, DEPT_SECTION: self._dept_op, FT_SECTION: self._feed_types_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o),
+              TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, LOGS_SECTION: self._logs_op, DEPT_SECTION: self._dept_op, FT_SECTION: self._feed_types_op,
+              NOTIF_SECTION: lambda a, b, o: self.cad.notif.settings_op(a, b, o), "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o),
               "intel": lambda a, b, o: self.cad.intel_admin.settings_op(a, b, o),
               FIX_SECTION: lambda a, b, o: self.cad.stt_fix.settings_op(a, b, o)}.get(section)
         if fn is None:
@@ -3837,6 +3851,11 @@ class Editor:
                     or not isinstance(v, dict) or set(v) - {"type", "subtype"}
                     or not all(isinstance(v.get(x, ""), str) for x in ("type", "subtype")) or not v.get("type")):
                 raise CadError(f"overrides.{FT_SECTION}: {str(k)[:60]!r} -> {{type, subtype}} (key <feed>|<code>)")
+        if ov.get(NOTIF_SECTION):                             # the notification rules (sizeup/cad/notif.py)
+            try:
+                ov[NOTIF_SECTION] = notif_mod.check_section(ov[NOTIF_SECTION])
+            except ValueError as e:
+                raise CadError(f"overrides.{NOTIF_SECTION}: {e}") from None
         for k, v in (ov.get(DEPT_SECTION) or {}).items():     # a feed's department entries (#370)
             try:
                 self._dept_value(k, v)

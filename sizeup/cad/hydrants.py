@@ -64,6 +64,7 @@ import threading
 import time
 from datetime import date
 
+from sizeup.cad.notif import num_key
 from sizeup.cad.premise import who
 from sizeup.cad.settings import Editor
 from sizeup.cad.store import CadError
@@ -434,6 +435,7 @@ class Hydrants:
         self._lock = threading.Lock()
         self._idx: tuple | None = None          # (signature, index)
         self._sidx: tuple | None = None         # (index, towns rev, assume, the search table) (#840)
+        self._nidx: tuple | None = None         # (index, number -> items): a notification's numbers (notif.py)
         self._towns: dict = {"rev": None, "at": {}}
         with self.store.lock:
             if self.store.db.execute("SELECT 1 FROM sqlite_master WHERE name = 'incidents'").fetchone():
@@ -681,6 +683,8 @@ class Hydrants:
         """GET /api/cad/hydrants/<key>: the card and its history (the Settings audit log's rows: anyone signed in reads
         that log in Settings too; hydrant data is no secret, the list and the CSV are admins' as the editors' tools)."""
         out = {"hydrant": self.shown(self._item_or_404(key)), "gen": self.gen}
+        nf = getattr(self.cad, "notif", None)
+        out["notifications"] = nf.for_hydrant(key) if nf is not None else []     # the ones holding it OOS (notif.py)
         out["history"] = self.store.q("SELECT at, operator, old, new FROM settings_audit WHERE section = ? AND key = ? "
                                       "ORDER BY at DESC, id DESC LIMIT 100", (SECTION, key))
         for h in out["history"]:
@@ -702,6 +706,29 @@ class Hydrants:
                         found.append((d, it))
         found.sort(key=lambda t: (t[0], t[1]["key"]))
         return [self.shown(it, full=False) | {"dist_m": round(d)} for d, it in found[:n]]
+
+    def by_number(self, number: str) -> list[dict]:
+        """The hydrants on the maps (never a removed one) whose number shown, county number or asset id is this one
+        (notif.num_key: case, spaces, dashes and leading zeros aside): a notification's numbers (sizeup/cad/notif.py)."""
+        k = num_key(number)
+        if not k:
+            return []
+        idx = self.index()
+        got = self._nidx
+        if got is None or got[0] is not idx:
+            m: dict = {}
+            for it in idx["items"]:
+                if it["removed"]:
+                    continue
+                r = it["row"] or {}
+                for v in (it["number"], it["props"].get(NUMBER), r.get("asset_id")):
+                    nk = num_key(v)
+                    if nk and all(x is not it for x in m.setdefault(nk, [])):
+                        m[nk].append(it)
+            got = (idx, m)
+            with self._lock:
+                self._nidx = got
+        return list(got[1].get(k, ()))
 
     def for_incident(self, inc: dict) -> dict | None:
         """An incident's hydrants: the nearest (near) and every one out of service within NEAR_M (down)."""
@@ -992,10 +1019,13 @@ class Hydrants:
         touched = {k for k in f if k in FIELDS and row.get(k, DEFAULTS[k]) != f[k]}
         warn = check({**DEFAULTS, **row, **f}, self._today(), touched) if touched else []
         now = self.cad.clock()
+        was = row.get("status") or "unknown"
         with self.store.tx() as db:
             changed = self._write(db, it, f, op, now)
         if changed:
             self._bump()
+        if "status" in changed and getattr(self.cad, "notif", None) is not None:
+            self.cad.notif.on_status(key, was, f["status"], op)     # back in service: its notifications let it go
         it = self.index()["by_key"][key]
         return {"ok": True, "hydrant": self.shown(it), "changed": changed, "warnings": warn}
 
@@ -1189,6 +1219,10 @@ class Hydrants:
                 Editor._audit(db, now, op, SECTION, key, None, {k: v for k, v in f.items() if v not in (None, "", 0)})
         if changes or new:
             self._bump()
+        nf = getattr(self.cad, "notif", None)
+        for c in changes:                              # back in service: its notifications let it go (notif.py)
+            if nf is not None and "status" in c["changes"]:
+                nf.on_status(c["key"], c["changes"]["status"][0], c["changes"]["status"][1], op)
         out["applied"] = True
         return out
 

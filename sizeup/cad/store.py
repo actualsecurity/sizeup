@@ -501,6 +501,9 @@ class Store:
         if self.path != ":memory:":
             self.db.execute("PRAGMA journal_mode = WAL")
         self.lock = threading.RLock()
+        # what else keeps a non-emergency event open past its Until (sizeup/cad/notif.py: hydrants out of service linked
+        # to a notification): fn(db, iid) -> "2 hydrants OOS" | '' (in the caller's transaction); None: nothing
+        self.holds = None
         self.db.close_lock = self.lock       # any close of it (shutdown(), a test's db.close()) waits for the lock (#740)
         self._closed = False
         # state_rev: what the console's state is built from (Cad.state): it moves with rev (and with every `rev += 1`
@@ -1828,8 +1831,16 @@ class Store:
                     and inc["until_at"] is not None and inc["until_at"] <= now)
 
         def held_line(inc, on) -> str:
+            if on and isinstance(on[-1], tuple):         # what else holds it (self.holds): "2 hydrants OOS"
+                return f"Until {_when(inc['until_at'], now)} passed: open while {on[-1][0]}"
             return (f"Until {_when(inc['until_at'], now)} passed: open while {', '.join(on)} "
                     f"{'is' if len(on) == 1 else 'are'} on it")
+
+        def kept(db, iid) -> list:
+            on = self._on_it(db, iid)
+            if not on and self.holds is not None and (why := self.holds(db, iid)):
+                return [(why,)]
+            return on
 
         def said(db, inc, text) -> bool:
             return db.execute("SELECT 1 FROM events WHERE incident_id = ? AND kind = 'system' AND text = ?",
@@ -1840,15 +1851,16 @@ class Store:
             inc = self.db.execute(look, (iid,)).fetchone()
             if not due(inc):
                 return None
-            on = self._on_it(self.db, iid)
+            on = kept(self.db, iid)
             if on and said(self.db, inc, held_line(inc, on)):
                 return None                              # held, and said so already
         with self.tx() as db:                            # the same checks again, under the write
             inc = db.execute(look, (iid,)).fetchone()
             if not due(inc):
                 return None
-            on = self._on_it(db, iid)
-            d = {"id": iid, "number": inc["number"], "until_at": inc["until_at"], "closed": not on, "units": on}
+            on = kept(db, iid)
+            d = {"id": iid, "number": inc["number"], "until_at": inc["until_at"], "closed": not on,
+                 "units": [u for u in on if isinstance(u, str)], "held": next((u[0] for u in on if isinstance(u, tuple)), "")}
             if on:                                       # said once per set of units, then left to them
                 text = held_line(inc, on)
                 if said(db, inc, text):

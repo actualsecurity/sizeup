@@ -617,6 +617,8 @@ class AutoDispatch:
         """The end of a report never seen open here: "close?" for a person (one click), never closed by itself."""
         if self._manual(iid, "close") or self.store.incident(iid)["status"] not in ("pending", "active"):
             return
+        if self._hydrants_hold(iid, t, op, label):
+            return
         ref = f"ask:{t}"
         if not self.store.one("SELECT 1 AS x FROM auto_steps WHERE incident_id = ? AND kind = 'close?' AND ref = ?", (iid, ref)):
             self._step(iid, "close?", "county", f"{label} in service {_hm(t)}: close?", t, ref=ref, own_event=True,
@@ -632,6 +634,8 @@ class AutoDispatch:
                     return
                 if self.store.incident(iid)["status"] not in ("pending", "active") or self.close_pending(iid) is not None:
                     return                           # (a close already waiting for its units: it goes ahead as it was)
+                if self._hydrants_hold(iid, at, f"{label} · auto", label):
+                    return
                 ref = f"ask:gone:{at}"
                 if not self.store.one("SELECT 1 AS x FROM auto_steps WHERE incident_id = ? AND kind = 'close?' AND ref = ?",
                                       (iid, ref)):
@@ -842,6 +846,8 @@ class AutoDispatch:
                 sid = self._unit_step(iid, self.store.unit(r["id"]), "free", t, op, "county", "in_service")
                 if sid:
                     released.append(sid)
+        if self._hydrants_hold(iid, t, op, label):      # the units it lists released; the call itself stays open
+            return
         blocking = self._blocking(iid)
         if blocking:
             if not self.store.one("SELECT 1 AS x FROM auto_steps WHERE incident_id = ? AND kind = 'close?' AND ref = ?",
@@ -859,7 +865,7 @@ class AutoDispatch:
     def _do_close(self, iid: int, t: float, op: str, label: str, released=()) -> None:
         """Closed; the step remembers the units the close released and those this in service released (released: their
         steps), so one undo of the close puts them all back (round 3)."""
-        if self._manual(iid, "close"):
+        if self._manual(iid, "close") or self._hydrants_hold(iid, t, op, label):
             return
         codes = self.store.lists.disposition_codes
         disp = "COMPLETE" if "COMPLETE" in codes else codes[0]
@@ -868,6 +874,19 @@ class AutoDispatch:
         self.store.close(iid, disp, op)
         self._step(iid, "close", "county", f"Closed: {label} in service {_hm(t)}", t, event_kind="closed",
                    ref=json.dumps({"left": left, "released": list(released)}))
+
+    def _hydrants_hold(self, iid: int, t: float, op: str, label: str) -> bool:
+        """A notification holding hydrants out of service (sizeup/cad/notif.py): the county's in service never closes it
+        nor asks; one line, once ("kept open: 2 hydrants OOS"). Its hydrants back in service close it or ask then."""
+        notif = getattr(self.cad, "notif", None)
+        n = notif.held(iid) if notif is not None else 0
+        if not n:
+            return False
+        text = f"{label} in service {_hm(t)}: kept open ({n} hydrant{'' if n == 1 else 's'} OOS)"
+        if not self.store.one("SELECT 1 AS x FROM events WHERE incident_id = ? AND kind = 'auto' AND text = ?", (iid, text)):
+            with self.store.tx() as db:
+                self.store._event(db, iid, "auto", text, op, at=t)
+        return True
 
     def close_pending(self, iid: int) -> dict | None:
         """The latest "close?" on an open incident not closed by automation since: the step, else None."""

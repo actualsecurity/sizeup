@@ -70,6 +70,7 @@ const S_TONE_TYPES = [["fire", "Fire"], ["ems", "EMS"], ["police", "Police"], ["
 const S_LISTS = [["event_types", "Event types"], ["event_subtypes", "Event subtypes"], ["type_subtypes", "Subtypes per type"],
   ["dispositions", "Dispositions"],
   ["received_via", "Received via"], ["unit_statuses", "Unit statuses"], ["location_qualifiers", "Location qualifiers"],
+  ["notification_kinds", "Notification sub-types"], ["notif_rules", "Notification rules"],
   ["event_class", "Emergency rules"], ["feed_types", "Feed types"], ["geo_town_order", "Town order"], ["place_names", "Place names"]];
 const S_ROLES = [["", "Committed (on a call)"], ["free", "Available (in service)"], ["dispatched", "Dispatched (set on dispatch)"],
   ["enroute", "Responding (first en route)"], ["onscene", "On location (first on scene)"], ["oos", "Unavailable (out of service)"]];
@@ -325,7 +326,8 @@ async function sCardMount(card, mount, must) {          // mount(node): reads, t
 const S_PART_OF = { lists: "lists", titles: "lists", units: "units", unit_kinds: "units", boards: "units", dispatch: "dispatch", reminders: "dispatch",
   operators: "users", tones: "radios", radio_emergencies: "radios", station_logs: "station",
   system: "system", audit_sections: "system", atc: "system", hub_errors: "system", map_display: "system",
-  premise_visibility: "system", audio_retention: "system", camera_wall: "system", alert_mutes: "system", feed_types: "lists" };
+  premise_visibility: "system", audio_retention: "system", camera_wall: "system", alert_mutes: "system", feed_types: "lists",
+  notif_rules: "lists" };
 const S_LIVE = new Set(["lists", "units"]);
 const S_LIVE_KEYS = { lists: new Set(["used", "now"]), units: new Set(["used", "status", "incident_number"]),
   audio_retention: new Set(["clips", "bytes", "totals"]), camera_wall: new Set(["n", "streams"]),
@@ -992,6 +994,7 @@ function sLists(panel) {
   else if (S.list === "place_names") body = sPlaceNames();
   else if (S.list === "type_subtypes") body = sTypeMap();
   else if (S.list === "feed_types") body = sFeedTypes();
+  else if (S.list === "notif_rules") body = sNotifRules();
   else body = sListTable(S.list);
   const flow = S.list === "unit_statuses" && S.data.status_flow ? sFlow() : null;
   const common = S.list === "place_names" ? sCommonPlaces() : null;
@@ -1020,6 +1023,8 @@ function sListTable(sec) {
       + "unconfirmed: change it, or Confirm. Available frees the unit and clears it off its call. Unavailable takes it out "
       + "of service and asks why. Dispatched, Responding and On location stamp the times. The rest keep it committed.",
     event_types: "The type's color on the queue, the board and the records.",
+    notification_kinds: "What a Notification is about, shown after its type (Notification · Hydrants OOS). Set by the "
+      + "Notification rules or by hand on the event. Hydrants OOS and Hydrants back in service are what the hydrant rules set.",
     location_qualifiers: "Where at a location, in front of the address. Name: the pick list. Short: the text (IFO 12 Sample St). "
       + "Spoken: what the dispatch voice says and what pages are heard as. Never moves a point on the map.",
   }[sec];
@@ -1372,6 +1377,85 @@ function sFeedTypes() {
   const box = el("div");
   box.append(rows, ...(seenCard ? [seenCard] : []));
   return box;
+}
+
+// Notification rules (sizeup/cad/notif.py): a pattern over a Notification's remarks, comments and notes -> its sub-type,
+// and the hydrant numbers it names (out of service, or back). None ship: the department's formats are entered here.
+function sNotifRules() {
+  const d = S.data.notif_rules || { rules: [], auto_close: false, actions: [], numbers: "" };
+  const kinds = (L().notification_kinds || []).filter(live).map((k) => [k.code, k.name]);
+  const kindName = (c) => (kinds.find((k) => k[0] === c) || [c, c])[1];
+  const actName = (a) => (d.actions.find((x) => x[0] === a) || [a, ""])[1];
+  const ol = el("ol", "s-rows");
+  d.rules.forEach((r, i) => {
+    const li = el("li", "s-row nf-rule" + (r.on ? "" : " dim"));
+    const pat = el("code", "s-code nf-pat", r.match);
+    pat.title = r.numbers ? `Numbers: ${r.numbers}` : `Numbers: the default (${d.numbers})`;
+    li.append(el("b", "s-rule", r.name), pat);
+    if (r.kind) li.append(el("span", "small", `→ ${kindName(r.kind)}`));
+    if (r.hydrants) {
+      const c = el("span", "chip", r.hydrants === "oos" ? "OOS numbers" : "back numbers");
+      c.title = `${actName(r.hydrants)}: the numbers it names are proposed` + (r.auto_apply ? "; auto-applied when one is near" : "");
+      li.append(c);
+    }
+    if (r.auto_apply) li.append(el("span", "chip warn", "auto"));
+    if (r.off) { const c = el("span", "chip s-confirm", "sub-type gone"); c.title = r.off; li.append(c); }
+    if (!r.on) li.append(el("span", "chip", "off"));
+    li.append(el("span", "spacer"));
+    if (i) li.append(sBtn("↑", "Up: the first that matches sets the sub-type", () => sPost("notif_rules", { action: "move", id: r.id, dir: -1 }, "Moved"), "mini"));
+    li.append(
+      sBtn("Edit", "", () => { S.nrDraft = { ...r }; sRender(true); }, "mini"),
+      sBtn("Delete", "", () => sAsk(`Delete rule ${r.name}?`, () => sPost("notif_rules", { action: "delete", id: r.id }, `${r.name} deleted`), "Delete"), "danger-quiet"));
+    ol.append(li);
+  });
+  if (!d.rules.length) ol.append(el("li", "s-row dim small", "None"));
+  if (d.broken) ol.append(el("li", "s-row warn small", `${d.broken} saved rule${d.broken === 1 ? "" : "s"} not read: edit by settings import`));
+  const dr = S.nrDraft || {};
+  const f = el("form", "s-add nf-form");
+  const name = sInput(dr.name || "", 60, "Name");
+  const match = sInput(dr.match || "", 300, "Match (regular expression)", null, "mono");
+  match.title = "Any case. Group (?P<nums>...) holds the hydrant numbers; else group 1; else the whole match";
+  const nums = sInput(dr.numbers || "", 120, "Numbers (optional)", null, "mono");
+  nums.title = `One hydrant number; empty: ${d.numbers}`;
+  const kind = sSelect([["", "No sub-type"], ...kinds], dr.kind || "", null, "Sub-type");
+  const hyd = sSelect([["", "No hydrants"], ...d.actions], dr.hydrants || "", null, "Hydrants");
+  const [autoL, auto] = sCheck("Auto-apply", dr.auto_apply, "Mark (or link) the one hydrant near the call at once; never one found elsewhere");
+  const [onL, on] = sCheck("On", dr.on !== false, "");
+  const save = el("button", "primary", dr.id ? "Save" : "Add");
+  save.type = "submit";
+  const cancel = dr.id ? sBtn("Cancel", "", () => { S.nrDraft = null; sRender(true); }) : null;
+  f.append(name, match, nums, kind, hyd, autoL, onL, save, ...(cancel ? [cancel] : []));
+  f.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const rule = { id: dr.id || "", name: name.value.trim(), match: match.value.trim(), numbers: nums.value.trim(),
+                   kind: kind.value, hydrants: hyd.value, auto_apply: auto.checked, on: on.checked };
+    sPost("notif_rules", { action: "set", rule }, `${rule.name} saved`).then((r) => { if (r) S.nrDraft = null; });
+  });
+  // the test box: what the rules make of a text (nothing saved, nothing changed)
+  const t = el("form", "row s-add nf-test");
+  const tin = sInput("", 4000, "Test a comment");
+  tin.title = "What the saved rules make of this text (nothing is changed)";
+  const tout = el("span", "small nf-test-out");
+  const go = el("button", "", "Test");
+  go.type = "submit";
+  t.append(tin, go, tout);
+  t.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!tin.value.trim()) return;
+    try {
+      const r = await api("POST", "/api/cad/settings/notif_rules", { action: "test", text: tin.value, operator: operator() });
+      const hs = r.hydrants.map((h) => `${h.number} ${h.action === "in" ? "back" : "OOS"}`).join(", ");
+      setText(tout, [r.kind_name || "No sub-type", hs || "no hydrants"].join(" · "));
+    } catch (ex) { setText(tout, ex.message); }
+  });
+  const [acL, ac] = sCheck("Close when all back in service", d.auto_close,
+    "Off: the notification asks to be closed once every linked hydrant is back in service");
+  ac.addEventListener("change", () => sPost("notif_rules", { action: "auto_close", value: ac.checked }, "Saved"));
+  return sCard(sCardHead("Notification rules", `${d.rules.length} rule${d.rules.length === 1 ? "" : "s"}`,
+    sHelp("Read on a Notification's remarks, feed comments and notes. The first rule that matches sets its sub-type. "
+      + "A hydrants rule's numbers are matched to the hydrant list and proposed on the event: an admin marks them out of "
+      + "service (or links ones already out); the notification stays open until they are back in service."), acL),
+  ol, f, t);
 }
 
 function sTowns() {

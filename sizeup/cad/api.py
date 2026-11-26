@@ -79,6 +79,11 @@ POST /api/cad/hydrants                    {lat, lon, number?, fields...}: a hydr
 POST /api/cad/hydrants/<key>              {fields..., lat?, lon? (a move), action?: remove | restore | reset_position}
 POST /api/cad/hydrants/import             {action: preview | apply, csv}: by key; nothing applied with a row in error.
                                           All three: admins (WRITES), in the Settings audit log (section "hydrants")
+POST /api/cad/incident/<id>/notif         {kind}: a Notification's sub-type by hand ("" : the rules' again; sizeup/cad/
+                                          notif.py): dispatchers and admins
+POST /api/cad/incident/<id>/hydrants      {action: apply {items?: [{id, key?}]} | back {ids?} | link {key} | dismiss {id}}:
+                                          the hydrants a notification names, marked out of service / linked / back in
+                                          service (audited as hydrant edits): admins, as every hydrant edit
 GET  /api/cad/streetview                  {provider: "google", key} with a key set ([streetview] google_key: a browser
                                           key restricted by referrer), else {provider: ""}; no-store, never logged
 POST /api/cad/streetview/open             the page asks before it makes a panorama: {ok, used, limit, why?}. Counts one
@@ -463,6 +468,8 @@ PREMISE = re.compile(r"/api/cad/premise(?:/(\d{1,9})(?:/(ack))?)?")             
 PREPLAN = re.compile(r"/api/cad/preplan(?:/(\d{1,9}))?")                         # pre-plan points (#456)
 DOCS = re.compile(r"/api/cad/preplan/docs(?:/(\d{1,9}))?")                       # site documents (#459)
 DOC_FILE = re.compile(r"/api/cad/preplan/docs/(\d{1,9})/(file|plan)")
+NOTIF_KIND = re.compile(r"/api/cad/incident/(\d{1,9})/notif")                   # a notification's sub-type (notif.py)
+NOTIF_HYD = re.compile(r"/api/cad/incident/(\d{1,9})/hydrants")               # ... its hydrants out of service
 HYDRANT = re.compile(r"/api/cad/hydrants(?:/([ch][1-9]\d{0,9}(?:-[1-9]\d{0,3})?|import|search))?")   # hydrants (#799, #840)
 EXPORT = re.compile(r"/api/cad/export/([a-z-]{1,20}\.csv)")
 UNIT = re.compile(r"/api/cad/unit/(\d{1,9})/status")
@@ -524,6 +531,8 @@ WRITES = (
     (re.compile(r"/api/cad/incident(?:/\d{1,9}(?:/(?:accept|dismiss|close|reopen|note|recommend|preview|dispatch|upgrade"
                 r"|attach|link|unlink|keep|return|feed-use|auto-undo|merge))?)?"), "dispatch"),      # events, notes, dispatches, radio links
     (INCIDENT_CHANNEL, "dispatch"),                                         # an event's operating channel (opchannel.py)
+    (NOTIF_KIND, "dispatch"),                                               # a notification's sub-type (notif.py)
+    (NOTIF_HYD, "admin"),                                                   # ... its hydrants: hydrant edits are admins'
     (DISPATCH_MODE, "dispatch"),                                            # 60 Control / PCFD dispatching (#311)
     (UNIT, "dispatch"),                                                     # unit status on the board
     (PREALERT, "dispatch"),                                                 # a phone pre-alert that is nothing
@@ -673,7 +682,8 @@ def _unit_status(m, b, o, c):
 
 def _settings(m, b, o, c):
     sec, act = m.group(1), str(b.get("action") or "")
-    if (sec == "import" and act != "apply") or (sec == "dispatch" and act in ("preview", "voice_preview")):
+    if ((sec == "import" and act != "apply") or (sec == "dispatch" and act in ("preview", "voice_preview"))
+            or (sec == "notif_rules" and act == "test")):
         return None
     if sec == "import":
         return "Changed settings: imported a settings file", ""
@@ -854,6 +864,11 @@ DOES = (
     (PREPLAN, _preplan),
     (DOCS, _docs),
     (HYDRANT, _hydrant),
+    (NOTIF_KIND, lambda m, b, o, c: (f"Notification sub-type: {_clip(b.get('kind'), 24) or 'from the rules'}",
+                                     _number(c, m.group(1)))),
+    (NOTIF_HYD, lambda m, b, o, c: (f"Notification hydrants: {_clip(b.get('action'), 12)}"
+                                    + (f" ({len(o.get('done') or [])})" if b.get("action") == "apply" else ""),
+                                    _number(c, m.group(1)))),
     (UNIT_STATION, lambda m, b, o, c: (f"Changed settings: {o.get('name', '')} station {_clip(b.get('station'), 40) or 'unset'}", "")),
     (re.compile(r"/api/cad/settings/channels"), _channels),
     (re.compile(r"/api/cad/settings/stt"), _stt),
@@ -1617,6 +1632,10 @@ class CadApi:
             return c.create(body)
         if m := INCIDENT_CHANNEL.fullmatch(path):
             return c.incident_channel(int(m.group(1)), body)
+        if m := NOTIF_KIND.fullmatch(path):
+            return c.notif.set_kind(int(m.group(1)), body)
+        if m := NOTIF_HYD.fullmatch(path):
+            return c.notif.hydrants_op(int(m.group(1)), body)
         if m := INCIDENT.fullmatch(path):
             iid, action = int(m.group(1)), m.group(2)
             fn = {None: c.update, "accept": c.accept, "dismiss": c.dismiss, "close": c.close, "reopen": c.reopen, "note": c.note,

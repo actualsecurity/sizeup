@@ -325,8 +325,21 @@ window.Hydrants = (() => {
     const seq = ++st.seq;
     (got ? Promise.resolve(got) : api("GET", `/api/cad/hydrants/${encodeURIComponent(key)}`)).then((d) => {
       if (seq !== st.seq) return;
-      draw(d.hydrant, [...adminRow(gm, d.hydrant), ...(d.history && d.history.length ? [historyEl(d.history)] : [])]);
+      draw(d.hydrant, [...notifRows(d.notifications), ...adminRow(gm, d.hydrant),
+                       ...(d.history && d.history.length ? [historyEl(d.history)] : [])]);
     }).catch((e) => { if (seq === st.seq) draw(quick, [el("div", "error", e.message)]); });
+  }
+  // the notifications holding it out of service (sizeup/cad/notif.py): a click opens that one
+  function notifRows(list) {
+    return (list || []).map((n) => {
+      const row = el("div", "row hy-notif");
+      const b = el("button", "sm quiet ro-ok", `Notification ${n.number || n.id}${n.status === "closed" ? " · closed" : ""}`);
+      b.type = "button";
+      b.title = `Holds it OOS${n.status === "closed" ? " (closed)" : ""}: open it`;
+      b.addEventListener("click", () => { if (typeof selectIncident === "function") selectIncident(n.id); });
+      row.append(el("span", "dim small", "Held by"), b);
+      return row;
+    });
   }
   function adminRow(gm, h) {
     if (!canDo("admin") || BOARD_()) return [];
@@ -658,7 +671,7 @@ window.Hydrants = (() => {
     }, "sm primary");
     gm.map.easeTo({ center: start, zoom: Math.max(gm.map.getZoom(), 18), duration: 300 });
   }
-  function place(gm) {
+  function place(gm, preset) {
     endMove();
     const { bar, msg } = moveBar(gm, "Tap the map to place the hydrant");
     const m = { map: gm.map, bar, adding: true, update: () => {} };
@@ -675,7 +688,7 @@ window.Hydrants = (() => {
     const cancel = el("button", "sm", "Cancel");
     cancel.type = "button";
     cancel.addEventListener("click", endMove);
-    next.addEventListener("click", () => { const ll = m.marker.getLngLat(); editor(null, [+ll.lng.toFixed(7), +ll.lat.toFixed(7)]); });
+    next.addEventListener("click", () => { const ll = m.marker.getLngLat(); editor(preset || null, [+ll.lng.toFixed(7), +ll.lat.toFixed(7)]); });
     bar.append(cancel, next);
   }
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && st.move && !UI.dialog.isOpen()) endMove(); });
@@ -812,7 +825,7 @@ window.Hydrants = (() => {
     if (!box) return;
     const d = inc && inc.hydrants;
     const near = (d && d.near) || [], down = (d && d.down) || [];
-    const sig = JSON.stringify([inc && inc.id, near, down]);
+    const sig = JSON.stringify([inc && inc.id, near, down, d && d.linked, inc && inc.type, inc && inc.status]);
     show(box, near.length > 0 || down.length > 0);
     if (box.dataset.sig === sig) return;
     box.dataset.sig = sig;
@@ -825,8 +838,10 @@ window.Hydrants = (() => {
     }
     const list = el("ol", "pp-list");
     const shown = [...near, ...down.filter((x) => !near.some((n) => n.key === x.key))];
+    const linked = new Set((d && d.linked) || []);            // held OOS by this notification (sizeup/cad/notif.py)
+    const notif = inc && inc.type === "NOTIF" && ["queued", "pending", "active"].includes(inc.status);
     for (const h of shown) {
-      const li = el("li", "pp-row" + (DOWN.includes(h.status) ? " hy-down" : ""));
+      const li = el("li", "pp-row" + (DOWN.includes(h.status) ? " hy-down" : "") + (linked.has(h.key) ? " hy-linked" : ""));
       const go = el("button", "pp-go", line(h));
       go.type = "button";
       go.prepend(mark(h.cls, h.status, h.cls_assumed));
@@ -835,7 +850,22 @@ window.Hydrants = (() => {
         const gm = window.GisLayers && [...GisLayers.maps].find((x) => x.map.getContainer().closest("#d-map"));
         if (gm) focusOn(gm, h);
       });
-      li.append(go, mapBtn(h, true));
+      li.append(go);
+      if (linked.has(h.key)) {
+        const c = el("span", "chip warn", "linked");
+        c.title = "Held OOS by this notification";
+        li.append(c);
+      } else if (notif && DOWN.includes(h.status) && canDo("admin") && !BOARD_()) {
+        const b = el("button", "sm quiet", "Link");
+        b.type = "button";
+        b.title = "Keep this notification open until it is back in service";
+        b.addEventListener("click", async () => {
+          try { await api("POST", `/api/cad/incident/${inc.id}/hydrants`, { action: "link", key: h.key, operator: operator() }); }
+          catch (e) { UI.toast(e.message, "err"); }
+        });
+        li.append(b);
+      }
+      li.append(mapBtn(h, true));
       list.append(li);
     }
     box.replaceChildren(head, list);
@@ -1040,5 +1070,8 @@ window.Hydrants = (() => {
     if (!first && Date.now() - (st.changedAt || 0) > 5000) changed();    // (not again for this page's own write)
   });
 
-  return { ...api_, addImages, legend, show: showCard, card, mount, editor, showOnMap, mapBtn, resultRow, mark, focusOn, refocus };
+  // a hydrant a notification names that the list lacks (notif.js "+ Add"): tap the map, the form with its number
+  const placeNew = (gm, number) => place(gm, number ? { number } : null);
+  return { ...api_, addImages, legend, show: showCard, card, mount, editor, showOnMap, mapBtn, resultRow, mark, focusOn, refocus,
+           placeNew };
 })();

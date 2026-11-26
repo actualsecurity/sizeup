@@ -105,7 +105,9 @@ window.DispatchMode = (() => {
       ev.stopPropagation();
       b.disabled = true;
       try {
-        await deps.api("POST", `/api/cad/incident/${inc.id}/close`, { disposition: "COMPLETE", operator: deps.operator() });
+        const ok = window.Notif ? await Notif.confirmClose(inc) : {};       // hydrants held OOS by it: asked first
+        if (!ok) { b.disabled = false; return; }
+        await deps.api("POST", `/api/cad/incident/${inc.id}/close`, { disposition: "COMPLETE", operator: deps.operator(), ...ok });
         deps.toast("Closed", "ok");
       } catch (err) {
         b.disabled = false;

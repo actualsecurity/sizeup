@@ -2707,6 +2707,9 @@ class Sources:
             with self.store.tx() as db:
                 for at, text in notes:
                     self.store._event(db, iid, "feed", text[:2000], at=at)
+        notif = getattr(self.cad, "notif", None)
+        if notif is not None and (notes or fields):
+            notif.scan(iid)                                  # a notification's comments: its sub-type, hydrants (notif.py)
 
     def feed_type(self, data: dict, label: str) -> tuple[str, str, str]:
         """A feed report's type as ours (Cad.map_type): its type, its feed and its own code (extra "county_type")."""
