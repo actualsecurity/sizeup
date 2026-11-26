@@ -14,8 +14,8 @@
 // by MapLibre from the zoom: no work here when the map moves). The selected pin ringed.
 // Pins at the same point (a street's or a corner's one point, read for several events): a pin each, one over the
 // other, the top one with a count badge (2-9, "9+"); a click there steps through them (the next one each click).
-// A corrected place: a diamond in FIX (never a level's colour), a dashed line from the engine's pin when it has one;
-// a click picks its event.
+// A corrected place: a diamond in FIX (never a level's colour), a dashed line from the engine's pin when it has one
+// (none where it is that pin); a click picks its event, unless a pin is under it (the pins' step-through wins).
 "use strict";
 
 window.IntelMap = (() => {
@@ -130,9 +130,10 @@ window.IntelMap = (() => {
     const at = new Map(pins.map((p) => [p.id, p]));
     const out = [];
     for (const f of fixes) {
-      out.push({ type: "Feature", geometry: { type: "Point", coordinates: [f.lon, f.lat] }, properties: { id: f.id } });
       const p = at.get(f.id);
-      if (p && (p.lat !== f.lat || p.lon !== f.lon)) {
+      if (p && p.lat === f.lat && p.lon === f.lon) continue;       // where the engine put it already: its pin says so
+      out.push({ type: "Feature", geometry: { type: "Point", coordinates: [f.lon, f.lat] }, properties: { id: f.id } });
+      if (p) {
         out.push({ type: "Feature", geometry: { type: "LineString", coordinates: [[p.lon, p.lat], [f.lon, f.lat]] }, properties: { id: f.id } });
       }
     }
@@ -188,15 +189,21 @@ window.IntelMap = (() => {
       "icon-image": "im-fix", "icon-allow-overlap": true, "icon-ignore-placement": true } });
     const pin = `${prefix}-pin`, fix = `${prefix}-fix`;
     let selected = null;
-    // the pins under the click, top first: the first, or the one after the selected one (a point's pins in turn);
-    // a corrected place's diamond: its event
+    // the pins under the click, top first: the first, or the one after the selected one (a point's pins in turn)
+    map.on("click", pin, (e) => {
+      const ids = [...new Set((e.features || []).map((f) => Number(f.properties.id)))];
+      if (!ids.length || !opts.pick) return;
+      const i = ids.indexOf(selected);
+      opts.pick(ids[i < 0 ? 0 : (i + 1) % ids.length]);
+    });
+    // a corrected place's diamond: its event, only where no pin is under the click (one click path: the pins' turn)
+    map.on("click", fix, (e) => {
+      if (!opts.pick) return;
+      if (typeof map.queryRenderedFeatures === "function" && map.queryRenderedFeatures(e.point, { layers: [pin] }).length) return;
+      const f = e.features && e.features[0];
+      if (f) opts.pick(Number(f.properties.id));
+    });
     for (const layer of [pin, fix]) {
-      map.on("click", layer, (e) => {
-        const ids = [...new Set((e.features || []).map((f) => Number(f.properties.id)))];
-        if (!ids.length || !opts.pick) return;
-        const i = ids.indexOf(selected);
-        opts.pick(ids[i < 0 ? 0 : (i + 1) % ids.length]);
-      });
       map.on("mouseenter", layer, () => { map.getCanvas().style.cursor = "pointer"; });
       map.on("mouseleave", layer, () => { map.getCanvas().style.cursor = ""; });
     }

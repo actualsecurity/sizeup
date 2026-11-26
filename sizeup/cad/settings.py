@@ -1974,26 +1974,24 @@ class Editor:
         return (e.get("label") if commonplaces.is_imported(key, e) else "") or e.get("name") or key
 
     def _names_town(self, toks: list[str]) -> bool:
-        """The words are a town's ("Port Chester", "Village of Rye Brook", "Harrison"), or town words alone ("Chester"):
-        the lists' towns and their aliases, the county's (data/westchester_towns.txt), the page locator's phrases."""
+        """The words are a town's, exactly ("Port Chester", "Village of Rye Brook", "Rye"): the lists' towns and their
+        aliases, the county's (data/westchester_towns.txt), the page locator's phrases. Never a name merely made of
+        words towns use ("Pleasant Manor", "River Vista", "Lake Hills")."""
         L = self.cad.lists
         got = getattr(self, "_town_names", None)
         if got is None or got[0] is not L:             # (built again when the lists change: a town alias added)
             from sizeup.geo.gazetteer import MUNI_PHRASES
-            from sizeup.geo.pagegeo import TOWN_WORDS
             from sizeup.intel.rules import town_names
             phrases = {tuple(norm_tokens(t)) for t in (*L.geo_town_order, *L.geo_town_aliases,
                                                         *L.geo_town_aliases.values(), *town_names().values())}
             phrases |= {tuple(p) for p, _m, _n in MUNI_PHRASES}
-            words = set(TOWN_WORDS) | {w for p in phrases for w in p} | {"of", "city", "village", "town", "the"}
-            got = self._town_names = (L, phrases - {()}, words)
-        _L, phrases, words = got
-        return tuple(toks) in phrases or all(t in words for t in toks)
+            got = self._town_names = (L, phrases - {()})
+        return tuple(toks) in got[1]
 
     def alias_problem(self, key: str, alias: str, cur: dict | None = None) -> tuple[str, str] | None:
         """Why alias can't be another name of place key: ("taken", why) (a town, a place on the map, or another
         place's name or alias already: the API's 409, PlaceNameTaken) | ("bad", why) (empty, too long, a number, a
-        street's name; one word too short or too common unless an acronym, "KFC"; several with none but generic words:
+        street's name; one word that is common ("Market") or a single letter; several with none but generic words:
         400); None: it may. cur: {key: entry} (local_places by key), else read."""
         a = " ".join(str(alias or "").split())
         if not a:
@@ -2012,12 +2010,15 @@ class Editor:
             return ("taken", f'"{a}" is already a place on the map')
         from sizeup.geo.commonwords import COMMON_WORDS
         from sizeup.geo.pagegeo import GENERIC
-        if len(toks) == 1:                             # one word: an acronym ("KFC", "BJs"), else its own, not common
-            raw = a.replace("'", "").replace("’", "")
-            acronym = bool(re.fullmatch(r"[A-Z][A-Za-z&]{1,3}", raw)) and sum(c.isupper() for c in raw) >= 2
-            ok = acronym or (len(toks[0]) >= 4 and toks[0] not in GENERIC and toks[0] not in COMMON_WORDS)
-        else:                                          # several ("Golden Star Diner"): one of them not generic
-            ok = any(len(t) >= 3 and not t.isdigit() and t not in GENERIC for t in toks)
+        # its words with "&", "." and "'" gone first ("A&P", "C.V.S.", "BJ's" -> ap, cvs, bjs: heard words often lower case)
+        words = norm_tokens(re.sub(r"[&.'’]", "", a))
+        own = [t for t in words if not t.isdigit() and t not in GENERIC and t not in COMMON_WORDS]
+        if len(words) == 1:                            # one word: its own ("Hudson", "KFC", "cvs"), never a common one
+            ok = bool(own) and len(own[0]) >= 2
+        else:                                          # several ("Golden Star Diner", "NY Deli"): one not generic, or a
+            ok = any(len(t) >= 3 and not t.isdigit() and t not in GENERIC for t in words) or \
+                any(len(t) == 2 and t.isalpha() for t in own)                       # two-letter one not common
+
         if not ok:
             return ("bad", "alias: too short or too common to name a place on its own")
         if cur is None:

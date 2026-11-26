@@ -419,8 +419,8 @@ def test_an_alias_never_takes_another_places_name_or_alias(placed):
 @pytest.mark.parametrize("alias, why", [
     ("", "empty"), ("   ", "empty"), ("Sampel Diner by the old railroad bridge underpass", "at most 40"), ("12", "a number"),
     ("12 34", "a number"), ("King St", "a street's name"), ("N Main St", "a street's name"), ("Arbor", "a street's name"),
-    ("Joe", "too short"), ("the deli", "too common"), ("Market", "too common"), ("Garden", "too common"),
-    ("Kfc", "too short")])
+    ("X", "too short"), ("the deli", "too common"), ("Market", "too common"), ("Garden", "too common"),
+    ("Bar", "too common")])
 def test_a_street_a_number_or_junk_is_never_an_alias(placed, alias, why):
     cad, _clock, _gaz = placed
     code, out = alias_by_settings(cad, "sample diner", alias)
@@ -555,8 +555,8 @@ global.api = async (m, p, b) => {{ if (m === "POST") {{ posts.push([p, b]); retu
     assert out["posts"] == [[f"/api/cad/intel/notes/{nid}/alias", {"remove": True, "operator": ""}]]
 
 
-@pytest.mark.parametrize("alias", ["Port Chester", "port  chester", "Village of Rye Brook", "Rye", "Harrison", "Chester",
-                                   "Greenwich"])
+@pytest.mark.parametrize("alias", ["Port Chester", "port  chester", "Village of Rye Brook", "Rye", "Harrison",
+                                   "Greenwich", "City of Rye"])
 def test_a_town_is_never_an_alias(placed, alias):
     """#960 re-review 1: "Port Chester" as the diner's alias would pin a county event located only by its town there."""
     cad, _clock, _gaz = placed
@@ -574,9 +574,19 @@ def test_a_place_on_the_map_is_never_an_alias(placed, alias):
 
 
 @pytest.mark.parametrize("alias", ["Golden Star Diner", "Lucky Garden", "Royal Palace", "Grand Union", "King St Diner",
-                                   "Mobile Station", "CVS", "KFC", "BJs", "BJ's"])
+                                   "Mobile Station", "CVS", "KFC", "BJs", "BJ's", "kfc", "cvs", "Kfc", "A&P", "C.V.S.",
+                                   "NY Deli", "Joe",
+                                   # words towns use, never a town (#960 re-review 2)
+                                   "Pleasant Manor", "The Castle", "Hudson", "River Vista", "Lake Hills"])
 def test_business_names_and_acronyms_may_be_aliases(placed, alias):
     """#960 re-review 3: common words refuse a single word only; several need one that isn't generic; an acronym."""
     cad, _clock, _gaz = placed
     code, out = alias_by_settings(cad, "sample diner", alias)
     assert code == 200 and out["added"] is True, out
+
+
+def test_a_common_word_alone_is_refused_but_never_as_a_town(placed):
+    """"Manor" is a word towns use, not a town: refused as too common (400), never as a town (409)."""
+    cad, _clock, _gaz = placed
+    code, out = alias_by_settings(cad, "sample diner", "Manor")
+    assert code == 400 and "too common" in out["error"] and "town" not in out["error"]
