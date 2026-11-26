@@ -409,15 +409,19 @@ a new `worker.py`, through the self-update's checks above.
 4. **Test:** whisper-server must decode a second of silence. For llama.cpp, `--version` must name the build, and
    llama-server must give a 1-token completion on its own 1.2 MB test model (`stories260K.gguf`, pinned in
    `worker.py`, in `runtimes\test\`), whatever the LLM and the speech models are doing. When the LLM runs, it must
-   also give its 1-token constrained answer. Then one wanted speech model of that kind, if its files are there, must
-   decode a second of silence. Each part has 3 minutes. A whisper.cpp build is downloaded only when `worker.toml` has
+   also give its 1-token constrained answer. Then every wanted speech model of that kind whose files are there must
+   decode a second of silence; one that doesn't fit beside what is loaded (the LLM is never stopped for it), or
+   runs out of VRAM, is left untested and covered by the probation below. Each part has 3 minutes. A whisper.cpp build is downloaded only when `worker.toml` has
    its own `whisper_server` to test it with.
 5. **Rollback:** any failure makes the build before active again (its folder is kept), restarts it and checks it.
-   While gaming or paused it only stops the servers; the worker starts them again once the PC is free. The new
+   While gaming or paused it only stops llama-server and the speech models' servers (whisper-server keeps running
+   as it always does while gaming, until `gaming_stop_whisper_min`); the worker starts them again once the PC is
+   free. The new
    build is tried again after 30 minutes, then 60; after 3 failures in a row it is marked bad for a day. Gaming
    during the test doesn't count as a failure. A worker stopped mid-switch goes back to the build before at its next
    start. For 30 minutes after a switch, a speech model of that kind that fails to load rolls the build back (a
-   failure of the build, not of the model).
+   failure of the build, not of the model). Such failures add up across passing tests (30, then 60 minutes, then
+   bad for a day) until the build passes a whole probation.
 6. **Prune:** only the running build and the one before it stay in `runtimes\`. The installer's own `llama\` and
    `whisper\` folders are never deleted.
 
