@@ -580,7 +580,29 @@ it changes nothing.
   "Station silent 4 min · Port Chester FD · last heard 14:32", "South 2 not running · PCFD · SDR 101 on South 2";
   the push opens the panel (with `[cloud] public_url` set). A critical alert still on is pushed again every
   `remind_min` (180 min; 0: never), titled "Still: ..." (#547: "P25 trunk silent" was pushed once in 22 h); a muted
-  one isn't, and its "Recovered" says how many reminders went.
+  one isn't, and its "Recovered" says how many reminders went. A push ntfy didn't take is tried again after 1 min
+  (3 times at most), as the same push: a lost first push is no longer followed only by the "Still:" 3 h later.
+* **Dispatch coverage lost (`cover:<job>`, urgent).** Fire/EMS 15 (the county P25 job, trunk-recorder) or a paging
+  channel (kind `paging`: South 2) not running or not heard for 5 min in all within the last 10 min (5 min straight,
+  or flapping / crash-looping), whatever the cause (its dongle gone, trunk-recorder down, "P25 trunk silent": no call
+  or the control channel lost, an antenna group short, no audio #703, its job down, or its dongle held by another app:
+  "Fire/EMS 15 down 5 min: SDR held by shortfinal", switch it Off there): one push at ntfy priority 5 ("urgent", the
+  level a phone can let through Do Not Disturb), "Fire/EMS 15 down 5 min: SDR V4 gone", then "Still: ..." every 30 min
+  while it lasts (not `remind_min`), and "All clear: Fire/EMS 15 back" (priority 4) only once it has run again 2 min
+  without a break. Its causes are pushed as before until it fires ("SDR gone" at once), and from then on said by it.
+  "P25 trunk silent" counts from its own start, so it is pushed when it comes on (20 min without a call by day).
+  The station silent is one such alert for all its dispatch jobs (`cover:station`, "Fire/EMS 15, South 2 down 5 min:
+  station silent", "All clear: station back" once it has reported 2 min straight); "Station silent" itself stays on
+  Health and isn't pushed. Back from silent, a job already lost before it carries on at once; one only "starting" on
+  the first posts back gets its 60 s. Only the station update's **switch** doesn't count: the updater's phase `switch`
+  (state.json, from the switch until the result: services stopping and restarting), and 5 min after it ended, 10 min
+  at most; the 5 min start after it. Its build and the staged wait for a quiet moment do count: the radios keep
+  running. (The first update to a release with phases runs on the old updater: that one switch isn't known.) The
+  counting survives a hub restart. 2026-11-24: Fire/EMS 15 and South 2 lost ~6 h, and the pushes were the usual
+  priority 4 ones.
+* **Dispatch channel Off (`off:<job>`).** Fire/EMS 15 or a paging channel that no dongle runs: "South 2 Off (set by
+  person)" on Health and one push (priority 4); "(no dongle runs it)" after a swap that left the old dongle removed
+  and the new one Off; set Off by auto: urgent, as dispatch lost.
 * Alerts and 24 h of their history are in `hub.sqlite`: a redeploy neither forgets an alert nor pushes it again.
 * **Flapping (#340).** "Recovered" is pushed only once an alert has stayed clear 15 min (30 min once it came back 3
   times within an hour). Back before then, it is the same episode: no second push, no "Recovered", one row in the
@@ -589,9 +611,12 @@ it changes nothing.
   While an alert's hold (e.g. down_min) is counting it again, it isn't clear. A pushed warning back as critical
   (disk 92 % -> 98 %) is pushed again at once.
 * **Muted (#340).** Settings → System → Push notifications → Mute alerts (admins): each alert kind (ADS-B, whisper,
-  channel jobs, P25 trunk silent, station silent, hub errors ...), until unmuted or for 1 h / 24 h / 7 days (station
-  silent, P25 trunk silent and channel jobs: for a time only). A muted alert still shows on Health ("Muted", and the
-  muted kinds in its header); it isn't pushed. One pushed before it was muted still gets its "Recovered". Audited as
+  channel jobs, P25 trunk silent, station silent, dispatch coverage, hub errors ...), until unmuted or for 1 h / 24 h /
+  7 days (station silent, P25 trunk silent, channel jobs and dispatch coverage: for a time only). Muting a cause
+  ("P25 trunk silent", "SDR gone" ...) doesn't mute our dispatch lost: to silence dispatch-lost pushes, mute "Dispatch
+  coverage" (the list's hover says so). Planned dongle work: mute "Dispatch coverage" for the time it takes (two
+  short swaps within 10 min count together as 5 min of 10); muting "Station silent" mutes the station's ("station silent"). A muted alert
+  still shows on Health ("Muted", and the muted kinds in its header); it isn't pushed. One pushed before it was muted still gets its "Recovered". Audited as
   System. Default: none.
 
 **The panel:** Settings → **Station → Health**, a tab shown to admins on the hub (also the Station row in
@@ -611,6 +636,7 @@ Settings > Station > Health (`static/health.js`), top to bottom. A row with noth
 
 | Row | Shows | Look here when |
 |---|---|---|
+| New dongles | "New dongle *serial* seen — use it for *jobs*?": Use it, Not now ([A dongle swapped for a new one](#a-dongle-swapped-for-a-new-one)) | a dongle was replaced |
 | Alerts now | each alert that is on: severity, since when, where, pushed or muted | anything is red |
 | Hints | a channel quiet for longer than usual, a squelch opening on noise, context clips shed, the police budget used up | never pushed: read with the Channels row |
 | Incident sources | each source's tier, state (ok, backing off, failing, stale), reason, last report, which one is the acting primary; each source's lead over paging; reports a feed no longer lists | the console pill says "Paging primary" |
@@ -642,6 +668,38 @@ hour, then "Hub errors back to normal" once it has been at or under its threshol
 in `hub.sqlite` (meta "errwatch"), so a redeploy doesn't push a running fault again. Settings → System → **Hub error
 alerts** (admins, the hub): on / off and the two numbers; Settings → Station → Health: **Hub errors**, the rate and
 the top signatures with their last message (admins only). The access log (`http ...` lines) is not counted.
+
+### A dongle swapped for a new one
+
+New dongles (new serials) put in for old ones leave the jobs on the old serials: nothing moves them by itself
+(2026-11-25: hours without coverage). The station now says so (`sizeup/radio/replace.py`, `App.replace_offers`):
+a dongle with a job, or in an antenna group, gone 60 s, and a new dongle plugged in with no job, in no group, not
+switched Off by a person, not another app's (the shared claims), not out for no audio, that **fits** the gone one's
+jobs: each frequency in its tuner's range (R820T / R828D / E4000 / FC0012 / FC0013 / FC2580: the tuner rtl_fm reported
+on it, else its USB product, else taken as an R820T), HF only with direct sampling (Blog V3/V4), the sample rate the
+job takes. Several gone and several new: paired by the same tuner, then the same product, then the USB port (or bus)
+the gone one was on (`sdr_seen.json`); when that can't tell, each new dongle that fits is offered and a person picks.
+
+- **Health** (New dongles) and **the console** (under the radio, like the new radio IDs): "New dongle *serial* seen —
+  use it for Fire/EMS 15?". **Use it** (admins, `POST /api/sdr-replace`, in their activity) moves the gone dongle's
+  job there, and its place in its antenna group (replaced, never added beside it). **Not now**: asked again in 6 h.
+- **"SDR *x* gone"** names its job, says when a new dongle fits, and links to the dongle's row in Settings > Radios >
+  Receivers (the push too). When the dongle leaves the station's config (Use it, a group saved without it) the alert
+  clears as "SDR *x* removed from config (jobs now on *y*)", never "Recovered".
+- A group's dongle missing for a day: a Health hint "*serial* missing 1 d: remove from group?" with **Remove**.
+- **No question left**: a gone dongle whose job already runs on another dongle as that dongle's own (auto-assign gave
+  it a replacement, or a person picked it) is not offered. A group's stand-in only covers: its gone dongle is offered.
+- **Use it** that fails (the new dongle doesn't start the job) puts everything back: the job stays the gone dongle's,
+  and an antenna group and its file are only changed once the job runs on the new dongle.
+- **Auto-replace** (Settings > Radios > Receivers, *New dongles*, off by default): 60 s after the old one went, the
+  hub moves it (`sizeup/cloud/dongleswap.py`), audits it ("auto-replace", Radios) and pushes "Auto-replaced SDR *x*"
+  to the status topic, only when the station marks the offer `auto` (`App._auto_ok`), which needs all of:
+  Fire/EMS 15 or paging; exactly one new dongle fits, and it fits no other gone dongle with a job (however long gone,
+  Not now included); it is on exactly the USB port the gone one last used (no ports known, as on macOS: never; the
+  port is a path, not the dongle: a hub moved or renumbered can put another new dongle on the old path, so this rule
+  is only as good as the ports staying put); it first appeared after the gone one was last seen (`sdr_seen.json`
+  `first`: an old idle spare never); the job runs on no dongle now (no stand-in, no auto-assigned replacement); the
+  same tuner when both are known. The station checks it again before it moves anything. Anything less is asked.
 
 ### The alert and status topics (ntfy)
 
@@ -687,7 +745,8 @@ keeps it), `/api/station/status` and the logs never carry a name. `GET /api/cad/
    and random, e.g. `python3 -c "import secrets; print('sizeup-health-' + secrets.token_hex(8))"` →
    `sizeup-health-3f9c27d1a0b84e65`. At least 12 characters (letters, digits, `-`, `_`).
 2. **Subscribe on your phone:** the ntfy app (iOS / Android) → **+** → topic name → server `ntfy.sh` →
-   Subscribe. Allow its notifications; a critical alert is sent at high priority. To test, publish one by
+   Subscribe. Allow its notifications; a critical alert is sent at high priority, our dispatch coverage lost at
+   urgent (5): to hear that one at night, allow the topic to override Do Not Disturb (ntfy: the topic's settings). To test, publish one by
    hand to *your* topic only: `curl -d "test" ntfy.sh/<your topic>`.
 3. **Give them to the hub** (secrets by name, so not in the repo):
    `aws ssm put-parameter --name /sizeup-hub/alert-topic --type SecureString --value '<your alerts topic>'`
@@ -1255,6 +1314,25 @@ them).
   on the board is that account's everywhere).
 - An event's own layer set (a dispatcher's change on its map) stays the event's, for everyone who opens it.
 - All-in-one, or a hub without Access: nobody to keep them for; the browser keeps them, as before.
+
+### Live audio on every view: the live player and Listening
+
+Live radio follows the dispatcher around the console (`static/live-player.js`): **Listen** in the header (or on the
+Radio view) turns it on with one click (the browser's autoplay rule), and a strip under every view (Overview, Incident,
+Radio, Search, Settings) shows what plays: service, channel, talker, elapsed, how many wait, play / pause, skip
+(`]`), mute (`M`), volume, *Our calls only*, *Mute police*, **Listening** and *Go to* (its row on the Radio view).
+The page never reloads between views, so a clip is never restarted. /monitor keeps its own **Sound**.
+
+- **What plays** is each person's own (`PUT /api/me/prefs/listen`, validated in `sizeup/cad/prefs.py`): a level
+  (*Priority*, *Normal*, *Off*) per target, the most specific first: a channel or talkgroup (also from each row of the
+  Radio rail), a frequency, *Our calls* (dispatch, paging, firegrounds), a system, a service. A new person: Our calls
+  Priority, the rest Off. Volume, mute and on/off are the device's own.
+- **Priority** plays first and is never dropped; over a Normal one it interrupts (the Normal one resumes after, unless
+  too old), ducks it or waits, as chosen. **Normal** ones queue oldest first and are dropped once older than *Max age*
+  (60 s) or when 15 wait. An emergency on a channel you listen to plays as Priority. Key-ups never play.
+- **Load**: no timer of its own. When the state push's `comms_rev` moves, one
+  `GET /api/cad/comms?view=all&type=radio&changed=<cursor>` (what changed since; the hub's #419 gate decides what this
+  person may hear), only while it is on. A clip played by hand holds it until that clip ends.
 
 ## Config
 
@@ -3052,6 +3130,16 @@ A talkgroup of another system has a tier, not Record / Main / Transcribe (`sizeu
 
 - The default is the file's `Tier` column. With none, a talkgroup is `record` (no STT cost) and an encrypted one is
   `activity`. Settings > Radios > Channels changes it per talkgroup.
+- Settings > Radios > Channels shows it as the same switches as every other talkgroup: Record, Transcribe, Alerts
+  (`alert`), Main (another system's: never, shown disabled). A switch is written as the tier it makes
+  (`tiers.from_switches`): Alerts on turns on Transcribe and Record, Record off turns the others off. The page's Record
+  on is `record` only (it sends `{"record": true, "transcribe": false}`), so one tap never turns on Transcribe or
+  Alerts. `record` alone (the API, a whole section's switch) is the file's tier if that records, else `record`. An
+  encrypted talkgroup has only "Activity only" (`activity` / `off`). `POST /api/talkgroup` takes `transcribe` /
+  `alerts` instead of `tier` (both in one request: 400, "send tier or switches, not both"), and the state's talkgroup
+  rows carry `transcribe` and `alerts` beside `tier`. The county's talkgroups keep Record / Main / Transcribe; their
+  `alerts` is null (the switch has no knob, disabled): their pre-alerts are the intel packs' (scoped by service and
+  source), not a per-talkgroup choice.
 - An encrypted talkgroup is only ever `activity` or `off`. Nothing of it is recorded or decoded. Its key-ups are
   counted per minute with the radio IDs (`radio_activity`), from the control channel's grants.
 - Neither tier is ever ahead of the pages, Fire/EMS 15, the firegrounds, the airband, a Main talkgroup or a

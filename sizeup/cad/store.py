@@ -631,6 +631,9 @@ class Store:
                 self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
         if tcols and "late" not in tcols:                 # a P25 call from while sizeup was down (#747): 1, kept on later
             self.db.execute("ALTER TABLE radio_traffic ADD COLUMN late INTEGER NOT NULL DEFAULT 0")   # writes, 2026-11-25
+        for col in ("corr_text", "corr_rules", "corr_v"):  # the text of record's vocabulary correction beside the raw
+            if tcols and col not in tcols:                 # text (#879, sizeup/stt_correct.py), 2026-11-25: old rows ''
+                self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
         # Every row's source, qualified by its system (#409, #415: talkgroup numbers repeat between P25 systems), 2026-11-10.
         # "group" is the talkgroup file's; ours: in "Our calls"; dept / safety: for #412 / #411 (nothing writes them yet).
         for col, kind in (("source", "TEXT NOT NULL DEFAULT ''"), ("system", "TEXT NOT NULL DEFAULT ''"),

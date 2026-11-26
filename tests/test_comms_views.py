@@ -154,7 +154,8 @@ def test_notes_ride_with_our_calls_and_all_only(c):
 
 def test_bad_parameters_are_refused(c):
     for bad in ({"view": "everything"}, {"service": "plumbing"}, {"before": "yesterday"}, {"at": "noon"},
-                {"view": "all", "limit": "many"}, {"source": ",".join(f"fm:{i}" for i in range(40))}):
+                {"view": "all", "limit": "many"}, {"source": ",".join(f"fm:{i}" for i in range(201))},
+                {"unit": ",".join(f"U{i}" for i in range(21))}):
         with pytest.raises(CadError):
             q(c, **bad)
     code, raw, _ = CadApi(c).get("/api/cad/comms", "view=everything")

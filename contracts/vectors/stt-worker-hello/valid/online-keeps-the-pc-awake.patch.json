@@ -1,0 +1,13 @@
+{
+  "base": "stt-worker-hello/valid/online-with-gpu.json",
+  "patch": [
+    {
+      "op": "add",
+      "path": "/keep_awake",
+      "value": {
+        "on": true,
+        "held": true
+      }
+    }
+  ]
+}

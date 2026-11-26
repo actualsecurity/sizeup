@@ -80,10 +80,15 @@ def test_the_permission_map():
     # not listed: admin (a new write route is safe until someone decides otherwise)
     assert needs("/api/cad/incident/7/explode") == needs("/api/cad/something-new") == needs("/api/whatever") == "admin"
     # "read": a POST that changes nothing anyone relies on (a radio pre-alert vote, sizeup/intel: anyone signed in)
-    assert {need for _, need in WRITES} == {"dispatch", "admin", "read"}
+    assert {need for _, need in WRITES} == {"dispatch", "admin", "read", "active"}
     # ... and a panorama opened (street view's monthly limit counts it: anyone who may look at the map)
-    assert [p.pattern for p, need in WRITES if need == "read"] == [r"/api/cad/intel/\d{1,9}/feedback",
-                                                                  r"/api/cad/streetview/open"]
+    assert [p.pattern for p, need in WRITES if need == "read"] == [r"/api/cad/streetview/open"]
+    # "active": anyone signed in whose account is active (never a deactivated one): a vote on a radio pre-alert, a note
+    # on one (sizeup/intel/notes.py: its author or an admin edits it; done: admins)
+    assert [p.pattern for p, need in WRITES if need == "active"] == [r"/api/cad/intel/\d{1,9}/feedback",
+                                                                    r"/api/cad/intel/(\d{1,9})/notes",
+                                                                    r"/api/cad/intel/notes/\d{1,9}"]
+    assert needs("/api/cad/intel/notes/7/done") == "admin" and needs("/api/cad/intel/notes/7") == "active"
 
 
 def test_whoami_says_the_role_and_that_it_is_enforced(api):

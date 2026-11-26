@@ -102,6 +102,7 @@ CALLS = ("set_mode", "set_talkgroup", "set_talkgroup_group", "retranscribe", "se
          "catch_up",                  # shed clips caught up (sizeup/sttcatchup.py): whisper, under every other clip
          "set_adsb_receiver",         # Settings > Radios on the hub: the dongle reserved for ADS-B (#235)
          "set_antenna_groups",        # ... the antenna groups: dongles locked to jobs (sizeup/radio/groups.py)
+         "replace_sdr",               # Health / the console: a gone dongle's jobs to a new one (sizeup/radio/replace.py)
          "sources_poll_now",          # a pre-alert on the hub: the CAD feed adapters here poll now (#297)
          "reception_post",            # Settings > Radios on the hub: a reception test here (#410)
          "reception_sample_b64",      # ... and a call it captured, to listen to (never stored on the hub)
@@ -175,6 +176,7 @@ def source_rows(runner) -> list[dict]:
 
 POOL_CAP = "stt_pool"      # the hub takes clips handed to its pool (sizeup/cloud/hub.py POOL_CAP, #639 phase 2)
 RESTART_S = (1.0, 30.0)    # a link thread that raised starts again after this long (doubling, at most the second)
+STT_LANE_LOOK_S = 2.0      # the STT lane looks again this often while it waits (an event's ack, or a new input, wakes it)
 
 
 def _is_int(v) -> bool:
@@ -293,6 +295,12 @@ class StationLink:
         n, _ = self.outbox.pending()
         if n:
             log(f"hub link: {n} event(s) still queued from before, sending them first")
+
+    def _wake_stt(self) -> None:
+        """The STT lane looks now (a link built without __init__, as some tests do, has no lane: nothing)."""
+        wake = getattr(self, "_stt_wake", None)
+        if wake is not None:
+            wake.set()
 
     # -- the app's side ---------------------------------------------------------------------------
 
@@ -489,7 +497,7 @@ class StationLink:
 
     def _stt_made(self, data: dict, flac: bytes, meta: dict, prio: int = sttinput.NORMAL) -> None:
         self.outbox.add_stt(data, flac, meta, prio=prio)
-        self._stt_wake.set()
+        self._wake_stt()
 
     def stt_stats(self) -> dict:
         """The STT inputs: waiting (to be made, to go up), sent, and dropped by reason."""
@@ -502,6 +510,7 @@ class StationLink:
                 "dropped_pre": self.stt_encoder.dropped_pre + self.outbox.dropped_stt_pre,
                 "dropped_fire": self.stt_encoder.dropped_fire + self.outbox.dropped_stt_fire,
                 # (#677) where the FLAC is made (scope | process | thread (why)), and held now for whisper
+                "wake_on_ack": True,         # (#678) its lane goes at once after the events' ack: the hub's short waits
                 "encoder": self.stt_encoder.where, "held": self.stt_encoder.holding,
                 "worker": self.stt_encoder.worker()}       # (its state: a wedged-but-alive service is seen)
 
@@ -732,6 +741,7 @@ class StationLink:
         while not self._stop.is_set():
             wait = self._forward_once(client, backoff)
             if wait is None:
+                self._wake_stt()        # (the outbox emptied with no ack: a quarantined or unreadable last event, #678)
                 self._wake.wait(5.0)
                 self._wake.clear()
             elif wait > 0:
@@ -805,6 +815,9 @@ class StationLink:
                 self.outbox.released([x["qid"]])
                 self.log(f"hub link: the hub took the {x['type']} it had refused")
         self.outbox.ack(acked)
+        # the STT lane waits while an event is in the outbox: wake it now the events went, so a clip's STT input
+        # follows its event at once instead of at the lane's next 2 s look (that look was the hub's ~2 s wait, #678)
+        self._wake_stt()
         self.sent += sum(1 for x in rows if x["seq"] <= acked and x["seq"] not in bad)
         if iso and acked >= iso["hi"]:
             self._isolate = None                    # past every event of the batch it refused: whole batches again
@@ -884,15 +897,20 @@ class StationLink:
 
     def _stt_forward(self) -> None:
         """POST /api/station/stt: the STT inputs, gzipped, a few hundred KB at a time, only to a hub that takes them and
-        only while no event waits in the outbox (a page or a transmission never queues behind one)."""
+        only while no event waits in the outbox (a page or a transmission never queues behind one), in the lane's order
+        (outbox.py _stt_order, #677 / #701: the pre-alert channels' first, then by n). An input never waits for its own
+        event: a clip's traffic event goes only with its text, and the hub keeps an input that comes first (its rows'
+        order is the hub's). The events' ack wakes it (#678)."""
         client = self._client(60.0)
         backoff = Backoff(first=2.0, fast_cap=10.0, cap=120.0)
         while not self._stop.is_set():
             if sttinput.CAP not in self.hub_caps or self.outbox.pending()[0] or not self.outbox.stt_pending()[0]:
-                self._stt_wake.wait(2.0)
+                self._stt_wake.wait(STT_LANE_LOOK_S)
                 self._stt_wake.clear()
                 continue
             rows = self.outbox.stt_batch()
+            if self.outbox.pending()[0]:            # an event queued meanwhile: it goes first (then the lane is woken)
+                continue
             body = {"v": 1, "station": self.station_id,
                     "items": [dict(r["data"], n=r["n"], stt=sttinput.to_wire(r["flac"], r["meta"])) for r in rows]}
             try:

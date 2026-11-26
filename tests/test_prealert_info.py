@@ -5,8 +5,8 @@ needed, like maybe the audio recordings related?" One bundle per pre-alert (the 
 why it fired, the transmissions with their audio (or "audio expired"), the channels around it, the place, site
 history, what is open near it now, the outcome.
 
-  the API      signed in only (403 from the CAD API without a person, 401 from the server behind Access); shadow / log
-               radio pre-alerts and rule phrases are the admins'; 404 for one that isn't there
+  the API      signed in only (403 from the CAD API without a person, 401 from the server behind Access); every level
+               for anyone signed in (the Intel page's rows open it), rule phrases the admins'; 404 for one that isn't there
   the bundle   both kinds from the real paths (HPN ATC through atc.AtcWatch on the test_atc transcripts, a radio
                pre-alert through the intel engine on test_intel's), the radio log, site history, expired audio
   the page     the cards' More info link and the page itself in node with a minimal DOM; rendering again changes
@@ -271,14 +271,19 @@ def test_an_intel_bundle_has_the_full_transcripts_hits_place_site_history_and_vo
     assert [(f["verdict"], f["operator"]) for f in o["feedback"]] == [("noise", "Jordan Example"), ("useful", "Val Example")]
 
 
-def test_shadow_and_log_radio_prealerts_are_the_admins(intel):
+@pytest.mark.parametrize("mode", ["shadow", "log"])
+def test_shadow_and_log_radio_prealerts_open_for_anyone_signed_in(intel, mode):
+    """The Intel page lists every level for anyone signed in, and its rows open here (admin, 2026-11-25): a held event's
+    More info is every reader's; the rule phrases stay the admins'."""
     cad, ev, _old = intel
     with cad.store.tx() as db:
-        db.execute("UPDATE intel_events SET mode = 'shadow' WHERE id = ?", (ev.id,))
+        db.execute("UPDATE intel_events SET mode = ? WHERE id = ?", (mode, ev.id))
     api = CadApi(cad)
-    assert get(api, f"/api/cad/prealerts/intel/{ev.id}", VAL)[0] == 404
-    assert get(api, f"/api/cad/prealerts/intel/{ev.id}", JORDAN)[0] == 404
-    assert get(api, f"/api/cad/prealerts/intel/{ev.id}", CASEY)[0] == 200
+    for who in (VAL, JORDAN, CASEY):
+        code, b = get(api, f"/api/cad/prealerts/intel/{ev.id}", who)
+        assert code == 200 and b["summary"]["mode"] == mode
+        assert b["why"]["phrases_hidden"] is (who != CASEY)
+    assert get(api, f"/api/cad/prealerts/intel/{ev.id}", None)[0] == 403
 
 
 def test_the_page_url_for_the_push_is_only_the_kind_and_the_id():

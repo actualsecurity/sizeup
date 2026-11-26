@@ -15,7 +15,8 @@
 //
 // Views (the header's tabs): Dispatch (the selected incident), Overview (every open call, cadmap.js),
 // Radio (/cad#radio?..., radio-view.js: every transmission, which replaced the Comms page), Search (/cad#search?...,
-// search-view.js: past calls and address notes, #403) and Settings.
+// search-view.js: past calls and address notes, #403), Intel (/cad#intel?..., intel-page.js: every radio intel event,
+// pushed or not, and why) and Settings.
 // /monitor is this same page as a read-only wall board (BOARD, board.js): the Overview only, larger type,
 // nothing to press but Sound and Full screen, so it never disagrees with the console.
 //
@@ -47,6 +48,7 @@ const cad = {
   radio: false,              // the Radio view is open (#radio)
   search: false,             // the Search view is open (#search, search-view.js, #403)
   pinfo: false,              // a pre-alert's More info is open (#prealert/<kind>/<id>, prealert-info.js)
+  intelv: false,             // the Intel page is open (#intel, intel-page.js)
   extra: new Map(),          // incidents opened from Records that aren't in the live state
   rec: null,                 // {iid, units, unfilled, already, card, note, checked:Set, extra:[], error}
   hand: null,                // the Dispatch card shown at the last render (PCFD dispatching: handDispatch); null: not yet
@@ -526,7 +528,7 @@ function renderClock() {              // the same clock on the console and the b
 
 function leaveView() {               // an incident or the form opens: out of Radio and Settings
   if (location.hash) history.pushState(null, "", location.pathname);
-  if (cad.radio || cad.search || cad.pinfo || !$("#settings").hidden || !$("#styleguide").hidden) window.dispatchEvent(new HashChangeEvent("hashchange"));
+  if (cad.radio || cad.search || cad.pinfo || cad.intelv || !$("#settings").hidden || !$("#styleguide").hidden) window.dispatchEvent(new HashChangeEvent("hashchange"));
 }
 function route() {                    // #radio?filters: the Radio view; #search?filters: Search; anything else: the console's own
   // #peek/<id>: a past call read-only over whatever is on screen (addr-history.js; History here's ⌘-click), the board too
@@ -541,6 +543,14 @@ function route() {                    // #radio?filters: the Radio view; #search
     cad.pinfo = pinfo;
     show($("#prealert-view"), pinfo);
     if (window.PrealertInfo) { if (pinfo) PrealertInfo.open(location.hash.slice("#prealert/".length)); else PrealertInfo.close(); }
+    if (cad.state) render();
+  }
+  // #intel?filters: every radio intel event (intel-page.js)
+  const intelv = !BOARD && /^#intel(\?|$)/.test(location.hash);
+  if (intelv !== cad.intelv || intelv) {
+    cad.intelv = intelv;
+    show($("#intel-view"), intelv);
+    if (window.IntelPage) { if (intelv) IntelPage.open(location.hash.slice("#intel".length).replace(/^\?/, "")); else IntelPage.close(); }
     if (cad.state) render();
   }
   const search = !BOARD && location.hash.startsWith("#search");
@@ -562,13 +572,14 @@ function route() {                    // #radio?filters: the Radio view; #search
 }
 function viewTab() {                 // the view on screen: overview | dispatch (the Incident tab) | radio | settings
   const settings = !$("#settings").hidden || !$("#styleguide").hidden;
-  return settings ? "settings" : cad.radio ? "radio" : cad.search ? "search" : cad.pinfo ? "prealert" : cad.mode === "none" ? "overview" : "dispatch";
+  return settings ? "settings" : cad.radio ? "radio" : cad.search ? "search" : cad.intelv ? "intel" : cad.pinfo ? "prealert"
+    : cad.mode === "none" ? "overview" : "dispatch";
 }
 function renderTabs() {
   const tab = viewTab();
   // body[data-view]: Dispatch drops the 60 Control feed and shows the rigs big (#205); the board has no tabs
   if (!BOARD && document.body.dataset.view !== tab) document.body.dataset.view = tab;
-  for (const [id, k] of [["#overview-open", "overview"], ["#dispatch-open", "dispatch"], ["#radio-open", "radio"], ["#search-open", "search"], ["#settings-open", "settings"]]) {
+  for (const [id, k] of [["#overview-open", "overview"], ["#dispatch-open", "dispatch"], ["#radio-open", "radio"], ["#search-open", "search"], ["#intel-open", "intel"], ["#settings-open", "settings"]]) {
     const b = $(id);
     b.classList.toggle("on", tab === k);
     if (tab === k) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
@@ -697,11 +708,11 @@ function fillQueueItem(li, inc) {
     }
     li.append(chips);
   }
-  if (live.length) li.append(el("div", "qs q-live", `TX ${live.map((e) => `${Radio.who(e) || "Radio"} ${e.channel}`).join(", ")}`));
+  if (live.length) li.append(el("div", "qs q-live", `TX ${live.map((e) => `${Radio.who(e) || "Radio"} ${chName(e)}`).join(", ")}`));
   if (o && o.radio) {
     const r = el("div", "qs q-last");
     const who = o.radio.rig || o.radio.talker || (o.radio.dispatcher ? "60 Control" : "radio");
-    r.append(el("span", "t", fmtTime(o.radio.start)), el("b", "", who), el("span", "dim", ` ${o.radio.channel}`),
+    r.append(el("span", "t", fmtTime(o.radio.start)), el("b", "", who), el("span", "dim", ` ${chName(o.radio)}`),
              o.radio.text ? el("span", "q", ` “${o.radio.text}”`) : el("span", "dim", " —"));
     r.title = r.textContent;
     li.append(r);
@@ -739,6 +750,9 @@ function renderPrealert() {
   show($("#csv-airport-alerts"), !!aa);
   // radio pre-alerts (intel.js, sizeup/intel #411): signed-in viewers only (the state carries none otherwise)
   if (window.IntelCard && !BOARD) IntelCard.column($("#q-intel"), cad.state && cad.state.intel, { ...deps, readonly: false, more: true });
+  const intelOk = !BOARD && !!(cad.state && cad.state.intel);       // the Intel page: whoever the state gives intel to
+  show($("#intel-open"), intelOk);
+  show($("#q-intel-all"), intelOk);
 }
 function queueExtra(i) {              // what the queue card shows from the call's summary (#217), for its signature
   const o = isOpen(i) ? callSummary(i.id) : null;
@@ -839,7 +853,7 @@ function selectIncident(id) {
 
 function renderDetail() {
   renderTabs();
-  if (cad.radio || cad.search || cad.pinfo) {      // Radio (radio-view.js), Search, a pre-alert's More info: the middle column
+  if (cad.radio || cad.search || cad.pinfo || cad.intelv) {      // Radio (radio-view.js), Search, More info, Intel: the middle column
     for (const id of ["#new-form", "#d-empty", "#d-body"]) show($(id), false);
     return;
   }
@@ -924,6 +938,7 @@ function renderDetail() {
   else { since(elapsed, null); setText(elapsed, fmtDur((inc.closed_at || 0) - inc.created_at)); }
   if (window.Incoming) Incoming.facts($("#d-feed"), inc, { api, operator, readonly: BOARD || !canDo("dispatch") });
   if (window.AddrHistory) AddrHistory.card(inc, { readonly: BOARD || !canDo("dispatch") });   // notes, History here (#403)
+  if (window.IntelNotes && !BOARD) IntelNotes.incident(inc);        // the notes on its intel events (intel-notes.js)
   const viaFeed = inc.source === "CAD feed" && inc.feed;              // received from the feed itself (#297)
   show($("#d-via-w"), !!inc.received_via || !!viaFeed);
   setText($("#d-via"), viaFeed ? inc.feed.label : inc.received_via ? nameOf("received_via", inc.received_via) : "");
@@ -1029,6 +1044,11 @@ function renderSourcePages(inc) {
   }));
   show(box, pages.length > 0);
 }
+// A source's label and its hover: the one name everywhere (radio-names.js; sizeup/radionames.py): the short label on
+// chips, "System · Name (TG n)" on hover; the row's real label until the names have loaded (and where radio-names.js
+// isn't on the page). Display only: filters, links and comparisons keep t.channel.
+function chName(t) { return typeof RadioNames !== "undefined" ? RadioNames.short(t) : String((t && t.channel) || ""); }
+function chTitle(t) { return typeof RadioNames !== "undefined" ? RadioNames.title(t) : String((t && t.channel) || ""); }
 // A clip's URL: a page plays from where the voice starts (voice_at, a media fragment: nothing new on the server)
 // unless the tones are wanted too.
 function clipUrl(t, withTones) {
@@ -1287,7 +1307,9 @@ function radioRow(t, ctx = {}) {
   meta.append(b, el("span", "t", fmtTime(t.start, true)));
   const tag = Radio.rigTag({ rig: t.rig, radio_id: t.radio_id, unit: t.talker });
   if (tag) meta.append(tag);
-  meta.append(el("span", "chip src", t.channel));        // the channel once; never in the talker's place
+  const src = el("span", "chip src", chName(t));          // the channel once; never in the talker's place
+  src.title = chTitle(t);                                 // which system and talkgroup: never ambiguous
+  meta.append(src);
   if (t.mhz > 0) {                                        // the frequency it was heard on (an airband row, #260: NY
     const ctaf = +t.mhz === HPN_TOWER_MHZ && !hpnTowerOpenAt(t.start);   // Approach is 126.4 by day, 120.8 overnight)
     const f = el("span", "dim small", ctaf ? `${+t.mhz} CTAF` : `${+t.mhz}`);
@@ -1543,7 +1565,7 @@ async function nameTonesDialog(t, opts = {}) {
   head.querySelector("h2").id = "tone-form-title";
   const body = el("form", "dialog-body");
   const toneHow = "Each pair goes in the tone book under its places and service; this page is read again";
-  const pageLine = el("p", "dim small", `Page ${fmtTime(t.start, true)} ${t.channel} `);
+  const pageLine = el("p", "dim small", `Page ${fmtTime(t.start, true)} ${chName(t)} `);
   if (window.Help && Help.info) pageLine.append(Help.info(toneHow, "How tones are saved")); else pageLine.title = toneHow;
   body.append(pageLine);
   if (opts.ours) body.append(el("p", "warnbox small", `${oursNamedText(t)} · prefilled PC / RB: check which is whose`));
@@ -1724,7 +1746,7 @@ async function keepTx(t, iid, undo = false) {
   txChanged();
 }
 async function copyText(t) {
-  const text = `${fmtTime(t.start, true)} ${t.rig || t.talker || ""} (${t.channel}): ${t.text}`;
+  const text = `${fmtTime(t.start, true)} ${t.rig || t.talker || ""} (${chName(t)}): ${t.text}`;
   try {
     await navigator.clipboard.writeText(text);
   } catch (e) {                            // no clipboard API (http, an old browser): a hidden field
@@ -2131,7 +2153,7 @@ function renderOnUnits(inc) {
         .filter(([, t]) => t).map(([k, t]) => el("span", "", `${k} ${fmtTime(t, true)}`)));
       head.append(times, el("span", "spacer"));
       const talk = !a.cleared_at && Radio.talkingFor(a.name);
-      if (talk) head.append(el("span", "talk-badge", `${talk.ended ? "Ended" : "TX"} ${talk.channel}`));
+      if (talk) head.append(el("span", "talk-badge", `${talk.ended ? "Ended" : "TX"} ${chName(talk)}`));
       if (!a.cleared_at && onMap(a.name)) head.append(followBtn(a.name));
       if (!a.cleared_at && isOpen(inc)) {
         head.append(statusButtons({ id: a.unit_id, status: a.status, next: a.next, cmd: cmd !== a.name && cmd,
@@ -2296,7 +2318,7 @@ function renderDispatches(inc) {
       const meta = el("div", "meta");
       meta.append(el("span", "t", fmtTime(d.at, true)), el("span", `ek ${d.kind === "upgrade" ? "upgrade" : "dispatch"}`,
         DISPATCH_KINDS[d.kind] || d.kind || "dispatch"), d.operator ? opSpan(d.operator) : el("span", "", ""),
-      el("span", "", d.channel || ""));
+      el("span", "", d.channel ? chName({ channel: d.channel }) : ""));
       const tx = el("span", d.transmitted ? "txd" : "notx", d.transmitted ? "Transmitted" : "Not transmitted");
       if (!d.transmitted && d.tx_note) tx.title = d.tx_note;
       meta.append(tx);
@@ -2670,7 +2692,7 @@ async function dispatch() {
     try {
       const r = await api("POST", `/api/cad/incident/${inc.id}/dispatch`,
         { unit_ids: ids, operator: op, channel: $("#r-channel").value, full: $("#r-full").checked, remarks: $("#r-remarks").value });
-      const how = r.transmitted ? `transmitted on ${r.channel}` : "logged, not transmitted";
+      const how = r.transmitted ? `transmitted on ${chName({ channel: r.channel })}` : "logged, not transmitted";
       showSent(`${r.kind === "add-on" ? "Add-on" : "Dispatch"} #${r.dispatch_id}: ${how}`
         + (r.moved.length ? `. Moved ${r.moved.join(", ")}` : ""), r);
       $("#r-full").checked = false;
@@ -2704,7 +2726,7 @@ async function upgrade(e, previewOnly) {
       if (previewOnly) await showPreviewThenAudio(() => "Preview upgrade: not logged", `/api/cad/incident/${inc.id}/upgrade`, body);
       else {
         const r = await api("POST", `/api/cad/incident/${inc.id}/upgrade`, body);
-        const how = r.transmitted ? `transmitted on ${r.channel}` : "logged, not transmitted";
+        const how = r.transmitted ? `transmitted on ${chName({ channel: r.channel })}` : "logged, not transmitted";
         showSent(`Upgrade #${r.dispatch_id}: ${how}`, r);
         $("#upgrade-form").reset();
         show($("#upgrade-form"), false);
@@ -3817,7 +3839,7 @@ function renderUnits() {
         if (!BOARD) li.setAttribute("aria-expanded", String(cad.openUnit === u.id));
         if (u.spare) head.append(el("span", "chip spare", "spare"));
         if (talk) {
-          const tb = el("span", "talk-badge", `${talk.ended ? "Ended" : "TX"} ${talk.channel}`);
+          const tb = el("span", "talk-badge", `${talk.ended ? "Ended" : "TX"} ${chName(talk)}`);
           tb.title = [talk.radio_id ? `Radio ${talk.radio_id}` : "", talk.label || talk.alias || ""].filter(Boolean).join(", ");
           head.append(tb);
         }
@@ -4432,9 +4454,10 @@ async function loadWho(fresh) {
 // through Cloudflare Access (sizeup/cad/api.py WRITES); this only shows it: Settings read-only for a
 // dispatcher, every action off for a viewer or a deactivated user, each with a banner naming the
 // admins. Without Access (whoami enforced: false) nothing changes.
-function canDo(need) {             // "dispatch" (run calls) | "admin" (Settings, the radios)
+function canDo(need) {             // "dispatch" (run calls) | "admin" (Settings, the radios) | "active" (a vote, a note)
   const w = cad.who;
   if (!w || !w.enforced) return true;
+  if (need === "active") return w.active !== false || !!w.bootstrap;     // anyone signed in, never a deactivated account
   return w.may === "admin" || (need === "dispatch" && w.may === "dispatcher");
 }
 function askAdmin() {

@@ -434,8 +434,9 @@ def test_a_channels_name_on_the_rail_is_display_only(nav):
     assert "Dispatch North" in n["rail"] and "PD Dispatch" not in n["rail"]
     # the hover: the name in full (a narrow rail cuts it short), the channel's own name and number beside it
     assert n["title"].startswith("Dispatch North (PD Dispatch, TG 9001) · ") and n["fgTitle"].startswith("FG1 (154.1 MHz) · ")
-    # the list's channel chip: the name shown, the real one in the hover; the row itself (filters, links) untouched
-    assert n["chips"] and all(c == ["Dispatch North", "p25:metro:9001"] for c in n["chips"])
+    # the list's channel chip: the row's own (cad.js radioRow asks radio-names.js, the one resolver: tests/test_radio_names.py),
+    # never a name of the rail's own put over it; the row itself (filters, links) untouched
+    assert n["chips"] and all(c == [n["kept"], ""] for c in n["chips"])
     assert n["kept"] == "p25:metro:9001" and n["asked"] == "police"
     assert nav["crumb"].endswith("› Dispatch North") and nav["sourceAsked"] == "p25:metro:9001"    # the hub asked by key
     assert nav["resetField"] == "" and nav["namesReset"]["action"] == "reset"

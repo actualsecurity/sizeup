@@ -1,5 +1,6 @@
-// The Radio page with many sources (GitHub #415, layout B): a rail on the left with the views (Our calls, Police, EMS,
-// Transit, Air, All) and the tree system > group > channel, one list on the right.
+// The Radio page with many sources (GitHub #415, layout B): a rail on the left with the views (set in the app:
+// radio-views.js; by default Our calls, Police, EMS, Transit, Air, All) and the tree system > group > channel, one list
+// on the right.
 //
 //   /cad#radio?ui=2            turns it on for this browser (ui=1: the page as before, radio-view.js); the Rail
 //                              button on the Radio page does the same. Remembered (localStorage "sizeup.cad.radio.nav").
@@ -7,8 +8,8 @@
 //                              link (#radio?event=26-000012, ?channel=Fire/EMS 15) opens filtered here too, in All
 //   &view=police &source=<key>  read from a link, never written back: a reload or the Radio tab opens Our calls
 //
-// Our calls is the view the page opens on, every time. Live (RadioLive) plays only Our calls, whatever is on screen;
-// any other view keeps the newest of Our calls in one line on top (a click: back to Our calls). A page going out now
+// Our calls is the view the page opens on, every time. Live audio is the console's player (live-player.js: on every
+// view, what each person listens to); any other view keeps the newest of Our calls in one line on top (a click: back to Our calls). A page going out now
 // (South 2) shows over the list as on the page before.
 // A view is a filter on the hub (GET /api/cad/comms?view=...): one page of 100, older ones by "Older" (?before=),
 // and on each state push whose comms_rev moved only what changed since (?changed=: rows patched by id, `gone` taken
@@ -51,14 +52,16 @@
 // ENC), its meaning in the hover. Another system's traffic comes only to a viewer who may see it (the hub decides).
 //
 // Uses cad.js (el, $, show, setText, syncList, api, fmtTime, cad), radio.js (Radio.fillPaging) and radio-view.js
-// (RadioView.row / rowSig, RadioLive): loaded after them. Tested in node (tests/test_radio_nav.py).
+// (RadioView.row / rowSig, RadioLive): loaded after them. Each channel's live-audio level: live-player.js
+// (LivePlayer.sourceControl, the person's own; loaded after this, asked when the tree is drawn). Tested in node (tests/test_radio_nav.py).
 "use strict";
 
 window.RadioNav = (() => {
   const KEY = "sizeup.cad.radio.nav";
   const SAFETY_MS = 30000, SOURCES_MS = 5000, RECENT_S = 300, PAGE = 100, MAX_KEYS = 100, SEEN_MAX = 1000;
-  const VIEWS = [["ours", "Our calls", "F", "fire"], ["police", "Police", "P", "police"], ["ems", "EMS", "E", "ems"],
-                 ["transit", "Transit", "T", "transit"], ["air", "Air", "A", "air"], ["all", "All", "∗", ""]];
+  // the views (radio-views.js): the department's and this person's own, in their order, hidden ones left out
+  const RV = () => window.RadioViews;
+  const NONE = "none";                                   // a view nothing can match: no request
   const MARK = { fire: "F", police: "P", ems: "E", transit: "T", air: "A" };
   const SERVICE = { fire: "Fire", police: "Police", ems: "EMS", transit: "Transit", air: "Air", other: "Other" };
   const SERVICES = Object.keys(SERVICE);                 // (sizeup/sourcekeys.py SERVICES)
@@ -133,8 +136,9 @@ window.RadioNav = (() => {
     }
     return out;
   }
-  // ours: our fire channels; a service's view: its sources that aren't ours; all: every source
-  const inView = (s, view) => (view === "all" ? true : view === "ours" ? !!s.ours : !s.ours && s.service === view);
+  // a source in a view (its id, or the view itself): the view's filter (radio-views.js); no such view: everything
+  const viewOf = (view) => (view && typeof view === "object" ? view : RV().find(view));
+  const inView = (s, view) => { const v = viewOf(view); return RV().matches(s, v ? v.filter : {}); };
   // Calls on a source in the minutes after this viewer last had it on screen. counts: [[minutes ago, calls]] as of
   // `now` (the hub's clock). Never seen: nothing is new (a first visit doesn't start with an hour of counts).
   function unread(s, seen, now) {
@@ -158,7 +162,7 @@ window.RadioNav = (() => {
   };
   // live: source keys transmitting now; windows: {source key: until} of the open emergency windows; loud: the services
   // whose emergencies (not ours) stand out
-  function model(sources, p, now, live = new Set(), windows = {}, loud = loudServices(), custom = null) {
+  function model(sources, p, now, live = new Set(), windows = {}, loud = loudServices(), custom = null, defs = RV().views()) {
     const pins = new Set(p.pins), mutes = new Set(mutesFor(p.mutes, sources));
     const names = (custom && custom.names) || {};       // the admins' names for the rail (#607): display only
     const rows = sources.map((s) => {
@@ -173,10 +177,11 @@ window.RadioNav = (() => {
                em, quiet: !!(em || until) && em !== "ours" && !s.ours && !!s.service && !loud.includes(s.service),
                until, code: t ? t[0] : "", tip: t ? t[1] : "" };
     });
-    const views = VIEWS.filter(([v]) => v === "ours" || v === "all" || rows.some((s) => inView(s, v))).map(([id, name, mark, service]) => {
-      const mine = rows.filter((s) => inView(s, id));
+    const views = defs.filter((v) => RV().shows(v, rows)).map((v) => {
+      const mine = rows.filter((s) => RV().matches(s, v.filter));
       const em = mine.filter((s) => s.em && !s.quiet);     // an emergency shows on its views, muted or not (quiet: never)
-      return { id, name, mark, service, n: id === "all" ? 0 : mine.reduce((a, s) => a + s.n, 0), live: mine.some((s) => s.live && !s.mute),
+      return { id: v.id, name: v.name, mark: v.mark, service: RV().service(v), color: v.color || "", scope: v.scope || "dept",
+               n: RV().dims(v.filter) ? mine.reduce((a, s) => a + s.n, 0) : 0, live: mine.some((s) => s.live && !s.mute),
                em: em.some((s) => s.em === "ours") ? "ours" : em.length ? "other" : "" };
     });
     // each folder: one service (its mark) or none (mixed), its new calls, live (not muted), its emergency (what a
@@ -279,13 +284,17 @@ window.RadioNav = (() => {
     const ui = new URLSearchParams(qs || "").get("ui");
     return ui === "2" || (ui !== "1" && st.p.on);
   }
+  // the hub's query for what is on screen: the view's filter (radio-views.js resolve), a channel picked, the filters
+  // (a unit picked wins over the view's units); NONE: nothing can match (no request)
   function query(extra = {}) {
     const q = new URLSearchParams(), f = st.f;
-    q.set("view", f.source ? "all" : f.view);
+    const r = f.source ? { view: "all" } : RV().resolve(viewOf(f.view), st.src);
+    if (!r) return NONE;
+    for (const k of ["view", "service", "system", "source", "unit", "linked"]) if (r[k]) q.set(k, r[k]);
     if (f.source) q.set("source", f.source);
     for (const k of KEPT) if (f[k]) q.set(k, f[k]);
     const mutes = mutesFor(st.p.mutes, st.src);
-    if (f.view === "all" && !f.source && mutes.length) q.set("mute", mutes.join(","));
+    if (r.all && !f.source && mutes.length) q.set("mute", mutes.join(","));
     q.set("limit", String(PAGE));
     for (const [k, v] of Object.entries(extra)) q.set(k, String(v));
     return q.toString();
@@ -302,11 +311,24 @@ window.RadioNav = (() => {
   function fromHash(qs) {
     const q = new URLSearchParams(qs || ""), f = BLANK();
     for (const k of ["source", ...KEPT]) f[k] = q.get(k) || "";
-    const v = q.get("view") || "";
     // an old link (an incident's "All", the feed's More): its filter, over every source
-    f.view = VIEWS.some(([id]) => id === v) ? v : KEPT.some((k) => f[k]) ? "all" : "ours";
+    const wide = KEPT.some((k) => f[k]);
+    f.view = normView(q.get("view") || (wide ? allView() : "ours"), wide);
     st.f = f;
   }
+  // The view to show: that one while it exists ("": everything, no view); else (hidden, deleted) for a filter's link
+  // (wide) the first view of everything, else this person's first view
+  function allView() {
+    const v = RV().views().find((x) => !RV().dims(x.filter));
+    return v ? v.id : "";
+  }
+  function normView(id, wide = false) {
+    const vs = RV().views();
+    if (id === "" || vs.some((v) => v.id === id)) return id;
+    if (wide) return allView();
+    return vs.length ? vs[0].id : "";
+  }
+  const allLike = (id) => !RV().dims((viewOf(id) || { filter: {} }).filter);
 
   // ---- the hub: one request at a time, what is asked meanwhile done right after ------------------------------
 
@@ -328,8 +350,13 @@ window.RadioNav = (() => {
     st.timer = 0;
     if (!shown()) return;
     if (st.busy) { st.want = "page"; return; }
-    st.busy = true;
     const asked = query();
+    if (asked === NONE) {                             // nothing can match: none, and no request
+      Object.assign(st, { rows: [], next: "", older: false, deep: false, shown: asked, error: "" });
+      render();
+      return;
+    }
+    st.busy = true;
     try {
       const d = await api("GET", `/api/cad/comms?${asked}`);
       st.error = "";
@@ -352,6 +379,7 @@ window.RadioNav = (() => {
     if (!shown()) return;
     if (st.busy) { st.want = st.want || "delta"; return; }
     if (st.shown !== query()) { page(); return; }
+    if (st.shown === NONE) return;
     st.busy = true;
     const asked = st.shown;
     try {
@@ -402,6 +430,7 @@ window.RadioNav = (() => {
         st.layout = d.folders || null;                // the admins' folders (#607), null: the automatic grouping
         st.services = d.services || {};               // the admins' service per channel (none: automatic)
         st.retagWaiting = new Set(d.retag_waiting || []);   // ... a re-tag waiting for the station's talkgroups
+        RV().setShared(d.views, st.src);              // the department's views (none: the coded ones)
         st.clock = { hub: d.now || Date.now() / 1000, at: Date.now() };
         let changed = false;                          // a source first met: nothing of it is unread
         for (const s of st.src) if (!st.p.seen[s.key]) { st.p.seen[s.key] = now(); changed = true; }
@@ -411,6 +440,7 @@ window.RadioNav = (() => {
         seenNow();
       }
       renderRail();
+      if (st.shown !== null && st.shown !== query() && !st.busy) page();   // a view's channels came with the tree
     } catch (_) { /* the rail as it was */ }
   }
   // Our calls, whatever is on screen: what Live plays, and the line on top of any other view
@@ -446,6 +476,12 @@ window.RadioNav = (() => {
       st.svcAsked = sr;
       sources(true);
     } else if (sr !== null && st.svcAsked === undefined) st.svcAsked = sr;
+    // ... or the department's views: the tree (they come with it) again, once for that rev
+    const vr = (cad.state && typeof cad.state.radio_views === "string") ? cad.state.radio_views : null;
+    if (vr !== null && vr !== RV().rev() && vr !== st.viewsAsked && st.src.length) {
+      st.viewsAsked = vr;
+      sources(true);
+    }
     renderRail();                                     // who is talking now, an emergency window: each push
     renderPaging();
     const rev = pushed();
@@ -521,7 +557,9 @@ window.RadioNav = (() => {
     pin.title = s.pin ? "Pinned: on top of the tree" : "Pin";
     pin.setAttribute("aria-pressed", String(s.pin));
     pin.setAttribute("aria-label", `Pin ${s.name}`);
-    row.append(b, pin);
+    row.append(b);
+    if (window.LivePlayer) row.append(LivePlayer.sourceControl(s));   // its live-audio level (live-player.js): per person
+    row.append(pin);
     if (!fixed(s)) {                                  // Our calls and our fire channels are never muted
       const mute = el("button", "rn-act quiet sm icon", s.mute ? "✕" : "♪");
       mute.type = "button";
@@ -584,7 +622,7 @@ window.RadioNav = (() => {
     if (!dom || !st.open) return;
     const m = model(st.src, st.p, now(), liveKeys(), windowKeys(), loudServices(), st.layout);
     const here = (v) => v.id === st.f.view && !st.f.source;
-    const sig = JSON.stringify([st.f.view, st.f.source, st.p.rail, st.sheet, st.p.folds, st.layout && st.layout.rev, !!st.edit,
+    const sig = JSON.stringify([st.f.view, st.f.source, st.p.rail, st.sheet, st.p.folds, st.layout && st.layout.rev, !!st.edit, !!st.vedit, st.listenRev,
                                m.sections.map((x) => [x.label, x.groups.map((g) => [g.id, g.name, g.n, g.live, g.em, g.sources.length])]), m.views,
                                m.rows.map((s) => [s.key, s.name, s.n, s.live, s.recent, s.pin, s.mute, s.em, s.quiet, s.stuck, s.until, s.code])]);
     if (sig === st.railSig) return;
@@ -602,19 +640,27 @@ window.RadioNav = (() => {
       b.tabIndex = here(v) || (st.f.source && v.id === st.f.view) ? 0 : -1;      // one stop; the arrows move between them
       b.setAttribute("role", "tab");
       b.setAttribute("aria-selected", String(here(v)));
-      b.append(mark(v.service, v.mark), el("span", "lbl", v.name), el("span", "spacer"));
+      const mk = mark(v.service, v.mark);
+      if (v.color) mk.style.setProperty("--c", v.color);
+      mk.title = v.name;
+      b.append(mk, el("span", "lbl", v.name), el("span", "spacer"));
       if (v.em) b.append(emChip(v.em));
       if (v.n && !here(v)) b.append(count(v.n, v.id === "ours"));
       if (v.live) b.append(dot({ live: true }));
       return b;
     }));
+    // every view hidden: no VIEWS (the ✎ stays, to bring them back); the editor in their place while open
+    show($("#rn-views-h"), m.views.length > 0 && !st.vedit);
+    show($("#rn-views"), m.views.length > 0 && !st.vedit);
+    show($("#rn-vbox"), !!st.vedit);
+    $("#rn-vedit").setAttribute("aria-expanded", String(!!st.vedit));
     show($("#rn-edit"), !st.edit && mayEdit());
     if (!st.edit) renderTree(m);                      // (Edit draws its own, only when the draft changes: never on a push)
     else show($("#rn-folds"), false);
     const s = st.f.source && m.rows.find((x) => x.key === st.f.source);
     const g = s && m.sections.flatMap((x) => x.groups).find((x) => x.sources.includes(s));
     setText($("#rn-crumb"), s ? `${g && g.section ? `${g.section} › ` : ""}${g ? g.name : s.group || "Other"} › ${s.name}` : st.f.source
-      || (VIEWS.find(([id]) => id === st.f.view) || VIEWS[0])[1]);
+      || (viewOf(st.f.view) || { name: "All" }).name);
     show($("#rn-back"), !!st.f.source);
     // the phone's Sources button: what the other views hold (the rail is behind it)
     const away = m.views.filter((v) => !here(v) && v.id !== "all");
@@ -891,7 +937,7 @@ window.RadioNav = (() => {
     const on = st.open && !!t && (st.f.view !== "ours" || narrowed());
     show(box, on);
     if (!on) return;
-    const who = t.rig || t.talker || t.radio_id || t.channel;
+    const who = t.rig || t.talker || t.radio_id || (typeof chName === "function" ? chName(t) : t.channel);
     const n = st.src.filter((s) => s.ours).reduce((a, s) => a + unread(s, st.p.seen[s.key], now()), 0);
     box.replaceChildren(mark("fire"), el("b", "", "Our calls"), ...(n ? [count(n, true)] : []),
                         el("span", "t", fmtTime(t.start)), el("span", "trunc", `${who}: ${t.text || "—"}`));
@@ -926,20 +972,10 @@ window.RadioNav = (() => {
     fill($("#rn-event"), "Any incident", (d.events || []).map((e) => [e.number || String(e.id), `${e.number || "#" + e.id} ${e.type || ""} ${e.address || ""}`.trim()]),
          st.f.event);
   }
-  // the admins' name for its channel (#607) on the row's channel chip: display only (filters, menus and links keep the
-  // real one); the real one in the hover
-  const shownName = (t) => (st.layout && st.layout.names && t.source && st.layout.names[t.source]) || "";
-  function srcChip(n) {
-    if (n.classList && n.classList.contains("chip") && n.classList.contains("src")) return n;
-    for (const c of n.children || []) { const x = srcChip(c); if (x) return x; }
-    return null;
-  }
+  // (the channel chip: radioRow's, its one name from radio-names.js: the admins' short or name, system and talkgroup on
+  // hover; no name of the rail's own here)
   function fillRow(li, t) {
-    const n = RadioView.row(t), nm = shownName(t), chip = nm && srcChip(n);
-    if (chip) {
-      chip.textContent = nm;
-      chip.title = `${t.channel}${t.talkgroup !== undefined && t.talkgroup !== null ? ` (TG ${t.talkgroup})` : ""}`;
-    }
+    const n = RadioView.row(t);
     li.className = n.className;
     li.replaceChildren(...n.childNodes);
   }
@@ -951,7 +987,7 @@ window.RadioNav = (() => {
     renderChips();
     if (document.activeElement !== $("#rn-q")) $("#rn-q").value = st.f.q;
     setText($("#rv-count"), st.error ? `Load failed: ${st.error}` : `${st.rows.filter((t) => t.kind !== "note").length} TX${st.older ? "+" : ""}`);
-    syncList($("#rn-list"), st.rows, { key: (t) => t.id, sig: (t) => RadioView.rowSig(t) + shownName(t), make: () => el("li"), fill: fillRow,
+    syncList($("#rn-list"), st.rows, { key: (t) => t.id, sig: (t) => RadioView.rowSig(t), make: () => el("li"), fill: fillRow,
                                        empty: narrowed() ? "None match" : "None" });
     show($("#rn-older"), st.older);
   }
@@ -959,6 +995,7 @@ window.RadioNav = (() => {
   // ---- in and out --------------------------------------------------------------------------------------
 
   function set(patch) {
+    if ("view" in patch) patch = { ...patch, view: normView(patch.view) };
     if ("view" in patch && patch.view !== st.f.view) for (const k of EXTRA) st.f[k] = "";   // an old link's filters: gone with the view
     Object.assign(st.f, patch);
     st.sheet = false;
@@ -1031,6 +1068,19 @@ window.RadioNav = (() => {
     });
   }
 
+  // The views' editor in the rail (radio-views.js, mode "mine"): show / hide, order, this person's own (admins: the
+  // department's too); in place of the views while open
+  function vedit(on) {
+    if (on && !st.vedit) {
+      st.vedit = RV().editor($("#rn-vbox"), { mode: "mine", close: () => vedit(false) });
+    } else if (!on && st.vedit) {
+      st.vedit.stop();
+      st.vedit = null;
+      if ($("#rn-vedit").focus) $("#rn-vedit").focus();
+    }
+    st.railSig = "";
+    renderRail();
+  }
   function toggle(list, key) {
     const i = list.indexOf(key);
     if (i >= 0) list.splice(i, 1); else list.push(key);
@@ -1053,6 +1103,15 @@ window.RadioNav = (() => {
     for (const t of tabs) t.tabIndex = t === n ? 0 : -1;
     n.focus();
   }
+
+  if (window.RadioViews) RV().onChange(() => {
+    st.railSig = "";
+    if (!st.open) return;
+    const v = normView(st.f.view);
+    if (v !== st.f.view && !st.f.source) { set({ view: v }); return; }
+    renderRail();
+    if (st.shown !== null && st.shown !== query()) page();
+  });
 
   if (dom) {
     $("#rv-nav").addEventListener("click", () => {    // on / off: the page as before stays one click away
@@ -1086,9 +1145,10 @@ window.RadioNav = (() => {
       if (b.dataset.view) return set({ view: b.dataset.view, source: "" });
       if (b.dataset.source) return set({ source: st.f.source === b.dataset.source ? "" : b.dataset.source });
       if (b.dataset.pin) { toggle(st.p.pins, b.dataset.pin); return renderRail(); }
-      if (b.dataset.mute) { toggle(st.p.mutes, b.dataset.mute); renderRail(); if (st.f.view === "all") page(); }
+      if (b.dataset.mute) { toggle(st.p.mutes, b.dataset.mute); renderRail(); if (allLike(st.f.view)) page(); }
     });
     $("#rn-views").addEventListener("keydown", onKeys);
+    $("#rn-vedit").addEventListener("click", () => vedit(!st.vedit));
     $("#rn-edit").addEventListener("click", editStart);
     $("#rn-folds").addEventListener("click", () => {  // all folded / all shown
       const ids = model(st.src, st.p, now(), new Set(), {}, [], st.layout).sections.flatMap((x) => x.groups.map((g) => g.id));
@@ -1148,12 +1208,12 @@ window.RadioNav = (() => {
     tree.addEventListener("dragend", () => { unmark(); st.drag = null; });
     $("#rn-flags").addEventListener("click", (e) => { const b = e.target.closest("[data-source]"); if (b) set({ source: b.dataset.source }); });
     $("#rn-chips").addEventListener("click", (e) => { const b = e.target.closest("[data-clear]"); if (b) set({ [b.dataset.clear]: "" }); });
-    $("#rn-event").addEventListener("change", () => set({ event: $("#rn-event").value, view: $("#rn-event").value && st.f.view === "ours" ? "all" : st.f.view }));
+    $("#rn-event").addEventListener("change", () => set({ event: $("#rn-event").value, view: $("#rn-event").value && st.f.view === "ours" ? allView() : st.f.view }));
     $("#rn-unit").addEventListener("change", () => set({ unit: $("#rn-unit").value }));
     $("#rn-q").addEventListener("input", () => { clearTimeout(st.qTimer); st.qTimer = setTimeout(() => set({ q: $("#rn-q").value.trim() }), 350); });
     $("#rn-list").addEventListener("click", (e) => {  // an incident chip on a row: just that call's traffic (once: radio-view.js stands down)
       const b = e.target.closest("[data-event]");
-      if (b) set({ event: b.dataset.event, view: st.f.view === "ours" ? "all" : st.f.view });
+      if (b) set({ event: b.dataset.event, view: st.f.view === "ours" ? allView() : st.f.view });
     });
     document.addEventListener("keydown", (e) => { if (e.key === "Escape" && st.open && st.sheet) { e.stopPropagation(); sheet(false); } }, true);
     document.addEventListener("DOMContentLoaded", sizer);
@@ -1162,16 +1222,18 @@ window.RadioNav = (() => {
     let drawn = -1;
     cad.hooks.push(() => { if (st.open && drawn !== cad.txRev) { drawn = cad.txRev; render(); } });
     window.addEventListener("sizeup:tx-changed", () => { if (st.open) page(); });
+    // a listen level changed (live-player.js): the tree's level marks again
+    window.addEventListener("sizeup:listen-changed", () => { st.listenRev = (st.listenRev || 0) + 1; if (st.open) renderRail(); });
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") { clearTimeout(st.timer); st.timer = 0; } else if (st.open) page();
     });
   }
 
-  const out = { wants, open, close, prefs, inView, unread, mutesFor, model, merged, folders, draftOf, moveItem, moveFolder, step,
+  const out = { wants, open, close, prefs, inView, unread, mutesFor, model, merged, folders, draftOf, moveItem, moveFolder, step, normView,
                 widthLimits, clampW,
                 get on() { return st.open; } };
   // its insides, for tests/test_radio_nav.py only (the harness sets this before the script runs): never on the page
   if (window.RADIO_NAV_TEST === true) out.test = { st, page, delta, older, sources, ours, set, onPush, query, fromHash, hashOf, render,
-                                                  editStart, editDo, editSave, renderEdit, sizer, sizeRail };
+                                                  editStart, editDo, editSave, renderEdit, sizer, sizeRail, vedit };
   return out;
 })();

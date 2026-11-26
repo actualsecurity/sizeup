@@ -28,6 +28,8 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
     <button id="dispatch-open" class="tab" type="button" title="The open incident"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-dispatch"/></svg><span class="lbl">Incident</span></button>
     <a id="radio-open" class="tab" href="#radio" title="All transmissions"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-radio"/></svg><span class="lbl">Radio</span></a>
     <a id="search-open" class="tab" href="#search" title="Past calls: address, type, unit, words; address notes"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-search"/></svg><span class="lbl">Search</span></a>
+    <!-- every radio intel event, pushed or not, and why (intel-page.js): signed-in viewers (cad.js shows it with the state's intel) -->
+    <a id="intel-open" class="tab" href="#intel" title="Radio intel events: every level, pushed or not, and why" hidden><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-intel"/></svg><span class="lbl">Intel</span></a>
     <a id="settings-open" class="tab" href="#settings" title="Settings"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-settings"/></svg><span class="lbl">Settings</span></a>
   </nav>
   <span id="conn" class="pill warn">Connecting</span>
@@ -47,6 +49,8 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
     <select id="operator-pick" hidden></select>
     <input id="operator" type="text" maxlength="60" autocomplete="off" spellcheck="false" placeholder="Name">
   </label>
+  <!-- live audio on every view (live-player.js): one click turns it on and allows sound -->
+  <button id="lp-on" class="nav live-btn console-only" type="button" aria-pressed="false" aria-controls="lp" aria-label="Listen"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-radio"/></svg><span class="lbl" hidden></span></button>
   <button id="sound" class="nav live-btn board-only" type="button">Sound</button>
   <button id="fullscreen" class="nav board-only" type="button" title="Full screen (f)" aria-label="Full screen"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-expand"/></svg><span class="lbl">Full screen</span></button>
   <a class="nav console-only" href="/monitor" target="sizeup-monitor" title="Wall board: opens in its own window"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-monitor"/></svg><span class="lbl">Monitor</span></a>
@@ -70,7 +74,8 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
   <aside class="queue">
     <button id="new-incident" class="primary wide lg" title="New incident (N)"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-plus"/></svg>New incident</button>
     <section>
-      <div class="q-head"><h2 title="Pages to accept or dismiss">60 Control</h2><span id="tapout" class="tapout" hidden></span></div>
+      <div class="q-head"><h2 title="Pages to accept or dismiss">60 Control</h2><span id="tapout" class="tapout" hidden></span>
+        <a id="q-intel-all" class="nav mini quiet q-intel-all" href="#intel" title="Every intel event, pushed or not (the Intel page)" hidden><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-intel"/></svg><span class="lbl">Intel</span></a></div>
       <ol id="q-incoming" class="pa-list" hidden aria-live="assertive" aria-label="Possible incoming"></ol>
       <ol id="q-intel" class="pa-list" hidden aria-live="polite" aria-label="Radio pre-alerts"></ol>
       <ol id="q-airport" class="pa-list" hidden aria-live="assertive" aria-label="Airport pre-alerts"></ol>
@@ -149,15 +154,16 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <span id="rv-count" class="dim small"></span>
         <span class="spacer"></span>
         <button id="rv-nav" class="sm" type="button" aria-pressed="false" title="Views and the channel tree in a rail">Rail</button>
-        <button id="rv-live" class="live-btn" type="button">Live</button>
+        <button id="rv-live" class="live-btn" type="button" aria-pressed="false" aria-controls="lp">Listen</button>
       </div>
       <!-- The rail layout (radio-nav.js, #415; /cad#radio?ui=2 or the Rail button): the views and the tree system >
            group > channel on the left, one list on the right. Hidden until a viewer turns it on; the page as before
            (the filters and the two sections below) is what everyone else gets. -->
       <div id="rn" class="rn" hidden>
         <aside id="rn-rail" class="rn-rail" aria-label="Views and channels">
-          <div class="rn-rail-head"><h2>Views</h2><span class="spacer"></span><button id="rn-fold" class="quiet sm icon" type="button" aria-expanded="true">«</button></div>
+          <div class="rn-rail-head"><h2 id="rn-views-h">Views</h2><span class="spacer"></span><button id="rn-vedit" class="quiet sm icon" type="button" title="Views: show, hide, order, add" aria-label="Edit views" aria-expanded="false" aria-controls="rn-vbox">✎</button><button id="rn-fold" class="quiet sm icon" type="button" aria-expanded="true">«</button></div>
           <div id="rn-views" class="tabs vertical" role="tablist" aria-label="Views"></div>
+          <div id="rn-vbox" class="rv-ed" hidden></div>
           <div class="rn-tree-head"><button id="rn-folds" class="quiet sm icon" type="button" hidden>⊟</button><button id="rn-edit" class="quiet sm" type="button" title="Edit the folders (for everyone)" hidden>Edit</button></div>
           <div id="rn-tree" class="rn-tree"></div>
         </aside>
@@ -271,6 +277,39 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       </div>
     </div>
 
+    <!-- Intel (intel-page.js, /cad#intel?level=&category=&source=&system=&decided=&held=&status=&from=&to=&page=): every
+         radio intel event at every level and status, and why it didn't push; paged on the hub (GET /api/cad/intel/list) -->
+    <div id="intel-view" class="il-view" hidden>
+      <div class="view-head">
+        <h2 class="view-title">Intel</h2>
+        <span id="il-count" class="dim small" aria-live="polite"></span>
+        <button id="il-refresh" type="button" class="sm quiet" title="Read it again (a long or filtered view isn't refreshed on its own)" hidden>Refresh</button>
+        <span class="spacer"></span>
+        <a id="il-csv" class="nav sm" href="#" download hidden title="These events with their notes, scores, rule hits and transcripts (admins; in your activity)">CSV</a>
+        <a id="il-jsonl" class="nav sm" href="#" download hidden title="The same as JSON lines (admins; in your activity)">JSONL</a>
+      </div>
+      <form id="il-filters" class="rv-filters il-filters" autocomplete="off" role="search">
+        <select id="il-level" aria-label="Level" title="Level: pushed, held at push, map, log, shadow"><option value="">Any level</option>
+          <option value="push">push</option><option value="held">held</option><option value="map">map</option><option value="log">log</option><option value="shadow">shadow</option></select>
+        <select id="il-category" aria-label="Category"><option value="">Any category</option></select>
+        <select id="il-source" aria-label="Source or system"><option value="">Any source</option></select>
+        <select id="il-decided" aria-label="Decided by" title="Decided by its rules, the model, or both"><option value="">Rules or model</option>
+          <option value="rules">Rules</option><option value="model">Model</option><option value="both">Rules + model</option></select>
+        <select id="il-held" aria-label="Not pushed because" title="Why it didn't push"><option value="">Any reason</option></select>
+        <select id="il-status" aria-label="Status"><option value="">Any status</option>
+          <option value="open">open</option><option value="ended">ended</option><option value="expired">expired</option><option value="dismissed">dismissed</option></select>
+        <input id="il-q" type="search" placeholder="Notes" aria-label="Words in the notes" spellcheck="false" maxlength="200">
+        <select id="il-tag" aria-label="Note tag"><option value="">Any tag</option></select>
+        <button id="il-review" type="button" aria-pressed="false" title="Review queue: notes tagged for a rule or model change, not done yet (every date)">Review</button>
+        <label class="inline" title="From this day (default: the last 24 h)"><span class="dim">From</span> <input id="il-from" type="date"></label>
+        <label class="inline" title="To the end of this day"><span class="dim">To</span> <input id="il-to" type="date"></label>
+        <button id="il-clear" type="button">Clear</button>
+      </form>
+      <div class="tscroll"><table class="evtable db il-table"><thead><tr><th>Time</th><th>Category</th><th>Level</th><th>Source</th><th>Place</th><th>Score</th><th>Not pushed</th><th><span class="sr-only">Feedback</span></th></tr></thead>
+        <tbody id="il-rows"></tbody></table></div>
+      <div class="sv-pager row"><button id="il-prev" type="button" class="sm">Newer</button><span id="il-page" class="dim small"></span><button id="il-next" type="button" class="sm">Older</button></div>
+    </div>
+
     <!-- A pre-alert's More info (prealert-info.js, /cad#prealert/<kind>/<id>): its context bundle (sizeup/context_bundle.py):
          why, the transmissions and their audio, the channels around it, the place, site history, now, the outcome.
          #pi-updates (hidden) is where a later PR puts the event's timeline of updates, above the bundle -->
@@ -288,6 +327,8 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       <div class="pi-grid">
         <div class="pi-main">
           <section id="pi-why" class="pi-sec" hidden aria-label="Why"></section>
+          <!-- a radio pre-alert's notes and tags (intel-notes.js, sizeup/intel/notes.py) -->
+          <section id="pi-notes" class="pi-sec" hidden aria-label="Notes"></section>
           <section id="pi-trigger" class="pi-sec" hidden aria-label="Heard"></section>
           <section id="pi-around" class="pi-sec" hidden aria-label="Timeline"></section>
           <section id="pi-site" class="pi-sec" hidden aria-label="Site history"></section>
@@ -433,6 +474,8 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
               </div>
               <div id="d-here-body" class="here-body" hidden></div>
             </section>
+            <!-- the notes on the radio intel events at this call (intel-notes.js): signed-in viewers, folded -->
+            <section id="d-intel" class="d-intel" hidden aria-label="Intel notes"></section>
             <!-- an Airport event (#105): what the tower passed, one compact row; the subtype's FAA definition behind "?" -->
             <div id="d-airport" class="d-airport" hidden aria-label="Airport: what the tower passed"></div>
             <div id="d-roads" class="d-roads" hidden aria-label="Road closures and projects nearby"></div>
@@ -660,6 +703,11 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       <h2 title="Radio IDs heard on a fireground channel (FG1, FG2) that the registry doesn't know: say who each is (nothing is guessed)">New radio IDs</h2>
       <ol id="q-newids" class="nid-list" aria-live="polite" aria-label="New radio IDs"></ol>
     </section>
+    <!-- a dongle swapped for a new one (dongle-swaps.js, sizeup/radio/replace.py): use the new one for the gone one's jobs? -->
+    <section id="dongleswaps" class="nid-sec console-only" hidden>
+      <h2 title="A dongle with a job is gone and a new, free dongle that fits its jobs is plugged in: nothing moves until someone says so">New dongles</h2>
+      <ol id="q-dongleswaps" class="nid-list" aria-live="polite" aria-label="New dongles"></ol>
+    </section>
     <!-- the wall board's radio (board.js): the main channels (FG1, FG2, Fire/EMS 15, every talkgroup marked Main), not the
          console's pinned 60 Control feed (user, 2026-10-08: "isnt showing the radio traffic from FireGround 1") -->
     <section class="board-only b-sec b-radio" aria-label="Radio: main channels">
@@ -733,6 +781,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
       <div class="s-head view-head"><h2 class="view-title">Radios</h2></div>
       <div id="s-radio-tabs" class="s-tabs tabs" aria-label="Radios"></div>
       <div id="settings-radio-controls" class="radio-controls"></div>
+      <div id="settings-dongle-swap" class="radio-controls" data-rtab="receivers" hidden></div>
       <div class="radio-controls" data-rtab="squelch" hidden>
         <section class="card">
           <div class="card-head"><h2>Squelch</h2><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="Each FM channel's noise squelch, applied live on the station. Open: quieting (dB under the idle hiss) that opens it. Close: it stays open above this. Min: carrier shorter than this is not kept and never shows as TX. Short/min: opens that closed with nothing kept (last 5 min); many means it is chattering on noise: raise Open. Empty: the default. Traffic channels only: paging (South 2) is read-only. PL est.: the CTCSS tone estimated per key-up (none, or unsure when too short, speech or hum). Suggested (admins): the Open 7 days of the channel's own idle quieting and real transmissions suggest, the numbers on hover; Apply sets Open and Close, audited like an edit. Charts: the Signal tab.">?</button></div>
@@ -745,6 +794,12 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
       </div>
       <div id="settings-tones" class="radio-controls" data-rtab="tones" hidden></div>
       <div id="settings-emergencies" class="radio-controls" data-rtab="emergencies" hidden></div>
+      <div class="radio-controls" data-rtab="views" hidden>
+        <section class="card">
+          <div class="card-head"><h2>Views</h2><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="The Radio rail's views, for everyone (admins). A view: any of its services, systems and channels (Our calls: our dispatch, paging and firegrounds); units and On an incident narrow it. Each person hides, orders and adds their own from the rail's ✎.">?</button></div>
+          <div id="settings-views" class="rv-ed"></div>
+        </section>
+      </div>
       <div class="radio-controls" data-rtab="ids" hidden>
         <div class="s-note notice">Radios editor unavailable</div>
         <section class="card">
@@ -758,6 +813,26 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 
 <!-- the style guide (styleguide.js, /cad#styleguide): every component in every state; Settings > System links it -->
 <main id="styleguide" class="styleguide" hidden></main>
+
+<!-- the live player (live-player.js): under every view while Listen is on; the page never reloads between views, so
+     what plays goes on as you move around -->
+<div id="lp" class="lp console-only" role="region" aria-label="Live audio" hidden>
+  <button id="lp-pp" class="sm icon" type="button"></button>
+  <button id="lp-skip" class="sm icon quiet" type="button" title="Skip (])" aria-label="Skip">⏭</button>
+  <span id="lp-now" class="lp-now"></span>
+  <span id="lp-queue" class="chip lp-queue" hidden></span>
+  <a id="lp-go" class="btn sm quiet" href="#radio" title="Its row in Radio" hidden>Go to</a>
+  <span class="spacer"></span>
+  <span class="seg lp-quick" role="group" aria-label="Quick">
+    <button id="lp-ours" class="sm" type="button" aria-pressed="false" title="Only Our calls (dispatch, paging, firegrounds)">Our calls only</button>
+    <button id="lp-police" class="sm" type="button" aria-pressed="false" title="No police traffic">Mute police</button>
+  </span>
+  <button id="lp-mute" class="sm icon quiet" type="button" aria-pressed="false"></button>
+  <input id="lp-vol" class="lp-vol" type="range" min="0" max="100" step="5" value="100" aria-label="Volume" title="Volume (this device)">
+  <button id="lp-set" class="sm" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="lp-panel" title="What you listen to, and its priority">Listening</button>
+  <button id="lp-off" class="sm icon quiet" type="button" title="Stop live audio" aria-label="Stop live audio">✕</button>
+  <div id="lp-panel" class="lp-panel popover" role="dialog" aria-labelledby="lp-panel-title" hidden></div>
+</div>
 
 <!-- a past call from History here, read-only over the current view (addr-history.js peek; #peek/<id> deep link) -->
 <div id="peek-overlay" class="overlay" hidden>
@@ -830,16 +905,22 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/airport-alerts.js"></script>
 <script src="/static/intel.js"></script>
 <script src="/static/cad.js"></script>
+<script src="/static/radio-names.js"></script>
 <script src="/static/status-hints.js"></script>
 <script src="/static/oos-notices.js"></script>
 <script src="/static/radio-ids.js"></script>
+<script src="/static/dongle-swaps.js"></script>
 <script src="/static/cadmap.js"></script>
 <script src="/static/newcall-map.js"></script>
 <script src="/static/radio-view.js"></script>
+<script src="/static/radio-views.js"></script>
 <script src="/static/radio-nav.js"></script>
+<script src="/static/live-player.js"></script>
 <script src="/static/addr-history.js"></script>
 <script src="/static/search-view.js"></script>
 <script src="/static/prealert-info.js"></script>
+<script src="/static/intel-notes.js"></script>
+<script src="/static/intel-page.js"></script>
 <script src="/static/preplan.js"></script>
 <script src="/static/bldg-highlight.js"></script>
 <script src="/static/hydrants.js"></script>
