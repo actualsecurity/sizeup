@@ -2246,6 +2246,8 @@ class HubApp(App):
             ts = self._terms_for_item(item)
             terms = stt_terms.prompt_terms(ts.terms)[:sttmodels.CONTEXT_MAX] if ts is not None and ts.terms else []
             job.context = sttmodels.context_list(names, calls, planes, terms)
+            # (#869: what of the context names a unit or an aircraft: a ref among them never scores for a model)
+            job.extra["ctx_names"] = [*names, *calls, *planes]
             if terms and any(t in job.context for t in terms):
                 job.extra["list_vocab_v"] = ts.vocab_v
             job.plain = ch.plain(key)
@@ -2978,6 +2980,7 @@ class HubApp(App):
                                  "champ_model": champ.model, "champ_prompted": stt_time.prompted(champ.prompt,
                                                                                                  champ.clip_end),
                                  "service": service, "input": want,
+                                 "ctx_names": list(champ.extra.get("ctx_names") or ()),
                                  "refs": self._challenge_refs(item, champ.channel, service, champ.clip_end)})
         self.sttpool.submit(job)
 
@@ -3035,10 +3038,10 @@ class HubApp(App):
         item = job.extra.get("page") or self._find(cid)[0]
         if used == job.model:
             # (refs that were in the context sent never score: the ADS-B list, a talker's name, a call sign)
-            refs = sttscore.drop_context(dict(job.extra.get("refs") or {}), job.context, job.prompt)
+            sent = list(job.extra.get("ctx_names") or ())
+            refs = sttscore.drop_context(dict(job.extra.get("refs") or {}), sent)
             if job.extra.get("service") in ("fire", "ems", "police") and isinstance(job.clip_end, (int, float)):
-                refs["cad"] = sttscore.drop_context({"cad": self._cad_refs(float(job.clip_end))}, job.context,
-                                                    job.prompt)["cad"]
+                refs["cad"] = sttscore.drop_context({"cad": self._cad_refs(float(job.clip_end))}, sent)["cad"]
             champ_text = str(job.extra.get("champ_text") or "")
             prompted = stt_time.prompted(job.prompt, job.clip_end) if ctx == "prompt" else False
             checks = (self._time_check(job.channel, item, champ_text, job.clip_end, "gpu-worker",
