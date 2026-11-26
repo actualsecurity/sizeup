@@ -12,7 +12,8 @@
 //   Motion       motion.js's Motion.tracker with a gentle dead-reckon (drift): on along its course at its speed, for at
 //                most HORIZON_S after the report and slowing past HOLD_S; a new report is eased into over EASE_MS
 //                (no surge: the mark never jumps forward to catch up). Redrawn only while something moves, at most
-//                every FRAME_MS, at least every MAX_FRAME_MS, never while the page is hidden.
+//                every FRAME_MS, at least every MAX_FRAME_MS, only on maps it is on and on screen, never while the
+//                page is hidden; a timer sleeps between draws.
 //   Click        follows it (mapfollow.js Follower: one follower at a time, a drag or Recenter lets go) and opens its
 //                box, kept live (MapFollow.LiveInfo): name, type, length, speed, course, status, destination, age.
 //   Event        a marine call's "Vessels nearby" under its map (panel(inc, host), cadmap.js): the vessels its text
@@ -100,7 +101,7 @@ window.VesselLayer = (() => {
         const r = await fetch(URL, { credentials: "same-origin" });
         if (r.ok) { store.data = await r.json(); store.at = Date.now(); store.failed = false; } else store.failed = true;
       } catch (_) { store.failed = true; }
-      finally { store.loading = null; moved(); for (const m of maps) m.sync(); animate(); }
+      finally { store.loading = null; moved(); for (const m of maps) m.sync(); wake(); }   // (a new answer: its speeds set the next draw)
     })();
     return store.loading;
   }
@@ -157,14 +158,30 @@ window.VesselLayer = (() => {
     tracker.forget(keep);
   }
   const where = (v) => (tracker && tracker.where(v.id, Date.now())) || { lon: v.lon, lat: v.lat, rot: course(v) || 0 };
-  let raf = 0;
-  const wanted = () => anyOn() && document.visibilityState !== "hidden" && !!tracker && tracker.busy();
-  function animate() { if (wanted() && !raf && window.requestAnimationFrame) raf = requestAnimationFrame(frame); }
+  // a frame: each map it is on and on screen redrawn once its fastest vessel has moved STEP_PX there; between draws the
+  // loop sleeps on a timer (aircraft.js, #887), no frame asked for on every vsync. A zoom, a map coming on screen, a
+  // follow, the layer ticked and a new answer wake it.
+  let raf = 0, sleepT = 0;
+  const live = (m) => m.isOn() && m.shown();
+  const anyLive = () => { for (const m of maps) if (live(m)) return true; return false; };
+  const wanted = () => anyLive() && document.visibilityState !== "hidden" && !!tracker && tracker.busy();
+  function animate() { if (wanted() && !raf && !sleepT && window.requestAnimationFrame) raf = requestAnimationFrame(frame); }
+  function wake() {
+    if (sleepT) { clearTimeout(sleepT); sleepT = 0; }
+    animate();
+  }
   function frame(ts) {
     raf = 0;
     if (!wanted()) return;
-    for (const m of maps) if (ts - (m.drawnAt || 0) >= m.frameMs() - 2) { m.drawnAt = ts; m.draw(); }
-    raf = requestAnimationFrame(frame);
+    let wait = Infinity;
+    for (const m of maps) {
+      if (!live(m)) continue;
+      const ms = m.frameMs();
+      if (ts - (m.drawnAt || 0) >= ms - 2) { m.drawnAt = ts; m.draw(); }
+      wait = Math.min(wait, (m.drawnAt || 0) + ms - ts);
+    }
+    if (!(wait < Infinity) || typeof setTimeout !== "function") raf = requestAnimationFrame(frame);
+    else sleepT = setTimeout(() => { sleepT = 0; animate(); }, Math.max(0, wait - 2));   // (the next vsync: the draw's)
   }
 
   // ---- the marks: original, simple hulls (bow up), white for MapLibre to tint (SDF) -----------------------------------
@@ -231,11 +248,14 @@ window.VesselLayer = (() => {
       this.live = null;
       maps.add(this);
       this.map.on("click", (e) => this.clicked(e));
+      this.screen = MapFollow.screen(this.map, () => { if (this.isOn()) wake(); });   // shown: drawn now (an Expand opened)
+      this.map.on("zoom", () => { if (live(this)) wake(); });   // closer in, the marks move faster on screen
       this.fol = new MapFollow.Follower(this.map, control.host, { cls: "ac-follow", textCls: "ac-follow-t", icon: "vessel",
                                                                  onStop: () => this.draw(true) });
       if (this.isOn()) kick();
     }
     get following() { return this.fol.id; }
+    shown() { return this.screen.shown(); }   // on screen (kept: MapFollow.screen), not an Expand shut
     focusedMarine() { const f = this.control.focused; return this.control.profile === "incident" && isMarine(f) ? f : null; }
     isOn() {
       const f = this.focusedMarine();
@@ -316,7 +336,7 @@ window.VesselLayer = (() => {
     draw(force) {
       const d = store.data;
       if (!d || !this.added || !this.isOn()) return;
-      if (!force && !this.map.getContainer().offsetParent) return;
+      if (!force && !this.shown()) return;
       const marks = [], hl = [], ring = token("--accent-text", "#EE6475");
       for (const v of d.vessels || []) {
         const age = ageNow(v), stale = age > staleS(d), lk = look(v), at = stale ? { lon: v.lon, lat: v.lat, rot: course(v) || 0 } : where(v);
@@ -341,7 +361,7 @@ window.VesselLayer = (() => {
       if (!v) return;
       this.fol.start(id, where(v), FOLLOW_ZOOM);
       this.draw(true);
-      animate();
+      wake();                               // (zoomed in to follow: the draws timed again from now)
     }
     track(f, force) {
       if (f) this.fol.pan(f.geometry.coordinates);

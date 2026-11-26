@@ -225,7 +225,11 @@ def test_no_attribute_is_set_on_a_transmission_that_the_schema_does_not_name():
              "rerun_at": "a page's", "rerun_result": "a page's", "alt_text": "a page's", "alt_model": "a page's",
              "page": "the tap's carrier",
              # set only on the CAD of record (App._screen: never while forwarding to a hub, which screens itself)
-             "quality": "the CAD of record's (sizeup/stt_quality.py)", "unclear_text": "the CAD of record's"}
+             "quality": "the CAD of record's (sizeup/stt_quality.py)", "unclear_text": "the CAD of record's",
+             # the text of record's vocabulary correction: only where the term lists are (the hub, all-in-one; never a
+             # station: App._corr_put sets nothing without a corrector), #879 sizeup/stt_correct.py
+             "corr_text": "the CAD of record's (sizeup/stt_correct.py)", "corr_rules": "the CAD of record's",
+             "corr_v": "the CAD of record's"}
     found: dict[str, str] = {}
     for rel in ("sizeup/app.py", "sizeup/stt.py"):
         tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))

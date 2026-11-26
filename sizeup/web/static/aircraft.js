@@ -202,7 +202,9 @@ window.AircraftLayer = (() => {
 
   // ---- who is talking (#252): the hub's "atc" (talking, tx by hex), what plays here, a chip's aircraft ---------------
   const talk = { playing: "", pending: null };
-  const lights = new MapFollow.Lights();    // a chip's aircraft (picked) and an alert card's (hovered); the frames redraw
+  // a chip's aircraft (picked) and an alert card's (hovered); its pick's time up: redrawn then (the ring off), not at the
+  // next answer up to 2 s later (the frames run only while something moves)
+  const lights = new MapFollow.Lights(() => { for (const m of maps) m.draw(true); animate(); });
   const nowS = () => Date.now() / 1000 + ((typeof cad !== "undefined" && cad && cad.skew) || 0);
   const atcOf = (d) => (d && d.atc && !(typeof cad !== "undefined" && cad && cad.state && cad.state.atc && cad.state.atc.map === false) ? d.atc : null);
   window.addEventListener("sizeup:playing", (e) => {
@@ -323,8 +325,13 @@ window.AircraftLayer = (() => {
   // a visible map. Between draws the loop sleeps on a timer, as cadmap.js's rigs do (#453): a frame asked for on every
   // vsync (120 a second on a fast screen) ran the whole page's frame (style, the observers, the commit) for 4 to 20
   // draws a second, all the time the layer was on.
+  // Only the maps it is on and on screen (#887): an incident map with the layer off, or one in an Expand shut, neither
+  // sets the sleep (an off map at z16 woke it every FRAME_MS for draws that did nothing) nor is drawn; one coming on
+  // screen wakes it (MapFollow.screen).
   let raf = 0, sleepT = 0;
-  const wanted = () => anyOn() && document.visibilityState !== "hidden" && ((!!glide && glide.busy()) || ringsOn(store.data));
+  const live = (m) => m.isOn() && m.shown();
+  const anyLive = () => { for (const m of maps) if (live(m)) return true; return false; };
+  const wanted = () => anyLive() && document.visibilityState !== "hidden" && ((!!glide && glide.busy()) || ringsOn(store.data));
   function animate() {
     if (wanted() && !raf && !sleepT && window.requestAnimationFrame) raf = requestAnimationFrame(frame);
   }
@@ -338,6 +345,7 @@ window.AircraftLayer = (() => {
     if (!wanted()) return;
     let wait = Infinity;
     for (const m of maps) {
+      if (!live(m)) continue;
       const ms = m.frameMs();
       if (ts - (m.drawnAt || 0) >= ms - 2) {
         m.drawnAt = ts;
@@ -435,7 +443,8 @@ window.AircraftLayer = (() => {
       maps.add(this);
       store.subs.add(() => this.sync());
       this.map.on("click", (e) => this.clicked(e));
-      this.map.on("zoom", wake);            // closer in, the marks move faster on screen: drawn more often from now
+      this.screen = MapFollow.screen(this.map, () => { if (this.isOn()) wake(); });   // shown: drawn now (an Expand opened)
+      this.map.on("zoom", () => { if (live(this)) wake(); });   // closer in, the marks move faster on screen: drawn more often from now
       this.live = null;                     // the open box, kept up to date (#375): a MapFollow.LiveInfo
       // following (mapfollow.js): a drag (not a pinch), Recenter (cadmap.js), ✕ or a unit followed lets it go
       this.fol = new MapFollow.Follower(this.map, control.host, { cls: "ac-follow", textCls: "ac-follow-t", icon: "aircraft",
@@ -443,6 +452,7 @@ window.AircraftLayer = (() => {
       if (this.isOn()) kick();
     }
     get following() { return this.fol.id; }   // the aircraft this map keeps centred (its hex), or ""
+    shown() { return this.screen.shown(); }   // on screen (kept: MapFollow.screen), not an Expand shut
     // on: the viewer's (or the event's) set; on the Overview's maps also while an open pre-alert names an aircraft
     isOn() { return this.control.on(KEY, false) || this.alertOn(); }
     alertOn() { return this.control.profile !== "incident" && alerted.by.size > 0 && this.offSig !== alerted.key; }
@@ -567,7 +577,7 @@ window.AircraftLayer = (() => {
     draw(force) {
       const d = store.data;
       if (!d || !this.added || !this.isOn()) return;
-      if (!force && !this.map.getContainer().offsetParent) return;         // a map not on screen (the Expand closed)
+      if (!force && !this.shown()) return;                                  // a map not on screen (the Expand closed)
       const trails = [], marks = [], hl = [], now = Date.now(), lk = look(d), live = new Set();
       for (const a of d.aircraft || []) {
         live.add(a.hex);

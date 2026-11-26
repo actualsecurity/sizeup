@@ -1173,7 +1173,7 @@ class AtcWatch:
         conf, adsb = self.confidence(me, ctx)
         if conf < self.rules.threshold:
             if adsb and adsb[0] == "normal":
-                self.log(f"atc: {me.id}: held back ({adsb[1]}): {', '.join(h.text for h in hits)}")
+                self.log(f"atc: {me.id}: held back ({adsb[1]}): {len(hits)} rule hit(s)")     # (never the words)
             return None
         alert = self.build(me, ctx, conf, adsb)
         try:

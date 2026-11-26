@@ -209,7 +209,10 @@ STORED_BAD = [{"radios": 5}, {"radios": [5, None, {"label": []}]}, {"outbox": 5}
               {"version": {"build": "1234567", "update": {"failed": [1]}}},
               {"version": {"build": "1234567", "update": {"state": "updating", "to": HUB_SHA, "since": "x"}}},
               {"sdr": 5}, {"p25_systems": 5}, {"stt_terms": 5}, {"reception": 5},
-              {"rerun": 5}, {"name": 5}, {"name": []}]
+              {"rerun": 5}, {"name": 5}, {"name": []},
+              {"sdr": {"replace": 5, "missing": 5}},                  # (#903) a dongle swap's offers, of another type
+              {"sdr": {"replace": [5, {"missing": "a", "choices": 5, "jobs": 5, "absent_s": "x"}],
+                       "missing": [5, {"serial": "a", "group": "g", "last_seen": 1.0, "jobs": 5}]}}]
 
 
 @pytest.mark.parametrize("bad", STORED_BAD, ids=[next(iter(b)) + ":" + repr(next(iter(b.values()))) for b in STORED_BAD])

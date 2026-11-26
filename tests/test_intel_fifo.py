@@ -284,29 +284,28 @@ def test_a_first_time_unclear_row_is_nothing():
 
 # -- (i) the corrected text, (g) the bundle in air-time order (live) ---------------------------------------------------
 
-def test_a_row_with_a_corrected_text_scores_it_and_a_database_without_the_column_reads_the_text(live, tmp_path):
-    cad, n = live
-    cad.comms.record(ctx_row("c1-t0", "shots fired at 100 Example Ave", cad.clock()))
-    cad.intel.drain()
-    assert "corr_text" not in cad.intel._row_sql() and len(n.sent) == 1          # before #901: the text as is
-    from tests.test_cad import make_cad
-    cad2 = make_cad(tmp_path / "corr")
-    cad2.intel.notifier, cad2.intel.locate = n, example_locate
-    with cad2.store.lock:
-        cad2.store.db.execute("ALTER TABLE radio_traffic ADD COLUMN corr_text TEXT NOT NULL DEFAULT ''")
-    cad2.comms.record(ctx_row("c2-t0", "caller reports a loud noise at 100 Example Ave", cad2.clock()))
-    with cad2.store.lock:
-        cad2.store.db.execute("UPDATE radio_traffic SET corr_text = ? WHERE id = 'c2-t0'", (SHOTS,))
-    cad2.intel.drain()
-    assert cad2.intel._row_sql() == (                                  # the shape #901 writes for
+def test_a_row_with_a_corrected_text_scores_it_and_a_database_without_the_column_reads_the_text(live):
+    from sizeup.intel.engine import ROW_SQL, text_sql
+    cols = ["id", "start", "text", "status"]
+    assert text_sql(cols) == "text"                                    # before #901: the text as is
+    assert text_sql([*cols, "corr_text"]) == "COALESCE(NULLIF(corr_text, ''), text) AS text"
+    assert ROW_SQL.format(text=text_sql([*cols, "corr_text"]), extra="") == (     # the shape #901 writes for
         "SELECT id, start, end, source, system, service, dept, tier, talkgroup, channel, talker, rig, radio_id, "
-        "COALESCE(NULLIF(corr_text, ''), text) AS text, alt_text, model, status, rerun_result FROM radio_traffic "
-        "WHERE id = ?")                                                # (+ what made the text: the late rows' causes)
-    cad2.comms.on_context_text("c2-t0")
-    cad2.intel.drain()
-    [ev] = cad2.intel.events.open_events()
-    assert ev.category == "weapons" and len(n.sent) == 2
-    hits = {h["rule_id"] for h in cad2.store.q("SELECT rule_id FROM intel_hits WHERE traffic_id = 'c2-t0'")}
+        "COALESCE(NULLIF(corr_text, ''), text) AS text, alt_text, model, status FROM radio_traffic WHERE id = ?")
+    cad, n = live
+    with cad.store.lock:
+        if "corr_text" not in {r[1] for r in cad.store.db.execute("PRAGMA table_info(radio_traffic)")}:
+            cad.store.db.execute("ALTER TABLE radio_traffic ADD COLUMN corr_text TEXT NOT NULL DEFAULT ''")
+    cad.comms.record(ctx_row("c2-t0", "caller reports a loud noise at 100 Example Ave", cad.clock()))
+    with cad.store.lock:
+        cad.store.db.execute("UPDATE radio_traffic SET corr_text = ? WHERE id = 'c2-t0'", (SHOTS,))
+    cad.intel.drain()
+    assert "COALESCE(NULLIF(corr_text, ''), text) AS text" in cad.intel._row_sql()
+    cad.comms.on_context_text("c2-t0")
+    cad.intel.drain()
+    [ev] = cad.intel.events.open_events()
+    assert ev.category == "weapons" and len(n.sent) == 1
+    hits = {h["rule_id"] for h in cad.store.q("SELECT rule_id FROM intel_hits WHERE traffic_id = 'c2-t0'")}
     assert "pd.shots" in hits
 
 
@@ -411,10 +410,10 @@ def test_a_text_that_reads_unclear_now_is_withdrawn_too():
 
 def test_a_cached_row_query_naming_a_missing_column_is_looked_up_again(live):
     cad, n = live
-    cad.intel._row_q = cad.intel._row_sql().replace("status", "status, corr_text")   # as if a column went away
+    cad.intel._row_q = cad.intel._row_sql().replace("status", "status, no_such_col")   # as if a column went away
     cad.comms.record(ctx_row("c9-t0", SHOTS, cad.clock()))
     cad.intel.drain()
-    assert len(n.sent) == 1 and "corr_text" not in cad.intel._row_q
+    assert len(n.sent) == 1 and "no_such_col" not in cad.intel._row_q
 
 
 # -- #923 review: ties and disregards by air time, late from the clip's end, never two events of one row ---------------
