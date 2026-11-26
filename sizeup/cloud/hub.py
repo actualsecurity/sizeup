@@ -2373,6 +2373,7 @@ class HubApp(App):
             except Exception:  # noqa: BLE001 - a channel the hub can't place: after the rest
                 services[key] = ""
         want = ch.want(services)
+        self.sttpool.resident = frozenset(want)   # (#869: a challenger never on a model live traffic decodes on)
         tries = ch.tries(services, want)          # (#869: the challengers, on demand only: never resident)
         now = time.time()
         for key, at in list(self.__dict__.get("_shadow_seen", {}).items()):   # (#878: an AWS channel's candidates,
@@ -3181,16 +3182,21 @@ class HubApp(App):
         service = ch.service_of(key)
         champ = ch.model_for(key, service)
         promoted = ch.promoted(key)
-        since = float(promoted.get("at") or 0.0)
-        rows = [r for r in self.stt_runs.challenges(key, since)        # (the current pair's samples only)
+        rolled = (ch.settings().get(key) or {}).get("rolled_back") or {}
+        # (the current pair's samples only: since its promotion, and never the evidence a rollback reversed)
+        since = max(float(promoted.get("at") or 0.0), float(rolled.get("at") or 0.0) if isinstance(rolled, dict) else 0.0)
+        rows = [r for r in self.stt_runs.challenges(key, since)
                 if c is not None and r["want"] == c[0] and r["score"].get("champion") == champ
                 and r["score"].get("norm") == sttscore.NORM]
         edits = self._corrections([r["clip_id"] for r in rows])
         samples = []
         for r in rows:
             s = r["score"]
-            if r["clip_id"] in edits:
-                s = sttscore.with_edit(s, self.stt_runs.text_of(r["clip_id"], champ), r["text"], edits[r["clip_id"]])
+            if r["clip_id"] in edits:           # (the champion's text of record by its catalog id; a loop: no text)
+                champ_text = next((str(x.get("text") or "") for x in reversed(self.stt_runs.of(r["clip_id"]))
+                                   if x.get("role") == "text" and self._model_id(x.get("model")) == champ), "")
+                s = sttscore.with_edit(s, champ_text, "" if r.get("status") == "loop" else r["text"],
+                                       edits[r["clip_id"]])
             samples.append(s)
         out = sttscore.compare(samples)
         out.update(key=key, champion=champ, challenger=c[0] if c else "", pct=c[1] if c else 0.0,
@@ -3238,8 +3244,9 @@ class HubApp(App):
             raise ValueError(f"not enough evidence to promote: {said}")
         if not confirm:
             return {"confirm": said, "board": board}
-        self.stt_champion_change(key, board["champion"], board["challenger"], operator, "promote")
-        old, new = self.stt_choices.promote(key, why=f"by {operator}" if operator else "")
+        old, new = self.stt_choices.promote(       # (the pair the evidence was for; intel told before it is stored)
+            key, why=f"by {operator}" if operator else "", expect=(board["champion"], board["challenger"]),
+            before=lambda k, was, to: self.stt_champion_change(k, was, to, operator, "promote"))
         return {"old": old, "new": new, "evidence": said}
 
     def _challenge_watch(self, key: str) -> None:
@@ -3261,9 +3268,9 @@ class HubApp(App):
             return
         why = (f"{b['challenger']} scored {b['chall']:.3f} against {b['champion']}'s {b['champ']:.3f} over {b['n']} "
                f"clips since the promotion")
-        self.stt_champion_change(key, str(p.get("to") or ""), str(p.get("from") or ""), "system: automatic rollback",
-                                 "rollback")
-        got = ch.roll_back(key, why)
+        got = ch.roll_back(key, why, expect_to=str(p.get("to") or ""),   # (intel told before it is stored)
+                           before=lambda k, was, to: self.stt_champion_change(k, was, to, "system: automatic rollback",
+                                                                              "rollback"))
         if got is None:
             return
         old, new = got
@@ -3305,27 +3312,27 @@ class HubApp(App):
         if item is None:
             return 0
         service = ch.service_of(key)
+        if time.time() < self.__dict__.setdefault("_shadow_pause", {}).get(key, 0.0):
+            return 0
+        seconds = max(0.0, float(getattr(item, "end", 0.0) or 0.0) - float(getattr(item, "start", 0.0) or 0.0))
         n = 0
-        pcm = None
         for model in ch.candidates(key, service):
             if not sttscore.sampled(job.id, f"aws|{model}", sttscore.SHADOW_PCT):
                 continue
-            pcm = self._rerun_pcm(item) if pcm is None else pcm
-            if pcm is None:
-                return n
-            seconds = len(pcm) / 8000.0
             if not self.sttpool.chall_ready(key, model, seconds)[0]:
-                continue
-            self._chall_exec(self._shadow_queue, item, page, key, model, text, service, pcm,
-                             getattr(job, "vocab_v", "") or "")
+                continue                           # (checked before any audio is read: on the AWS thread, cheap)
+            self._chall_exec(self._shadow_queue, item, page, key, model, text, service)
             n += 1
         return n
 
-    def _shadow_queue(self, item, page, key: str, model: str, text: str, service: str, pcm, aws_vocab: str) -> None:
+    def _shadow_queue(self, item, page, key: str, model: str, text: str, service: str) -> None:
         cid = str(getattr(item, "id", "") or "")
+        pcm = self._rerun_pcm(item)                 # (the listening clip AWS heard: read here, never on AWS's thread)
+        if pcm is None:
+            return
         sj = sttpool.Job(f"{cid}~sh~{model}", self._pool_class(item, key), key, "page" if page is not None else "traffic",
                          len(pcm) / 8000.0, audio=self._chall_audio(cid, page, pcm, sttinput.INPUT_LISTENING),
-                         on_done=self._shadow_done, on_fallback=self._challenge_fell,
+                         on_done=self._shadow_done, on_fallback=self._shadow_fell,
                          clip_end=self._hub_time(getattr(item, "end", None)), chall=True, bg=True, forced=True,
                          gpu_only=True, avoid=frozenset(self._guard_avoid()),
                          extra={"clip": cid, "page": page, "ref_text": text, "service": service, "shadow": True,
@@ -3337,6 +3344,18 @@ class HubApp(App):
         self._pool_models(sj, item, key)
         sj.model = model
         self.sttpool.submit(sj)
+
+    def _shadow_fell(self, job: sttpool.Job, why: str) -> None:
+        """A shadow run that didn't happen: a sample less. Failures on the worker count toward the channel's own shadow
+        pause (never its challenger's)."""
+        if job.extra.get("fell") in ("lease", "error"):
+            fails = self.__dict__.setdefault("_shadow_fails", {})
+            fails[job.channel] = fails.get(job.channel, 0) + 1
+            if fails[job.channel] >= self.CHALLENGE_FAILS:
+                fails[job.channel] = 0
+                self.__dict__.setdefault("_shadow_pause", {})[job.channel] = time.time() + self.CHALLENGE_PAUSE_S
+                self.hub.log(f"stt shadow: {job.channel}: {self.CHALLENGE_FAILS} failed in a row: not sampled for "
+                             f"{self.CHALLENGE_PAUSE_S / 60:.0f} min")
 
     def _shadow_done(self, job: sttpool.Job, res: dict) -> None:
         self._chall_exec(self._shadow_score, job, dict(res))
@@ -3356,6 +3375,7 @@ class HubApp(App):
             text, status = judge(raw, job.seconds, prompt=sent, vocab_v="list" if ctx == "list" and sent else
                                  str(job.extra.get("vocab_v") or "") if ctx == "prompt" else "")
         score = None
+        self.__dict__.setdefault("_shadow_fails", {})[job.channel] = 0
         item = job.extra.get("page") or self._find(cid)[0]
         if used == job.model:
             ref = str(job.extra.get("ref_text") or "")

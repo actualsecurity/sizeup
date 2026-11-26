@@ -1228,7 +1228,11 @@ class App:
             names = self._talker_names(item)[:PROFILE_NAMES] if self.cfg.stt_talker_prompt != "off" else []
             return " ".join(p for p in (base, ", ".join(names) + "." if names else "") if p)
         parts = [self.cfg.stt_prompt]
-        if self.cfg.stt_talker_prompt != "off":
+        if self.cfg.stt_talker_prompt != "off" and str(getattr(item, "system", "") or "") in radios_mod.OTHER_P25:
+            names = self._talker_names(item)[:PROFILE_NAMES]   # (another system's without a profile: its exact named
+            if names:                                          # radios only, never its talker text: range labels)
+                parts.append(", ".join(names) + ".")
+        elif self.cfg.stt_talker_prompt != "off":
             named, blocked = self._talker_hints(item)
             parts.append(talker_prompt(getattr(item, "unit", "") or "", getattr(item, "start", None),
                                        with_time=self.cfg.stt_talker_prompt == "ids+time",

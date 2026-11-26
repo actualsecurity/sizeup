@@ -60,6 +60,7 @@ CHALL_MAX_S = 30.0             # a clip longer than this isn't sampled (it would
 CHALL_CAP_CHANNEL_H = 30       # challenger runs an hour per channel at most ...
 CHALL_CAP_WORKER_H = 60        # ... and per worker
 CHALL_QUEUE_MAX = 20           # challengers waiting at most (a sample less beyond)
+CHALL_CAP = "challenger"       # a worker's caps word: it takes challenger jobs (greedy, the watch, try models: #964)
 PER_AUDIO_S = 0.25        # each lease (and cap) this much longer per second of audio (never a pre-alert class's: its
                           # deadline is absolute, so a long page can't hold a dead worker's clip for longer)
 READY_S = 15.0            # a worker seen this recently (or in a claim now) is ready ...
@@ -151,6 +152,11 @@ def model_label(model: str, worker: str = "", kind: str = "gpu") -> str:
     if kind == "station":
         return f"{name} (station {worker.removeprefix('station:')})"
     return f"{name} (GPU {worker})" if worker else f"{name} (GPU)"
+
+
+def model_id(model: str) -> str:
+    """A worker's model as a catalog id ("ggml-large-v3-turbo-q5_0.bin" -> "large-v3-turbo-q5_0")."""
+    return str(model or "").rsplit("/", 1)[-1].rsplit("\\", 1)[-1].removeprefix("ggml-").removesuffix(".bin")
 
 
 def _short(wid: str) -> str:
@@ -248,6 +254,7 @@ class Worker:
     lost: int = 0
     last_job: float | None = None
     leases: set = field(default_factory=set)
+    caps: frozenset = frozenset()               # what it says it can do: "challenger" (#869: watch, greedy, try models)
     models: list = field(default_factory=list)  # a GPU worker's models loaded now: its whisper_server's, then the
                                                 # catalog's that answer (its claim and heartbeat say)
     stt_state: dict = field(default_factory=dict)   # each model it was asked for: ready, downloading, no room ...
@@ -277,6 +284,8 @@ class Pool:
         self.llm_busy: Callable[[str], bool] = lambda wid: False   # LLM work held by this worker or queued (the hub's
                                                   # infer lane, read without its lock): no challenger meanwhile
         self.challenges = {"done": 0, "skipped": 0, "preempted": 0}   # challengers (never in the numbers below)
+        self.resident: frozenset = frozenset()     # the champions (the hub's want): models live traffic decodes on;
+                                                  # a challenger never on one (its server decodes one clip at a time)
         self._chall_runs: deque = deque()         # (at, channel, worker) of each challenger leased: the hourly caps
         self._cv = threading.Condition()
         self._queue: list[Job] = []
@@ -371,7 +380,7 @@ class Pool:
     def seen(self, wid: str, state: str | None = None, model: str | None = None, gpu: dict | None = None,
              version: str | None = None, kind: str | None = None, load: dict | None = None,
              update: dict | None = None, keep_awake: dict | None = None, reason: str | None = None,
-             models: list | None = None, stt_state: dict | None = None) -> Worker:
+             models: list | None = None, stt_state: dict | None = None, caps: list | None = None) -> Worker:
         """A worker's request (hello, state, claim): its state and when it was last seen. A worker that is no longer
         online hands its pre-alert and Auto · normal jobs back at once (a normal clip has the stations and AWS still
         ahead of it; the rest run to their lease: it may finish them). None: a worker
@@ -408,6 +417,8 @@ class Pool:
                 w.bye = reason == "shutdown"
             if isinstance(models, list):
                 w.models = [str(m)[:48] for m in models[:16] if isinstance(m, str)]
+            if isinstance(caps, list):
+                w.caps = frozenset(str(c)[:24] for c in caps[:16] if isinstance(c, str))
             if isinstance(stt_state, dict):
                 w.stt_state = {str(k)[:48]: str(v)[:60] for k, v in list(stt_state.items())[:16]}
             if isinstance(gpu, dict):
@@ -531,7 +542,7 @@ class Pool:
         """(lock held) May this GPU worker take background work now (#878): it holds nothing and is in a claim, no
         other job waits, no priority clip came in the last BG_QUIET_S, and the clip is short (it is back at once)."""
         return (self._ready(w, now) and self._free(w) and now - self._prio_at >= BG_QUIET_S
-                and not any(not j.bg and not j.extra.get("station_only") for j in self._queue)
+                and not any(not j.bg and not j.chall and not j.extra.get("station_only") for j in self._queue)
                 and (seconds is None or seconds <= BG_GPU_MAX_S))
 
     def _norm_free(self, w: Worker, now: float) -> bool:
@@ -579,6 +590,8 @@ class Pool:
         hourly caps (its channel's, the worker's)."""
         if w.kind != "gpu" or j.model not in w.models or w.polling <= 0 or w.leases or not self._ready(w, now):
             return False
+        if CHALL_CAP not in w.caps or not self._chall_model_ok(w, j.model):
+            return False
         if now - self._any_at < CHALL_QUIET_S or any(not o.chall and not o.extra.get("station_only")
                                                      for o in self._queue):
             return False
@@ -588,6 +601,11 @@ class Pool:
             return not self.llm_busy(w.id)
         except Exception:  # noqa: BLE001 - can't tell: no challenger
             return False
+
+    def _chall_model_ok(self, w: Worker, model: str) -> bool:
+        """(lock held) A challenger's model never one live traffic decodes on this worker: its primary (whisper_server's)
+        nor a champion (resident): a server decodes one clip at a time, so a live clip would wait behind it."""
+        return model not in self.resident and model != model_id(w.model)
 
     def _chall_room(self, channel: str, wid: str = "", now: float | None = None) -> bool:
         """(lock held) Under the hourly caps: CHALL_CAP_CHANNEL_H for the channel, CHALL_CAP_WORKER_H for the worker."""
@@ -606,7 +624,8 @@ class Pool:
         if seconds <= 0 or seconds > CHALL_MAX_S:
             return False, "too long"
         with self._cv:
-            if not any(w.kind == "gpu" and model in w.models and self._ready(w, now) for w in self.workers.values()):
+            if not any(w.kind == "gpu" and model in w.models and self._ready(w, now) and CHALL_CAP in w.caps
+                       and self._chall_model_ok(w, model) for w in self.workers.values()):
                 return False, "no worker has the model loaded"
             if not self._chall_room(channel, "", now):
                 return False, "its hourly cap"
@@ -889,12 +908,13 @@ class Pool:
         return min((j for j in self._queue if w is None or self._fits(w, j, now)), key=key, default=None)
 
     def claim(self, wid: str, wait: float = 0.0, state: str | None = None, model: str | None = None,
-              kind: str | None = None, load: dict | None = None, models: list | None = None) -> Job | None:
+              kind: str | None = None, load: dict | None = None, models: list | None = None,
+              caps: list | None = None) -> Job | None:
         """A worker's long poll: the best job (leased to it) or None after `wait`. Only an online worker gets one.
         models: the models it has loaded now (a job for one of them goes to it first: _fits)."""
         wait = max(0.0, min(CLAIM_WAIT_MAX_S, float(wait)))
         end = time.monotonic() + wait
-        w = self.seen(wid, state, model, kind=kind, load=load, models=models)
+        w = self.seen(wid, state, model, kind=kind, load=load, models=models, caps=caps)
         if w is None:
             return None
         with self._cv:

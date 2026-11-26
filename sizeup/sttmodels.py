@@ -231,10 +231,13 @@ class Choices:
         self.mdb.put(META, json.dumps(cur, separators=(",", ":"), sort_keys=True))
         self._cache = (0.0, {})
 
-    def promote(self, key: str, service: str | None = None, why: str = "") -> tuple[dict, dict]:
+    def promote(self, key: str, service: str | None = None, why: str = "", expect: tuple | None = None,
+                before: Callable[[str, str, str], None] | None = None) -> tuple[dict, dict]:
         """The channel's challenger becomes its model; the model it replaces becomes the challenger (at the same share),
         so the two go on being compared: if the new one scores worse over the samples since (sttscore.should_roll_back),
-        roll_back() puts the old one back. (old, new). ValueError with no challenger."""
+        roll_back() puts the old one back. (old, new). ValueError with no challenger, or when the pair isn't expect
+        (champion, challenger: the one the evidence was for). before(key, from, to): under the lock, before it is
+        stored (intel told first: HubApp.stt_champion_change)."""
         with self._lock:
             cur = dict(self._read())
             key = self.key_of(key)
@@ -245,21 +248,28 @@ class Choices:
                 raise ValueError("no challenger on this channel")
             was = old.get("model") if old.get("model") in self.catalog else \
                 self.default_for(self.service_of(key) if service is None else service)
+            if expect is not None and (was, ch[0]) != tuple(expect):
+                raise ValueError("the channel's models changed meanwhile: look at the evidence again")
+            if before is not None:
+                before(key, was, ch[0])
             new = dict(old, model=ch[0], challenger=was, promoted={"from": was, "to": ch[0], "at": self.clock(),
                                                                    **({"why": why[:80]} if why else {})})
             cur[key] = new
             self._write(cur)
         return old, new
 
-    def roll_back(self, key: str, why: str) -> tuple[dict, dict] | None:
+    def roll_back(self, key: str, why: str, expect_to: str | None = None,
+                  before: Callable[[str, str, str], None] | None = None) -> tuple[dict, dict] | None:
         """A promotion undone: the model it replaced is the channel's again, the challenger cleared (the rolled-back
         model isn't sampled again until an admin says so). None when nothing was promoted."""
         with self._lock:
             cur = dict(self._read())
             old = dict(cur.get(key) or {})
             p = old.get("promoted") if isinstance(old.get("promoted"), dict) else None
-            if not p or p.get("from") not in self.catalog:
+            if not p or p.get("from") not in self.catalog or (expect_to is not None and p.get("to") != expect_to):
                 return None
+            if before is not None:
+                before(key, str(p.get("to") or ""), str(p["from"]))
             new = {k: v for k, v in old.items() if k not in ("promoted", "challenger", "pct")}
             new["model"] = p["from"]
             new["rolled_back"] = {"from": p.get("to"), "at": self.clock(), "why": why[:120]}
@@ -461,14 +471,15 @@ def _items(text: str) -> list[str]:
 
 
 ECHO_MIN_ITEMS = 3        # a read-back: at least this many context phrases ...
-ECHO_SLOW_WPS = 0.8       # ... or (two, all of it) words this sparse for the clip's length: a long clip read as the list
+ECHO_SLOW_WPS = 0.3       # ... or (two, all of it) words this sparse for a clip ECHO_SLOW_MIN_S or longer: a long clip
+ECHO_SLOW_MIN_S = 8.0     # read as the list (a short call-up with a squelch tail and pauses is speech: "908, HQ" in 3 s)
 
 
 def context_echo(text: str, context: list, seconds: float | None = None) -> bool:
     """A llama-asr model gave its context back instead of what was said (Qwen3-ASR does when the list nearly matches a
     short clip). Every phrase of the text a context item, and either ECHO_MIN_ITEMS or more of them ("Engine 60, Ladder
-    31, 60 Control"), or two that are far too few words for the clip's length (seconds: under ECHO_SLOW_WPS words a
-    second). A real call-up of two names ("Sixty Control, Engine Sixty-Three" said in 2 s) is kept; a phrase that
+    31, 60 Control"), or two that are far too few words for a long clip (seconds: ECHO_SLOW_MIN_S or more, under
+    ECHO_SLOW_WPS words a second). A real call-up of two names ("Sixty Control, Engine Sixty-Three" said in 2 s) is kept; a phrase that
     isn't a name ("responding", "on scene") is speech."""
     if not text or not context:
         return False
@@ -480,4 +491,5 @@ def context_echo(text: str, context: list, seconds: float | None = None) -> bool
     if hits >= ECHO_MIN_ITEMS:
         return True
     words = sum(len(i.split()) for i in items)
-    return hits >= 2 and isinstance(seconds, (int, float)) and seconds > 0 and words / seconds < ECHO_SLOW_WPS
+    return (hits >= 2 and isinstance(seconds, (int, float)) and seconds >= ECHO_SLOW_MIN_S
+            and words / seconds < ECHO_SLOW_WPS)

@@ -256,8 +256,9 @@ def test_the_models_context_routing_and_discard_paths(tmp_path, logs):
 
     class ModelWorker(FakeWorker):
         def post(self, path, body):
-            if path.endswith("/claim"):
-                body = dict(body, models=["large-v3-turbo-q5_0", qwen])
+            if path.endswith(("/claim", "/hello", "/state")):
+                body = dict(body, models=["large-v3-turbo-q5_0", qwen] if path.endswith("/claim")
+                            else body.get("models"), caps=["challenger"])
             return call(self.url + path, "POST", body, token=self.token)
 
     w = None
@@ -307,8 +308,9 @@ def test_the_challenger_path(tmp_path, logs, monkeypatch):
 
     class ModelWorker(FakeWorker):
         def post(self, path, body):
-            if path.endswith("/claim"):
-                body = dict(body, models=["large-v3-turbo-q5_0", qwen, q8])
+            if path.endswith(("/claim", "/hello", "/state")):
+                body = dict(body, models=["large-v3-turbo-q5_0", qwen, q8] if path.endswith("/claim")
+                            else body.get("models"), caps=["challenger"])
             elif path.endswith("/complete") and self.jobs:
                 job = self.jobs[-1]
                 body = dict(body, model=job.get("model") or "large-v3-turbo-q5_0")
@@ -353,8 +355,9 @@ def test_the_shadow_path_against_aws(tmp_path, logs, monkeypatch):
 
     class ModelWorker(FakeWorker):
         def post(self, path, body):
-            if path.endswith("/claim"):
-                body = dict(body, models=["large-v3-turbo-q5_0", qwen])
+            if path.endswith(("/claim", "/hello", "/state")):
+                body = dict(body, models=["large-v3-turbo-q5_0", qwen] if path.endswith("/claim")
+                            else body.get("models"), caps=["challenger"])
             elif path.endswith("/complete") and self.jobs:
                 body = dict(body, model=self.jobs[-1].get("model") or "large-v3-turbo-q5_0")
             return call(self.url + path, "POST", body, token=self.token)

@@ -60,8 +60,9 @@ def test_on_a_hub_an_aws_channels_candidate_runs_in_shadow_and_is_scored_against
 
     class ModelWorker(FakeWorker):
         def post(self, path, body):
-            if path.endswith("/claim"):
-                body = dict(body, models=[Q5, QWEN])
+            if path.endswith(("/claim", "/hello", "/state")):
+                body = dict(body, models=[Q5, QWEN] if path.endswith("/claim") else body.get("models"),
+                            caps=["challenger"])
             elif path.endswith("/complete") and self.jobs:
                 body = dict(body, model=self.jobs[-1].get("model") or Q5)
             return call(self.url + path, "POST", body, token=self.token)

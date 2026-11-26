@@ -542,6 +542,10 @@ class Lane:
         if job.deadline_at - self.clock() >= MIN_LEFT_S and not self._stop.is_set():
             self._queue.append(job)
             self._cv.notify_all()
+            try:                                   # (#869: queued again: challengers step aside too; the pool never
+                self.on_queued()                   # calls into the lane under its own lock: no cycle)
+            except Exception:  # noqa: BLE001 - requeued all the same
+                pass
             return None
         return job, ("gaming" if job.last_why == "gaming" else "deadline")
 

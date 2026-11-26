@@ -308,20 +308,20 @@ class Runs:
         try:
             with self._lock:
                 cur = self._open().execute(
-                    "SELECT clip_id, model, want, done_at, text, score FROM stt_runs WHERE role = ? AND "
+                    "SELECT clip_id, model, want, done_at, text, score, status FROM stt_runs WHERE role = ? AND "
                     "channel = ? AND done_at >= ? AND score != '' ORDER BY done_at DESC LIMIT ?",
                     (role if role in ROLES else "challenger", channel, since, int(limit)))
                 rows = cur.fetchall()
         except Exception:  # noqa: BLE001 - none
             return []
         out = []
-        for clip_id, model, want, done_at, text, score in rows:
+        for clip_id, model, want, done_at, text, score, status in rows:
             try:
                 sc = json.loads(score)
             except ValueError:
                 continue
             out.append({"clip_id": clip_id, "model": model, "want": want, "done_at": done_at, "text": text,
-                        "score": sc})
+                        "score": sc, "status": status})
         return out
 
     def shadow_channels(self, since: float = 0.0) -> list[str]:
