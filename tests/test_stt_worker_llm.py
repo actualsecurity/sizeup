@@ -500,22 +500,30 @@ def test_llm_jobs_switched_off_on_the_hub_the_worker_asks_again_a_minute_later(t
     assert 55 < w._llm_until - w.clock() <= 60
 
 
-def test_the_readme_pins_both_model_choices_and_the_example_config_uses_the_default():
-    """Switching the model is config only: both GGUFs are pinned (revision, size, SHA256) in the README, and the
-    example worker.toml loads Qwen3-8B with its own hash."""
+def test_the_readme_pins_every_model_choice_and_the_example_config_uses_the_default():
+    """Switching the model is config only: every GGUF is pinned (revision, size, SHA256) in the README, the example
+    worker.toml loads Qwen3-8B with its own hash, and the switch to Qwen3-4B is its three lines."""
     import re
     readme = (Path(W.__file__).parent / "README.md").read_text()
     pins = {"Qwen3-8B-Q4_K_M.gguf": ("Qwen/Qwen3-8B-GGUF/resolve/7c41481f57cb95916b40956ab2f0b139b296d974",
                                      "5,027,783,488", "D98CDCBD03E17CE47681435B5150E34C1417F50B5C0019DD560E4882C5745785"),
             "google_gemma-3-12b-it-Q4_K_M.gguf": (
                 "bartowski/google_gemma-3-12b-it-GGUF/resolve/648e3a36a77c8a9f12d86e741f9dcb9089c769c4",
-                "7,300,575,264", "FC57F67EFA46D711C346E587CBEF7D049E95F3DF8DB2EB2271153343EF0ACC7B")}
+                "7,300,575,264", "FC57F67EFA46D711C346E587CBEF7D049E95F3DF8DB2EB2271153343EF0ACC7B"),
+            "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf": (
+                "bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/resolve/ae44f08e1392f39c0e474af10c3ff8355c8b6688",
+                "2,497,280,736", "2FDE00CE69DD4899C70D020845E2638353015BBA0FDF161B3EB965F2BCA4464E")}
     for name, (url, size, sha) in pins.items():
         assert f"{url}/{name}" in readme and size in readme
         assert f'(Get-FileHash "$d\\models\\{name}").Hash -eq \'{sha}\'' in readme
-    (example,) = re.findall(r"```toml\n(.*?)```", readme, re.S)
+    (example,) = [b for b in re.findall(r"```toml\n(.*?)```", readme, re.S) if "hub_url" in b]
     assert 'llm_model_sha256 = "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785"' in example
     assert "models\\Qwen3-8B-Q4_K_M.gguf" in example and "'--reasoning', 'off'" in example
+    (small,) = [b for b in re.findall(r"```ini\n(.*?)```", readme, re.S) if "Qwen3-4B" in b]     # (worker.toml lines)
+    assert 'llm_model_sha256 = "2fde00ce69dd4899c70d020845e2638353015bba0fdf161b3eb965f2bca4464e"' in small
+    toml = __import__("tomllib").loads(small)
+    assert toml["llm_server"][toml["llm_server"].index("-m") + 1] == "models\\Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+    W.check_llm_argv(toml["llm_server"])                  # (only options the worker allows)
 
 
 # --- review fixes (#755) --------------------------------------------------------------------------------------------

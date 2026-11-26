@@ -238,7 +238,7 @@ def test_install_ps1_dry_run(tmp_path, args):
         return
     llm = args[1] == "yes"
     for key, pin in ART.items():
-        if key == "gemma3_12b":
+        if key in ("gemma3_12b", "qwen3_4b"):          # (the other choices: the README's, never the installer's)
             assert pin["url"] not in out
             continue
         wanted = llm or not key.startswith(("llama", "qwen"))
