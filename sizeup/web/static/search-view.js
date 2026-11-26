@@ -23,7 +23,7 @@ window.SearchView = (() => {
   const INPUT = { where: "#sv-where", text: "#sv-text", type: "#sv-type", unit: "#sv-unit", disposition: "#sv-disp",
                   from: "#sv-from", to: "#sv-to" };
   const st = { q: {}, page: 0, tab: "calls", seq: 0, data: null, map: null, mapReady: false, listsSig: "", notes: null, hyTimer: null,
-               intel: false, iseq: 0, idata: null, isig: "", ipins: null, iq: null };
+               intel: false, iseq: 0, idata: null, isig: "", ipins: null, iq: null, paging: false };
   const IKEY = "sizeup.searchIntel";
   const TABS = ["notes", "preplan", "hydrants"];
   const HY_LIMIT = 50;
@@ -73,7 +73,8 @@ window.SearchView = (() => {
   }
   function close() { st.seq++; st.iseq++; if (window.Preplan) Preplan.closeSearch(); }
 
-  function submit(page = 0) {
+  function submit(page = 0, paging = false) {
+    st.paging = paging;                        // Newer / Older: the calls paged, the intel search as it is
     const q = Object.fromEntries(KEYS.map((k) => [k, $(INPUT[k]).value.trim()]));
     const h = "#search" + (params(q, page).toString() ? `?${params(q, page)}` : "");
     if (location.hash === h) { st.q = q; st.page = page; return run(); }
@@ -108,7 +109,8 @@ window.SearchView = (() => {
 
   // ---- calls ----------------------------------------------------------------------------------------------------
   async function run() {
-    runIntel();
+    runIntel(st.paging);
+    st.paging = false;
     const seq = ++st.seq;
     const p = params(st.q, st.page);
     setText($("#sv-count"), "Searching…");
@@ -251,7 +253,13 @@ window.SearchView = (() => {
   }
   function openIntel(id) { location.hash = window.PrealertInfo ? PrealertInfo.href("intel", id) : `#prealert/intel/${id}`; }
   const CALL_ONLY = ["type", "unit", "disposition"];
-  async function runIntel() {
+  function intelQuery() {
+    const p = new URLSearchParams();
+    for (const k of ["where", "text", "from", "to"]) if (st.q[k]) p.set(k, st.q[k]);
+    return p.toString();
+  }
+  async function runIntel(paging = false) {
+    if (paging && st.idata && !st.idata.calls_only && intelOn() && st.tab === "calls" && intelQuery() === st.iq) return;
     const seq = ++st.iseq;
     const box = $("#sv-intel-box");
     if (!intelOn() || st.tab !== "calls") {
@@ -263,10 +271,9 @@ window.SearchView = (() => {
     }
     show(box, true);
     if (CALL_ONLY.some((k) => st.q[k])) { renderIntel({ events: [], total: 0, calls_only: true }); return; }
-    const p = new URLSearchParams();
-    for (const k of ["where", "text", "from", "to"]) if (st.q[k]) p.set(k, st.q[k]);
-    if (p.toString() !== st.iq || !st.idata) setText($("#sv-intel-n"), "Searching…");    // (the same search: as it is)
-    st.iq = p.toString();
+    const p = intelQuery();
+    if (p !== st.iq || !st.idata) setText($("#sv-intel-n"), "Searching…");    // (the same search: as it is)
+    st.iq = p;
     try {
       const d = await api("GET", `/api/cad/intel/search?${p}`);
       if (seq === st.iseq) renderIntel(d);
@@ -298,7 +305,10 @@ window.SearchView = (() => {
     const tr = el("tr", "ev sv-irow");
     tr.tabIndex = 0;
     tr.dataset.id = String(e.id);
-    if ((e.matched || []).length) tr.title = `Words in: ${e.matched.join(", ")}`;
+    if ((e.matched || []).length) {
+      tr.title = `Words in: ${e.matched.join(", ")}`
+        + (e.matched.includes("radio") ? " (radio: any of its transmissions or their corrected text; More info lists the last 12)" : "");
+    }
     tr.addEventListener("click", () => openIntel(e.id));
     tr.addEventListener("keydown", (ev) => { if (ev.key === "Enter" && ev.target === tr) openIntel(e.id); });
     const cat = el("td", "il-cat");
@@ -437,8 +447,8 @@ window.SearchView = (() => {
     if (window.MePrefs) MePrefs.changed("search");             // the person's, on the hub (#823)
     if (st.tab === "calls") runIntel();
   });
-  $("#sv-prev").addEventListener("click", () => submit(Math.max(0, st.page - 1)));
-  $("#sv-next").addEventListener("click", () => submit(st.page + 1));
+  $("#sv-prev").addEventListener("click", () => submit(Math.max(0, st.page - 1), true));
+  $("#sv-next").addEventListener("click", () => submit(st.page + 1, true));
   for (const b of document.querySelectorAll("#sv-tabs button")) b.addEventListener("click", () => tab(b.dataset.tab));
   $("#sv-notes-all").addEventListener("change", runNotes);
   $("#sv-note-add").addEventListener("click", () => window.AddrHistory.noteForm($("#sv-note-form"), { where: $("#sv-where").value.trim() }, runNotes));

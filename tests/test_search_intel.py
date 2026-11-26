@@ -171,12 +171,44 @@ def test_it_reads_the_first_at_index(site, monkeypatch):
     cad, _clock = site
     save(cad, precision="address", lat=41.0, lon=-73.7, label_full="12 Example Road, Rye")
     seen = []
-    real = cad.store.q
-    monkeypatch.setattr(cad.store, "q", lambda sql, args=(): (seen.append((sql, args)), real(sql, args))[1])
+    real = cad.addrs._rq
+    monkeypatch.setattr(cad.addrs, "_rq", lambda sql, args=(): (seen.append((sql, args)), real(sql, args))[1])
     search(cad, where="example road")
     sql, args = next(x for x in seen if "LIMIT :scan" in x[0])
     plan = " ".join(r["detail"] for r in real(f"EXPLAIN QUERY PLAN {sql}", args))
     assert "intel_events_first" in plan and "TEMP B-TREE" not in plan
+
+
+def test_its_reads_are_off_the_store_lock(site, monkeypatch):
+    """#944 review: the scan, why each didn't push and the transcripts on the calls search's read-only connection,
+    never the store's (the lock every console and radio write takes)."""
+    cad, _clock = site
+    heard(cad, "c1-t0", "shots fired at Sample St and Test Rd", T0)
+    real = cad.store.q
+
+    def q(sql, args=()):
+        assert not any(t in sql for t in ("FROM intel_events e", "FROM radio_traffic")), sql
+        return real(sql, args)
+    monkeypatch.setattr(cad.store, "q", q)
+    ro = []
+    rq = cad.addrs._rq
+    monkeypatch.setattr(cad.addrs, "_rq", lambda sql, args=(): (ro.append(sql.split(" FROM ")[1].split()[0]), rq(sql, args))[1])
+    d = search(cad, where="sample st", text="fired")
+    assert d["events"][0]["matched"] == ["radio"] and d["events"][0]["held"] is None
+    assert search(cad, text="fired")["events"][0]["level"] == "push"
+    assert {"intel_events", "radio_traffic"} <= set(ro)
+
+
+def test_the_area_looks_only_at_the_ranges_newest_events(site, monkeypatch):
+    """The area is applied to the newest SEARCH_SCAN events read, never a walk of the whole range."""
+    cad, _clock = site
+    far = save(cad, first_at=T0 - 600, precision="address", label_full="12 Example Road, Rye", lat=41.0, lon=-73.7).id
+    for i in range(4):
+        save(cad, first_at=T0 - i, precision="address", label_full="8 Sample Ave, Rye", lat=41.0, lon=-73.7)
+    assert ids(search(cad, where="example road")) == [far]
+    monkeypatch.setattr(eventlog, "SEARCH_SCAN", 3)
+    d = search(cad, where="example road")
+    assert d["events"] == [] and d["capped"] is True and d["scanned"] == 3
 
 
 # -- the choice: off unless turned on, the person's own --------------------------------------------------------------------
@@ -213,7 +245,8 @@ global.history = { replaceState() {} };
 let UNTIL = 0;
 global.api = (m, path) => {                    // (the hub's range ends a minute from its clock: never the same twice)
   calls.get.push(path);
-  const d = JSON.parse(JSON.stringify(path.startsWith("/api/cad/intel/search") ? IN.intel : { rows: [], total: 0, page: 0, size: 50 }));
+  const d = JSON.parse(JSON.stringify(!path.startsWith("/api/cad/intel/search") ? { rows: [], total: 0, page: 0, size: 50 }
+    : path.includes("text=fired") ? IN.fired : IN.intel));
   if (d.until) d.until += ++UNTIL;
   return Promise.resolve(d);
 };
@@ -251,6 +284,19 @@ def test_the_page_offers_it_off_by_default_and_marks_what_it_finds(site):
   SearchView.open("");                                                 // the same answer: nothing redrawn
   await flush();
   out.same = $("#sv-intel-rows").children.every((r, i) => r === rows[i]);
+  const gp = calls.get.length;                                         // the calls paged: the intel search as it is
+  const route = () => SearchView.open(location.hash.replace(/^#search\??/, ""));     // (cad.js's route on the hash)
+  $("#sv-next").on.click[0]();
+  route();
+  await flush();
+  out.paged = {{ intel: calls.get.slice(gp).filter((p) => p.includes("/intel/")).length,
+                calls: calls.get.slice(gp).filter((p) => p.startsWith("/api/cad/search")).length }};
+  $("#sv-text").value = "fired";                                       // a new search: read again
+  $("#sv-filters").on.submit[0]({{ preventDefault() {{}} }});
+  route();
+  await flush();
+  out.newq = calls.get.slice(gp).filter((p) => p.includes("/intel/")).length;
+  out.radioTip = $("#sv-intel-rows").children[0].title;
   SearchView.open("unit=E1");                                         // a call-only filter: no intel read
   const g = calls.get.length;
   await flush();
@@ -263,7 +309,7 @@ def test_the_page_offers_it_off_by_default_and_marks_what_it_finds(site):
   console.log(JSON.stringify(out));
 }})();
 """
-    out = run_node(script, {"intel": d})
+    out = run_node(script, {"intel": d, "fired": search(cad, text="fired")})
     assert out["off"] == {"gets": 0, "box": True, "btn": False, "pressed": "false", "ns": "search", "v": {"intel": False}}
     assert out["on"] == {"changed": ["search"], "v": {"intel": True}, "stored": "1", "box": False, "gets": 1}
     pushed, held = out["rows"]
@@ -272,6 +318,8 @@ def test_the_page_offers_it_off_by_default_and_marks_what_it_finds(site):
     assert out["chips"] == ["chip sv-ichip", "chip sv-ichip"] and out["n"] == "2 events"
     assert out["hash"] == f"#prealert/intel/{d['events'][1]['id']}"
     assert out["same"] is True
+    assert out["paged"] == {"intel": 0, "calls": 1} and out["newq"] == 1
+    assert "More info lists the last 12" in out["radioTip"]
     assert out["callsOnly"] == {"gets": 0, "n": "Not with a type, unit or disposition"}
     assert out["applied"] == {"box": True, "pressed": "false"}
     assert out["gone"] is True

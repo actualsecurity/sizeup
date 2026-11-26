@@ -16,11 +16,12 @@ gate); names and PII as the events have them; nothing here leaves the hub.
         {pins: [{id, lat, lon, precision, radius_m, confirmed, level, category, label, held}], placed, unplaced,
         limit, since, until}. held: the reason's short label ("" pushed). Unplaced events are counted, never pinned.
     GET /api/cad/intel/search?where=&text=&from=&to=
-        Search's opt-in Intel events (#937, static/search-view.js): Search's time, area and words. where: each word in
-        the place or town (a street type either way: "road" / "rd"); text: each word (a prefix) in the category's
-        label, the place or a transcript of the event (only the scanned events' transmissions, by id). The range's
-        newest SEARCH_SCAN events looked through (intel_events_first; none given: every event kept), the newest
-        SEARCH_MAX matches returned. {events: [{id, at, status, category, label, pack_label, level, held, place,
+        Search's opt-in Intel events (#937, static/search-view.js): Search's time, area and words. The range's newest
+        SEARCH_SCAN events read (intel_events_first, off the store's lock: the calls search's read-only connection;
+        none given: every event kept), the area and the words applied to them here, the newest SEARCH_MAX matches
+        returned. where: each word whole in the place or town (a street type either way: "road" / "rd"); text: each
+        word (a prefix) in the category's label, the place or a transcript of the event (only those events'
+        transmissions, by id: every one of them and their corrected text, not only More info's last 12). {events: [{id, at, status, category, label, pack_label, level, held, place,
         precision, confirmed, town, lat, lon, radius_m, matched}], total, more, limit, scanned, capped, since, until}.
         matched: where the words were (category, place, radio); never the words heard. With words, the transcripts are
         read only for the words the label and place leave open, WORD_CHUNK events at a time, and no further once past
@@ -176,27 +177,15 @@ def _wordset(text: str) -> set[str]:
     return out
 
 
-AREA_PUNCT = (",", "&", ".", "#", "-", "/", "''", "(", ")", ";", ":", "@")      # ("''": a quote, as SQL writes it)
-
-
-def _area_sql(words: list[str]) -> tuple[str, dict]:
-    """Search's area box over an event's place and town: each word whole, a street type in either form."""
-    col = "e.label_full || ' ' || e.town"
-    for ch in AREA_PUNCT:                      # (as _words splits: "I-95 NB", "Main St/Elm St", "O'Neil Ave (rear)")
-        col = f"replace({col}, '{ch}', ' ')"
-    col = f"(' ' || lower({col}) || ' ')"
-    conds, args = ["e.precision != 'none'"], {}
-    for i, w in enumerate(words[:SEARCH_WORDS]):
-        alts = {w}
+def _in_area(words: list[str], label: str) -> bool:
+    """Search's area box over an event's place and town: each word whole (a street type in either form), the label
+    split as the words are ("I-95 NB", "Main St/Elm St", "O'Neil Ave (rear)")."""
+    have = _wordset(label)
+    for w in words:
         ab = STREET_TYPES.get(w)
-        if ab:
-            alts |= {ab, EXPAND.get(ab, ab)}
-        ors = []
-        for j, a in enumerate(sorted(alts)):
-            args[f"aw{i}_{j}"] = f"% {a} %"
-            ors.append(f"{col} LIKE :aw{i}_{j}")
-        conds.append("(" + " OR ".join(ors) + ")")
-    return " AND ".join(conds), args
+        if not ({w} | ({ab, EXPAND.get(ab, ab)} if ab else set())) & have:
+            return False
+    return True
 
 
 def is_model(rule_id) -> bool:
@@ -477,20 +466,19 @@ class IntelLog:
             since = until - SPAN_MAX_S
         if until <= since:
             raise CadError("to: after from")
-        args = {"since": since, "until": until, **self.classes(), "scan": SEARCH_SCAN + 1}
-        where = "e.first_at >= :since AND e.first_at < :until"
-        area = _words(one("where", 120))
-        if area:
-            sql, a = _area_sql(area)
-            where += f" AND {sql}"
-            args.update(a)
-        rows = self.cad.store.q(
+        # the range's newest SEARCH_SCAN events, off the store's lock (the calls search's own read-only connection); the
+        # area and the words over them here: never a scan of the whole range
+        rows = self._rq(
             "SELECT e.id, e.pack, e.category, e.first_at, e.status, e.mode, e.pushed_at, e.precision, e.lat, e.lon, "
             "e.radius_m, e.confirmed, e.label_full, e.town, e.traffic_ids FROM intel_events e "
-            f"WHERE {where} ORDER BY e.first_at DESC, e.id DESC LIMIT :scan",
-            {k: v for k, v in args.items() if k not in ("packs", "cats", "corr")})
+            "WHERE e.first_at >= :since AND e.first_at < :until ORDER BY e.first_at DESC, e.id DESC LIMIT :scan",
+            {"since": since, "until": until, "scan": SEARCH_SCAN + 1})
         capped = len(rows) > SEARCH_SCAN
         rows = rows[:SEARCH_SCAN]
+        scanned = len(rows)
+        area = _words(one("where", 120))[:SEARCH_WORDS]
+        if area:
+            rows = [r for r in rows if r["precision"] not in (None, "none") and _in_area(area, f"{r['label_full']} {r['town']}")]
         packs = {p.name: p for p in getattr(self.engine, "packs", []) or []}
         from sizeup.intel.push import category_label
         labels: dict = {}
@@ -539,7 +527,7 @@ class IntelLog:
         page = rows[:SEARCH_MAX]
         helds = {}
         if page:                                   # why each didn't push: for the rows returned only
-            helds = {h["id"]: h["held"] for h in self.cad.store.q(
+            helds = {h["id"]: h["held"] for h in self._rq(
                 f"SELECT e.id, {HELD_SQL} AS held FROM intel_events e WHERE e.id IN (SELECT value FROM json_each(:ids))",
                 {**self.classes(), "ids": json.dumps([r["id"] for r in page])})}
         for r in page:
@@ -559,8 +547,14 @@ class IntelLog:
                         "lat": round(r["lat"], 6) if placed else None, "lon": round(r["lon"], 6) if placed else None,
                         "radius_m": round(r["radius_m"] or 0), "matched": sorted(matched.get(r["id"], ()))})
         return {"events": out, "total": len(rows), "more": more, "limit": SEARCH_MAX,
-                "scanned": min(len(matched) if words else len(rows), SEARCH_SCAN), "capped": capped, "since": since,
+                "scanned": scanned, "capped": capped, "since": since,
                 "until": until}
+
+    def _rq(self, sql: str, args) -> list[dict]:
+        """Search's reads off the store's lock: the calls search's read-only connection (history.py _rq: WAL, it never
+        waits for nor holds the lock every console and radio write takes); the store's own without one (tests)."""
+        h = getattr(self.cad, "addrs", None)
+        return h._rq(sql, args) if h is not None and hasattr(h, "_rq") else self.cad.store.q(sql, args)
 
     def _heard(self, rows: list[dict], words: list[str]) -> dict[str, set]:
         """{word: the event ids one of whose transmissions has a word starting so}: these events' transmissions only,
@@ -579,7 +573,7 @@ class IntelLog:
         keys = list(owner)
         for i in range(0, len(keys), 500):
             part = keys[i:i + 500]
-            for t in self.cad.store.q("SELECT id, lower(text || ' ' || COALESCE(alt_text, '') || ' ' || "
+            for t in self._rq("SELECT id, lower(text || ' ' || COALESCE(alt_text, '') || ' ' || "
                                       f"COALESCE(corr_text, '')) AS t FROM radio_traffic WHERE id IN "
                                       f"({','.join('?' * len(part))})", part):
                 for w, pat in pats.items():

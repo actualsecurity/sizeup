@@ -401,8 +401,9 @@ GET  /api/cad/intel/list?from=&to=&level=&category=&source=&system=&decided=&hel
                                           unplaced}
 GET  /api/cad/intel/search?where=&text=&from=&to=
                                           Search's opt-in Intel events (#937): the time, area and words over the events
-                                          kept (the newest 5,000 of the range looked through, 100 returned), each with
-                                          where the words were; never the words heard; anyone signed in
+                                          kept (the range's newest 5,000 read off the store's lock, the area and words
+                                          applied to them, 100 returned), each with where the words were; never the
+                                          words heard; anyone signed in
 GET  /api/cad/intel/<id>/notes            its notes (sizeup/intel/notes.py), oldest first; the audit for an admin;
                                           anyone signed in
 POST /api/cad/intel/<id>/notes            {text?, tags?: [...], corrected_category?, corrected_place?, corrected_level?}:
