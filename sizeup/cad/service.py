@@ -2502,6 +2502,8 @@ class Cad:
         r = self.comms.link(_text(body, "traffic_id", 200, required=True), iid, _text(body, "operator", OPERATOR_MAX))
         if r.get("error"):
             raise CadError(r["error"])
+        if r.get("linked"):
+            self.outside.heard(_text(body, "traffic_id", 200, required=True))   # a mutual-aid unit's radio on it
         return dict(r, incident_id=iid, number=inc["number"])
 
     def keep_traffic(self, iid: int, body: dict) -> dict:

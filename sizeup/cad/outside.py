@@ -4,22 +4,26 @@ never one of ours. On the CAD of record, in both dispatch modes.
     feed       each unit code an external CAD feed lists on an accepted call of ours (its unit list, and its
                "group_units" extra: every department's units on the call), every live report of the call (a two-town
                call's runs too, sources.py "cross town"), that is not ours: assigned as an outside unit, with the feed's
-               own times for it (unit_times: dispatched, responding, on location, in service). Not ours: not one of the
+               own times for it (unit_times: dispatched, responding, on location, in service; a run of the call that is
+               over clears the units only it lists at its in-service time). Not ours: not one of the
                units automode dispatches (AutoDispatch._ours), never a department entry or a department's placeholder
                (DPT...: sources.is_placeholder), never a mutual-aid request code (kind "ma-request"), another agency's
-               board unit (EMS, PD) or a code of one of our own departments; those stay one "not assigned" line
-               (automode). Unlisted later (and assigned by the feed): cleared then; listed again: back on
+               board unit (EMS, PD), a code of one of our own departments, or a code nothing places in another
+               department (it may be one of ours written another way: a feed_unit_aliases entry is the fix); those stay
+               one "not assigned" line (automode). Unlisted later (and assigned by the feed): cleared then; listed
+               again: back on
     radio      a transmission from a mutual-aid board unit's radio (the registry's rig: a unit on a mutual-aid board,
-               response "mutual_aid") on an accepted call's channels or about it (radio_links: its fireground, its
-               operating channel, its address or place or units named, the airport talkgroup, a person's link):
+               response "mutual_aid", on no other open call) on an accepted call's channels (radio_links: its
+               fireground, its operating channel, the airport talkgroup, a person's link; by words only on those channels):
                assigned "from radio" when no feed lists it. Its own words, when they clearly say it of itself
                (statushints.Phrases: "<unit> on location", "on location" on its own radio; never another's, never
                60 Control's), set its responding / on location / command times, forward only
     who        an outside unit is a row of outside_units, keyed by the feed's code and its department: a mutual-aid
                board unit's department, else the county's apparatus and department numbers
-               (data/westchester_apparatus.csv: "Engine 901"; a chief's number: the department number and a digit),
+               (data/westchester_apparatus.csv: "Engine 9901"; a chief's number: the department number and a digit),
                else a "group_units" group that names another department (Sources.department_units), else none. An
-               admin may give it a name and a department to show (POST /api/cad/outside-units); it is never a
+               admin may give it a name and a department to show, or take a wrong one off a call for good
+               (POST /api/cad/outside-units); it is never a
                board unit: never on our boards or roster, never our staffing (store._staffed), never located,
                followed, reminded (#865), paged or pushed
     shown      inc["outside"]: after our units in Assigned, "MA · <department>" (a mutual-aid board unit a person put on
@@ -42,7 +46,7 @@ APPARATUS = ROOT / "data" / "westchester_apparatus.csv"
 DEPARTMENTS = ROOT / "data" / "westchester_departments.csv"
 FEED_TIMES = {"dispatched": "dispatched_at", "responding": "enroute_at", "on_location": "onscene_at",
               "in_service": "cleared_at"}
-RADIO_WHYS = ("fireground", "opchannel", "mention", "airport", "manual")   # a transmission on the call or about it
+RADIO_WHYS = ("fireground", "opchannel", "airport", "manual")   # a transmission on the call's channels (never words)
 REQUEST_KIND = "ma-request"
 SAID = {"enroute": ("enroute_at", "responding"), "onscene": ("onscene_at", "on location"),
         "command": ("command_at", "command")}
@@ -70,6 +74,8 @@ CREATE TABLE IF NOT EXISTS outside_assignments (
   assigned_at REAL NOT NULL,
   dispatched_at REAL, enroute_at REAL, onscene_at REAL, command_at REAL, cleared_at REAL,
   traffic_id TEXT NOT NULL DEFAULT '',  -- radio: the transmission it was first heard on
+  removed_at REAL,                      -- a person took it off this call: never put back here
+  removed_by TEXT NOT NULL DEFAULT '',
   UNIQUE (incident_id, outside_id)
 );
 CREATE INDEX IF NOT EXISTS outside_assignments_incident ON outside_assignments(incident_id);
@@ -81,7 +87,7 @@ def _key(s) -> str:
 
 
 def _abbrev(name: str) -> str:
-    """'Engine 901' -> 'E901', 'Tower Ladder 9' -> 'TL9' (the county's apparatus as its CAD writes it)."""
+    """'Engine 9901' -> 'E9901', 'Tower Ladder 99' -> 'TL99' (the county's apparatus as its CAD writes it)."""
     m = re.fullmatch(r"\s*([A-Za-z][A-Za-z ]*?)\s+(\d+)\s*", name or "")
     return "".join(w[0] for w in m[1].split()).upper() + m[2] if m else ""
 
@@ -140,7 +146,7 @@ class OutsideUnits:
         return {dept_key(n) for n in names} - {""}
 
     def county_dept(self, code: str) -> str:
-        """The county's department for a code: an apparatus number ("E901", "Engine 901"), or a chief's number (the
+        """The county's department for a code: an apparatus number ("E9901", "Engine 9901"), or a chief's number (the
         department number and a digit or two); '' when neither says."""
         units, numbers = self.county()
         k = _key(code)
@@ -183,12 +189,9 @@ class OutsideUnits:
             if u["response"] != "mutual_aid" or u["kind"] == REQUEST_KIND:
                 return "other", "", u["name"]
             return "outside", self.store.lists.department_of(u["name"]) or self.county_dept(u["name"]), u["name"]
-        dept = self.county_dept(code)
-        if not dept and group:
-            g = ctx["depts_named"].get(dept_code(group), "")
-            dept = g if dept_key(g) not in ctx["our_depts"] else ""
-        if dept and dept_key(dept) in ctx["our_depts"]:
-            return "other", dept, ""
+        dept = self.county_dept(code) or (ctx["depts_named"].get(dept_code(group), "") if group else "")
+        if not dept or dept_key(dept) in ctx["our_depts"]:
+            return "other", dept, ""                     # ours, or nothing says whose (ours written another way?)
         return "outside", dept, ""
 
     def context(self) -> dict:
@@ -218,10 +221,14 @@ class OutsideUnits:
         ctx = ctx if ctx is not None else self.context()
         out: dict[str, dict] = {}
         label = ""
+        now = self.clock()
         for r in self.store.q("SELECT data, label FROM source_reports WHERE incident_id = ? AND source != ? "
                               "AND merged_into = '' ORDER BY rank, first_seen", (iid, PAGING)):
             d = json.loads(r["data"] or "{}")
             label = label or r["label"] or "County feed"
+            end = (d.get("times") or {}).get("in_service")
+            over = bool(d.get("closed")) or end is not None
+            end = float(end) if isinstance(end, (int, float)) and end > 0 else now
             uts = {_key(c): t for c, t in (d.get("unit_times") or {}).items() if isinstance(t, dict)}
             codes = [(c, "") for c in d.get("units") or []]
             groups = (d.get("extra") or {}).get("group_units")
@@ -233,11 +240,17 @@ class OutsideUnits:
                     continue
                 ts = uts.get(_key(code)) or uts.get(_key(unit)) or {}
                 code = unit or str(code).strip()
-                have = out.setdefault(code, {"department": dept, "unit": unit, "times": {}})
+                have = out.setdefault(code, {"department": dept, "unit": unit, "times": {}, "live": False, "end": end})
+                have["department"] = have["department"] or dept
+                have["live"] = have["live"] or not over
+                have["end"] = min(have["end"], end)
                 for kk, col in FEED_TIMES.items():
                     t = ts.get(kk)
                     if isinstance(t, (int, float)) and t > 0 and col not in have["times"]:
                         have["times"][col] = float(t)
+        for x in out.values():                           # listed only by runs that are over: cleared at their end
+            if not x["live"]:
+                x["times"].setdefault("cleared_at", x["end"])
         return out, label
 
     def sync(self, iid: int | None) -> list[str]:
@@ -268,11 +281,16 @@ class OutsideUnits:
             for code, x in listed.items():
                 if x["unit"] and x["unit"] in board_on:
                     continue                             # a person put that mutual-aid board unit on: shown as ours
-                oid = self._unit_id(db, code, x["department"], x["unit"], now)
-                seen.add(oid)
                 t = x["times"]
-                a = db.execute("SELECT * FROM outside_assignments WHERE incident_id = ? AND outside_id = ?",
-                               (iid, oid)).fetchone()
+                a = self._on(db, iid, code)
+                if a is not None and a["department"] != x["department"] and x["department"] and not a["department"]:
+                    oid = self._unit_id(db, code, x["department"], x["unit"], now)   # whose, now known: the one row
+                    db.execute("UPDATE outside_assignments SET outside_id = ? WHERE id = ?", (oid, a["id"]))
+                    a = self._on(db, iid, code)
+                oid = a["outside_id"] if a is not None else self._unit_id(db, code, x["department"], x["unit"], now)
+                seen.add(oid)
+                if a is not None and a["removed_at"] is not None:
+                    continue                             # a person took it off this call
                 if a is None:
                     db.execute("INSERT INTO outside_assignments (incident_id, outside_id, via, listed, assigned_at, "
                                "dispatched_at, enroute_at, onscene_at, cleared_at) VALUES (?, ?, 'feed', 1, ?, ?, ?, ?, ?)",
@@ -291,7 +309,7 @@ class OutsideUnits:
                 db.execute(f"UPDATE outside_assignments SET {', '.join(f'{c} = ?' for c in cols)} WHERE id = ?",
                            (*cols.values(), a["id"]))
             for a in db.execute("SELECT id, outside_id, via, cleared_at FROM outside_assignments WHERE incident_id = ? "
-                                "AND listed = 1", (iid,)).fetchall():
+                                "AND listed = 1 AND removed_at IS NULL", (iid,)).fetchall():
                 if a["outside_id"] in seen:
                     continue
                 if a["via"] == "feed" and a["cleared_at"] is None:
@@ -302,6 +320,13 @@ class OutsideUnits:
             if new:
                 self.store._event(db, iid, "auto", f"Mutual aid ({label}): {_grouped(new)}", f"{label} · auto")
         return [c for c, _ in new]
+
+    @staticmethod
+    def _on(db, iid: int, code: str):
+        """Its assignment on the incident (any department it was worked out as), with that unit's department."""
+        return db.execute("SELECT a.*, o.department FROM outside_assignments a JOIN outside_units o ON o.id = a.outside_id "
+                          "WHERE a.incident_id = ? AND (o.code = ? OR o.unit = ?) ORDER BY a.id LIMIT 1",
+                          (iid, code, code)).fetchone()
 
     def _unit_id(self, db, code: str, dept: str, unit: str, now: float) -> int:
         r = db.execute("SELECT id FROM outside_units WHERE code = ? AND department = ?", (code, dept)).fetchone()
@@ -330,22 +355,32 @@ class OutsideUnits:
         if t is None or t["dispatcher"] or not (t["rig"] or "").strip() or sourcekeys.is_context(t):
             return []
         rigs = [r.strip() for r in t["rig"].split(",") if r.strip()]
-        by = {u["name"]: u for u in self.store.units()}
         L = self.store.lists
+        if not any(L.response(r) == "mutual_aid" for r in rigs):
+            return []                                    # (most transmissions: read nothing more)
+        by = {u["name"]: u for u in self.store.units()}
         mine = [by[r] for r in rigs if r in by and by[r]["board"] and by[r]["response"] == "mutual_aid"
                 and by[r]["kind"] != REQUEST_KIND and not L.placeholder(r)]
         if not mine:
             return []
-        links = self.store.q(f"SELECT incident_id, why FROM radio_links WHERE traffic_id = ? AND why IN "
-                             f"({','.join('?' * len(RADIO_WHYS))})", (tid, *RADIO_WHYS))
+        links = self.store.q("SELECT incident_id, why FROM radio_links WHERE traffic_id = ?", (tid,))
         got = []
-        for iid in dict.fromkeys(r["incident_id"] for r in links):
+        for iid in dict.fromkeys(r["incident_id"] for r in links if r["why"] in RADIO_WHYS or self._its_channel(r, t)):
             if not self._open(iid):
                 continue
             for u in mine:
                 if self._radio_one(iid, u, t, talker=len(rigs) == 1):
                     got.append(iid)
         return list(dict.fromkeys(got))
+
+    def _its_channel(self, link: dict, t: dict) -> bool:
+        """A link by words (it names one of the call's units, its address) that is on the call's own channel too: its
+        fireground, or a county talkgroup it is worked on (a link by words takes the place of "on this channel")."""
+        iid = link["incident_id"]
+        if t["talkgroup"] is None:
+            return bool(t["channel"]) and self.cad.radiolog.fireground(iid) == t["channel"]
+        return self.store.one("SELECT 1 AS x FROM incident_channels WHERE incident_id = ? AND talkgroup = ? AND "
+                              "removed_at IS NULL", (iid, t["talkgroup"])) is not None
 
     def _radio_one(self, iid: int, u: dict, t: dict, talker: bool) -> bool:
         code, now = u["name"], self.clock()
@@ -354,14 +389,17 @@ class OutsideUnits:
         dept = self.store.lists.department_of(code) or self.county_dept(code)
         new = False
         with self.store.tx() as db:
-            a = db.execute("SELECT a.* FROM outside_assignments a JOIN outside_units o ON o.id = a.outside_id "
-                           "WHERE a.incident_id = ? AND (o.unit = ? OR o.code = ?) ORDER BY a.id LIMIT 1",
-                           (iid, code, code)).fetchone()
+            a = self._on(db, iid, code)
+            if a is not None and a["removed_at"] is not None:
+                return False                             # a person took it off this call
             if a is None:
                 busy = db.execute("SELECT 1 FROM outside_assignments a JOIN outside_units o ON o.id = a.outside_id "
                                   "JOIN incidents i ON i.id = a.incident_id WHERE a.incident_id != ? AND "
-                                  "(o.unit = ? OR o.code = ?) AND a.cleared_at IS NULL AND i.status IN ('pending', 'active')",
-                                  (iid, code, code)).fetchone()
+                                  "(o.unit = ? OR o.code = ?) AND a.cleared_at IS NULL AND a.removed_at IS NULL "
+                                  "AND i.status IN ('pending', 'active')", (iid, code, code)).fetchone() or db.execute(
+                    "SELECT 1 FROM assignments a JOIN incidents i ON i.id = a.incident_id WHERE a.unit_id = ? AND "
+                    "a.incident_id != ? AND a.cleared_at IS NULL AND i.status IN ('pending', 'active')",
+                    (u["id"], iid)).fetchone()
                 if busy:
                     return False                         # on another open call: not this one's by its radio alone
                 oid = self._unit_id(db, code, dept, code, now)
@@ -369,22 +407,25 @@ class OutsideUnits:
                            "VALUES (?, ?, 'radio', 0, ?, ?)", (iid, oid, t["start"], t["id"]))
                 self.store._event(db, iid, "auto", f"Mutual aid from radio: {_grouped([(code, dept)])}", "Radio · auto",
                                   at=t["start"])
-                a = db.execute("SELECT * FROM outside_assignments WHERE incident_id = ? AND outside_id = ?",
-                               (iid, oid)).fetchone()
+                a = self._on(db, iid, code)
                 new = True
+            elif a["via"] == "radio" and t["start"] < a["assigned_at"]:     # an earlier one (a backfill walks back)
+                db.execute("UPDATE outside_assignments SET assigned_at = ?, traffic_id = ? WHERE id = ?",
+                           (t["start"], t["id"], a["id"]))
             if talker and a["cleared_at"] is None:
                 for intent in self._said(u, t):
                     col, words = SAID[intent]
+                    for c in [col] + (["onscene_at"] if intent == "command" else []):
+                        if a[c] is None or t["start"] < a[c]:      # the first time it said so
+                            db.execute(f"UPDATE outside_assignments SET {c} = ? WHERE id = ?", (t["start"], a["id"]))
                     if a[col] is None:
-                        db.execute(f"UPDATE outside_assignments SET {col} = ? WHERE id = ?", (t["start"], a["id"]))
                         self.store._event(db, iid, "auto", f"{code} {words} (radio)", "Radio · auto", at=t["start"])
-                    if intent == "command" and a["onscene_at"] is None:
-                        db.execute("UPDATE outside_assignments SET onscene_at = ? WHERE id = ?", (t["start"], a["id"]))
+                    a = self._on(db, iid, code)
         return new
 
     def _said(self, u: dict, t: dict) -> list[str]:
-        """What the unit's own radio clearly says of it (statushints.Phrases, this unit alone): "Engine 901 on location",
-        "on location", "we're on scene", "Engine 901 has command"; never of another, never "in the area"."""
+        """What the unit's own radio clearly says of it (statushints.Phrases, this unit alone): "Engine 9901 on
+        location", "on location", "we're on scene", "Engine 9901 has command"; never of another, never "in the area"."""
         from sizeup.cad.statushints import Phrases
         from sizeup.stt_correct import shown_text
         text = shown_text(t)
@@ -403,8 +444,11 @@ class OutsideUnits:
 
     def edit(self, body: dict) -> dict:
         """POST /api/cad/outside-units {id, name?, department?, operator?}: the name and department shown for an outside
-        unit ('' = as worked out). Audited (Settings > Audit, section outside_units)."""
+        unit ('' = as worked out); {assignment, remove: true, operator?}: a wrong one taken off its call for good (the
+        feed or the radio never put it back there). Audited (Settings > Audit, section outside_units)."""
         from sizeup.cad.store import CadError
+        if body.get("remove") is True:
+            return self._remove(body)
         oid = body.get("id")
         if isinstance(oid, bool) or not isinstance(oid, int):
             raise CadError("id: a number")
@@ -430,6 +474,26 @@ class OutsideUnits:
         return {"ok": True, "id": oid, "code": out["code"], "name": out["name"] or out["code"],
                 "department": out["shown_dept"] or out["department"]}
 
+    def _remove(self, body: dict) -> dict:
+        from sizeup.cad.store import CadError
+        aid = body.get("assignment")
+        if isinstance(aid, bool) or not isinstance(aid, int):
+            raise CadError("assignment: a number")
+        op = str(body.get("operator") or "")[:320]
+        now = self.clock()
+        with self._lock, self.store.tx() as db:
+            a = db.execute("SELECT a.*, o.code FROM outside_assignments a JOIN outside_units o ON o.id = a.outside_id "
+                           "WHERE a.id = ?", (aid,)).fetchone()
+            if a is None:
+                raise CadError("no such outside unit on a call")
+            if a["removed_at"] is None:
+                db.execute("UPDATE outside_assignments SET removed_at = ?, removed_by = ? WHERE id = ?", (now, op, aid))
+                self.store._event(db, a["incident_id"], "auto", f"{a['code']} taken off (mutual aid)", op)
+                db.execute("INSERT INTO settings_audit (at, operator, section, key, old, new) VALUES (?, ?, ?, ?, ?, ?)",
+                           (now, op, "outside_units", f"{a['code']}/removed", json.dumps(a["incident_id"]), "true"))
+        return {"ok": True, "assignment": aid, "code": a["code"], "name": "taken off", "department": "",
+                "incident_id": a["incident_id"]}
+
     # -- shown ------------------------------------------------------------------------------------------------------
 
     def decorate(self, incs: list[dict]) -> list[dict]:
@@ -454,12 +518,13 @@ class OutsideUnits:
                 "cleared_at": r["cleared_at"] if r["cleared_at"] is not None or not closed
                 else (inc.get("closed_at") or r["assigned_at"]),
                 "assigned_at": r["assigned_at"]}
-                for r in rows.get(inc["id"], []) if not (r["unit"] and r["unit"] in ours) and r["code"] not in ours]
+                for r in rows.get(inc["id"], []) if r["removed_at"] is None and not (r["unit"] and r["unit"] in ours)
+                and r["code"] not in ours]
         return incs
 
 
 def _grouped(units) -> str:
-    """'Sample FD E901, L77; E5' from [(code, department)]: by department, in the order they came."""
+    """'Sample FD E9901, L9902; ZZ7' from [(code, department)]: by department, in the order they came."""
     by: dict[str, list[str]] = {}
     for code, dept in units:
         by.setdefault(dept, []).append(code)

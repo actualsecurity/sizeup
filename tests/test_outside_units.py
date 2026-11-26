@@ -63,12 +63,12 @@ def test_the_feeds_group_list_assigns_outside_units_beside_ours(rig):
     assert {a["name"]: a["status"] for a in inc["assignments"]} == {"E60": "DP", "L31": "DP"}   # ours as before
     got = outside(rig)
     assert {k: v["department"] for k, v in got.items()} == {
-        "L9902": "Sampleville", "E9901": "Sampleville FD", "R9903": "Exampleton", "9905": "Exampleton", "ZZ7": ""}
-    assert "DPT99" not in got                                                     # a department's placeholder: never
+        "L9902": "Sampleville", "E9901": "Sampleville FD", "R9903": "Exampleton", "9905": "Exampleton"}
+    assert "DPT99" not in got and "ZZ7" not in got          # a placeholder: never; nothing says whose: maybe ours
     assert (got["L9902"]["dispatched_at"], got["L9902"]["onscene_at"], got["L9902"]["via"]) == (T0 + 5, T0 + 200, "feed")
     assert all(v["cleared_at"] is None for v in got.values())
     ev = lines(rig, inc["id"])
-    assert "Mutual aid (County feed): Sampleville L9902; Sampleville FD E9901; Exampleton R9903, 9905; ZZ7" in ev
+    assert "Mutual aid (County feed): Sampleville L9902; Sampleville FD E9901; Exampleton R9903, 9905" in ev
     assert not any("not on our boards" in e or "not assigned" in e for e in ev)
     # never ours: not on the boards or roster, no board status, no dispatch, no reminder, never our staffing
     assert {u["name"] for u in rig.cad.store.units()} == before
@@ -96,9 +96,46 @@ def test_a_unit_the_feed_drops_is_cleared_and_back_on_when_listed_again(rig):
 
 
 def test_codes_that_are_not_another_departments_unit_are_one_line_never_assigned(rig):
-    rig.created(units=("E60", "SVEMS1", "99_Eng"))
+    rig.created(units=("E60", "SVEMS1", "99_Eng", "ZZ7"))                       # another agency, a request, nobody's
     assert outside(rig) == {}
-    assert "County feed units not assigned: SVEMS1, 99_Eng" in lines(rig, rig.iid())
+    assert "County feed units not assigned: SVEMS1, 99_Eng, ZZ7" in lines(rig, rig.iid())
+
+
+def depts(rig, **codes) -> None:
+    for k, v in codes.items():
+        rig.cad.settings.post("department_units", {"action": "set", "key": k, "value": v, "operator": "Admin"})
+
+
+def test_a_group_naming_another_department_says_whose_and_ours_never_makes_one_outside(rig):
+    depts(rig, PCX="Port Chester FD", SVX="Sampleville FD")
+    rig.created(units=("E60", "QQ2"), extra={"group_units": {"PCX": ["E60", "QQ1"], "SVX": ["QQ2", "QQ3"]}})
+    got = outside(rig)
+    assert {k: v["department"] for k, v in got.items()} == {"QQ2": "Sampleville FD", "QQ3": "Sampleville FD"}
+    rig.at(60)
+    rig.change(units=("E60",))                                                    # still in its group: the same row
+    assert [(o["code"], o["department"], o["cleared_at"]) for o in rig.inc()["outside"]] == [
+        ("QQ2", "Sampleville FD", None), ("QQ3", "Sampleville FD", None)]
+
+
+def test_whose_found_later_keeps_one_row(rig):
+    depts(rig, SVX="Sampleville FD")
+    rig.cad.outside._county = ({**COUNTY[0], "QQ5": ""}, COUNTY[1])
+    rig.created(units=("E60",), extra={"group_units": {"OURS": ["QQ5", "L9902"]}})
+    assert set(outside(rig)) == {"L9902"}
+    rig.at(60)
+    rig.change(extra={"group_units": {"OURS": ["L9902"], "SVX": ["QQ5"]}})
+    assert [(o["code"], o["department"]) for o in rig.inc()["outside"]] == [("L9902", "Sampleville"),
+                                                                           ("QQ5", "Sampleville FD")]
+
+
+def test_a_wrong_one_taken_off_never_comes_back(rig):
+    rig.created(units=("E60", "L9902"), extra={"fireground": "FG1"})
+    o = outside(rig)["L9902"]
+    rig.cad.outside.edit({"assignment": o["id"], "remove": True, "operator": "Admin"})
+    assert outside(rig) == {} and "L9902 taken off (mutual aid)" in lines(rig, rig.iid())
+    rig.at(60)
+    rig.change(units=("E60", "L9902"), unit_times={"L9902": {"on_location": T0 + 50}})
+    assert outside(rig) == {}
 
 
 def test_a_closed_calls_outside_units_show_cleared_at_its_close(rig):
@@ -186,6 +223,33 @@ def test_a_radio_not_on_the_calls_channels_nor_about_it_is_never_assigned(rig):
     assert outside(rig) == {}
 
 
+def test_its_radio_naming_the_calls_address_alone_never_assigns_it(rig):
+    rig.created(units=("E60",))
+    iid = rig.iid()
+    rig.radio("307-1-call_1-t0", T0 + 70, "we're covering, 12 Example Avenue is the box", rig="E9901", unit="E9901")
+    assert rig.links(iid).get("307-1-call_1-t0", ("",))[0] in ("", "mention") and outside(rig) == {}
+
+
+def test_a_person_adding_its_transmission_to_the_call_assigns_it(rig):
+    rig.created(units=("E60",))
+    iid = rig.iid()
+    rig.clock.t = T0 + 60
+    rig.cad.record_traffic(tx("FG1-1", T0 + 60, rig="E9901", radio_id="9901", text="water on the fire"))
+    assert outside(rig) == {}
+    rig.cad.link_traffic(iid, {"traffic_id": "FG1-1", "operator": "Lt. Test"})
+    assert outside(rig)["E9901"]["via"] == "radio"
+
+
+def test_a_unit_a_person_put_on_another_open_call_is_not_taken_by_its_radio(rig):
+    rig.created(units=("E60",), extra={"fireground": "FG1"})
+    rig.feed.put("B1", type="STRUCTURE FIRE", location="400 Sample St", units=("E61",), times={"dispatched": rig.clock.t})
+    rig.poll()
+    rig.put_on(rig.iid("B1"), "E9901")
+    rig.clock.t = T0 + 60
+    rig.cad.record_traffic(tx("FG1-1", T0 + 60, rig="E9901", radio_id="9901", text="water on the fire"))
+    assert outside(rig) == {}
+
+
 def test_two_open_calls_on_one_fireground_assign_neither(rig):
     rig.created(units=("E60",), extra={"fireground": "FG1"})
     rig.feed.put("B1", type="STRUCTURE FIRE", location="400 Sample St", units=("E61",), times={"dispatched": rig.clock.t},
@@ -225,6 +289,28 @@ def test_a_two_town_call_is_one_incident_with_both_runs_outside_units(tmp_path, 
     assert got["L9902"]["cleared_at"] is None and got["R9903"]["cleared_at"] == T0 + 385
 
 
+def test_a_run_over_with_no_unit_times_clears_the_outside_units_only_it_lists(tmp_path, monkeypatch):
+    from sizeup.cad import sources
+    monkeypatch.setattr(sources, "OWN_TOWNS", frozenset({"our town a", "our town b"}))
+    monkeypatch.setattr(sources, "STREETS", {})
+    path = lists_file(tmp_path)
+    monkeypatch.setattr(tis, "make_cad", lambda tmp, clock=None: make_cad(tmp, clock=clock, lists=path))
+    rig = AutoRig(tmp_path)
+    rig.cad.outside._county = COUNTY
+    rig.feed.put("F0080001", type="ALARM/COMM", location="40 EXAMPLE ST", units=("E62", "L9902"),
+                 times={"dispatched": T0}, extra={"town": "Our Town A", "jurisdiction": "Our FD"})
+    rig.poll()
+    rig.at(130)
+    rig.feed.put("F0080907", type="ALARM/COMM", location="40 EXAMPLE ST", units=("E62", "L9902", "R9903"),
+                 times={"dispatched": T0 + 120}, extra={"town": "our town b", "jurisdiction": "Our FD"})
+    rig.poll()
+    rig.at(400)
+    rig.feed.change("F0080907", closed=True, times={"in_service": T0 + 390})
+    rig.poll()
+    got = outside(rig, "F0080001")
+    assert got["L9902"]["cleared_at"] is None and got["R9903"]["cleared_at"] == T0 + 390
+
+
 # -- whose, and an admin's name for one --------------------------------------------------------------------------------
 
 
@@ -238,19 +324,19 @@ def test_the_countys_apparatus_and_department_numbers_say_whose(tmp_path):
     units, numbers = county_departments(app, dep)
     assert units["E9902"] == units["ENGINE9902"] == units["TL99"] == "Sampleville"
     assert "E9903" not in units                                                   # two departments' number: nobody's
-    assert numbers == {"990": "Sampleville"} and _abbrev("Mini Attack 6") == "MA6"
+    assert numbers == {"990": "Sampleville"} and _abbrev("Mini Attack 9907") == "MA9907"
 
 
 def test_an_admin_names_an_outside_unit_and_it_is_audited(rig):
-    rig.created(units=("E60", "ZZ7"))
-    o = outside(rig)["ZZ7"]
+    rig.created(units=("E60", "L9902"))
+    o = outside(rig)["L9902"]
     r = rig.cad.outside.edit({"id": o["unit_id"], "name": "Sample Engine 7", "department": "Sampleton FD", "operator": "Admin"})
     assert (r["name"], r["department"]) == ("Sample Engine 7", "Sampleton FD")
-    o = outside(rig)["ZZ7"]
+    o = outside(rig)["L9902"]
     assert (o["name"], o["department"]) == ("Sample Engine 7", "Sampleton FD")
     assert [(a["key"], a["new"]) for a in rig.cad.store.q(
         "SELECT key, new FROM settings_audit WHERE section = 'outside_units' ORDER BY id")] == [
-        ("ZZ7/name", '"Sample Engine 7"'), ("ZZ7/shown_dept", '"Sampleton FD"')]
+        ("L9902/name", '"Sample Engine 7"'), ("L9902/shown_dept", '"Sampleton FD"')]
     assert needs("/api/cad/outside-units") == "admin"
     from sizeup.cad.store import CadError
     with pytest.raises(CadError):

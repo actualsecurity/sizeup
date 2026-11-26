@@ -146,14 +146,12 @@ def test_the_fg1_guess_never_places_a_unit(rig):
 # -- M1: exact unit codes only ------------------------------------------------------------------------------------------
 
 
-def test_feed_codes_match_exactly_and_unknown_ones_are_outside_units_not_sent(rig):
+def test_feed_codes_match_exactly_and_unknown_ones_are_listed_not_sent(rig):
     rig.created(units=("Engine 60", "RYE40", "LAR31", "60E"))
     names = {a["name"] for a in rig.inc()["assignments"]}
     assert names == {"E60"}                                                        # "Engine 60" is E60's spoken name
-    assert {o["code"] for o in rig.inc()["outside"]} == {"RYE40", "LAR31", "60E"}   # another's: outside units
-    assert any(e["text"].startswith("Mutual aid (County feed): ") and "RYE40" in e["text"] and "LAR31" in e["text"]
-               for e in rig.inc()["events"])
-    assert not any("not on our boards" in e["text"] for e in rig.inc()["events"])
+    assert any(e["text"] == "County feed units not assigned: RYE40, LAR31, 60E" for e in rig.inc()["events"])
+    assert rig.inc()["outside"] == []                       # nothing says whose: never mutual aid (maybe ours, garbled)
     assert rig.status("R40") == "AV" and rig.status("L31") == "AV"
 
 
