@@ -1448,14 +1448,15 @@ class App:
             pass
 
     def _metric_tx(self, label: str, kind: str, seg: Segment, ids: bool = False, am: bool = False,
-                   classified: bool = False) -> None:
+                   classified: bool = False, cont: bool | None = None) -> None:
         """A transmission's numbers for the hub's signal metrics (sizeup/cloud/metrics.py): a dict queued, nothing else;
         never in the way of the transmission. classified: a paging channel's, sorted by _page_metric_kind."""
         m = self.metrics
         if m is None:
             return
         try:
-            m.tx(label, kind, seg, ids=ids, am=am, **({"classified": True} if classified else {}))
+            m.tx(label, kind, seg, ids=ids, am=am, **({"classified": True} if classified else {}),
+                 **({"cont": cont} if cont is not None else {}))
         except Exception:  # noqa: BLE001 - a metric, never the radio path's problem
             pass
 
@@ -1564,7 +1565,10 @@ class App:
             self._metric_tx(ch.label, "noise", seg, classified=True)
             self._static_dropped(ch.label, seg)
             return
-        self._metric_tx(ch.label, self._page_metric_kind(seg, decoded), seg, classified=True)
+        # (a new page keyed inside the last one's continuation window, its own tones: not a continuation, its level
+        # at open is a page's own: PageHold makes it a page of its own too)
+        self._metric_tx(ch.label, self._page_metric_kind(seg, decoded), seg, classified=True,
+                        cont=bool(seg.cont and not decoded[0]))
         if not self.channel_pref(ch.label)["record"]:   # Settings > Radios: not recorded (receiver keeps running)
             log(f"{ch.label}: {assemble(ch.label, ch.mhz, seg, self.plan, *decoded).kind} not recorded "
                 "(Record is off in Settings > Radios)")
@@ -1613,9 +1617,9 @@ class App:
         """A paging transmission's kind in the signal metrics (the station's page level, sizeup/cloud/metricsinsight.py):
         "tones_other" when its only content is a tone pair none of ours names (no speech after the last tone: a weak
         transmitter's periodic tone, #973, kept for learning, is no weak page); "noise" when it has no tone and no
-        speech (a carrier or static kept as a row: 2 s or longer, or strong); else "page". A continuation is "page"."""
+        speech (a carrier or static kept as a row: 2 s or longer, or strong); else "page". A continuation with no tones of its own is "page"."""
         tones, heard = decoded
-        if seg.cont:
+        if seg.cont and not tones:
             return "page"
         if tones:
             if self.paging.is_ours([n for t in tones for n in t.names]):

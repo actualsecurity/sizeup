@@ -278,6 +278,8 @@ def real_page(d: dict, open_db: float | None = None) -> bool:
     strongest quieting "qx", else its median "q", under the Open it ran at + PAGING_STATIC_OVER_DB)."""
     if d.get("kind") != "page":
         return False
+    if d.get("pc"):
+        return True                     # (sorted by the station: its gate already kept it, a spoken word, a lone tone)
     dur, q = d.get("dur"), d.get("qx") if d.get("qx") is not None else d.get("q")
     if not isinstance(dur, (int, float)) or not isinstance(q, (int, float)) or d.get("cont"):
         return True

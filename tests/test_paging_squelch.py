@@ -533,3 +533,46 @@ def test_a_short_weak_word_is_speech():
     from sizeup.radio.fm import speech_seconds
     assert channels.PAGING_SPEECH_S == 0.15
     assert speech_seconds(static(0.8)) < channels.PAGING_SPEECH_S
+
+
+# -- final: a page's own weak opening always on the Open side; an Open edit never drags Close down -----------------------
+
+def test_sorted_short_weak_pages_count_on_the_open_side():
+    """A kept 1.6 s spoken open or a lone tone A (sorted "page", pc) at 12.5 dB is a page: the station's gate kept it."""
+    weak_kept = [dict(d, pc=1, dur=1.6, qx=13.5) for d in transmissions(NOW - 7 * DAY, 7 * DAY, [12.5] * 3, kind="page", seed=17)]
+    assert all(channels.real_page(d, 10.0) for d in weak_kept)
+    out = paging_suggestion([30.0] * 20, extra=weak_kept)
+    assert out["pages"] == 23 and out["page_min"] == 12.5 and out["open_ceiling"] == 9.5     # min(12.5, 24) - 3
+
+
+def test_a_new_page_inside_the_continuation_window_is_not_a_continuation(tmp_path):
+    """A first page at ~26 dB, 2 s of hiss, then a second page WITH TONES at ~12.5 dB: the squelch marks it cont (it
+    came back in the window), but its metric is a page's own opening (no "cont"), so it counts on the Open side."""
+    from sizeup.cloud.metrics import Collector
+    a = App(base(clips_dir=str(tmp_path / "clips")))
+    a.metrics = Collector()
+    first = keyed(np.concatenate([tone(349.1, 1.0), tone(311.1, 3.0), np.zeros(int(0.2 * RATE)), voice(4.0)]))
+    second = weak(np.concatenate([tone(349.1, 1.0), tone(311.1, 3.0), np.zeros(int(0.2 * RATE)), voice(3.0)]), 12.5)
+    segs = squelch_segments(a, np.concatenate([hiss(3.0), first, hiss(2.0), second, hiss(4.0)]))
+    assert len(segs) == 2 and segs[1].cont
+    for s1 in segs:
+        a._segment(SOUTH, s1)
+    recs = [r for r in a.metrics.batch()[1] if r.get("k") == "tx"]
+    assert [(r["kind"], r.get("cont"), r.get("pc")) for r in recs] == [("page", None, 1), ("page", None, 1)]
+    assert recs[1]["qo"] < 16.0
+    out = paging_suggestion([30.0] * 20, extra=[dict(recs[1], at=NOW - DAY)])
+    assert out["page_min"] == recs[1]["qo"]
+
+
+def test_an_open_edit_never_lowers_the_running_close(app):
+    """Pages that fade hard (tails low at close): an Open-only edit keeps the running Close instead of dragging it to
+    the tails' ceiling, where static would hold the squelch open."""
+    app.cad.station_metrics_insight = Levels(paging_suggestion([30.0] * 12), idle_max=6.0)
+    post(app, open_db=13, close_db=9)                               # set while the pages were strong
+    out = paging_suggestion([30.0] * 6 + [16.0] * 4)                # since: faded tails, close_ceiling 8
+    assert out["close_ceiling"] == 8.0
+    app.cad.station_metrics_insight = Levels(out, idle_max=6.0)
+    post(app, open_db=12)
+    assert app.cad.settings.squelch_overrides()["South 2"] == {"open_db": 12.0, "close_db": 9.0}
+    post(app, open_db=9.5)                                          # Close never reaches the Open
+    assert app.cad.settings.squelch_overrides()["South 2"] == {"open_db": 9.5, "close_db": 9.0}

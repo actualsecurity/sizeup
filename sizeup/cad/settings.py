@@ -2880,6 +2880,12 @@ class Editor:
                     c = vals["open_db"] - (hyst if hyst > 0 else 4.0)
                     if cceil is not None:
                         c = min(c, cceil)
+                    # never under the Close running now (heavy fading must not drag it down to hold static open),
+                    # and under the Open
+                    running = before.get("close_db")
+                    if isinstance(running, (int, float)) and not isinstance(running, bool):
+                        c = max(c, float(running))
+                    c = min(c, vals["open_db"] - channels_mod.SQUELCH["close_db"][2])
                     vals["close_db"] = max(channels_mod.SQUELCH["close_db"][0], c)
             if vals["close_db"] >= vals["open_db"]:
                 raise CadError(f"close {vals['close_db']:g} dB: under open ({vals['open_db']:g} dB)")

@@ -131,9 +131,11 @@ class Collector:
         self.add({"k": "ev", "s": str(subject)[:80], "at": round(self.clock() if at is None else at, 3),
                   "ev": ev, "d": str(detail)[:300]})
 
-    def tx(self, label: str, kind: str, seg, ids: bool = False, am: bool = False, classified: bool = False) -> None:
+    def tx(self, label: str, kind: str, seg, ids: bool = False, am: bool = False, classified: bool = False,
+           cont: bool | None = None) -> None:
         """One transmission as its squelch closed it (radio/fm.py / radio/am.py Segment): numbers only, never audio.
-        classified: a paging channel's, its kind from App._page_metric_kind ("pc": 1; one without it is from before)."""
+        classified: a paging channel's, its kind from App._page_metric_kind ("pc": 1; one without it is from before).
+        cont: whether it continues the transmission before ("cont": 1); None: the segment's own Segment.cont."""
         r: dict = {"k": "tx", "s": str(label)[:80], "at": round(float(seg.start), 3),
                    "dur": round(float(seg.end - seg.start), 2), "kind": kind, "q": _r1(seg.quieting_db)}
         for key, attr in (("qo", "q_open"), ("qc", "q_close"), ("qx", "q_max"), ("floor" if am else "hiss", "hiss_db"),
@@ -147,7 +149,7 @@ class Collector:
             r["id"] = 1
         if getattr(seg, "weak", False):
             r["weak"] = 1
-        if getattr(seg, "cont", False):
+        if (getattr(seg, "cont", False) if cont is None else cont):
             r["cont"] = 1
         if classified:
             r["pc"] = 1
