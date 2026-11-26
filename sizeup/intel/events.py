@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import fields
 
@@ -195,6 +196,9 @@ class SqlEvents:
         self.store = store
         self.rev = 0                       # bumped on every intel write: the console's intel card reads by it
         self.list_rev = 0                  # ... but a rule hit: what the Intel page lists (eventlog.py) changed
+        # ... an event saved or dismissed: what its map shows (#937; never a vote). From the start time in ms, so a
+        # page open across a hub restart never sees a value it already had
+        self.map_rev = int(time.time() * 1000)
         with store.lock:
             store.db.executescript(SCHEMA)
             cols = {r[1] for r in store.db.execute("PRAGMA table_info(intel_events)")}
@@ -228,7 +232,7 @@ class SqlEvents:
                     store.db.execute("COMMIT")
 
     @contextmanager
-    def _w(self, listed: bool = True):
+    def _w(self, listed: bool = True, placed: bool = False):
         """One transaction under the store's lock WITHOUT store.rev (#492 review, H4: intel writes are not CAD changes;
         a police transmission must not rebuild every console's state), the way sizeup/cad/activity.py writes."""
         with self.store.lock:
@@ -243,6 +247,8 @@ class SqlEvents:
             self.rev += 1
             if listed:
                 self.list_rev += 1
+            if placed:
+                self.map_rev += 1
 
     def recent_closed(self, pack: str, category: str, since: float) -> list[Event]:
         """The events of this pack and category ended or dismissed since then (the mute compares their places)."""
@@ -270,7 +276,7 @@ class SqlEvents:
             vals.append(json.dumps(v) if k in JSON_COLS else int(v) if isinstance(v, bool) else v)
         cols = (*EVENT_COLS, "decided")                 # (+ who raised it: the Intel page's filter, decided_of)
         vals.append(decided_of(ev.rules))
-        with self._w() as db:
+        with self._w(placed=True) as db:
             if ev.id is None:
                 cur = db.execute(f"INSERT INTO intel_events ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", vals)
                 ev.id = int(cur.lastrowid)
@@ -294,7 +300,7 @@ class SqlEvents:
             db.execute("UPDATE intel_events SET delivery = ? WHERE id = ?", (json.dumps(keep), int(eid)))
 
     def dismiss(self, eid: int, operator: str, now: float) -> bool:
-        with self._w() as db:
+        with self._w(placed=True) as db:
             return bool(db.execute("UPDATE intel_events SET status = 'dismissed', dismissed_by = ?, updated_at = ? "
                                    "WHERE id = ? AND status = 'open'", (operator[:120], now, eid)).rowcount)
 
