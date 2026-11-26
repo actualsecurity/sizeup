@@ -70,7 +70,7 @@ def test_defaults_and_what_runs_without_aws(tmp_path):
     app = App(base(clips_dir=str(tmp_path / "clips")))
     assert app.channel_pref("FG1") == {"record": True, "transcribe": True, "engine": "pin:aws"}
     assert app.channel_pref("South 2")["engine"] == "pin:aws" and app.channel_pref("tg:307")["engine"] == "pin:aws"
-    assert app.channel_pref("tg:301") == {"record": True, "transcribe": True, "engine": "local"}
+    assert app.channel_pref("tg:301") == {"record": True, "transcribe": True, "engine": "auto_bg"}   # (#896: context)
     # no AWS here: an AWS channel runs the local model, and says why
     assert app._stt_way(app.stt_engine("FG1"), "FG1") == "local" and "isn't set up here" in app.aws_ok()[1]
     st = app.state()["channels"]
@@ -96,8 +96,8 @@ def test_settings_store_only_what_differs_audited_exported(tmp_path):
     audit = s.audit_log("radios")
     assert [(a["key"], a["new"]) for a in audit][:2] == [("channel/FG1", '{"transcribe":false}'), ("channel/tg:301", '{"engine":"both"}')]
     assert audit[0]["operator"] == "Casey"
-    s.post("channels", {"action": "set_many", "keys": ["tg:301", "tg:302"], "engine": "local", "operator": "Casey"})
-    assert s.channel_overrides() == {"FG1": {"transcribe": False}}
+    s.post("channels", {"action": "set_many", "keys": ["tg:301", "tg:302"], "engine": "auto_bg", "operator": "Casey"})
+    assert s.channel_overrides() == {"FG1": {"transcribe": False}}       # (Auto · background: their default, #896)
     with pytest.raises(CadError):
         s.post("channels", {"action": "set", "key": "FG1", "engine": "whisper"})
     # export / import carries them
@@ -320,7 +320,7 @@ RECORD_ONLY = ("tg:383", "tg:3127")              # WCPD Ch 1, LLT Supervisor 1 (
 
 def test_record_only_is_a_default_and_a_settings_choice_wins(tmp_path):
     app = App(base(clips_dir=str(tmp_path / "clips"), stt_record_only=RECORD_ONLY))
-    assert app.channel_pref("tg:383") == {"record": True, "transcribe": False, "engine": "local"}
+    assert app.channel_pref("tg:383") == {"record": True, "transcribe": False, "engine": "auto_bg"}
     assert app.stt_engine("tg:3127") == "off" and app._stt_way(app.stt_engine("tg:301"), "tg:301") == "local"
     assert app.state()["channels"]["record_only"] == list(RECORD_ONLY)
     s = app.cad.settings
@@ -371,7 +371,7 @@ def test_the_station_gets_the_hubs_record_only_and_skips_whisper(tmp_path):
         assert whisper.calls == 0 and st.has_clip(tid)
         # a Settings choice on the hub wins, and reaches the station
         assert hub_post(hub, "channels", {"action": "set", "key": "tg:383", "transcribe": True})[0] == 200
-        assert wait(lambda: st._stt_way(st.stt_engine("tg:383"), "tg:383") == "local", 10)
+        assert wait(lambda: st._stt_way(st.stt_engine("tg:383"), "tg:383") == "local_bg", 10)     # (its own whisper first)
         assert wait(lambda: hub.get("/api/state")["channels"]["sync"]["state"] == "applied", 10)
         assert st.stt_engine("tg:3127") == "off"
     finally:

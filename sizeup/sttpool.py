@@ -55,6 +55,7 @@ FAST_WINDOW_S = 1200.0         # a worker's pre-alert times are looked at over t
 PROBE_S = 180.0                # a worker found slow on them gets one pre-alert clip again this long after its last
                                # slow one or try (a probe: how it recovers; a quick answer opens the gate again)
 STATION_DEFER_S = 1.0          # a job a GPU worker could take now waits this long before a station's whisper may claim it
+BG_STATION_FIRST_S = 2.0       # ... but background work (#896) the other way round: a station's whisper first this long
                                # (the order: a GPU worker, an idle station's whisper, then AWS; #639 phase 2)
 KINDS = ("gpu", "station")
 PREALERT_MAX_SERVICE_S = 3.0   # a pre-alert clip goes to the pool only to an idle worker (in a claim now) whose recent
@@ -413,6 +414,12 @@ class Pool:
         except Exception:  # noqa: BLE001 - a setting that can't be read: off
             return False
 
+    def _station_could(self, j: Job, now: float) -> bool:
+        """(lock held) A station's whisper in the pool could take this background job now (not its own station's)."""
+        return any(w.kind == "station" and self._ready(w, now) and w.polling > 0
+                   and w.id != f"station:{j.extra.get('origin') or ''}" and j.seconds <= float(w.load.get("max_s", 1e9))
+                   for w in self.workers.values())
+
     def _holds_bg(self, w: Worker) -> bool:
         """(lock held) This worker holds background work now (it decodes one clip at a time)."""
         return any(getattr(self._leases.get(lease), "bg", False) for lease in w.leases)
@@ -428,17 +435,18 @@ class Pool:
         than AWS), and only once a GPU worker that could take it now has had STATION_DEFER_S to. A GPU worker: a
         pre-alert clip only when _fast_ok (a forced one: when it holds nothing), background work only when _bg_free.
         A pinned job: its worker only; never a worker in its avoid."""
-        if (j.pin and w.id != j.pin) or w.id in j.avoid:
+        if (j.pin and w.id != j.pin) or w.id in j.avoid or (j.extra.get("station_only") and w.kind != "station"):
             return False
-        if j.bg and w.kind == "gpu":
-            return self._bg_free(w, now, j.seconds)
+        if j.bg and w.kind == "gpu":             # (#896: stations first: a GPU only once no station could take it)
+            return self._bg_free(w, now, j.seconds) and (bool(j.pin) or now - j.queued_at >= BG_STATION_FIRST_S
+                                                         or not self._station_could(j, now))
         if w.kind == "station":
-            if (j.cls in FAST_CLASSES and j.pin != w.id) or j.gpu_only or \
+            if (j.cls in FAST_CLASSES and j.pin != w.id and not j.bg) or j.gpu_only or \
                     j.extra.get("origin") == w.id.removeprefix("station:"):
                 return False                       # (never a station's own clip back to it: no round trip)
             if j.seconds > float(w.load.get("max_s", 1e9)):
                 return False                       # (only what it decodes in a few seconds: its own pages never wait long)
-            return not (now - j.queued_at < STATION_DEFER_S and self._gpu_idle(now)) or j.pin == w.id
+            return not (now - j.queued_at < STATION_DEFER_S and self._gpu_idle(now)) or j.pin == w.id or j.bg
         if not j.bg and self._holds_bg(w):
             return False                           # (#878: never queued behind its background decode)
         if j.cls in FAST_CLASSES and j.forced:     # (the pre-alert speed gate too; AWS out: any free worker)
@@ -555,6 +563,47 @@ class Pool:
         if est > BUDGETS[cls][0]:
             return False, f"busy (about {est:.0f} s of work ahead)"
         return True, ""
+
+    def station_wait(self, w: Worker) -> float:
+        """(lock held) A station's whisper's estimated wait for a new clip: its queue (and what the pool leased it) x its
+        measured time per clip (what it reports in its load)."""
+        svc = float(w.load.get("service_s") or SERVICE_DEFAULT_S * 8)
+        return (float(w.load.get("queue") or 0) + len(w.leases)) * svc
+
+    def bg_place(self, cls: float, seconds: float, origin: str = "", budget: float = 90.0,
+                 avoid=frozenset(), now: float | None = None) -> tuple[str, str, float]:
+        """Where an Auto · background clip its station couldn't start in time goes (#896): ("station", the soonest
+        station's worker id, its estimated wait) when a station whisper in the pool can START it within budget (never
+        its own station: it was behind; the job then goes to whichever station claims it first: station_only); else
+        ("gpu", worker id, 0) for an idle GPU with no priority work (overflow); else ("", "", the best station's wait or
+        -1 with none). A station's wait counts its queue, its leases and its share of the station-only clips waiting."""
+        now = self.clock() if now is None else now
+        if not self._on() or self._stop.is_set():
+            return "", "", -1.0
+        with self._cv:
+            cands = [w for w in self.workers.values() if w.kind == "station" and self._ready(w, now)
+                     and w.id != f"station:{origin}" and seconds <= float(w.load.get("max_s", 1e9))]
+            ahead = sum(1 for j in self._queue if j.extra.get("station_only"))
+            best = None
+            for w in cands:
+                svc = float(w.load.get("service_s") or SERVICE_DEFAULT_S * 8)
+                est = self.station_wait(w) + ahead / len(cands) * svc
+                if best is None or est < best[1]:
+                    best = (w.id, est)
+            if best is not None and best[1] <= budget:
+                return "station", best[0], round(best[1], 1)
+            gpu = next((w.id for w in self.workers.values() if w.kind == "gpu" and w.id not in avoid
+                        and self._bg_free(w, now, seconds)), "")
+            if gpu:
+                return "gpu", gpu, 0.0
+        return "", "", round(best[1], 1) if best is not None else -1.0
+
+    def station_waits(self, now: float | None = None) -> dict:
+        """Health: each pooled station's estimated wait for a new clip (s)."""
+        now = self.clock() if now is None else now
+        with self._cv:
+            return {w.id.removeprefix("station:"): round(self.station_wait(w), 1) for w in self.workers.values()
+                    if w.kind == "station" and self.state_of(w, now) != "offline"}
 
     # -- jobs ------------------------------------------------------------------------------------------------------
 

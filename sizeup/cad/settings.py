@@ -2429,7 +2429,7 @@ class Editor:
 
     def _channel_value(self, key: str, cur: dict, vals: dict):
         """The override to store for key: only what differs from the default (REMOVE: nothing does)."""
-        dflt = channels_mod.defaults(key, self._aws_channels(), self._record_only())
+        dflt = channels_mod.defaults(key, self._aws_channels(), self._record_only(), self._context())
         new = {k: v for k, v in {**cur, **vals}.items() if k in channels_mod.FIELDS and v != dflt.get(k)}
         if channels_mod.is_tg(key):
             new.pop("record", None)
@@ -2439,6 +2439,10 @@ class Editor:
         ctx = self.cad.radio_ctx
         return tuple(ctx.aws_channels()) if ctx is not None else channels_mod.DEFAULT_AWS
 
+    def _context(self):
+        """context(key): a context or neighbour talkgroup, its default Auto · background (#896, App.context_tg)."""
+        return getattr(self.cad.radio_ctx, "context_tg", None)
+
     def _record_only(self) -> tuple:
         """[stt] record_only (#201): recorded, not transcribed unless a choice here says otherwise."""
         ctx = self.cad.radio_ctx
@@ -2447,14 +2451,16 @@ class Editor:
 
     ENGINE_MIGRATION = "channels_engine_896"     # (cad meta) the one-time engine migration (#896) ran: when, what
 
-    def migrate_engines(self, op: str = "system: engine selector (#896)") -> dict | None:
+    def migrate_engines(self, op: str = "system: engine selector (#896)", context_keys=()) -> dict | None:
         """The one-time migration of #896, on the CAD of record's start: every channel's engine is the only thing that
         decides where its audio goes. A stored "aws" (AWS, with a GPU worker first wherever the pool's class switch
         was on) becomes "pin:aws" (AWS; a GPU worker only when AWS can't take a clip); a channel on the default
         (the [stt] aws_channels: "aws" before, "pin:aws" now) is noted the same way. "local" is the channel's own
         station pinned and "both" Compare already: unchanged. Each channel audited (Settings > Radios, operator op),
-        the counts kept in cad meta. Idempotent: once it ran (the meta says so), nothing. -> {migrated, default} the
-        first time, else None."""
+        the counts kept in cad meta. Idempotent: once it ran (the meta says so), nothing. A context or neighbour talkgroup
+        on its station's whisper (context_keys: the talkgroups known now; a stored "local", or the default) goes to
+        Auto · background, its default now (channels.defaults). -> {migrated, default, background, background_default}
+        the first time, else None."""
         store = self.cad.store
         if store.meta_get(self.ENGINE_MIGRATION):
             return None
@@ -2470,7 +2476,17 @@ class Editor:
         default = sorted(k for k in aws if not (isinstance(ov.get(k), dict) and "engine" in ov[k]))
         for key in default:
             audit.append(("radios", f"channel/{key}", {"engine": "aws (default)"}, {"engine": "pin:aws (default)"}))
-        out = {"migrated": stored, "default": default, "at": time.time()}
+        ctx = sorted({k for k in context_keys if isinstance(k, str) and channels_mod.is_tg(k) and k not in aws})
+        bg = [k for k in ctx if isinstance(ov.get(k), dict) and ov[k].get("engine") == "local"]
+        for key in bg:                            # (Auto · background is its default now: the engine's override goes)
+            new = self._channel_value(key, {k: v for k, v in ov[key].items() if k != "engine"}, {"engine": "auto_bg"})
+            changes.append((channels_mod.SECTION, key, new))
+            audit.append(("radios", f"channel/{key}", {"engine": "local"}, {"engine": "auto_bg"}))
+        bg_default = [k for k in ctx if not (isinstance(ov.get(k), dict) and "engine" in ov[k])]
+        for key in bg_default:
+            audit.append(("radios", f"channel/{key}", {"engine": "local (default)"}, {"engine": "auto_bg (default)"}))
+        out = {"migrated": stored, "default": default, "background": bg, "background_default": bg_default,
+               "at": time.time()}
         mark = (lambda db: db.execute("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
                                       "value = excluded.value", (self.ENGINE_MIGRATION, json.dumps(out))))
         if audit:                                 # (the overrides, their audit and the mark: one transaction)
@@ -2517,8 +2533,8 @@ class Editor:
                     continue
                 cur = ov.get(key) or {}
                 new = self._channel_value(key, cur, v)
-                before = channels_mod.pref(key, ov, aws, ro)
-                after = channels_mod.pref(key, {key: {} if new is REMOVE else new}, aws, ro)
+                before = channels_mod.pref(key, ov, aws, ro, self._context())
+                after = channels_mod.pref(key, {key: {} if new is REMOVE else new}, aws, ro, self._context())
                 if before != after:
                     changes.append((channels_mod.SECTION, key, new))
                     audit.append(("radios", f"channel/{key}", {k: before[k] for k in v}, {k: after[k] for k in v}))

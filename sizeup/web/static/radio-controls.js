@@ -45,7 +45,7 @@ window.RadioControls = (() => {
     + "Record only: audio kept, no speech-to-text.\nOff: dropped.\nActivity only: encrypted, never decoded; "
     + "only when it was active and which radios.";
   const ENGINE_HELP = "Auto · priority: idle GPU worker → AWS → station whisper.\n"
-    + "Auto · background: GPU with no priority work on it → station whisper → AWS last (its budget).\n"
+    + "Auto · background: stations → GPU overflow → AWS (its budget).\n"
     + "Pinned (a station, a GPU worker, AWS): that engine first, then Auto · priority's order.\n"
     + "Compare: station whisper and AWS on every clip (\u21c4).\n"
     + "Grey: not available now (its fallback runs). Police: its own AWS limit.";
@@ -1250,10 +1250,22 @@ window.RadioControls = (() => {
   }
   // Channel choices (sizeup/channels.py): the default (AWS for [stt] aws_channels, no text for [stt] record_only),
   // what is saved, what was just clicked.
+  // A channel's default engine (sizeup/channels.py defaults, #896): the [stt] aws_channels pinned AWS, a context or
+  // neighbour talkgroup (another system's, or a county one not Main) Auto · background, the rest its own station
+  function dfltEngine(key) {
+    const c = (st.state && st.state.channels) || {};
+    if ((c.aws_channels || []).includes(key)) return "pin:aws";
+    if (key.startsWith("p25:")) return "auto_bg";
+    if (key.startsWith("tg:")) {
+      const r = ((st.state && st.state.talkgroups) || []).find((x) => (x.key || `tg:${x.tg}`) === key);
+      if (r && !r.main) return "auto_bg";
+    }
+    return "local";
+  }
   function chan(key) {
     const c = (st.state && st.state.channels) || {};
     const p = { record: true, transcribe: !(c.record_only || []).includes(key),
-                engine: (c.aws_channels || []).includes(key) ? "pin:aws" : "local",
+                engine: dfltEngine(key),
                 ...((c.prefs || {})[key] || {}) };
     const q = st.cpending.get(key);
     if (q) Object.assign(p, q.vals, { cpending: true });
@@ -1278,7 +1290,7 @@ window.RadioControls = (() => {
     const c = (st.state && st.state.channels) || {};
     for (const [key, p] of st.cpending) {
       const saved = { record: true, transcribe: !(c.record_only || []).includes(key),
-                      engine: (c.aws_channels || []).includes(key) ? "pin:aws" : "local",
+                      engine: dfltEngine(key),
                       ...((c.prefs || {})[key] || {}) };
       if (saved.engine === "aws") saved.engine = "pin:aws";     // (#896, as chan() shows it)
       if (now > p.until || Object.entries(p.vals).every(([k, v]) => saved[k] === v)) st.cpending.delete(key);

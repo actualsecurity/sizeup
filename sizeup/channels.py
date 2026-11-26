@@ -85,10 +85,13 @@ def tg_of(key: str) -> tuple[str, int]:
     return ("" if key.startswith("tg:") else got[0]), got[1]
 
 
-def defaults(key: str, aws_channels=DEFAULT_AWS, record_only=DEFAULT_RECORD_ONLY) -> dict:
+def defaults(key: str, aws_channels=DEFAULT_AWS, record_only=DEFAULT_RECORD_ONLY, context=None) -> dict:
     """[stt] aws_channels: pinned AWS ("pin:aws": AWS, a GPU worker only when AWS can't take a clip; #896, before it
-    "aws", which a GPU worker took first wherever the pool's class switch was on), the rest the channel's own station."""
-    return {"record": True, "transcribe": key not in record_only, "engine": PIN_AWS if key in aws_channels else "local"}
+    "aws", which a GPU worker took first wherever the pool's class switch was on); a context or neighbour talkgroup
+    (context(key): another P25 system's, or a county talkgroup not Main) Auto · background (the stations' whisper, a GPU
+    as overflow, AWS last: the admin, #896); the rest the channel's own station."""
+    eng = PIN_AWS if key in aws_channels else "auto_bg" if context is not None and is_tg(key) and context(key) else "local"
+    return {"record": True, "transcribe": key not in record_only, "engine": eng}
 
 
 def clean(key: str, raw: dict) -> dict:
@@ -111,8 +114,8 @@ def clean(key: str, raw: dict) -> dict:
     return out
 
 
-def pref(key: str, overrides: dict, aws_channels=DEFAULT_AWS, record_only=DEFAULT_RECORD_ONLY) -> dict:
-    p = defaults(key, aws_channels, record_only)
+def pref(key: str, overrides: dict, aws_channels=DEFAULT_AWS, record_only=DEFAULT_RECORD_ONLY, context=None) -> dict:
+    p = defaults(key, aws_channels, record_only, context)
     o = overrides.get(key)
     if isinstance(o, dict):
         p.update({k: v for k, v in o.items() if k in FIELDS})

@@ -1614,7 +1614,7 @@ Settings > Radios > Channels picks each channel's engine (a group heading's "Eng
 | engine | order |
 |---|---|
 | Auto · priority (`auto`) | an idle GPU worker → AWS (budget, reserve) → the station's whisper |
-| Auto · background (`auto_bg`) | a GPU worker holding nothing, no priority work waiting, none in the last 3 s → the station's whisper (an idle one elsewhere when behind) → AWS last (the catch-up, within its budget) |
+| Auto · background (`auto_bg`) | the stations first: its own station's whisper, or (when its estimated wait is over the class's budget: 90 s for context talkgroups, 60 s for context alert classes) another pooled station's that can start it in time → an idle GPU as overflow (no priority work on it) → AWS within its budget (under 80% of its month) → else back to its own station's queue. Never dropped. The default of every context or neighbour talkgroup (another system's, or a county one not Main) |
 | pinned (`pin:gpu-pc`, `pin:station:<id>`, `pin:aws`) | that engine → Auto · priority's order; pinned AWS uses a GPU worker only when AWS can't take the clip |
 | this station (`local`) | today's Local |
 | Compare (`both`) | today's Both |
@@ -1623,7 +1623,12 @@ Settings > Radios > Channels picks each channel's engine (a group heading's "Eng
   no worker-side class opt-out replaces them. A clip a station hands over when its whisper is behind goes its channel's
   way; the catch-up goes Auto · background's way. The pool's on/off switch holds for all of it.
 - **Migration (once, audited):** on the CAD of record's first start with it (`Editor.migrate_engines`, cad meta
-  `channels_engine_896`), a stored `aws` becomes `pin:aws`, and the `[stt] aws_channels` default is `pin:aws`. Each
+  `channels_engine_896`), a stored `aws` becomes `pin:aws`, and the `[stt] aws_channels` default is `pin:aws`. A
+  context or neighbour talkgroup on its station's whisper (stored `local`, or the default) goes to Auto · background,
+  its default now.
+- **Background overflow on Health:** the last hour's hand-overs by where they went (station, GPU, AWS, back) and each
+  pooled station's estimated wait (queue x its measured time per clip). Overflow to the GPU or AWS often means more
+  stations are needed; each new station in the pool takes its share by itself. Each
   channel is in the Radios audit (operator "system: engine selector (#896)"); the log line has the counts. `aws` is
   never stored again (a Settings write of it is `pin:aws`); a station from before the selector is still sent it.
 - **The station:** on Auto · priority or a pinned GPU worker it skips its whisper and sends the clip at once, as for

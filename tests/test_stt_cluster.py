@@ -163,9 +163,17 @@ def test_with_no_worker_idle_a_handed_over_clip_waits_for_the_catch_up_never_dro
     try:
         app = hub.app
         ctx_tier(app)
+        asked = []
+        from sizeup.cloud.hub import StationOffline
+
+        def offline(fn, args, *a, **k):                  # (#896: back to its own station's queue first; it's offline)
+            asked.append((fn, args))
+            raise StationOffline("station offline")
+        app.hub.remote = offline
         now = time.time()
         send(hub, ctx_event("9570-1794-call_90", 1, now))
         assert wait(lambda: row(hub, "9570-1794-call_90").get("status") == "skipped", 10), row(hub, "9570-1794-call_90")
+        assert asked == [("transcribe_now", ["9570-1794-call_90"])]
         assert SHED in row(hub, "9570-1794-call_90")["model"]                        # the catch-up's to run
         assert [r["id"] for r in app.cad.comms.shed_clips(now - 3600)[0]] == ["9570-1794-call_90"]
         # a station's whisper free now: the catch-up sends it to the pool and it is done

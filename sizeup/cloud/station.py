@@ -471,6 +471,11 @@ class StationLink:
         n = self.pool.get("gpu_ready")
         return self.connected() and _is_int(n) and n > 0
 
+    def pool_takes_bg(self) -> bool:
+        """The hub takes an Auto · background clip handed over (#896: it places it on another station, a GPU, AWS, or
+        sends it back here): a hub with handed-over clips, heard lately."""
+        return POOL_CAP in self.hub_caps and self.connected()
+
     def pool_gpu_bg(self) -> bool:
         """The hub's last word, heard lately: a GPU worker would take an Auto · background clip now (it holds nothing
         and no priority work waits: #878). Only to a hub that takes handed-over clips."""

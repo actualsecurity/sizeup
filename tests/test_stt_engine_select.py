@@ -244,9 +244,8 @@ def test_the_station_hands_gpu_first_channels_over_at_once_and_runs_its_whisper_
     assert app._stt_way("auto", "FG1") == "aws"                    # no GPU, AWS: the hub's still
     _word(app, monkeypatch)
     assert app._stt_way("auto", "FG1") == "local"                  # neither: this whisper, no round trip
-    assert app._stt_way("auto_bg", "p25:mrrs:9211") == "local"
     _word(app, monkeypatch, gpu_bg=True)
-    assert app._stt_way("auto_bg", "p25:mrrs:9211") == "pool_bg"   # a GPU free for background: handed over
+    assert app._stt_way("auto_bg", "p25:mrrs:9211") == "local_bg"  # background: this station's whisper first (#896)
     app.link.station_id = "north"
     assert app._stt_way("pin:station:north", "FG1") == "local"     # pinned to itself
     assert app._stt_way("pin:station:south", "FG1") == "aws"
@@ -458,32 +457,23 @@ def test_the_guard_sends_a_slow_gpus_priority_clips_to_aws_and_says_so(tmp_path)
         fake.close()
 
 
-def test_auto_background_on_the_hub_goes_to_an_idle_gpu_and_falls_back_to_the_catch_up(tmp_path, quick):
+def test_auto_backgrounds_catch_up_uses_aws_last_within_each_budget(tmp_path):
     fake = FakeTranscribe(phrases={500: AWS_TEXT})
     hub = _hub(tmp_path, fake)
     try:
         _set(hub, "tg:325", "auto_bg")
-        hub.app.hub.workers.add("gpu-1")
-        w = hub.app.sttpool.seen("gpu-1", "online")
-        w.polling = 1
-        assert hub.app.pool_word("")["gpu_bg"] is True
-        w.leases.add("busy")                                     # the GPU holds something: no background now
-        assert hub.app.pool_word("")["gpu_bg"] is False
-        # its catch-up: AWS only within the context budget, never ours (another P25 system's talkgroup)
-        w.leases.clear()
-        w.polling = 0
-        w.state = "gaming"
         real = hub.app.channel_pref
         hub.app.channel_pref = lambda k: {"record": True, "transcribe": True, "engine": "auto_bg"} if k.startswith("p25:") \
             else real(k)                                         # (no MRRS system on this hub: its tier says nothing)
         assert hub.app._catchup_route("p25:mrrs:9211") == "aws"
         hub.app.aws.context_budget = lambda: {"pct": 95.0}
         assert hub.app._catchup_route("p25:mrrs:9211") == "whisper"
-        assert hub.app._catchup_route("tg:325") == "whisper"    # (ours: the station's whisper, never AWS first)
+        assert hub.app._catchup_route("tg:325") == "aws"         # (ours: within our month's budget, #896)
+        hub.app.aws.budget = lambda: {"pct": 95.0}
+        assert hub.app._catchup_route("tg:325") == "whisper"
     finally:
         hub.close()
         fake.close()
-
 
 def test_an_old_station_is_sent_the_nearest_old_engine(tmp_path):
     fake = FakeTranscribe(phrases={500: AWS_TEXT})
@@ -494,10 +484,11 @@ def test_an_old_station_is_sent_the_nearest_old_engine(tmp_path):
         _set(hub, "FG2", "pin:gpu-pc")
         hub.app.hub.status = {"channels": {"prefs": {}}}                 # a station from before: no engine_select_ok
         prefs = hub.app.channel_desired()["prefs"]
-        assert prefs["FG1"]["engine"] == "aws" and prefs["tg:325"]["engine"] == "local" and prefs["FG2"]["engine"] == "aws"
+        # (tg:325: Auto · background is its default now (#896), nothing to send; an old station's own default: local)
+        assert prefs["FG1"]["engine"] == "aws" and "tg:325" not in prefs and prefs["FG2"]["engine"] == "aws"
         hub.app.hub.status = {"channels": {"prefs": {}, "engine_select_ok": True}}
         prefs = hub.app.channel_desired()["prefs"]
-        assert prefs["FG1"]["engine"] == "auto" and prefs["tg:325"]["engine"] == "auto_bg"
+        assert prefs["FG1"]["engine"] == "auto" and "tg:325" not in prefs
         # the hub still routes an old station's "aws" clip by the channel's own choice (Auto · priority's order)
         assert hub.app._hub_engine("FG1") == "auto"
     finally:
@@ -659,26 +650,92 @@ def test_resend_after_aws_returns_skips_what_is_in_flight_or_done_on_every_engin
         fake.close()
 
 
-def test_a_background_clip_the_gpu_cant_take_goes_back_to_its_stations_whisper_not_aws(tmp_path, monkeypatch):
+def _bg_handed(tid, seq=1, cls="low"):
+    ev = pending_event(tid, seq=seq)
+    ev["data"].update(source="Neighbor FD", talkgroup=325, transcript_pending="pool", stt_class=cls, stt="")
+    return ev
+
+
+def _station_worker(p, sid, queue, service_s=18.0):
+    w = p.seen(f"station:{sid}", "online", kind="station", load={"queue": queue, "service_s": service_s, "max_s": 60.0})
+    w.polling = 1
+    return w
+
+
+def test_background_goes_stations_first_then_gpu_overflow_then_aws_then_back(tmp_path, monkeypatch):
+    """#896, the admin: "stations first, if overflow then the GPU, AWS last". A clip its station couldn't start within
+    its budget: another station that can (the soonest), else an idle GPU at once, else AWS within its budget, else back
+    to its own station's queue. Never dropped; each step on its route and counted for Health."""
     fake = FakeTranscribe(phrases={500: AWS_TEXT})
     hub = _hub(tmp_path, fake)
     asked = []
     try:
         _set(hub, "tg:325", "auto_bg")
+        p = hub.app.sttpool
         monkeypatch.setattr(hub.app.hub, "remote", lambda fn, args, *a, **k: asked.append((fn, args)) or 1)
-        ev = pending_event("TG325-1")
-        ev["data"].update(source="Neighbor FD", talkgroup=325, transcript_pending="pool", stt_class="low", stt="")
-        send(hub, ev)                                            # (no GPU worker: nobody takes it)
-        assert wait(lambda: ("transcribe_now", ["TG325-1"]) in asked, 10), asked
-        assert hub.app.aws.health()["done"] == 0
-        hub.app.apply("retext", {"id": "TG325-1", "text": "neighbor traffic", "status": "done", "model": "small.en"}, None)
-        assert wait(lambda: hub.app.stt_runs.of("TG325-1"), 5)
-        run = hub.app.stt_runs.of("TG325-1")[0]
-        assert run["role"] == "text" and run["route"].startswith("auto·background: GPU → station"), run
+        monkeypatch.setattr(hub.app.hub.workers, "stations_on", lambda sid=None: True)
+        monkeypatch.setattr(hub.app.hub.workers, "enabled", lambda cls=0.0: True)
+        p.allowed = lambda wid: True
+        _station_worker(p, "east", queue=20)                    # 20 x 18 s: 360 s, over the 90 s budget
+        _station_worker(p, "west", queue=2)                     # 36 s: can start it in time
+        _station_worker(p, "north", queue=3)                    # 54 s
+        send(hub, _bg_handed("TG325-1"))
+        assert wait(lambda: hub.app.stt_chosen("TG325-1") == "stations", 10), hub.app.stt_chosen("TG325-1")
+        assert p.bg_place(sttpool.LOW, 3.0, "", 90.0)[:2] == ("station", "station:west")    # (the soonest)
+        assert p.bg_place(sttpool.LOW, 3.0, "west", 90.0)[:2] == ("station", "station:north")  # (never its own)
+        # no station can start it in time: an idle GPU at once (overflow)
+        for sid in ("west", "north"):
+            p.workers[f"station:{sid}"].load["queue"] = 30
+        hub.app.hub.workers.add("gpu-1")
+        online(p, "gpu-1")
+        p._prio_at = 0.0
+        send(hub, _bg_handed("TG325-2", seq=2))
+        assert wait(lambda: hub.app.stt_chosen("TG325-2") == "gpu-1", 10), hub.app.stt_chosen("TG325-2")
+        # no GPU free either: AWS within its budget
+        p.workers["gpu-1"].leases.add("busy")
+        send(hub, _bg_handed("TG325-3", seq=3))
+        assert wait(lambda: _row(hub, "TG325-3").get("text") == AWS_TEXT + ".", 30), _row(hub, "TG325-3")
+        assert wait(lambda: "AWS" in _row(hub, "TG325-3").get("stt_route", ""), 5)
+        # AWS over its background budget too: back to its own station's queue (never dropped)
+        hub.app.aws.budget = lambda: {"pct": 95.0}
+        send(hub, _bg_handed("TG325-4", seq=4))
+        assert wait(lambda: ("transcribe_now", ["TG325-4"]) in asked, 10), asked
+        hub.app.apply("retext", {"id": "TG325-4", "text": "neighbor traffic", "status": "done", "model": "small.en"}, None)
+        assert wait(lambda: hub.app.stt_runs.of("TG325-4"), 5)
+        assert hub.app.stt_runs.of("TG325-4")[0]["role"] == "text"
+        h = hub.app.bg_health()
+        assert h["h"] == {"station": 1, "gpu": 1, "aws": 1, "back": 1}, h
+        assert h["stations"]["east"] == 360.0 and h["budget_s"] == sttroute.BG_BUDGET_S
     finally:
         hub.close()
         fake.close()
 
+
+def test_a_station_keeps_its_background_clip_until_it_is_behind_its_budget(st_app, monkeypatch):
+    app = st_app
+    sent = []
+    monkeypatch.setattr(app, "_stt_offload", lambda item, key, prio, why, bg=False: sent.append((item.id, bg)) or True)
+    stats = {"queued": 2, "service_s": 18.0}
+    monkeypatch.setattr(app.stt, "stats", lambda: dict(stats))
+    assert app._bg_over_budget(sttpool.LOW) == 0.0                         # 36 s: it starts here in time
+    stats["queued"] = 10
+    assert app._bg_over_budget(sttpool.LOW) == 180.0                       # 180 s: over the 90 s budget
+    assert app._bg_over_budget(sttpool.CONTEXT) == 180.0 and sttroute.bg_budget(sttpool.CONTEXT) == 60.0
+
+
+def test_background_on_a_gpu_waits_for_the_stations_first_and_never_blocks_priority():
+    clk, jobs = Clock(), Jobs()
+    p = pool(clk)
+    online(p, "gpu-1")
+    st = p.seen("station:west", "online", kind="station", load={"queue": 0, "service_s": 5.0, "max_s": 60.0})
+    st.polling = 1
+    assert p.submit(jobs.job("shed", CATCHUP, seconds=3.0, bg=True))
+    assert p.claim("gpu-1", 0) is None                       # a station could take it: stations first
+    assert p.claim("station:west", 0).id == "shed"
+    assert p.submit(jobs.job("shed2", CATCHUP, seconds=3.0, bg=True))
+    clk.t += sttpool.BG_STATION_FIRST_S                      # nobody took it in time: the GPU as overflow
+    assert p.claim("gpu-1", 0).id == "shed2"
+    assert p.ready_forced(LIVE) == (False, "gpu-1 busy (background)")      # priority never queues behind it
 
 def test_the_legacy_pool_check_never_counts_background_work_as_a_waiting_pre_alert():
     clk, jobs = Clock(), Jobs()
@@ -790,6 +847,34 @@ def test_switched_off_pool_classes_are_said_and_audited_once_when_they_go(tmp_pa
         assert "classes" not in json.loads(reg.mdb.get("stt_pool", ""))
         hub.app.migrate_engines()
         assert len([r for r in hub.app.cad.settings.audit_log("system") if "gone (#896)" in json.dumps(r)]) == 2
+    finally:
+        hub.close()
+        fake.close()
+
+
+def test_context_talkgroups_on_the_stations_whisper_move_to_auto_background_audited(tmp_path):
+    """#896, the admin: every context or neighbour talkgroup on its station's whisper goes to Auto · background (the
+    stations first, a GPU as overflow, AWS last): its default now, a stored "local" moved, each one audited, once."""
+    fake = FakeTranscribe(phrases={500: AWS_TEXT})
+    hub = _hub(tmp_path, fake)
+    try:
+        ed = hub.app.cad.settings
+        ed.cad.store.meta_put(ed.ENGINE_MIGRATION, "")
+        ed._commit([("channels", "tg:500", {"engine": "local", "transcribe": True}),
+                    ("channels", "tg:502", {"engine": "pin:aws"})], "test", [])
+        got = ed.migrate_engines(context_keys=["tg:500", "tg:501", "tg:502", "p25:metro:12", "FG1", "tg:307"])
+        assert got["background"] == ["tg:500"] and got["background_default"] == ["p25:metro:12", "tg:501"]
+        ov = ed.channel_overrides()
+        assert "tg:500" not in ov or "engine" not in ov["tg:500"]               # (Auto · background: its default now)
+        assert ov["tg:502"] == {"engine": "pin:aws"}                            # (an admin's other choice: kept)
+        assert hub.app.channel_pref("p25:metro:12")["engine"] == "auto_bg"
+        rows = [r for r in ed.audit_log("radios") if "auto_bg" in json.dumps(r)]
+        assert len(rows) == 3
+        assert ed.migrate_engines(context_keys=["tg:999"]) is None              # once
+        # a county talkgroup marked Main is ours: its own station, not background
+        assert hub.app.context_tg("p25:metro:12") is True and channels.defaults("tg:1", context=lambda k: False)["engine"] \
+            == "local" and channels.defaults("tg:1", context=lambda k: True)["engine"] == "auto_bg"
+        assert channels.defaults("FG1", context=lambda k: True)["engine"] == "pin:aws"    # (never an FM channel)
     finally:
         hub.close()
         fake.close()

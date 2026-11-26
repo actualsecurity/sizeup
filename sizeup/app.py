@@ -1569,7 +1569,7 @@ class App:
         log(recording_note(page))
         heard = self._page_heard(page)
         eng = self._stt_way(self.stt_engine(page.label), page.label) if heard else ""
-        eng = "local" if eng == "pool_bg" else eng          # (a page is never handed over as background work)
+        eng = "local" if eng == "local_bg" else eng         # (a page is never handed over as background work)
         page.stt = eng if eng in ("aws", "both") else ""  # type: ignore[attr-defined]
         if eng == "aws" and self.forwarding():
             page.status = "remote"          # the hub transcribes it (Amazon Transcribe)
@@ -2656,6 +2656,10 @@ class App:
                 and is_context(key) and self.aws is not None
                 and self.aws.available(key)[0] and self.aws.context_budget()["pct"] < CATCHUP_AWS_PCT):
             return "aws"
+        if (p.get("engine") == sttroute.AUTO_BG and not is_context(key) and self.aws is not None
+                and self.aws.available(key)[0]
+                and self.aws.budget()["pct"] < CATCHUP_AWS_PCT):
+            return "aws"                       # (#896: Auto · background's AWS last, within our month's budget too)
         return "whisper"
 
     def _catchup_whisper_ready(self, after: float) -> tuple[bool, str]:
@@ -2957,7 +2961,7 @@ class App:
 
     def channel_pref(self, key: str) -> dict:
         """{record, transcribe, engine} for "FG1" / "South 2" / "tg:307" (a talkgroup's record is its own switch)."""
-        p = channels.pref(key, self._chan_ov, self.cfg.stt_aws_channels, self.cfg.stt_record_only)
+        p = channels.pref(key, self._chan_ov, self.cfg.stt_aws_channels, self.cfg.stt_record_only, self.context_tg)
         if channels.is_tg(key):
             tsys, tgn = channels.tg_of(key)
             p["record"] = self.tg.record(tgn, tsys)
@@ -2996,10 +3000,10 @@ class App:
         sizeup/sttroute.py): the old ones as they are. A station: Auto · priority, a pinned GPU worker or another
         station "aws" (the hub routes it by the channel's choice: a GPU worker, AWS, then this station's whisper) while
         the hub said lately a GPU worker is ready or AWS can take it, else "local" at once (no round trip for nothing);
-        pinned to this station "local"; Auto · background "pool_bg" (handed to the hub's pool) while the hub said a GPU
-        would take background work now, else "local" (this station's whisper; behind, an idle one elsewhere: #639
-        phase 2; AWS last: the catch-up). No hub (all-in-one): AWS when it can take it (never for background), else
-        local."""
+        pinned to this station "local"; Auto · background "local_bg": this station's whisper first, handed to the hub
+        when its estimated wait is over the class's budget (_bg_over_budget: the hub places it on another station that
+        can start it in time, else an idle GPU, else AWS within its budget, else back here). No hub (all-in-one): AWS
+        when it can take it (never for background), else local."""
         if not sttroute.is_new(eng):
             return eng
         pin = sttroute.pinned(eng)
@@ -3009,7 +3013,7 @@ class App:
         if pin.startswith(sttroute.STATION_PIN) and pin.removeprefix(sttroute.STATION_PIN) == getattr(link, "station_id", None):
             return "local"
         if eng == sttroute.AUTO_BG:
-            return "pool_bg" if link is not None and hasattr(link, "pool_gpu_bg") and link.pool_gpu_bg() else "local"
+            return "local_bg"
         gpu = link is not None and hasattr(link, "pool_gpu_ready") and link.pool_gpu_ready()
         return "aws" if gpu or pin.startswith(sttroute.STATION_PIN) or self.aws_ok(key)[0] else "local"
         # (pinned AWS: "aws" too: the hub runs AWS, a GPU worker only when AWS can't take it)
@@ -3055,9 +3059,9 @@ class App:
         P25 key-up from while sizeup was down with no emergency (#747): whisper's RERUN class at the highest (_late_prio),
         so the live fire traffic after a restart never waits behind up to REPLAY_S of it."""
         eng = self._stt_way(eng, key)           # (the selector's engines as this process runs them now: #875)
-        if eng == "pool_bg" and (late or not isinstance(item, Traffic)
-                                 or float(item.end) - float(item.start) > sttroute.BG_GPU_MAX_S):
-            eng = "local"                       # (a long one: the GPU is never held long by background work)
+        bg = eng == "local_bg" and not late and isinstance(item, Traffic)
+        if eng == "local_bg":
+            eng = "local"
         item.stt = eng if eng in ("aws", "both") else ""
         if self._late_prio(self._stt_priority(item, key), late) in (URGENT, HIGH, LIVE):
             self.stt.ours_heard()              # ours, whichever engine takes it (AWS too): the catch-up's quiet spell
@@ -3066,10 +3070,6 @@ class App:
             item.model = ""
             return self._transcribed(item)
         self._stt_input(item, audio, key)      # (station) the same audio for the hub's engines, queued, never made here
-        if eng == "pool_bg":                   # Auto · background, a GPU free for it (the hub said): handed over now
-            if self._stt_offload(item, key, self._stt_priority(item, key), "background: a GPU worker is free", bg=True):
-                return
-            eng = "local"
         if eng == "aws" and self.forwarding():
             # The hub runs Amazon Transcribe on the clip it gets: no whisper here.
             item.raw, item.confidence, item.status, item.model = "", None, "remote", channels_model()
@@ -3084,7 +3084,11 @@ class App:
                 return self._aws_start(item, pcm, key)
             self._aws_wait[item.id] = (pcm, key)
         prio = self._late_prio(self._stt_priority(item, key), late)
-        if eng == "local" and self._offload_now(prio, len(audio) / RATE) and \
+        if bg:                                 # Auto · background (#896): here first, the hub's way once behind budget
+            over = self._bg_over_budget(prio)
+            if over and self._stt_offload(item, key, prio, f"background: whisper ~{over:.0f} s behind", bg=True):
+                return
+        elif eng == "local" and self._offload_now(prio, len(audio) / RATE) and \
                 self._stt_offload(item, key, prio, "whisper behind here"):
             return                             # (#639 phase 2: another worker of the pool takes it now)
         self.stt.submit(item, audio, prio, key)    # (dropped: _stt_dropped says so on it)
@@ -3108,16 +3112,23 @@ class App:
         st = self.stt.stats()
         return int(st.get("queued") or 0) * float(st.get("service_s") or 16.0) > OFFLOAD_WAIT_S
 
+    def _bg_over_budget(self, prio) -> float:
+        """(station) This station's whisper's estimated wait for a new clip (queued x its measured time per clip) when
+        it is over the class's background budget (sttroute.bg_budget: the clip couldn't START in time here), else 0."""
+        st = self.stt.stats()
+        est = int(st.get("queued") or 0) * float(st.get("service_s") or 16.0)
+        return est if est > sttroute.bg_budget(prio) else 0.0
+
     def _stt_offload(self, item, key: str, prio, why: str, bg: bool = False) -> bool:
         """(station) A transmission to the hub's pool instead of this station's whisper (#639 phase 2): sent as
         transcript_pending "pool" with its clip (its STT input went up on its own lane already); the hub transcribes it
         on a pool worker, else AWS or this station's whisper later (the catch-up). False: the hub doesn't take them.
-        bg: an Auto · background channel's while the hub said a GPU would take it (whatever the pool's class switches:
-        the channel's choice routes it on the hub)."""
+        bg: an Auto · background channel's, behind its budget here (the hub places it: another station, an idle GPU,
+        AWS, else back here; any hub that takes handed-over clips)."""
         link = self.link
         if not isinstance(item, Traffic) or link is None or not self.forwarding():
             return False
-        if not (link.pool_gpu_bg() if bg and hasattr(link, "pool_gpu_bg") else
+        if not (link.pool_takes_bg() if bg and hasattr(link, "pool_takes_bg") else
                 not bg and hasattr(link, "pool_takes") and link.pool_takes()):
             return False
         item.raw, item.confidence, item.status, item.model = "", None, "remote", "pool"
@@ -3863,6 +3874,19 @@ class App:
                 log(f"channel choices: couldn't save the move from the old names ({type(e).__name__}: {e})")
         return out
 
+    def context_tg(self, key: str) -> bool:
+        """A context or neighbour talkgroup (its default engine Auto · background, #896): another P25 system's, or a county
+        talkgroup not Main. Never in the way: a talkgroup that can't be placed is not one."""
+        try:
+            if key.startswith("p25:"):
+                return True
+            if key.startswith("tg:"):
+                tsys, tgn = channels.tg_of(key)
+                return not self.tg.main(tgn, tsys) if tsys else not self.tg.main(tgn)
+        except Exception:  # noqa: BLE001 - the plain default then
+            pass
+        return False
+
     def migrate_engines(self) -> dict | None:
         """(the CAD of record's start) The engine selector's one-time migration (#896, Editor.migrate_engines): a
         channel's engine alone decides where its audio goes, so "aws" becomes pinned AWS. Logged with its counts; never
@@ -3870,14 +3894,17 @@ class App:
         if self.forwarding():
             return None
         try:
-            got = self.cad.settings.migrate_engines()
+            known = [str(r.get("key") or channels.tg_key(r["tg"])) for r in (self.tg.state() or [])
+                     if isinstance(r, dict) and (r.get("key") or isinstance(r.get("tg"), int))]
+            got = self.cad.settings.migrate_engines(context_keys=[k for k in known if self.context_tg(k)])
         except Exception as e:  # noqa: BLE001 - tried again at the next start
             log(f"speech-to-text: the engine migration (#896) failed: {type(e).__name__}: {e}")
             return None
         if got is not None:
             log(f"speech-to-text: engine migration (#896): {len(got['migrated'])} channel(s) set to AWS moved to pinned "
                 f"AWS ({', '.join(got['migrated']) or 'none'}); {len(got['default'])} on the default AWS, now pinned "
-                f"AWS ({', '.join(got['default']) or 'none'})")
+                f"AWS ({', '.join(got['default']) or 'none'}); {len(got['background'])} context talkgroup(s) set to "
+                f"the station's whisper and {len(got['background_default'])} on it by default now Auto · background")
             try:
                 self.channels_changed()
             except Exception as e:  # noqa: BLE001 - the next push sends them

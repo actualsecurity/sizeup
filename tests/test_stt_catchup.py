@@ -867,7 +867,8 @@ def test_the_hub_routes_police_to_its_own_aws_budget_and_never_ours(tmp_path):
         pd_alert(app)
         assert app.channel_pref("FG1")["engine"] == "pin:aws"           # ours on AWS: still never caught up on AWS
         assert app._catchup_route(PD) == "aws" and app._catchup_route("FG1") == "whisper"
-        assert app._catchup_route("tg:383") == "whisper"
+        assert app._catchup_route("tg:383") == "aws"     # (#896: a county context talkgroup, Auto · background: AWS last
+        #                                                   within our month's budget)
         assert call(hub.url + "/api/cad/settings/stt", "POST", {"action": "set", "key": "aws_context_budget_usd",
                                                                  "value": 0}, token=None)[0] == 200
         assert app._catchup_route(PD) == "whisper"                  # its own budget used up: whisper, not ours

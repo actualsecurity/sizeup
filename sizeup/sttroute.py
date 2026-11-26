@@ -8,9 +8,10 @@ A channel's engine (sizeup/channels.py ENGINES; the stored value, then what the 
                 station's whisper. For the pages, Fire/EMS main talkgroups, firegrounds, police alert talkgroups and
                 the airband. The station skips its whisper and hands the clip to the hub at once (unless the hub said
                 no GPU worker is ready and AWS can't take it: then its own whisper at once, no round trip).
-    auto_bg     Auto · background: a GPU worker only while no priority work is queued or held on it (and none came in
-                the last BG_QUIET_S), else the station's whisper (an idle one elsewhere in the cluster when it is behind,
-                #639 phase 2), AWS last within the context budget (the catch-up), never dropped.
+    auto_bg     Auto · background (#896): the stations' whisper first (its own, then any station in the pool that can
+                start it within its class's budget: BG_BUDGET_S), a GPU worker as overflow (idle, no priority work on
+                it, none in the last BG_QUIET_S), AWS last within its budget, else back to its own station's queue.
+                Never dropped. The default of every context or neighbour talkgroup.
     pin:<id>    one engine by its real id: a GPU worker ("pin:gpu-pc"), another station's whisper ("pin:station:<id>")
                 or AWS ("pin:aws"). Tried first, then Auto · priority's order (a GPU worker, AWS, the station's
                 whisper). Pinned AWS is AWS: a GPU worker only once AWS can't take the clip (its budget out, the
@@ -58,6 +59,13 @@ PIN_RE = re.compile(r"pin:(?:station:[A-Za-z0-9][A-Za-z0-9_.-]{0,63}|[a-z0-9][a-
 PIN_AWS = "pin:aws"       # Amazon Transcribe and nothing else while it can take the clip (a GPU worker only when it can't)
 MODES = {AUTO: "auto·priority", AUTO_BG: "auto·background", "local": "station", "aws": "AWS", "both": "compare"}
 
+# Auto · background (#896, the admin: "stations first, if overflow then the GPU, AWS last"): a clip goes to a station's
+# whisper that can START it within its class's budget (estimated wait: its queue x its measured time per clip), the
+# clip's own station first; none can: an idle GPU at once (overflow); none: AWS within its budget; else back to its own
+# station's queue. Never dropped. A constant for now (Settings later).
+BG_BUDGET_S = 90.0        # LOW (context talkgroups), RERUN, CATCHUP
+BG_BUDGET_FAST_S = 60.0   # context alert classes (CONTEXT, CONTEXT_FALLBACK) ...
+BG_BUDGET_LIVE_S = 30.0   # ... and anything of a live class on a background channel (a neighbour's main, an emergency)
 BG_QUIET_S = 3.0          # a background clip goes to a GPU only this long after the last priority clip came in
 BG_GPU_MAX_S = 30.0       # ... and only one this short (the GPU is back for priority work in a moment)
 
@@ -73,6 +81,16 @@ GUARD_PROBE_S = 60.0      # ... one probe this often: a shadow copy of a priorit
 GUARD_PROBE_RUN_S = 3.0   # itself goes its own way), decoded within this (claim -> text: sttpool PREALERT_MAX_SERVICE_S)
 GUARD_RECOVER_N = 3       # ... and this many good ones in a row: back
 LATENCY_WINDOW_S = 7200.0  # Health's live latency per engine
+
+
+def bg_budget(cls) -> float:
+    """How long an Auto · background clip of this class may wait to START on a station's whisper (seconds)."""
+    from sizeup.stt import CONTEXT, CONTEXT_FALLBACK, HIGH, LIVE, URGENT
+    if cls in (URGENT, HIGH, LIVE):
+        return BG_BUDGET_LIVE_S
+    if cls in (CONTEXT, CONTEXT_FALLBACK):
+        return BG_BUDGET_FAST_S
+    return BG_BUDGET_S
 
 
 def is_auto(eng: str) -> bool:
