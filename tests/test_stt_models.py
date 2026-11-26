@@ -356,8 +356,10 @@ def test_a_context_list_read_back_is_caught():
     # a real call-up of two names (the review's: discarded before, AWS's cost or a catch-up try burnt): kept ...
     assert not sttmodels.context_echo("60 Control, Engine 60.", ctx, 2.0)
     assert not sttmodels.context_echo("60 Control, Engine 60.", ctx)
-    # ... but the same two names for a 12 s clip are a read-back, and three are whatever the length
-    assert sttmodels.context_echo("60 Control, Engine 60.", ctx, 12.0)
+    assert not sttmodels.context_echo("60 Control, Engine 60.", ctx, 5.5)          # (a squelch tail, pauses: speech)
+    assert not sttmodels.context_echo("908, Headquarters.", ["908", "Headquarters"], 3.0)
+    # ... but the same two names for a 15 s clip are a read-back, and three are whatever the length
+    assert sttmodels.context_echo("60 Control, Engine 60.", ctx, 15.0)
     assert sttmodels.context_echo("Engine 60, Ladder 31, 60 Control.", ctx, 3.0)
     assert not sttmodels.context_echo("Engine 60, Ladder 31.", [])
 
@@ -383,6 +385,13 @@ def test_another_systems_talker_text_never_gets_in_only_its_exact_names(tmp_path
                             ("Made-up PD officer", "9900602", [])):
         item = SimpleNamespace(system="mrrs", unit=unit, radio_id=rid, rig="", talkgroup=9211)
         assert a._talker_names(item) == want, unit
+    # ... and an MRRS talkgroup with no profile of its own: whisper's prompt has its exact named radios only
+    a._base_prompt = App._base_prompt.__get__(a)
+    a._kind, a._stt_profile = {}, lambda item: None
+    a.cfg = SimpleNamespace(stt_prompt="Base words.", stt_talker_prompt="ids")
+    for unit, rid, want in (("4000 series patrol", "9904123", "Base words."), ("908", "9900601", "Base words. 908.")):
+        item = SimpleNamespace(system="mrrs", unit=unit, radio_id=rid, rig="", talkgroup=9564, source="", start=0.0)
+        assert a._base_prompt(item) == want, unit
 
 
 def test_the_hint_switch_alone_is_no_edit_and_blocks_alias_names(tmp_path):

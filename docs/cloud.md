@@ -1829,7 +1829,7 @@ Each channel has its own speech-to-text model on the GPU workers (`sizeup/sttmod
   each channel its own (sizeup-pcfd, sizeup-pd, sizeup-atc and the term lists'). Per-clip names, call signs and
   aircraft can't reach it.
 - **Context read back:** every phrase of the text a context item, and 3 or more of them, or 2 that are too few words
-  for the clip (under 0.8 a second: a 12 s clip "read" as two names). A real call-up of two names ("60 Control, Engine
+  for a long clip (8 s or more, under 0.3 a second: a 15 s clip "read" as two names). A real call-up of two names ("60 Control, Engine
   63" in 2 s) is kept (`sttmodels.context_echo`).
 - **The workers' LLM (Settings > Station > Health, beside its status):** the hub names it (`stt_models.llm`, an
   `llm_models` id of `models.json`; today's Qwen3-8B by default) and its VRAM priority (`llm_priority`: "yield", speech

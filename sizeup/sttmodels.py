@@ -439,14 +439,15 @@ def _items(text: str) -> list[str]:
 
 
 ECHO_MIN_ITEMS = 3        # a read-back: at least this many context phrases ...
-ECHO_SLOW_WPS = 0.8       # ... or (two, all of it) words this sparse for the clip's length: a long clip read as the list
+ECHO_SLOW_WPS = 0.3       # ... or (two, all of it) words this sparse for a clip ECHO_SLOW_MIN_S or longer: a long clip
+ECHO_SLOW_MIN_S = 8.0     # read as the list (a short call-up with a squelch tail and pauses is speech: "908, HQ" in 3 s)
 
 
 def context_echo(text: str, context: list, seconds: float | None = None) -> bool:
     """A llama-asr model gave its context back instead of what was said (Qwen3-ASR does when the list nearly matches a
     short clip). Every phrase of the text a context item, and either ECHO_MIN_ITEMS or more of them ("Engine 60, Ladder
-    31, 60 Control"), or two that are far too few words for the clip's length (seconds: under ECHO_SLOW_WPS words a
-    second). A real call-up of two names ("Sixty Control, Engine Sixty-Three" said in 2 s) is kept; a phrase that
+    31, 60 Control"), or two that are far too few words for a long clip (seconds: ECHO_SLOW_MIN_S or more, under
+    ECHO_SLOW_WPS words a second). A real call-up of two names ("Sixty Control, Engine Sixty-Three" said in 2 s) is kept; a phrase that
     isn't a name ("responding", "on scene") is speech."""
     if not text or not context:
         return False
@@ -458,4 +459,5 @@ def context_echo(text: str, context: list, seconds: float | None = None) -> bool
     if hits >= ECHO_MIN_ITEMS:
         return True
     words = sum(len(i.split()) for i in items)
-    return hits >= 2 and isinstance(seconds, (int, float)) and seconds > 0 and words / seconds < ECHO_SLOW_WPS
+    return (hits >= 2 and isinstance(seconds, (int, float)) and seconds >= ECHO_SLOW_MIN_S
+            and words / seconds < ECHO_SLOW_WPS)
