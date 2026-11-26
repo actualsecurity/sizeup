@@ -1832,9 +1832,11 @@ Each channel has its own speech-to-text model on the GPU workers (`sizeup/sttmod
   for a long clip (8 s or more, under 0.3 a second: a 15 s clip "read" as two names). A real call-up of two names ("60 Control, Engine
   63" in 2 s) is kept (`sttmodels.context_echo`).
 - **The workers' LLM (Settings > Station > Health, beside its status):** the hub names it (`stt_models.llm`, an
-  `llm_models` id of `models.json`; today's Qwen3-8B by default) and its VRAM priority (`llm_priority`: "yield", speech
-  first, the admin's default; "keep", the LLM first). The worker downloads, checks and swaps it; its state ("unavailable:
-  gave its VRAM to the speech models") shows in the GPU workers' LLM table. Audited as System.
+  `llm_models` id of `models.json`; today's Qwen3-8B by default). Its VRAM priority (`llm_priority`: "yield", speech
+  first; "keep", the LLM first) has one source per worker: the worker's own per-worker hub setting (#968's config doc),
+  else the hub-wide default an admin set here (`stt_models.llm_priority`, never sent unless set), else worker.toml's
+  ("yield"). The worker downloads, checks and swaps the model; its state ("unavailable: gave its VRAM to the speech
+  models") shows in the GPU workers' LLM table. Audited as System.
 - **A champion change** (Settings' model, a promote, an automatic rollback) goes through `HubApp.stt_champion_change`
   BEFORE it applies: kept in hub.sqlite (meta `stt_champion_log`, what intel reads: `HubApp.stt_champion_log(since)`),
   said in the hub's log (the channel key and model ids), and passed to each listener in `stt_champion_hooks`. A

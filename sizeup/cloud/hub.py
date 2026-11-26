@@ -2353,13 +2353,14 @@ class HubApp(App):
         """What a GPU worker hears in its hello and state answers (sizeup/sttmodels.py): the catalog in this build (its
         commit on main and models.json's SHA-256: the worker fetches that file from GitHub itself) and the models the
         channels use, most important first (want: the champions, the resident plan); the LLM it should run (llm: an
-        llm_models id, the admin's or today's 8B) and llm_priority ("yield": speech first, the admin's default). Without
-        a build commit (a local run): only llm_priority (the workers keep their own models and worker.toml's LLM)."""
+        llm_models id, the admin's or today's 8B) and llm_priority, only as a hub-wide default an admin set (a worker's
+        own per-worker setting wins over it, and it over worker.toml's: sttmodels.LLM_PRIORITIES). Without a build commit
+        (a local run): only that default (the workers keep their own models and worker.toml's LLM)."""
         ch = self.stt_choices
-        word: dict = {"llm_priority": ch.llm_priority()}
+        word: dict = {"llm_priority": ch.llm_priority()} if ch.llm_priority() else {}
         build = (self.stt_api.build or {}).get("commit", "")
         if not build or not ch.digest or not ch.catalog:
-            return word
+            return word or None
         services: dict = {}
         off_gpu: set = set()
         for key in ch.settings():

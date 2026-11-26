@@ -438,11 +438,12 @@ LLMS = {"qwen3-8b-q4_k_m": {"id": "qwen3-8b-q4_k_m", "what": "8B", "vram_mb": 62
 
 def test_the_llm_is_todays_8b_until_an_admin_picks_another_and_speech_comes_first():
     c = sttmodels.Choices(Meta(), clock=Clock(), llms=dict(LLMS))
-    assert c.llm() == sttmodels.DEFAULT_LLM == "qwen3-8b-q4_k_m" and c.llm_priority() == "yield"
+    assert c.llm() == sttmodels.DEFAULT_LLM == "qwen3-8b-q4_k_m" and c.llm_priority() == ""   # (each worker's own)
     old, new = c.set_llm("qwen3-4b-instruct-2507-q4_k_m")
-    assert old == {"model": "qwen3-8b-q4_k_m", "priority": "yield"} and new["model"] == "qwen3-4b-instruct-2507-q4_k_m"
+    assert old == {"model": "qwen3-8b-q4_k_m", "priority": ""} and new["model"] == "qwen3-4b-instruct-2507-q4_k_m"
     assert c.set_llm(priority="keep")[1] == {"model": "qwen3-4b-instruct-2507-q4_k_m", "priority": "keep"}
     assert c.set_llm("")[1]["model"] == "qwen3-8b-q4_k_m"                       # back to the default
+    assert c.set_llm(priority="")[1]["priority"] == ""                          # back to each worker's own
     with pytest.raises(ValueError):
         c.set_llm("gpt-something")
     with pytest.raises(ValueError):
@@ -464,15 +465,21 @@ def test_the_hub_tells_the_workers_the_llm_and_its_priority_and_health_shows_its
         hub.app.stt_choices.llms = dict(LLMS)
         hub.app.stt_api.build = {"commit": "c" * 40}
         word = hub.app._stt_models_word()
-        assert word["llm"] == "qwen3-8b-q4_k_m" and word["llm_priority"] == "yield" and "want" in word
+        # one source per worker: no hub-wide llm_priority unless an admin set one (a worker's own per-worker setting,
+        # else worker.toml's, then stands: never hidden by a default nobody chose)
+        assert word["llm"] == "qwen3-8b-q4_k_m" and "llm_priority" not in word and "want" in word
+        hub.app.stt_choices.set_llm(priority="yield")
+        assert hub.app._stt_models_word()["llm_priority"] == "yield"       # (the admin's hub-wide default)
         hub.app.stt_api.build = {}
-        assert hub.app._stt_models_word() == {"llm_priority": "yield"}     # (a local run: the priority only)
+        assert hub.app._stt_models_word() == {"llm_priority": "yield"}     # (a local run: that default only)
+        hub.app.stt_choices.set_llm(priority="")
+        assert hub.app._stt_models_word() is None
         token = hub.app.hub.workers.add("gpu-1")
         code, out = call(hub.url + "/api/station/stt/hello", "POST", {
             "version": "t", "model": Q5, "state": "online",
             "models": {"stt": Q5, "llm": "", "llm_state": "unavailable: gave its VRAM to the speech models"}},
             token=token)
-        assert code == 200 and out["stt_models"]["llm_priority"] == "yield"
+        assert code == 200 and "stt_models" not in out                    # (a local run, no default set: nothing)
         inf = hub.app.infer_lane.stats()
         [w] = inf["workers"]
         assert w["llm_state"] == "unavailable: gave its VRAM to the speech models"

@@ -52,7 +52,10 @@ PCT_DEFAULT = 10.0           # a challenger's share of its channel's clips
 LLM_META = "stt_llm"
 DEFAULT_LLM = "qwen3-8b-q4_k_m"
 LLM_PRIORITIES = ("yield", "keep")      # "yield": speech first, the LLM gives its VRAM to the speech models (the admin's)
-DEFAULT_LLM_PRIORITY = "yield"
+# llm_priority, one source per worker (the admin's rule): the worker's own per-worker hub setting (#968's config doc) >
+# the hub-wide default here (stt_models.llm_priority, sent only once an admin set one) > worker.toml's ("yield" by
+# default: speech first). The hub never sends one an admin didn't set, so it never hides a per-worker value.
+DEFAULT_LLM_PRIORITY = ""
 # a champion change on a pre-alert channel (#728: intel is told before it applies): kept in hub.sqlite meta, newest last
 CHANGES_META = "stt_champion_log"
 CHANGES_MAX = 200
@@ -390,6 +393,8 @@ class Choices:
         return m if m in self.llms else ""
 
     def llm_priority(self) -> str:
+        """The hub-wide default an admin set ("yield" | "keep"), "" for none (each worker's own: its per-worker
+        setting, else worker.toml's)."""
         p = self._llm_doc().get("priority")
         return p if p in LLM_PRIORITIES else DEFAULT_LLM_PRIORITY
 
@@ -407,9 +412,12 @@ class Choices:
                 else:
                     d["model"] = model
             if priority is not None:
-                if priority not in LLM_PRIORITIES:
-                    raise ValueError(f"priority: one of {', '.join(LLM_PRIORITIES)}")
-                d["priority"] = priority
+                if priority == "":
+                    d.pop("priority", None)            # (back to each worker's own)
+                elif priority not in LLM_PRIORITIES:
+                    raise ValueError(f"priority: one of {', '.join(LLM_PRIORITIES)}, or \"\" for each worker's own")
+                else:
+                    d["priority"] = priority
             self.mdb.put(LLM_META, json.dumps(d, separators=(",", ":"), sort_keys=True))
             return old, {"model": self.llm(), "priority": self.llm_priority()}
 
