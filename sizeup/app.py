@@ -66,7 +66,7 @@ import numpy as np
 
 from sizeup.api.v1.switches import Switches
 from sizeup.config import P25_JOB, Config, ConfigError, airband_owner, load
-from sizeup import janitor, tz
+from sizeup import janitor, logscrub, tz
 from sizeup.cad import Cad
 from sizeup.cad.alarms import STUCK_WITHIN_S
 from sizeup.cad.api import CadApi
@@ -1011,7 +1011,7 @@ class App:
             from sizeup.geo.pagegeo import locate_page
             return locate_page(self.gaz, d.text, tone_departments).as_geo()
         except Exception as e:
-            log(f"geocode error for {d.location!r}: {type(e).__name__}: {e}")
+            log(f"geocode error ({len(d.location or '')} characters): {type(e).__name__}")     # (never the address)
             return None
 
     def _geocode_text(self, q: str) -> list[dict]:
@@ -2085,10 +2085,9 @@ class App:
             if not getattr(item, "system", ""):      # another system's traffic (#409) raises none of our alarms
                 self._alarm(item)
             self._atc(item)
-            if item.status != "no_speech" and other:
-                log(f"{item.source}: transmission {item.id} ({item.status})")     # (#419: its words never in a log)
-            elif item.status != "no_speech":
-                log(f"{item.source}: {'[' + item.unit + '] ' if item.unit else ''}{item.text or '(' + item.status + ')'}")
+            if item.status != "no_speech":         # (its words never in a log: CloudWatch, #419)
+                log(f"{item.source}: transmission {item.id} ({item.status}, {logscrub.said(item.text)})"
+                    + (f" · unit {item.unit}" if item.unit and not other else ""))
             return
         if isinstance(item, Rerun):
             return self._rerun_done(item)
@@ -2099,7 +2098,7 @@ class App:
         self._save_page(page)
         self._page_to_cad(page)                     # its text in the log (before an event links it)
         self._emit("page_text", self._page_doc(page))
-        log(f"{page.label} {page.kind}: {page.raw or '(' + page.status + ')'}"
+        log(f"{page.label} {page.kind} {page.id}: {page.status}, {logscrub.said(page.raw)}"     # (never its words)
             + {True: " [read twice]", False: " [not read twice]"}.get(page.read_twice, ""))
         if d is None:
             return
@@ -2134,7 +2133,9 @@ class App:
             where = inc.geo["label"] if inc.geo else (inc.location or "location not found")
             if inc.geo and inc.geo.get("confirmed") is False:
                 where = f"{inc.location or where} (location unconfirmed: {inc.geo.get('why') or 'not sure'}; best {where})"
-            log(f"INCIDENT {inc.incident_type} · {where} · {', '.join(inc.departments)}")
+            # (never its type, its address or its words in a log: an EMS type is a medical detail)
+            log(f"INCIDENT {inc.id} · {inc.category or 'call'} · "
+                f"{'located' if inc.geo else 'no location'} · {', '.join(inc.departments)}")
             try:
                 ev = self.cad.from_monitor(inc)
                 if ev and tones_half is not None:       # its tones came as a transmission of their own
@@ -2852,8 +2853,8 @@ class App:
             if not late:
                 self._atc(t, text)
         if changed:
-            # (another P25 system's words are never in a log, #419)
-            log(f"{why} {cid}: " + ("(text changed)" if self.clip_is_context(cid) else text or "(no speech)"))
+            # (no transcript's words are ever in a log: CloudWatch; #419 masked only another P25 system's)
+            log(f"{why} {cid}: text changed ({logscrub.said(text)}, {model or '?'})")
         self._emit("retext", {"id": cid, "text": text, "status": status, "confidence": confidence, "model": model,
                               **({"stt_prompt_time": True} if prompted else {}),    # (whisper's prompt had its time, #727)
                               **({"alt": alt} if alt is not None else {}), **({"catchup": True} if quiet else {}),
