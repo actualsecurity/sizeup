@@ -946,7 +946,7 @@ class App:
                                     context=cfg.atc_context, context_s=cfg.atc_context_s, log=log)
                 log(f"atc: airport pre-alerts from {', '.join(airband)} ({len(self.atc.rules.rules)} rules)")
             except (OSError, ValueError, KeyError) as e:
-                log(f"atc: WARNING the pre-alert rules didn't load ({type(e).__name__}: {e}): no HPN ATC pre-alerts")
+                log(f"atc: WARNING the pre-alert rules didn't load ({type(e).__name__}): no HPN ATC pre-alerts")   # (never {e}: rule text)
         # ... and the ones that build up over several transmissions (#369, sizeup/airport_watch.py): an abnormal
         # go-around followed through its frequency changes (_atc, _atc_view), "alert level N" on 60 Control (the CAD's)
         self.cad.airport_watch.configure(cfg.channels, self._atc_aircraft, cfg.atc_alert_level_incident,
@@ -3352,7 +3352,7 @@ class App:
             try:
                 r.tick()
             except Exception as e:  # noqa: BLE001 - the aircraft layer goes on
-                log(f"atc vocabulary: {type(e).__name__}: {e}")
+                log(f"atc vocabulary: {type(e).__name__}")   # (never {e}: it can quote a term)
 
     def _intel_listen(self, intel):
         """The pre-alert pushes' "Listen" link (sizeup/intel/listen.py): the transmissions around it, stitched, behind a
