@@ -412,8 +412,9 @@ POST /api/cad/intel/<id>/notes            {text?, tags?: [...], corrected_catego
                                           author: who signed in)
 POST /api/cad/intel/notes/<nid>           the same fields | {delete: true}: its author or an admin; audited
 POST /api/cad/intel/notes/<nid>/done      {done: "PR #123" | ""}: acted on (the review queue); admins
-POST /api/cad/intel/notes/<nid>/alias     its heard words another name of the common place it picked (Settings > Lists >
-                                          Place names: the place search and the radio read them); admins; audited
+POST /api/cad/intel/notes/<nid>/alias     {remove?}: its heard words another name of the common place it picked (Settings
+                                          > Lists > Place names: the place search and the radio read them), or taken off
+                                          again; admins; audited. 409: another place's name or alias already
 GET  /api/cad/intel/export.csv|.jsonl     ?from=&to= and the Intel page's filters: each event with its notes, tags,
                                           scores, rule hits, the model's record, verdicts and transcripts; admins
                                           (ADMIN_READS), in their activity (kind "search")
@@ -446,7 +447,7 @@ from sizeup.cad import airport
 from sizeup.cad import hydrants as hydrants_mod
 from sizeup.cad.activity import CSV_MAX_ROWS, KINDS, MAX_ROWS
 from sizeup.cad.service import Cad
-from sizeup.cad.settings import LastAdmin
+from sizeup.cad.settings import LastAdmin, PlaceNameTaken
 from sizeup.cad.store import TZ, CadError
 from sizeup.datasources import TooSoon
 from sizeup.intel.notes import Forbidden as NoteForbidden
@@ -814,6 +815,8 @@ def _intel_note(m, b, o, c):
     if m.re is INTEL_NOTES:
         return (f"Added a note on radio pre-alert {m.group(1)}" + (f" ({tags})" if tags else ""), "")
     if m.group(2) == "/alias":                 # (its common place and the words: in the settings audit)
+        if b.get("remove"):
+            return (f"Removed an alias of a common place from note {m.group(1)}", "") if (o or {}).get("removed") else None
         return (f"Added an alias to a common place from note {m.group(1)}", "") if (o or {}).get("added") else None
     if m.group(2):
         return (f"Marked note {m.group(1)} done" + (f": {_clip(b.get('done'), 40)}" if b.get("done") else " (not yet)"), "")
@@ -1573,6 +1576,8 @@ class CadApi:
             if signed:
                 self.refused(path, who, str(e), client)
             return _json(403, {"error": str(e)})
+        except PlaceNameTaken as e:            # an alias that is another place's name already (settings.py)
+            return _json(409, {"error": str(e)})
         except NeedsConfirm as e:              # live: the page asks (the error is the question), then sends confirm
             return _json(409, {"error": str(e), "confirm": True})
         except TooSoon as e:                   # a data source's Refresh now, refused (#186): rate limit, running, resting

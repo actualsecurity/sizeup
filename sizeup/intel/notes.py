@@ -44,19 +44,27 @@ Diner"): an older note's free text alone, read as before. A picked place is:
     an alias              an admin's "add as alias" (POST /api/cad/intel/notes/<nid>/alias): the heard words become
                           another name of the common place picked (Settings: add_place_alias; the place search, the
                           radio's page locator and the county feed read them), so the next transmission saying them
-                          resolves; audited in intel_note_audit (action "alias") and in the settings audit
+                          resolves. Never another place's name or alias (409), a street's name, a number or a word
+                          too common (alias_ok / alias_why say so first); {remove: true} takes it off again (as
+                          Settings' Common places "−"). Audited in intel_note_audit (action "alias" / "unalias", the
+                          same entry before and after) and in the settings audit
     a correction candidate  the misheard -> real pair (heard, the common place's name or the address picked) in
                           intel_correction_candidates, for the speech-to-text side (#956):
 
         correction_candidates(since=None, unimported_only=True) -> [{id, note_id, clip_id, heard_phrase, real_phrase,
-                              kind, source, who, when, imported_at}], oldest first: the pairs written since then (epoch
-                              seconds; None: all), only those not taken yet unless unimported_only=False
-        mark_imported(ids) -> n   taken by the speech-to-text side (imported_at: now); a note's edit never rewrites a
-                              pair already taken
+                              kind, source, who, when, imported_at}], by when then id: the pairs written or changed
+                              AFTER since (epoch seconds, exclusive: pass the last "when" read; None: all), only those
+                              not taken yet unless unimported_only=False
+        mark_imported(pairs) -> n  taken by the speech-to-text side (imported_at: now): each pair as read (a row
+                              above, or (id, heard_phrase, real_phrase)); one changed since it was read is not marked
+                              (it comes back with its new words and when). ids are never reused (AUTOINCREMENT)
 
-    kind is place for a note's (place | unit | street | other); source "intel-note"; who the operator who wrote it; a
-    note's edit replaces its pairs not yet taken, its delete removes them. The hub's store by default (the IntelNotes the
-    hub made); store= another (tests, a copy). The phrases are never logged.
+    kind is place for a note's (place | unit | street | other); source "intel-note"; who the note's author. A note's edit
+    changes its pair not yet taken in place (its words, clip and when), and only when the heard words, the real ones or
+    the clip changed; a pair already taken is never rewritten nor written twice; its delete removes the one not taken.
+    The hub's store by default (the IntelNotes the hub made, in the hub's process): in a process with none, a call
+    without store= raises RuntimeError, so pass store= (a copy, tests) or call it in the hub. The phrases are never
+    logged.
 
 Notes are kept a year (events.py KEEP_NOTES_S), and an event with a note is kept with them; so are the pairs.
 """
@@ -150,7 +158,7 @@ def correction_candidates(since: float | None = None, unimported_only: bool = Tr
     """The misheard -> real pairs (the module doc), oldest first."""
     where, args = [], []
     if since is not None:
-        where.append('"when" >= ?')
+        where.append('"when" > ?')
         args.append(float(since))
     if unimported_only:
         where.append("imported_at IS NULL")
@@ -159,19 +167,27 @@ def correction_candidates(since: float | None = None, unimported_only: bool = Tr
     return [dict(r) for r in _store(store).q(sql + ' ORDER BY "when", id', args)]
 
 
-def mark_imported(ids, *, store=None, at: float | None = None) -> int:
-    """The pairs taken by the speech-to-text side: imported_at now (or at). -> how many were marked."""
-    ids = [int(i) for i in ids or []]
-    if not ids:
+def mark_imported(pairs, *, store=None, at: float | None = None) -> int:
+    """The pairs taken by the speech-to-text side, each as it read it: a row of correction_candidates() or (id,
+    heard_phrase, real_phrase). imported_at now (or at); a pair whose words changed since is left (not taken). -> how
+    many were marked."""
+    want = []
+    for p in pairs or []:
+        if isinstance(p, dict):
+            want.append((int(p["id"]), str(p["heard_phrase"]), str(p["real_phrase"])))
+        elif isinstance(p, (tuple, list)) and len(p) == 3:
+            want.append((int(p[0]), str(p[1]), str(p[2])))
+        else:
+            raise TypeError("mark_imported: each pair as read: a row, or (id, heard_phrase, real_phrase)")
+    if not want:
         return 0
     s = _store(store)
     when = float(at) if at is not None else float(s.clock())
     n = 0
     with _tx(s) as db:
-        for k in range(0, len(ids), 500):
-            part = ids[k:k + 500]
-            n += db.execute(f"UPDATE intel_correction_candidates SET imported_at = ? WHERE imported_at IS NULL AND id IN "
-                            f"({','.join('?' * len(part))})", [when, *part]).rowcount
+        for i, heard, real in want:
+            n += db.execute("UPDATE intel_correction_candidates SET imported_at = ? WHERE imported_at IS NULL AND id = ? "
+                            "AND heard_phrase = ? AND real_phrase = ?", (when, i, heard, real)).rowcount
     return n
 
 
@@ -221,15 +237,27 @@ class IntelNotes:
         return {_words(x) for x in (e.get("name") or "", e.get("label") or "", *(e.get("aliases") or []))} - {""}
 
     def _with_place(self, n: dict, places: dict, admin: bool) -> dict:
-        """A shown note with its common place's name (place_name) and, for an admin, whether its heard words may become
-        an alias of it (alias_ok: picked, heard, and not one of its names yet)."""
+        """A shown note with its common place's name (place_name) and, for an admin: whether its heard words may become
+        an alias of it (alias_ok: picked, heard, not one of its names yet, and allowed: Settings alias_problem; else
+        alias_why, the reason) and whether they are one now (alias_on: "− Alias")."""
         p = n.get("corrected")
         e = places.get(p["place_key"]) if p and p["place_key"] else None
         if e is not None:
             site = places.get(e.get("site") or "")
             n["place_name"] = _place_name(e)
+            heard = _words(n["heard"])
             names = self._names(e) | (self._names(site) if site else set())
-            n["alias_ok"] = bool(admin and _words(n["heard"]) and _words(n["heard"]) not in names)
+            aliases = {_words(a) for x in (e, site or {}) for a in (x.get("aliases") or [])}
+            n["alias_on"] = bool(admin and heard and heard in aliases)
+            why = None
+            if admin and heard and heard not in names:
+                try:
+                    why = self.cad.settings.alias_problem(p["place_key"], n["heard"], places)
+                except CadError as x:
+                    why = ("bad", str(x))
+            n["alias_ok"] = bool(admin and heard and heard not in names and not why)
+            if why:
+                n["alias_why"] = why[1]
         return n
 
     def of_event(self, eid: int, email: str = "", admin: bool = False) -> dict:
@@ -412,11 +440,11 @@ class IntelNotes:
         point = self.picked(note)
         if point:
             corrected["point"] = point
-        if note.get("heard"):
-            corrected["heard"] = note["heard"]
         rows = [(TAG_VERDICT[t], None) for t in tags]                      # once per note
-        if not tags and (corrected or note["corrected_category"]):
+        if not tags and (corrected or note["corrected_category"]):         # (heard words alone: no correction)
             rows.append((CORRECTED, None))
+        if note.get("heard") and corrected:
+            corrected["heard"] = note["heard"]
         if "false_garbled_audio" in tags:
             rows += [(TX_VERDICT, tid) for tid in tids]                      # the clips, labelled per transmission
         clip = self._clip(db, note, tids) if point or note.get("heard") else ""
@@ -439,20 +467,34 @@ class IntelNotes:
             return (note.get("corrected_label") or "").split(",")[0].strip()
         return ""
 
-    def _candidates(self, db, note: dict, clip: str, op: str, at: float) -> None:
-        """The note's misheard -> real pair (intel_correction_candidates), replacing those not taken yet."""
-        db.execute("DELETE FROM intel_correction_candidates WHERE note_id = ? AND imported_at IS NULL", (note["id"],))
+    def _candidates(self, db, note: dict, clip: str, at: float) -> None:
+        """The note's misheard -> real pair (intel_correction_candidates): the one not taken yet changed in place, and
+        only when its words or clip changed (else left as it is: its who and when too); none when the words are the
+        same; a pair taken already is never rewritten nor written twice. who: the note's author."""
         heard = note.get("heard") or ""
         real = self._real(note, self._places() if note.get("corrected_place_key") else {}) if heard else ""
-        if not heard or not real or _words(heard) == _words(real):
+        real = real[:PLACE_MAX]
+        rows = [dict(r) for r in db.execute("SELECT id, clip_id, heard_phrase, real_phrase, imported_at FROM "
+                                            "intel_correction_candidates WHERE note_id = ? ORDER BY id", (note["id"],))]
+        open_ = [r for r in rows if r["imported_at"] is None]
+        want = bool(heard and real and _words(heard) != _words(real))
+        if want and any(r["heard_phrase"] == heard and r["real_phrase"] == real for r in rows if r["imported_at"]):
+            want = False                                                   # taken already: never twice
+        if not want:
+            for r in open_:
+                db.execute("DELETE FROM intel_correction_candidates WHERE id = ?", (r["id"],))
             return
-        if db.execute("SELECT 1 FROM intel_correction_candidates WHERE note_id = ? AND heard_phrase = ? AND "
-                      "real_phrase = ?", (note["id"], heard, real)).fetchone():
-            return                                                         # taken already: never twice
+        for r in open_[1:]:                                                # (one per note)
+            db.execute("DELETE FROM intel_correction_candidates WHERE id = ?", (r["id"],))
+        if open_:
+            r = open_[0]
+            if (r["heard_phrase"], r["real_phrase"], r["clip_id"]) != (heard, real, clip or ""):
+                db.execute('UPDATE intel_correction_candidates SET heard_phrase = ?, real_phrase = ?, clip_id = ?, '
+                           '"when" = ? WHERE id = ?', (heard, real, clip or "", at, r["id"]))
+            return
         db.execute('INSERT INTO intel_correction_candidates (note_id, clip_id, heard_phrase, real_phrase, kind, source, '
                    'who, "when") VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                   (note["id"], clip or "", heard, real[:PLACE_MAX], "place", CANDIDATE_SOURCE, (op or note["author"])[:160],
-                    at))
+                   (note["id"], clip or "", heard, real, "place", CANDIDATE_SOURCE, (note["author"] or "")[:160], at))
 
     @staticmethod
     def _audit(db, nid: int, eid: int, action: str, op: str, at: float, before, after) -> None:
@@ -473,7 +515,7 @@ class IntelNotes:
             nid = int(cur.lastrowid)
             note = dict(db.execute("SELECT * FROM intel_notes WHERE id = ?", (nid,)).fetchone())
             clip = self._feedback(db, note, ev, now)
-            self._candidates(db, note, clip, op, now)
+            self._candidates(db, note, clip, now)
             self._audit(db, nid, int(eid), "add", op, now, None, {k: note[k] for k in FIELDS})
         return {"ok": True, "note": self._with_place(self.shown(note, email, admin), self._places(), admin)}
 
@@ -507,7 +549,7 @@ class IntelNotes:
                            (*(n[k] for k in FIELDS), now, int(nid)))
                 note = dict(db.execute("SELECT * FROM intel_notes WHERE id = ?", (int(nid),)).fetchone())
                 clip = self._feedback(db, note, ev, now)
-                self._candidates(db, note, clip, op, now)
+                self._candidates(db, note, clip, now)
                 self._audit(db, int(nid), cur["event_id"], "edit", op, now, before, {k: note[k] for k in FIELDS})
                 moved = any(before[k] != note[k] for k in PICK)
                 out = None
@@ -519,27 +561,31 @@ class IntelNotes:
 
     def alias(self, nid: int, body: dict) -> dict:
         """An admin's "add as alias of <common place>": the note's heard words become another name of the common place
-        it picked (Settings add_place_alias), so the next transmission saying them resolves. Audited here (action
-        "alias") and with the lists."""
+        it picked (Settings add_place_alias), so the next transmission saying them resolves; {remove: true}: taken off
+        again (remove_place_alias). Never another place's name or alias (settings.PlaceNameTaken: 409), nor a street,
+        a number or a word too common (400). Audited here (action "alias" / "unalias": the entry it went on, before and
+        after) and with the lists."""
         if body.get("_may") != "admin":
-            raise Forbidden("adding an alias is for admins")
+            raise Forbidden("changing a place's aliases is for admins")
         cur = self._note(nid)
         heard, key = cur.get("heard") or "", cur.get("corrected_place_key") or ""
         if not heard or not key:
             raise CadError("the note needs the words heard and a common place picked")
-        e = self._places().get(key)
-        if e is None:
+        if self._places().get(key) is None:
             raise CadError("its common place is gone")
         op = str(body.get("operator") or "")[:160]
-        had = list(e.get("aliases") or [])
-        out = self.cad.settings.add_place_alias(key, heard, op)
-        if out["added"]:
+        remove = bool(body.get("remove"))
+        st = self.cad.settings
+        out = (st.remove_place_alias if remove else st.add_place_alias)(key, heard, op)
+        changed = out["removed"] if remove else out["added"]
+        if changed:                                    # before and after: the same entry (a site's primary)
             now = self.cad.clock()
             with self.engine.events._w(listed=False) as db:
-                self._audit(db, int(nid), cur["event_id"], "alias", op, now, {"place_key": key, "aliases": had},
+                self._audit(db, int(nid), cur["event_id"], "unalias" if remove else "alias", op, now,
+                            {"place_key": out["key"], "aliases": out["had"]},
                             {"place_key": out["key"], "aliases": out["aliases"]})
         email = str(body.get("_email") or "")
-        return {"ok": True, "added": out["added"], "place": out["name"],
+        return {"ok": True, ("removed" if remove else "added"): changed, "place": out["name"],
                 "note": self._with_place(self.shown(self._note(nid), email, True), self._places(), True)}
 
     def done(self, nid: int, body: dict) -> dict:

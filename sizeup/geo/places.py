@@ -446,6 +446,23 @@ class PlaceIndex:
             r["aliases"] = [a for a in (r["aliases"] or "").split("|") if a]
         return rows
 
+    def names_street(self, text: str) -> bool:
+        """text is a street's whole name ("King St") or its name without the type ("King"): never a place's alias."""
+        q = tuple(norm_tokens(text))
+        if not q:
+            return False
+        got = getattr(self, "_street_names", None)
+        if got is None:
+            from .normalize import TYPE_ABBRS
+            got = set()
+            for sid in self.street_ids:
+                toks = tuple(norm_tokens(self.gaz.streets[sid].name))
+                got.add(toks)
+                if len(toks) > 1 and toks[-1] in TYPE_ABBRS:
+                    got.add(toks[:-1])
+            self._street_names = got
+        return q in got
+
     def names_place(self, text: str, extra: list[dict] = ()) -> bool:
         """text is a named place's whole name or alias ("Sample Market"), or one of the department's own."""
         q = tuple(norm_tokens(text))

@@ -131,7 +131,7 @@ CREATE TABLE IF NOT EXISTS intel_note_audit (
 );
 CREATE INDEX IF NOT EXISTS intel_note_audit_note ON intel_note_audit(note_id);
 CREATE TABLE IF NOT EXISTS intel_correction_candidates (
-  id INTEGER PRIMARY KEY, note_id INTEGER,
+  id INTEGER PRIMARY KEY AUTOINCREMENT, note_id INTEGER,      -- (never reused: mark_imported names what it read)
   clip_id TEXT NOT NULL DEFAULT '',                  -- the transmission (radio_traffic id) the words were heard in
   heard_phrase TEXT NOT NULL, real_phrase TEXT NOT NULL,
   kind TEXT NOT NULL DEFAULT 'other',                -- place | unit | street | other

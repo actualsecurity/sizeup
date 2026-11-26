@@ -984,7 +984,7 @@
   .nt-place { flex-wrap: wrap; }
   .nt-place > .nt-place-in { flex: 2 1 12rem; }
   .nt-place > .nt-heard { flex: 1 1 8rem; }
-  .nt-geo, .nt-sugg { margin-block-start: calc(-1 * var(--s-1)); }
+  .nt-sugg { margin-block-start: calc(-1 * var(--s-1)); }
   .pi-fixed { color: var(--ok-text); }
   .d-intel { display: flex; flex-direction: column; gap: var(--s-1); margin-block: var(--s-2); }
 

@@ -40,6 +40,9 @@
     padding-block: var(--s-1); border-block-end: var(--bw) solid var(--line);
   }
   .s-row:last-child { border-block-end: 0; }
+  /* a place's alias (Common places' Aliases): its "−" inside the chip */
+  .s-alias { display: inline-flex; align-items: center; gap: var(--s-1); }
+  .s-alias > button { min-block-size: auto; padding-block: 0; padding-inline: var(--s-1); }
   .s-row.retired > :not(.s-ord):not(button) { opacity: 0.62; }
   .s-row.deleted { opacity: 0.6; }
   .s-row.deleted :is(.s-code, .s-name) { text-decoration: line-through; }

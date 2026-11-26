@@ -319,6 +319,7 @@ STT_KEYS = ("vocabulary", "aws_monthly_limit_usd", "aws_context_budget_usd",   #
             "catchup", "catchup_max_age_h")    # shed clips caught up (sizeup/sttcatchup.py): on/off, how far back
 MAX_VOCAB_BYTES = 50_000          # AWS's limit; also keeps the Settings request under its 64 KB
 MAX_PLACE_NAMES = 300
+ALIAS_MAX = 40                     # an alias added one at a time (add_place_alias): a place's other name, never a phrase
 # The county's "common place names" list (sizeup/cad/commonplaces.py): imported into section "places" under keys
 # "county/...", replaced as a whole on each import; Settings > Lists > Place names (admins), audited as Lists, counts only.
 COMMON_SECTION = "common_places"
@@ -495,6 +496,10 @@ def overlay(d: dict, ov: dict) -> dict:
                                        **({"third_party_only": [c for c in ag["third_party_only"] if c not in gone_st]}
                                           if isinstance(ag.get("third_party_only"), list) else {}))
     return d
+
+
+class PlaceNameTaken(CadError):
+    """An alias that is already another place's name or alias (Editor.alias_problem): the API's 409."""
 
 
 class LastAdmin(CadError):
@@ -1920,8 +1925,13 @@ class Editor:
             if key not in cur:
                 raise CadError(f"no place name {key!r}")
             return self._commit([("places", key, REMOVE)], op, [("lists", f"place/{cur[key]['name']}", cur[key], None)])
+        if action in ("alias", "unalias"):                # one alias of any place name (a county entry's too)
+            key = _text(body.get("key"), "key", 200)
+            if action == "alias":
+                return self.add_place_alias(key, str(body.get("alias") or ""), op)
+            return self.remove_place_alias(key, str(body.get("alias") or ""), op)
         if action != "set":
-            raise CadError("action: set or delete")
+            raise CadError("action: set or delete (or alias / unalias {key, alias})")
         name = _text(body.get("name"), "name", 60)
         key = " ".join(re.sub(r"[^a-z0-9]+", " ", name.lower()).split())
         if not key:
@@ -1949,32 +1959,95 @@ class Editor:
                "note": _text(body.get("note"), "note", 120, required=False)}
         return self._commit([("places", key, val)], op, [("lists", f"place/{name}", cur.get(key), val)])
 
-    def add_place_alias(self, key: str, alias: str, op: str) -> dict:
-        """Another name for one of the department's place names, its aliases as Settings > Lists > Place names keeps
-        them (the place search, the radio's page locator and the county feed read them): an admin's from an intel
-        note's misheard name (sizeup/intel/notes.py). A county entry's too (a re-import keeps them: commonplaces.plan);
-        a site's other address: its primary's. Audited with the lists. -> {ok, key, name, aliases, added}"""
-        cur = {r["key"]: {k: v for k, v in r.items() if k != "key"} for r in self.local_places()}
+    def _alias_entry(self, key: str, cur: dict) -> tuple[str, dict]:
+        """(key, entry) of the place an alias goes on: a site's other address -> its primary."""
         e = cur.get(key)
         if e is None:
             raise CadError("no such place name")
         if e.get("site") and e["site"] in cur and e["site"] != key:
-            key, e = e["site"], cur[e["site"]]
-        a = _text(alias, "alias", 60)
+            return e["site"], cur[e["site"]]
+        return key, e
+
+    @staticmethod
+    def _place_label(key: str, e: dict) -> str:
+        """A place name as people write it: the county's label, a hand-made one's name (its label is where)."""
+        return (e.get("label") if commonplaces.is_imported(key, e) else "") or e.get("name") or key
+
+    def alias_problem(self, key: str, alias: str, cur: dict | None = None) -> tuple[str, str] | None:
+        """Why alias can't be another name of place key: ("taken", why) (another place's name or alias already: the
+        API's 409, PlaceNameTaken) | ("bad", why) (empty, too long, a number, a street's name, too short or common to
+        name a place on its own: 400); None: it may. cur: {key: entry} (local_places by key), else read."""
+        a = " ".join(str(alias or "").split())
+        if not a:
+            return ("bad", "alias: empty")
+        if len(a) > ALIAS_MAX:
+            return ("bad", f"alias: at most {ALIAS_MAX} characters")
+        toks = norm_tokens(a)
+        if not toks or all(t.isdigit() for t in toks):
+            return ("bad", "alias: a number names no place")
+        ix = self.cad.place_index() if hasattr(self.cad, "place_index") else None
+        if ix is not None and getattr(ix, "names_street", None) and ix.names_street(a):
+            return ("bad", "alias: a street's name")    # (the location box would offer the place for the street)
+        from sizeup.geo.commonwords import COMMON_WORDS
+        from sizeup.geo.pagegeo import GENERIC
+        own = [t for t in toks if not t.isdigit() and t not in GENERIC and t not in COMMON_WORDS]
+        if not (own and ((len(toks) > 1 and max(map(len, own)) >= 3) or len(own[0]) >= 4)):
+            return ("bad", "alias: too short or too common to name a place on its own")
+        if cur is None:
+            cur = {r["key"]: r for r in self.local_places()}
+        key, e = self._alias_entry(key, cur)
+        mine = e.get("site") or key
+        k = commonplaces.name_key(a)
+        for ok, o in cur.items():
+            if ok == key or (o.get("site") or ok) == mine:
+                continue                                   # the place itself (a site: every address of it)
+            names = [o.get("name") or "", *(o.get("aliases") or [])]
+            if commonplaces.is_imported(ok, o):
+                names.append(o.get("label") or "")
+            if k in {commonplaces.name_key(x) for x in names if x}:
+                return ("taken", f'"{a}" is already a name of {self._place_label(ok, o)}')
+        return None
+
+    def add_place_alias(self, key: str, alias: str, op: str) -> dict:
+        """Another name for one of the department's place names, its aliases as Settings > Lists > Place names keeps
+        them (the place search, the radio's page locator and the county feed read them): an admin's from an intel
+        note's misheard name (sizeup/intel/notes.py), or Settings' action "alias". A county entry's too (a re-import
+        keeps them: commonplaces.plan); a site's other address: its primary's. Never another place's name or alias
+        (PlaceNameTaken: 409), a street's name, a number or a word too common (alias_problem). Audited with the lists.
+        -> {ok, key (where it went), name, had (its aliases before), aliases, added}"""
+        cur = {r["key"]: {k: v for k, v in r.items() if k != "key"} for r in self.local_places()}
+        key, e = self._alias_entry(key, cur)
+        a = " ".join(str(alias or "").split())
         had = list(e.get("aliases") or [])
+        out = {"ok": True, "key": key, "name": self._place_label(key, e), "had": had, "added": False}
         names = {commonplaces.name_key(x) for x in (e.get("name") or "", e.get("label") or "", *had)}
-        if not commonplaces.name_key(a):
-            raise CadError("alias: letters or digits")
-        name = (e.get("label") if commonplaces.is_imported(key, e) else "") or e.get("name") or ""
-        out = {"ok": True, "key": key, "name": name, "added": False}
-        if commonplaces.name_key(a) in names:
+        if a and commonplaces.name_key(a) in names:
             return dict(out, aliases=had)                  # its name, or one it has: nothing to add
+        why = self.alias_problem(key, a, {k: dict(v, key=k) for k, v in cur.items()})
+        if why:
+            raise (PlaceNameTaken if why[0] == "taken" else CadError)(why[1])
         if len(had) >= 10:
             raise CadError("aliases: up to 10 other names")
         val = dict(e, aliases=[*had, a])
         self._commit([("places", key, val)], op, [("lists", f"place/{e.get('name') or key}", {"aliases": had},
                                                    {"aliases": val["aliases"]})])
         return dict(out, aliases=val["aliases"], added=True)
+
+    def remove_place_alias(self, key: str, alias: str, op: str) -> dict:
+        """One alias off a place name (a county entry's too: Settings > Lists > Place names, Common places' "−"; an
+        intel note's "− Alias"). Audited with the lists. -> {ok, key, name, had, aliases, removed}"""
+        cur = {r["key"]: {k: v for k, v in r.items() if k != "key"} for r in self.local_places()}
+        key, e = self._alias_entry(key, cur)
+        had = list(e.get("aliases") or [])
+        k = commonplaces.name_key(str(alias or ""))
+        left = [x for x in had if commonplaces.name_key(x) != k]
+        out = {"ok": True, "key": key, "name": self._place_label(key, e), "had": had, "aliases": left,
+               "removed": len(left) != len(had)}
+        if not out["removed"]:
+            return out
+        self._commit([("places", key, dict(e, aliases=left))], op,
+                     [("lists", f"place/{e.get('name') or key}", {"aliases": had}, {"aliases": left})])
+        return out
 
     # -- the department's own address points (sizeup/geo/localaddr.py) ----------------------------------
 
@@ -2104,7 +2177,10 @@ class Editor:
             (imported if commonplaces.is_imported(r["key"], r) else made).append(r)
         lost = [{"name": r["name"], "address": r.get("address") or "", "town": r.get("muni") or ""}
                 for r in imported if r.get("lat") is None]
-        return {"items": made, "max": MAX_PLACE_NAMES,
+        aliased = [{"key": r["key"], "name": self._place_label(r["key"], r), "town": r.get("muni") or "",
+                    "aliases": list(r["aliases"]), "imported": commonplaces.is_imported(r["key"], r)}
+                   for r in self.local_places() if r.get("aliases")]
+        return {"items": made, "max": MAX_PLACE_NAMES, "aliased": sorted(aliased, key=lambda x: x["name"].lower()),
                 "imported": {"source": commonplaces.SOURCE, "names": len(imported),
                              "addresses": len({commonplaces.name_key(r.get("address") or "") for r in imported}),
                              "located": len(imported) - len(lost), "unresolved": lost[:300],

@@ -151,13 +151,25 @@ window.IntelNotes = (() => {
       });
       acts.append(e, x);
     }
-    if (n.alias_ok && n.place_name) {                 // admins: the heard words another name of the common place
+    if (n.place_name && (n.alias_ok || n.alias_why)) {   // admins: the heard words another name of the common place
       const a = el("button", "sm quiet", `+ Alias of ${n.place_name}`);
       a.type = "button";
-      a.title = `Add "${n.heard}" as another name of ${n.place_name} (Settings > Lists > Place names): the next transmission saying it resolves`;
+      a.disabled = !n.alias_ok;                       // not allowed: why, in its hover (the hub says the same: 409 / 400)
+      a.title = n.alias_ok ? `Add "${n.heard}" as another name of ${n.place_name} (Settings > Lists > Place names): the next transmission saying it resolves`
+        : n.alias_why;
       a.addEventListener("click", async () => {
         if (window.UI && UI.confirm && !(await UI.confirm(`Add "${n.heard}" as a name of ${n.place_name}?`, { ok: "Add", danger: false }))) return;
         write(host, `/api/cad/intel/notes/${n.id}/alias`, {}, `Alias added to ${n.place_name}`);
+      });
+      acts.append(a);
+    }
+    if (n.place_name && n.alias_on) {                 // ... and off again (as Settings' Common places "−")
+      const a = el("button", "sm quiet danger-quiet", "− Alias");
+      a.type = "button";
+      a.title = `Take "${n.heard}" off ${n.place_name}'s names`;
+      a.addEventListener("click", async () => {
+        if (window.UI && UI.confirm && !(await UI.confirm(`Take "${n.heard}" off ${n.place_name}'s names?`, { ok: "Remove" }))) return;
+        write(host, `/api/cad/intel/notes/${n.id}/alias`, { remove: true }, `Alias removed from ${n.place_name}`);
       });
       acts.append(a);
     }
@@ -236,7 +248,7 @@ window.IntelNotes = (() => {
     heard.setAttribute("aria-label", "Heard as");
     heard.title = "The words the transcript has for the place (a misheard name): a labelled example, and a correction for speech-to-text";
     row.append(input, heard);
-    const geo = el("div", "geo nt-geo");
+    const geo = el("div", "geo");                   // (addressBox sets its class: "geo span2", "warn")
     const sugg = el("ol", "sugg nt-sugg");
     sugg.id = `nt-sugg-${++st.boxes}`;
     sugg.hidden = true;
