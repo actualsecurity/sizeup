@@ -80,7 +80,7 @@ window.IntelCard = (() => {
       li.append(fd);
     }
     const src = el("div", "aa-src", `${deps.time(e.first_at)} · ${(e.traffic_ids || []).length} tx`);
-    for (const id of (e.traffic_ids || []).slice(-4)) {
+    for (const id of (e.traffic_ids || []).slice(-4).reverse()) {     // the latest four, newest first
       const b = el("button", "mini play", st.playing === id ? "■" : "▶");
       b.type = "button";
       b.title = "Play (while its audio is kept)";
