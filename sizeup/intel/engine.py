@@ -316,6 +316,7 @@ class Entry:
     talker: str = ""                   # who keyed up ("" not known)
     units: frozenset = frozenset()     # the units it names or its radio is ("car 3"), lower case
     dispatcher: bool = False           # the dispatcher / HQ voices every job: never a tie by talker alone
+    ties: frozenset = frozenset()      # who keyed up, as a tie by talker reads it (_talker_ties): radio IDs, not text
     place: object = None               # the place in its own words (model.Place), or None
     late: bool = False                 # logged late (#747, row["late"]; older than max_age_min) or read over the
                                        # pack's late_s after its clip ended: context and a record, never a push's origin
@@ -903,6 +904,7 @@ class IntelEngine:
             units.add(talker.lower())
         end = max(at, float(row.get("end") or at))
         entry = Entry(at, hits, text, who, suppressed, talker, frozenset(units), disp, end=end,
+                      ties=_talker_ties(row, talker),
                       label=tk.label if tk else "", town=self._talker_town(pack, key, tk),
                       late=bool(row.get("late") or row.get("aged")) or self.clock() - end > pack.late_s,
                       read=self.clock())
@@ -1214,7 +1216,8 @@ class IntelEngine:
              it names a unit or car already tied to the event ("car 3 to dispatch, I'm at ..."),
              or repeats the event's category words,
              or reads back the event's place,
-             or the same talker said it, when that talker is known and is no dispatcher or HQ (who voices every job).
+             or the same talker said it (the same radio ID: _talker_ties), when that talker is known and is no
+               dispatcher or HQ (who voices every job).
         A row with another category's rule words is another job."""
         if mine - {ev.category, rules_mod.WILD, "routine"}:
             return False
@@ -1227,8 +1230,8 @@ class IntelEngine:
                            if not _unit_placeholder(u))
         if shared and not self._busy(pack, ev, shared, entry.at):
             return True                       # (a unit on two or more open jobs: only words or the place tie it)
-        if (entry.talker and not entry.dispatcher
-                and entry.talker in {e.talker for e in mine_entries if e.talker and not e.dispatcher}):
+        if (entry.ties and not entry.dispatcher
+                and entry.ties & {k for e in mine_entries if not e.dispatcher for k in e.ties}):
             return True
         # "now at", "last seen at": the one moving incident open on this source
         movable = lambda e: pack.category(e.category).get("moves") or e.category in PEOPLE      # noqa: E731
@@ -1512,7 +1515,7 @@ class IntelEngine:
         talkers, units = self._held_who(pack, ev)
         if entry.units - units or not self._address_only(entry):
             return False
-        return bool(entry.talker and entry.talker in talkers) or bool(entry.units & units)
+        return bool(entry.ties & talkers) or bool(entry.units & units)
 
     @staticmethod
     def _address_only(entry) -> bool:
@@ -1533,10 +1536,11 @@ class IntelEngine:
         return all(w in ok or i in apt for i, w in enumerate(ws))
 
     def _held_who(self, pack, ev: Event) -> tuple[set, frozenset]:
-        """The talkers and units of an unplaced event's own transmissions (kept past the window, _note_who)."""
+        """The talkers (their ties: _talker_ties) and units of an unplaced event's own transmissions (kept past the
+        window, _note_who)."""
         talkers, units = self._who_of.get(ev.id, (set(), frozenset()))
         mine = [e for e in self._event_entries(pack, ev)]
-        return (talkers | {e.talker for e in mine if e.talker},
+        return (talkers | {k for e in mine for k in e.ties},
                 units | frozenset(u for e in mine for u in e.units))
 
     def _note_who(self, pack, ev: Event) -> None:
@@ -2383,9 +2387,26 @@ def rung(evidence: list, damp: list, thr: float, cues: list = ()) -> str:
     return modes[-1] if modes else "off"
 
 
+# a talker text that names no one talker: an unlabelled radio's ("unknown MRRS radio": sizeup/cad/radios.py)
+GENERIC_TALKER = re.compile(r"(unknown|unk|unidentified)\b.*", re.I)
+
+
+def _talker_ties(row: dict, talker: str) -> frozenset:
+    """Who keyed up, as a tie by talker reads it: each of the row's radio IDs as "<system>:<id>" ("a,b": one per
+    key-up); a row with no radio ID, its talker text (an alias heard on the channel), never a generic one ("unknown
+    MRRS radio"). Never a radio's label: every unlabelled radio has the same text, and a department's or a range's
+    label is many radios' (the admin labels by department and role, not per car)."""
+    system = str(row.get("system") or "")
+    ids = frozenset(f"{system}:{x.strip()}" for x in str(row.get("radio_id") or "").split(",") if x.strip())
+    if ids:
+        return ids
+    t = str(talker or "").strip()
+    return frozenset({t}) if t and not GENERIC_TALKER.fullmatch(t) else frozenset()
+
+
 def _unit_placeholder(unit: str) -> bool:
     """A department's placeholder unit (DPT239 ...: sizeup/cad/mapview.is_placeholder, a CAD unit placeholder): never a
-    tie between two rows. Talkers tie as they are (a bare radio ID is most MRRS talkers'), within window_s of air."""
+    tie between two rows. Talkers tie by radio ID (_talker_ties), within window_s of air."""
     w = str(unit or "").strip()
     if not w:
         return True

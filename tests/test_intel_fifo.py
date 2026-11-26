@@ -8,8 +8,10 @@ Invented scenes only (this repository is public): "100 Example Ave", made-up rad
 
 from __future__ import annotations
 
+import pytest
+
 from sizeup.intel import backing as B
-from sizeup.intel.engine import LATE_S, WITHDRAWN, IntelEngine, RecordingSink
+from sizeup.intel.engine import LATE_S, WITHDRAWN, IntelEngine, RecordingSink, _talker_ties
 from sizeup.intel.events import MemoryEvents
 from tests.test_intel import Clock, ctx_row, engine, example_locate, live, row  # noqa: F401 - live: a fixture
 
@@ -446,13 +448,63 @@ def test_a_bare_radio_id_ties_the_call_out_and_its_read_back():
     assert up.id == ev.id and up.label_full == "100 Example Ave, Port Chester" and up.traffic_ids == ["k", "r"]
 
 
-def test_two_unknown_radio_rows_14_s_apart_tie():
+def test_two_rows_of_one_unknown_radio_14_s_apart_tie():
     t = 5000.0
     clock = Clock(t + 16)
     e, sink = engine(clock=clock)
-    [ev] = e.feed(row("k", "respond for a male with a knife", t, talker="Unknown radio"))
-    [up] = e.feed(row("r", "copy, 100 Example Ave", t + 14, talker="Unknown radio"))
+    [ev] = e.feed(row("k", "respond for a male with a knife", t, talker="unknown MRRS radio", radio_id="7701"))
+    [up] = e.feed(row("r", "copy, 100 Example Ave", t + 14, talker="unknown MRRS radio", radio_id="7701"))
     assert up.id == ev.id and up.label_full == "100 Example Ave, Port Chester"
+
+
+# -- a tie by talker is a tie by radio ID: never by a text many radios share --------------------------------------------
+
+@pytest.mark.parametrize("first, second", [
+    ({"talker": "unknown MRRS radio", "radio_id": "7701"}, {"talker": "unknown MRRS radio", "radio_id": "7702"}),
+    ({"talker": "Sampletown PD officer", "radio_id": "7701"}, {"talker": "Sampletown PD officer", "radio_id": "7702"}),
+    ({"talker": "unknown MRRS radio"}, {"talker": "unknown MRRS radio"}),         # no radio ID: a generic text alone
+])
+def test_two_radios_with_one_stored_talker_text_never_tie(first, second):
+    t = 5000.0
+    clock = Clock(t + 16)
+    e, sink = engine(clock=clock)
+    [ev] = e.feed(row("k", "respond for a male with a knife", t, **first))
+    e.feed(row("r", "copy, 100 Example Ave", t + 14, **second))
+    got = e.events.get(ev.id)
+    assert got.traffic_ids == ["k"] and got.precision == "none"
+
+
+@pytest.mark.parametrize("first, second", [
+    ({"talker": "Sampletown PD officer", "radio_id": "7701"}, {"talker": "Sampletown PD officer", "radio_id": "7701"}),
+    ({"talker": "Sampletown PD officer", "radio_id": "7701"}, {"talker": "unknown MRRS radio", "radio_id": "7701"}),
+    ({"talker": "unknown MRRS radio", "radio_id": "7702,7701"}, {"talker": "unknown MRRS radio", "radio_id": "7701"}),
+    ({"talker": "SAMPLE-4"}, {"talker": "SAMPLE-4"}),                  # no radio ID: an alias as heard ties as before
+])
+def test_one_radio_ties_whatever_its_stored_text(first, second):
+    t = 5000.0
+    clock = Clock(t + 16)
+    e, sink = engine(clock=clock)
+    [ev] = e.feed(row("k", "respond for a male with a knife", t, **first))
+    [up] = e.feed(row("r", "copy, 100 Example Ave", t + 14, **second))
+    assert up.id == ev.id and up.traffic_ids == ["k", "r"] and up.label_full == "100 Example Ave, Port Chester"
+
+
+@pytest.mark.parametrize("talker, radio_id, ties", [
+    ("unknown MRRS radio", "7701", {"mrrs:7701"}),
+    ("unknown MRRS radio", " 7701 , 7702 ", {"mrrs:7701", "mrrs:7702"}),
+    ("Sampletown PD officer", "7701", {"mrrs:7701"}),                  # the label is never the key
+    ("SAMPLE-4", "", {"SAMPLE-4"}),
+    ("unknown MRRS radio", "", set()),
+    ("Unknown", "", set()),
+    ("", "", set()),
+])
+def test_the_talker_ties_of_a_row(talker, radio_id, ties):
+    assert _talker_ties({"system": "mrrs", "radio_id": radio_id}, talker) == ties
+
+
+def test_another_systems_radio_of_the_same_id_is_another_talker():
+    assert not _talker_ties({"system": "mrrs", "radio_id": "7701"}, "x") & _talker_ties(
+        {"system": "westchester", "radio_id": "7701"}, "x")
 
 
 def test_a_department_placeholder_unit_never_ties_two_rows():
