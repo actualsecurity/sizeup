@@ -142,6 +142,8 @@ def test_the_worker_toml_it_writes_loads(tmp_path, with_llm):
     assert cfg.hub_url == "https://hub.example.org"
     assert cfg.whisper_server[0] == r"whisper\Release\whisper-server.exe"
     assert cfg.whisper_server[cfg.whisper_server.index("--host") + 1] == "127.0.0.1"
+    assert cfg.whisper_server[cfg.whisper_server.index("-l") + 1] == "en"
+    assert " ".join(cfg.whisper_server[1:]) == _ps_string("WhisperArgs")     # the check's whisper-server, the same
     if with_llm:
         assert cfg.llm_model_sha256 == ART["qwen3_8b"]["sha256"].lower()
         assert cfg.llm_server[cfg.llm_server.index("--host") + 1] == "127.0.0.1"
@@ -166,6 +168,10 @@ def test_the_check_servers_listen_on_loopback_as_in_the_readme():
     assert "0.0.0.0" not in ps1
     whisper = _ps_string("WhisperArgs")
     assert "--host 127.0.0.1 --port 8179" in whisper and "--host 127.0.0.1 --port 8179 -t 4" in readme
+    # English only, with the anti-loop decode, and the same flags as worker.toml's whisper_server (the worker's allow-list)
+    flags = "-l en -sns -et 2.4 -lpt -1.0 -nth 0.6"
+    assert whisper.endswith(f"-t 4 {flags}") and f"--host 127.0.0.1 --port 8179 -t 4 {flags}\n" in readme
+    W.check_whisper_argv(["whisper-server.exe", *whisper.split()])
     llama = _ps_string("LlamaArgs")
     assert llama.startswith("-m models\\Qwen3-8B-Q4_K_M.gguf --host 127.0.0.1 --port 8180 ")
     assert llama.split(" ", 2)[2] in readme      # the README's step 4b flags, from --host on

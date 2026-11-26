@@ -1791,7 +1791,7 @@ class HubApp(App):
             self._save_page(item)
             self._stt_row(item.id, "pending", sttpool.PENDING_MODEL)
         try:                                      # (its vocab_v: the term list in this very prompt, or none)
-            prompt, vocab_v = self._prompt_v(item)
+            prompt, vocab_v = self._pool_prompt_v(item)
         except Exception:  # noqa: BLE001 - no prompt is still a transcript
             prompt, vocab_v = "", ""
         job = sttpool.Job(item.id, cls, key, "page" if page is not None else "traffic", len(pcm) / 8000.0,
@@ -1802,6 +1802,13 @@ class HubApp(App):
             self._pool_to_aws(job, "the GPU pool couldn't take it")
         self.sync()
         return True
+
+    def _pool_prompt_v(self, item) -> tuple[str, str]:
+        """A pool job's whisper prompt and its vocab_v: none for the airband (an ATC prompt costs words and makes
+        large-v3-turbo loop on a weak AM clip), else the source's own (_prompt_v). The station's own whisper keeps its."""
+        if item is None or self._kind.get(getattr(item, "source", "")) == "airband":
+            return "", ""
+        return self._prompt_v(item)
 
     def _pool_audio_of(self, cid: str, page, pcm):
         """A pool job's audio, read when its worker asks (on that request's thread, never the events'): the station's
@@ -1852,7 +1859,7 @@ class HubApp(App):
                 self._save_page(item)
                 self._stt_row(item.id, "pending", sttpool.PENDING_MODEL)
         try:                                      # (its vocab_v: the term list in this very prompt, or none)
-            prompt, vocab_v = self._prompt_v(item)
+            prompt, vocab_v = self._pool_prompt_v(item)
         except Exception:  # noqa: BLE001 - no prompt is still a transcript
             prompt, vocab_v = "", ""
         seconds = len(pcm) / 8000.0 if pcm is not None else max(0.0, float(item.end) - float(item.start))
@@ -2006,7 +2013,7 @@ class HubApp(App):
             return False, "no recording"
         item = self._find(cid)[0]
         try:                                      # (its vocab_v: the term list in this very prompt, or none)
-            prompt, vocab_v = self._prompt_v(item) if item is not None else ("", "")
+            prompt, vocab_v = self._pool_prompt_v(item)
         except Exception:  # noqa: BLE001 - no prompt is still a transcript
             prompt, vocab_v = "", ""
         end = row.get("start")
