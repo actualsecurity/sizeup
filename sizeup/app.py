@@ -2130,12 +2130,10 @@ class App:
         name one of ours (IncidentStore.on_page). Returns the incident, or None."""
         inc = self.store.on_page(page.id, depts, d, at=page.start)
         if inc:
-            where = inc.geo["label"] if inc.geo else (inc.location or "location not found")
-            if inc.geo and inc.geo.get("confirmed") is False:
-                where = f"{inc.location or where} (location unconfirmed: {inc.geo.get('why') or 'not sure'}; best {where})"
             # (never its type, its address or its words in a log: an EMS type is a medical detail)
             log(f"INCIDENT {inc.id} · {inc.category or 'call'} · "
-                f"{'located' if inc.geo else 'no location'} · {', '.join(inc.departments)}")
+                f"{('location unconfirmed' if inc.geo.get('confirmed') is False else 'located') if inc.geo else 'no location'}"
+                f" · {', '.join(inc.departments)}")
             try:
                 ev = self.cad.from_monitor(inc)
                 if ev and tones_half is not None:       # its tones came as a transmission of their own
