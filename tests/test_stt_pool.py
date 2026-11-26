@@ -509,6 +509,7 @@ def test_a_ready_worker_transcribes_an_aws_clip_and_the_run_is_kept_with_its_wor
         assert run["text"] == GPU_TEXT and run["confidence"] == 0.8 and run["class"] == "urgent"
         assert [x[0] for x in run["words"]] == GPU_TEXT.split()
         assert run["queued_at"] <= run["engine_start"] <= run["done_at"] and run["clip_end"] <= run["done_at"]
+        assert run["input"] == "listening-8k"                 # (no STT input from the station: the listening clip, #678)
         lat = hub.app.stt_latency.table()
         assert lat[0]["channel"] == "FG1" and lat[0]["target"] and lat[0]["engines"] == {"gpu-worker": 1}
         health = hub.app.health.model()["stt_pool"]
@@ -518,6 +519,136 @@ def test_a_ready_worker_transcribes_an_aws_clip_and_the_run_is_kept_with_its_wor
                           "another engine's words", 0.7)
         runs = hub.app.stt_runs.of("FG1-2")
         assert [x["text"] for x in runs] == [GPU_TEXT, "another engine's words"] and runs[1]["role"] == "rerun"
+        assert runs[1]["input"] == "listening-8k"            # (AWS hears the listening clip)
+    finally:
+        w.close()
+        hub.close()
+        fake.close()
+
+
+def test_a_jobs_audio_waits_for_the_stt_input_only_its_class_budget_counted_from_when_it_was_queued():
+    """#678: a pre-alert clip's audio request waits at most SRC_WAIT_S (0.75 s) from when the job was queued, a LOW one
+    longer, a catch-up or re-run clip never (old: its input is here or never comes); half the lease left at most."""
+    clock = Clock()
+    jobs = Jobs()
+    for cls, budget in ((URGENT, 0.75), (HIGH, 0.75), (CONTEXT, 0.75), (LIVE, 1.5), (LOW, 3.0), (CATCHUP, 0.0),
+                        (RERUN, 0.0)):
+        j = jobs.job(f"FG1-{cls}", cls)
+        j.queued_at, j.expires = clock.t, clock.t + 20.0
+        assert sttpool.src_wait_s(j, clock.t) == budget, cls
+        assert sttpool.src_wait_s(j, clock.t + 0.5) == max(0.0, budget - 0.5)     # the claim's own delay counts
+        assert sttpool.src_wait_s(j, clock.t + 5.0) == 0.0
+    j = jobs.job("FG1-lease", LOW)
+    j.queued_at, j.expires = clock.t, clock.t + 1.0
+    assert sttpool.src_wait_s(j, clock.t) == 0.5                                   # half of what is left of the lease
+
+
+def _stt_item(n, tid, seconds=3.0):
+    from sizeup.cloud import flac, sttinput
+    pcm = sttinput.stt_pcm(voice(seconds), True)
+    meta = {"v": 1, "format": "flac", "input": "stt-src", "kind": "traffic", "rate": 16000, "samples": len(pcm)}
+    return {"n": n, "id": tid, "kind": "traffic", "source": "FG1", "talkgroup": None, "system": "",
+            "end": time.time(), "stt": sttinput.to_wire(flac.encode(pcm, 16000), meta)}, len(pcm)
+
+
+def _waits(hub):
+    """The wait each pool job's audio request gave HubApp.read_stt_audio (the station's STT input), in order."""
+    waits, read = [], hub.app.read_stt_audio
+
+    def spy(cid, *a, wait_s=0.0, **k):
+        waits.append(wait_s)
+        return read(cid, *a, wait_s=wait_s, **k)
+    hub.app.read_stt_audio = spy
+    return waits
+
+
+def test_a_pre_alert_job_gets_the_stt_input_that_comes_in_time_and_never_waits_2_s_for_one_that_doesnt(tmp_path):
+    """#678: the worker's fetch was ~2.0 s per pre-alert job (the hub's flat 2 s wait for the station's STT input, which
+    came ~2 s after its event). Now, from a station whose lane is woken by the events' ack: the input that comes within
+    the class's budget is what the worker hears (16 kHz, stamped stt-src); one that doesn't costs the budget (0.75 s at
+    most) and the listening clip, stamped listening-8k."""
+    import io
+    import wave
+    fake = FakeTranscribe(phrases={500: AWS_TEXT})
+    hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
+    hub.app.hub.status = {"stt_input": {"wake_on_ack": True}}       # (the station's last status, #678)
+    waits = _waits(hub)
+    token = hub.app.hub.workers.add("gpu-1", "Test box")
+    w = FakeWorker(hub.url, token).start()
+    try:
+        assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
+        item, samples = _stt_item(1, "FG1-30")
+        threading.Timer(0.3, lambda: call(hub.url + "/api/station/stt", "POST", {"v": 1, "items": [item]})).start()
+        send(hub, pending_event("FG1-30"))
+        assert wait(lambda: row(hub, "FG1-30").get("text") == GPU_TEXT, 30), row(hub, "FG1-30")
+        with wave.open(io.BytesIO(w.audio[0][1])) as f:          # the station's own input, padded 0.5 s each side
+            assert f.getframerate() == 16000 and f.getnframes() == samples + 16000
+        assert wait(lambda: hub.app.stt_runs.of("FG1-30"), 5)
+        assert hub.app.stt_runs.of("FG1-30")[0]["input"] == "stt-src"
+        send(hub, pending_event("FG1-31", seq=2))                     # its STT input never comes
+        assert wait(lambda: row(hub, "FG1-31").get("text") == GPU_TEXT, 30), row(hub, "FG1-31")
+        assert wait(lambda: hub.app.stt_runs.of("FG1-31"), 5)
+        assert hub.app.stt_runs.of("FG1-31")[0]["input"] == "listening-8k"
+        assert len(waits) == 2 and all(0.0 <= x <= 0.75 for x in waits), waits    # the budget, never the old 2.0 s
+    finally:
+        w.close()
+        hub.close()
+        fake.close()
+
+
+def test_an_stt_input_that_comes_before_its_event_is_what_the_worker_hears(tmp_path):
+    """The station never holds an input for its own event (a transmission's traffic event goes only with its text): one
+    that reaches the hub first is kept as <id>.src and is what the pool's worker gets once the event comes (#678)."""
+    import io
+    import wave
+    fake = FakeTranscribe(phrases={500: AWS_TEXT})
+    hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
+    hub.app.hub.status = {"stt_input": {"wake_on_ack": True}}
+    waits = _waits(hub)
+    token = hub.app.hub.workers.add("gpu-1", "Test box")
+    w = FakeWorker(hub.url, token).start()
+    try:
+        assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
+        item, samples = _stt_item(1, "FG1-50")
+        assert call(hub.url + "/api/station/stt", "POST", {"v": 1, "items": [item]})[0] == 200    # before its event
+        send(hub, pending_event("FG1-50"))
+        assert wait(lambda: row(hub, "FG1-50").get("text") == GPU_TEXT, 30), row(hub, "FG1-50")
+        with wave.open(io.BytesIO(w.audio[0][1])) as f:
+            assert f.getframerate() == 16000 and f.getnframes() == samples + 16000
+        assert wait(lambda: hub.app.stt_runs.of("FG1-50"), 5)
+        assert hub.app.stt_runs.of("FG1-50")[0]["input"] == "stt-src" and len(waits) == 1
+    finally:
+        w.close()
+        hub.close()
+        fake.close()
+
+
+@pytest.mark.parametrize("flag", [None, False, "yes"], ids=["no-status", "false", "not-a-bool"])
+def test_a_station_whose_lane_is_not_woken_on_ack_keeps_the_old_2_s_wait(tmp_path, flag):
+    """The hub deploys before the stations (#678): a station that doesn't say stt_input.wake_on_ack sends each STT
+    input ~2 s after its event, so its pool jobs keep the old flat wait (else every pre-alert job would get the 8 kHz
+    clip until the station updates). The input then still comes in time and is what the worker hears."""
+    import io
+    import wave
+    fake = FakeTranscribe(phrases={500: AWS_TEXT})
+    hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
+    if flag is not None:
+        hub.app.hub.status = {"stt_input": {"wake_on_ack": flag}}
+    assert hub.app._station_stt_fast() is False
+    waits = _waits(hub)
+    token = hub.app.hub.workers.add("gpu-1", "Test box")
+    w = FakeWorker(hub.url, token).start()
+    try:
+        assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
+        item, samples = _stt_item(1, "FG1-40")
+        threading.Timer(0.3, lambda: call(hub.url + "/api/station/stt", "POST", {"v": 1, "items": [item]})).start()
+        send(hub, pending_event("FG1-40"))
+        assert wait(lambda: row(hub, "FG1-40").get("text") == GPU_TEXT, 30), row(hub, "FG1-40")
+        with wave.open(io.BytesIO(w.audio[0][1])) as f:
+            assert f.getframerate() == 16000 and f.getnframes() == samples + 16000
+        assert wait(lambda: hub.app.stt_runs.of("FG1-40"), 5)
+        assert hub.app.stt_runs.of("FG1-40")[0]["input"] == "stt-src"
+        assert waits and waits[0] > 0.75, waits                  # the old wait (2 s, or half the lease left), not 0.75
     finally:
         w.close()
         hub.close()

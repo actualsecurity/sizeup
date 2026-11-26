@@ -634,20 +634,22 @@
       ]
     },
     "call.set_talkgroup": {
-      "description": "App.set_talkgroup(tg, record=None, main=None, tier=None, system=\"\"): a talkgroup's switches. The hub sends [tg, record, main] for the county system's, and [tg, record, main, tier, system] when a tier or another system is named, but only to a station whose status has `p25_systems` (an older one raises TypeError on five arguments). Result: null, else why not.",
+      "description": "App.set_talkgroup(tg, record=None, main=None, tier=None, system=\"\", transcribe=None, alerts=None): a talkgroup's switches. The hub sends [tg, record, main] for the county system's, and [tg, record, main, tier, system] when a tier or another system is named, but only to a station whose status has `p25_systems` (an older one raises TypeError on five arguments). It never sends transcribe / alerts: it writes them as the tier they make (tiers.from_switches). Result: null, else why not.",
       "x-names": [
         "tg",
         "record",
         "main",
         "tier",
-        "system"
+        "system",
+        "transcribe",
+        "alerts"
       ],
       "x-forms": [
         3,
         5
       ],
       "minItems": 1,
-      "maxItems": 5,
+      "maxItems": 7,
       "prefixItems": [
         {
           "type": "integer",
@@ -692,6 +694,20 @@
         {
           "type": "string",
           "description": "system: the P25 system's name; \"\" for the county's."
+        },
+        {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "transcribe: another system's Transcribe switch, written as its tier; never sent by the hub."
+        },
+        {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "alerts: another system's Alerts switch, written as its tier; never sent by the hub."
         }
       ]
     },

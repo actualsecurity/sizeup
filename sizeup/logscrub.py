@@ -124,6 +124,14 @@ def _forms(v: str) -> set[str]:
     return {f for f in out if f}
 
 
+def said(text: str | None) -> str:
+    """What a log line may say of private words (a transcript, a page, a prompt, a term list, a dispatch's or an alarm's
+    text): how many words, never the words. Logs go to CloudWatch (the hub's stdout to /ecs/sizeup-hub, the station's
+    journal to /sizeup/station); the words stay in the hub's database, behind sign-in."""
+    n = len(str(text or "").split())
+    return f"{n} word{'' if n == 1 else 's'}" if n else "no words"
+
+
 def secret(*values: str, short: bool = False) -> None:
     """Values that must never leave the station in a log line (a line with one, in any of its forms, is dropped). Kept
     in memory only. short: a credstore value, matched down to MIN_SHORT characters as a whole word."""

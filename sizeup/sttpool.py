@@ -75,6 +75,22 @@ CLASSES = tuple(BUDGETS)
 FAST_CLASSES = (URGENT, HIGH, CONTEXT_FALLBACK, CONTEXT)
 
 
+# class -> how long after its job was queued (its event applied) a worker's audio request may still wait for the
+# station's own STT input (#671's stt-src, 16 kHz) before it gets the 8 kHz listening clip (#678). It comes on its own
+# lane, under the events: ~0.2-0.5 s after its event once the lane is woken by the events' ack (sizeup/cloud/station.py),
+# ~2 s before that fix. A pre-alert clip never waits long for the better input; a re-run or catch-up clip is old (its
+# input is here already, or never comes)
+SRC_WAIT_S: dict[float, float] = {
+    URGENT: 0.75, HIGH: 0.75, CONTEXT_FALLBACK: 0.75, CONTEXT: 0.75, LIVE: 1.5, LOW: 3.0, RERUN: 0.0, CATCHUP: 0.0}
+
+
+def src_wait_s(job: "Job", now: float) -> float:
+    """How long this job's audio request may still wait for the station's STT input now: its class's budget less the
+    time since it was queued, and never more than half of what is left of its lease (it is still transcribed in time)."""
+    left = SRC_WAIT_S.get(job.cls, 0.0) - max(0.0, now - (job.queued_at or now))
+    return max(0.0, min(left, (job.expires - now) / 2.0))
+
+
 def _extra(job) -> float:
     return 0.0 if job.cls in FAST_CLASSES or job.cls == CATCHUP else PER_AUDIO_S * max(0.0, job.seconds)
 PENDING_MODEL = "gpu-worker"   # a row's model while a worker has it (the UI: "Transcribing (GPU)")
