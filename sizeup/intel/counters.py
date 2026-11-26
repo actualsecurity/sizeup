@@ -16,7 +16,7 @@ scope. These say which. In memory, by the clock hour, per pack and overall ("" b
     pushed         pushes sent (a push again of the same event counts again)
     held           events not pushed for a reason (shadow, pushes off, quiet hours, a cap, merged, the scrub, unsent),
                    once per event, when it was first held (one pushed later is in both)
-    late           a push source's text read late (over engine.LATE_S after it aired, or #747's late flag), once per
+    late           a push source's text read late (over its pack's late_s after the clip ended, or #747's flag), once per
                    row; late_<cause> by what made it (engine.late_cause: aws, gpu, station_pool, station, catchup,
                    outage, other); late_lost: its words reached a category at push (a pre-alert lost). Overall:
                    engine.late_row, Settings > Station > Health

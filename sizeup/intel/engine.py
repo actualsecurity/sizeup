@@ -283,8 +283,8 @@ def late_row(snap: dict, now: float) -> dict:
     n, lost = h.get("late", 0), h.get("late_lost", 0)
     by = ", ".join(f"{w} {h.get('late_' + c, 0)}" for c, w in LATE_CAUSES if h.get("late_" + c, 0))
     text = f"Late PD text 24 h: {n}" + (f" ({by})" if by else "") + (f" · would have pushed: {lost}" if lost else "")
-    title = (f"Transcripts of the sources intel pushes from that reached it more than {LATE_S / 60:g} min after they "
-             "aired (or from an outage, #747): read as context and kept at log, never pushed. By what made the text: "
+    title = ("Transcripts of the sources intel pushes from that reached it later than their pack's late s after the "
+             "clip ended (PD 5 min), or from an outage (#747): read as context and kept at log, never pushed. By what made the text: "
              "the engine, a catch-up of a shed clip, an outage. Would have pushed: their words reached a category at "
              "push, so a pre-alert was lost. To cut it: raise the police AWS budget, keep the PD channels on Auto · "
              "priority.")
