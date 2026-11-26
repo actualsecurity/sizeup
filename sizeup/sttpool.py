@@ -609,12 +609,13 @@ class Pool:
             return False
 
     def _chall_model_ok(self, w: Worker, model: str) -> bool:
-        """(lock held) A challenger never on a SERVER live traffic decodes on (whisper-server can't abort a decode): a
-        model this worker serves live (its primary, a champion: resident) only on a separate try instance of the same
-        files (it says CHALL_SAME_CAP and lists it in try_loaded); any other only once it is loaded."""
-        if model in self.resident or model == model_id(w.model):
-            return CHALL_SAME_CAP in w.caps and model in w.try_models
-        return model in w.models or model in w.try_models
+        """(lock held) A challenger never on a SERVER live traffic decodes on (whisper-server can't abort a decode): only
+        on a try server that answers now (the worker's try_loaded: #964 runs challengers there alone), and for a model
+        this worker serves live (its primary, a champion: resident) only when it says CHALL_SAME_CAP (that try server is
+        a separate instance of the same files)."""
+        if model not in w.try_models:
+            return False
+        return CHALL_SAME_CAP in w.caps or (model not in self.resident and model != model_id(w.model))
 
     def _chall_room(self, channel: str, wid: str = "", now: float | None = None) -> bool:
         """(lock held) Under the hourly caps: CHALL_CAP_CHANNEL_H for the channel, CHALL_CAP_WORKER_H for the worker."""
