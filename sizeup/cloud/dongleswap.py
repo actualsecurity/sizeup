@@ -21,6 +21,11 @@ TICK_S = 5.0
 RETRY_S = 300.0              # an auto move the station refused: tried again this much later
 
 
+def _list(v) -> list:
+    """v when it is a list, else none (a value of another type in a station's status: an older or broken station's)."""
+    return v if isinstance(v, list) else []
+
+
 class AutoReplace:
     """auto_critical's driver: tick() each TICK_S (run()), on the hub only."""
 
@@ -36,7 +41,7 @@ class AutoReplace:
     def offers(self) -> list[dict]:
         sdr = self.hub.sdr() if hasattr(self.hub, "sdr") else None
         rows = sdr.get("replace") if isinstance(sdr, dict) else None
-        return [o for o in rows or [] if isinstance(o, dict)]
+        return [o for o in _list(rows) if isinstance(o, dict)]
 
     def tick(self, now: float | None = None) -> list[tuple[str, str]]:
         """Take every offer auto-replace may take now: the (gone, new) pairs moved."""
@@ -45,16 +50,17 @@ class AutoReplace:
             return []
         done = []
         for o in self.offers():
-            gone, choices = str(o.get("missing") or ""), [c for c in o.get("choices") or [] if isinstance(c, dict)]
+            gone, choices = str(o.get("missing") or ""), [c for c in _list(o.get("choices")) if isinstance(c, dict)]
             if not (o.get("critical") and o.get("only") and len(choices) == 1 and gone):
                 continue                                 # (ambiguous, or not the county's / paging: a person decides)
-            if float(o.get("absent_s") or 0) < MISSING_S:
+            absent = o.get("absent_s")
+            if not isinstance(absent, (int, float)) or isinstance(absent, bool) or absent < MISSING_S:
                 continue
             new = str(choices[0].get("serial") or "")
             if not new or now - self._tried.get((gone, new), -1e18) < RETRY_S:
                 continue
             self._tried[(gone, new)] = now
-            jobs = ", ".join(str(j) for j in o.get("jobs") or []) or "its jobs"
+            jobs = ", ".join(str(j) for j in _list(o.get("jobs"))) or "its jobs"
             try:
                 err = self.hub.remote("replace_sdr", gone, new, "use", "auto")
             except Exception as e:  # noqa: BLE001 - offline or refused: tried again RETRY_S later
@@ -81,7 +87,7 @@ class AutoReplace:
         n = self.notifier
         if n is None or not getattr(n, "enabled", False):
             return
-        c = (o.get("choices") or [{}])[0]
+        c = next((x for x in _list(o.get("choices")) if isinstance(x, dict)), {})
         name = c.get("name") or new
         click = f"{self.public_url}/cad#settings/radios/receivers?sdr={new}" if self.public_url else ""
         n.send(f"Auto-replaced SDR {o.get('name') or o.get('missing')}",

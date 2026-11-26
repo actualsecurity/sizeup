@@ -682,7 +682,7 @@ class Cad:
             self.log(f"CAD: dongle swaps: {type(e).__name__}: {e}")
             return []
         return [{k: o.get(k) for k in ("missing", "name", "jobs", "group", "pick", "choices")}
-                for o in rows or [] if isinstance(o, dict)][:8]
+                for o in (rows if isinstance(rows, list) else []) if isinstance(o, dict)][:8]
 
     def name_radio(self, body: dict) -> dict:
         """POST /api/cad/radio-id {system, radio_id, unit? | label? | ignore?, operator}: who a new FG1 radio is."""

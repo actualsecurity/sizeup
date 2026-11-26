@@ -340,20 +340,25 @@ def _swaps(sdr: dict | None, now: float, skew: float = 0.0) -> tuple[list[dict],
     ("New SDR <serial> seen: use it for <jobs>?"), and a hint per antenna group member gone LONG_GONE_S ("<serial>
     missing 1 d: remove from group?", with its one-click action)."""
     from sizeup.radio.replace import LONG_GONE_S
+
+    def rows(v) -> list:                            # (a value of another type, an older or broken station's: none)
+        return v if isinstance(v, list) else []
+    sdr = sdr if isinstance(sdr, dict) else {}
     offers = []
-    for o in (sdr or {}).get("replace") or []:
+    for o in rows(sdr.get("replace")):
         if not isinstance(o, dict) or not o.get("missing"):
             continue
         ch = [{k: str(c.get(k) or "")[:64] for k in ("serial", "name", "product", "tuner")}
-              for c in o.get("choices") or [] if isinstance(c, dict) and c.get("serial")][:8]
+              for c in rows(o.get("choices")) if isinstance(c, dict) and c.get("serial")][:8]
         if ch:
             offers.append({"missing": str(o["missing"])[:64], "name": str(o.get("name") or o["missing"])[:64],
-                           "jobs": [str(j)[:40] for j in o.get("jobs") or []][:4], "group": str(o.get("group") or "")[:40],
+                           "jobs": [str(j)[:40] for j in rows(o.get("jobs"))][:4], "group": str(o.get("group") or "")[:40],
                            "pick": str(o.get("pick") or "")[:64], "only": bool(o.get("only")),
                            "critical": bool(o.get("critical")), "choices": ch,
-                           "absent_s": o.get("absent_s") if isinstance(o.get("absent_s"), (int, float)) else None})
+                           "absent_s": o.get("absent_s") if isinstance(o.get("absent_s"), (int, float))
+                           and not isinstance(o.get("absent_s"), bool) else None})
     hints = []
-    for x in (sdr or {}).get("missing") or []:
+    for x in rows(sdr.get("missing")):
         at = x.get("last_seen") if isinstance(x, dict) else None
         if not isinstance(at, (int, float)) or isinstance(at, bool) or not x.get("group"):
             continue
@@ -364,8 +369,8 @@ def _swaps(sdr: dict | None, now: float, skew: float = 0.0) -> tuple[list[dict],
         serial = str(x.get("serial") or "")[:64]
         hints.append({"channel": f"Antenna group {str(x['group'])[:40]}", "level": "warn",
                       "text": f"{serial} missing {days} d: remove from group?",
-                      "title": f"Last seen {_hhmm(at)}" + (f"; its job {', '.join(x.get('jobs') or [])} goes with it"
-                                                          if x.get("jobs") else ""),
+                      "title": f"Last seen {_hhmm(at)}" + (f"; its job {', '.join(str(j) for j in rows(x.get('jobs')))} goes with it"
+                                                          if rows(x.get("jobs")) else ""),
                       "action": {"label": "Remove", "missing": serial, "do": "drop"}})
     return offers[:8], hints[:8]
 
