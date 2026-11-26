@@ -1021,7 +1021,7 @@ class App:
             return [{k: getattr(m, k) for k in ("label", "lat", "lon", "kind", "municipality", "precision")}
                     | {"confidence": round(float(m.confidence), 2)} | self._geocode_parts(m) for m in self.gaz.candidates(q)[:20]]
         except Exception as e:
-            log(f"geocode error for {q!r}: {type(e).__name__}: {e}")
+            log(f"geocode error ({len(q or '')} characters): {type(e).__name__}")   # (never what was typed: an address)
             return []
 
     @staticmethod

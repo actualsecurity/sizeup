@@ -922,8 +922,10 @@ class CadApi:
         if who is None or not who.email:
             return
         said = summarize(path, body or {}, out, self.cad)
-        if said is not None:
-            self.cad.activity.record(who.email, "action", f"POST {path}", said[0], said[1], True, *client)
+        if said is not None:                     # the summary (a note's words, a nature, a disposition, a name) stays in
+            self.cad.activity.record(who.email, "action", f"POST {path}", said[0], said[1], True, *client,  # this table:
+                                     logged="action")                                      # the server log, the route
+
 
     def refused(self, path: str, who, why: str, client: tuple[str, str] = NO_CLIENT) -> None:
         m = INCIDENT.fullmatch(path)
