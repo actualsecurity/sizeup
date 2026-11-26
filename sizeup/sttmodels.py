@@ -196,16 +196,18 @@ class Choices:
         v = (self.settings().get(key) or {}).get("callsigns")
         return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
 
-    def want(self, services: dict | None = None) -> list[str]:
+    def want(self, services: dict | None = None, off_gpu=()) -> list[str]:
         """The models the GPU workers are asked to run, most important first: each service's (fire, EMS, police, air
-        ...) default, then the channels' own choices by their service (services: {channel key: service})."""
-        services = services or {}
+        ...) default, then the channels' own choices by their service (services: {channel key: service}). off_gpu: the
+        channels whose engine never decodes on a GPU live (pinned AWS, Local, Compare): their model isn't resident."""
+        services = {k: v for k, v in (services or {}).items() if k not in off_gpu}
         out: list[str] = []
         for svc in SERVICE_ORDER:
             mids = [self.default_for(svc)] if svc in DEFAULTS else []
             mids += [self.model_for(k, svc) for k, s in sorted(services.items()) if s == svc]
             if svc == "":
-                mids += [v.get("model") for k, v in sorted(self.settings().items()) if k not in services]
+                mids += [v.get("model") for k, v in sorted(self.settings().items())
+                         if k not in services and k not in off_gpu]
             for m in mids:
                 if isinstance(m, str) and m in self.catalog and m not in out:
                     out.append(m)
