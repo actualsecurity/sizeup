@@ -551,7 +551,14 @@ class Listen:
                 if it is None or not self.configured:
                     continue
                 before = it.versions
-                self._make(it, c)
+                try:
+                    self._make(it, c)
+                except Exception as e:  # noqa: BLE001 - a clip that can't be read or stitched never ends the thread
+                    # (uncaught, its traceback would reach the log with the exception's text): the type only, and
+                    # refresh() queues nothing for a minute (one line, not one per refresh)
+                    self._retry_at = self.clock() + RETRY_SOON_S
+                    self.log(f"listen: making a link failed ({type(e).__name__}): trying again in a minute")
+                    continue
                 n += it.versions - before
 
     # -- the cleanup (the listen thread) --------------------------------------------------------------------------

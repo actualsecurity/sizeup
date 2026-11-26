@@ -233,6 +233,9 @@ GET  /api/cad/comms?unit=&channel=&event=&pcfd=1&emergency=1&since=&until=&main_
                                           ?system= ?group= ?source= ?service= ?tier= ?dept= ?safety=1 ?mute= ?before=
                                           ?changed= ?at= gives one page {rows, older, newer, next, cursor, reload}
                                           (Cad.comms_query). Another system's rows: only to a viewer who may see them
+GET  /api/cad/radio-names              {rev, names, shorts, systems, freqs}: what every channel / talkgroup label on
+                                          the page shows (sizeup/radionames.py, static/radio-names.js); another
+                                          system's keys only to a reader who may see its traffic
 GET  /api/cad/comms/sources?rev=          the Radio page's tree: {live, sources: [{key, system, group, name, service,
                                           tier, ours, last, counts: [[minutes ago, calls]], emergency}], folders: the
                                           admins' folders (#607) | null} (Cad.comms_sources)
@@ -339,6 +342,9 @@ POST /api/cad/settings/atc                {action: set {key: identify | map | vo
                                           talking on HPN Tower (#252, sizeup/atc_talkers.py) on the rows / the map; admins
 POST /api/cad/settings/hydrant_display    {action: set {key: assume_c, value: true | false} | reset {key}}: untested hydrants
                                           drawn as an assumed Class C, marked "C*" (#840, sizeup/cad/hydrants.py); admins
+POST /api/cad/settings/dongle_swap        {action: set {key: auto_critical, value: true | false} | reset {key}}: a gone
+                                          dongle's Fire/EMS 15 or paging job moved by itself to the one new dongle that
+                                          fits (sizeup/cloud/dongleswap.py; off by default); admins
 POST /api/cad/settings/hub_errors         {action: set {key: on | per_signature | total, value} | reset {key}}: the hub's own
                                           error spikes to the status topic (#285, sizeup/errwatch.py); admins
 POST /api/cad/settings/department_units  {action: set {key: a feed's department entry code, value: the department,
@@ -519,7 +525,7 @@ WRITES = (
     (DVR_PIN, "dispatch"),                                                  # keep recording a camera (#277)
     (DVR_CLIP, "dispatch"),                                                 # save a camera clip on an event (#323)
     (ATTACHMENT, "admin"),                                                  # delete an event's attachment (#323)
-    (re.compile(r"/api/(?:talkgroup|talkgroup-group|mode|retranscribe|adsb-receiver|antenna-groups)"), "admin"),   # the station's radios (server.py)
+    (re.compile(r"/api/(?:talkgroup|talkgroup-group|mode|retranscribe|adsb-receiver|antenna-groups|sdr-replace)"), "admin"),   # the station's radios (server.py)
 )
 READ_ACTIONS = {("/api/cad/settings/dispatch", "preview")}                  # the wording on a sample event
 MAY = {"admin": ("read", "dispatch", "admin"), "dispatcher": ("read", "dispatch"), "viewer": ("read",)}
@@ -756,7 +762,8 @@ def _prealert_at(o) -> str:
 
 
 def _toggles(b) -> str:
-    return ", ".join(f"{k} {'on' if b[k] else 'off'}" for k in ("record", "main") if b.get(k) is not None)
+    return ", ".join([f"{k} {'on' if b[k] else 'off'}" for k in ("record", "main", "transcribe", "alerts")
+                      if b.get(k) is not None] + ([f"tier {_clip(b['tier'], 12)}"] if b.get("tier") else []))
 
 
 DOES = (
@@ -827,7 +834,7 @@ DOES = (
     (re.compile(r"/api/cad/stt-workers"), lambda m, b, o, c: (
         f"STT workers: {_clip(str(b.get('action') or ''), 20)}"
         + (f" {_clip(b.get('id'), 40)}" if b.get("id") else ""), "")),
-    (re.compile(r"/api/talkgroup"), lambda m, b, o, c: (f"Talkgroup {b.get('tg')}: {_toggles(b) or 'no change'}", "")),
+    (re.compile(r"/api/talkgroup"), lambda m, b, o, c: (f"Talkgroup {_clip(b.get('source') or b.get('tg'), 40)}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/talkgroup-group"), lambda m, b, o, c: (f"Talkgroups {_clip(b.get('group'), 40)}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/mode"), lambda m, b, o, c: (f"Radio mode: {_clip(b.get('mode'), 30)}" + (f" ({_clip(b['sdr'], 30)})" if b.get("sdr") else ""), "")),
     (re.compile(r"/api/reception"), lambda m, b, o, c: (
@@ -842,6 +849,13 @@ DOES = (
            else "") + ")"
         for g in b.get("groups") or [] if isinstance(g, dict)), 300) or "none")
         + (f" · confirmed: {_clip(b.get('confirm'), 300)}" if isinstance(b.get("confirm"), str) and b.get("confirm") else ""), "")),
+    (re.compile(r"/api/sdr-replace"), lambda m, b, o, c: (
+        (f"Used new SDR {_clip(b.get('new'), 32)} for gone SDR {_clip(b.get('missing'), 32)}"
+         + (f" ({_clip(', '.join(map(str, o.get('jobs') or [])), 60)})" if isinstance(o, dict) and o.get("jobs") else "")
+         + (f", group {_clip(o.get('group'), 24)}" if isinstance(o, dict) and o.get("group") else ""))
+        if b.get("action", "use") == "use"
+        else f"Took gone SDR {_clip(b.get('missing'), 32)} out of its antenna group" if b.get("action") == "drop"
+        else f"New dongle for gone SDR {_clip(b.get('missing'), 32)}: not now", "")),
     (re.compile(r"/api/retranscribe"), lambda m, b, o, c: ("Retranscribe: every recording" if b.get("all")
                                                            else f"Retranscribe: {len(b.get('ids') or [])} recordings", "")),
 )
@@ -922,8 +936,10 @@ class CadApi:
         if who is None or not who.email:
             return
         said = summarize(path, body or {}, out, self.cad)
-        if said is not None:
-            self.cad.activity.record(who.email, "action", f"POST {path}", said[0], said[1], True, *client)
+        if said is not None:                     # the summary (a note's words, a nature, a disposition, a name) stays in
+            self.cad.activity.record(who.email, "action", f"POST {path}", said[0], said[1], True, *client,  # this table:
+                                     logged="action")                                      # the server log, the route
+
 
     def refused(self, path: str, who, why: str, client: tuple[str, str] = NO_CLIENT) -> None:
         m = INCIDENT.fullmatch(path)
@@ -1345,6 +1361,8 @@ class CadApi:
                 return _json(200, self.cad.comms_query(parse_qs(query)))
             if path == "/api/cad/comms/sources":
                 return _json(200, self.cad.comms_sources(parse_qs(query)))
+            if path == "/api/cad/radio-names":        # one name per source, every label on the page (sizeup/radionames.py)
+                return _json(200, self.cad.radio_names())
             if path == "/api/cad/comms/activity":      # per-minute activity per source (#409); ?source=&hours= (24)
                 # which radios keyed an encrypted talkgroup: a verified, signed-in admin only (read_refused checks the
                 # admin when someone is signed in; with nobody verified, never: sourcekeys.may_see_context)

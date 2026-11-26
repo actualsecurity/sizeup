@@ -181,8 +181,8 @@ window.RadiosPanel = (() => {
     const h = hintOf(r);
     if (!h) return [el("span", "dim", "unknown")];
     const pct = `${Math.round(h.share * 100)}%`;
-    const s = el("span", "dim small", h.shared ? `shared · ${h.channel} ${pct}` : `${h.agency}? ${pct}`);
-    s.title = `Likely agency: heard on ${h.channel} in ${pct} of ${h.n} transmissions (last 14 days)`
+    const s = el("span", "dim small", h.shared ? `shared · ${(typeof chName === "function" ? chName(h) : h.channel)} ${pct}` : `${h.agency}? ${pct}`);
+    s.title = `Likely agency: heard on ${(typeof chName === "function" ? chName(h) : h.channel)} in ${pct} of ${h.n} transmissions (last 14 days)`
       + (h.shared ? ". Several agencies share it: no guess" : ". A hint only: never applied");
     if (h.shared) return [s];
     const use = el("button", "mini", "Use");
@@ -314,7 +314,7 @@ window.RadiosPanel = (() => {
       if (!x.n) continue;
       const parts = [`${x.with_id} with an ID`, x.none && `${x.none} no ID sent`, x.undecoded && `${x.undecoded} ID not decoded`,
                      x.weak && `${x.weak} too weak to tell`, x.unknown && `${x.unknown} not checked`].filter(Boolean);
-      const line = el("div", "dim small rp-ids", `${x.channel}, last 24 h: ${x.n} transmission${x.n === 1 ? "" : "s"}, ${parts.join(", ")}`);
+      const line = el("div", "dim small rp-ids", `${(typeof chName === "function" ? chName(x) : x.channel)}, last 24 h: ${x.n} transmission${x.n === 1 ? "" : "s"}, ${parts.join(", ")}`);
       line.title = "No ID sent: no MDC / FleetSync burst on a strong carrier (the radio sends none). ID not decoded: a burst "
         + "was there but didn't decode. Too weak to tell: no burst found on a weak carrier. Not checked: from before this was kept.";
       out.push(line);

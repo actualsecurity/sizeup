@@ -365,7 +365,9 @@ def test_the_row_shows_the_channel_once_and_why_there_is_no_id():
     js = (STATIC / "cad.js").read_text()
     assert "channel: \"FG1\"" not in js and "only call with units" not in js           # no FG1 "why" chip any more
     body = re.search(r"^function radioRow\(t, ctx = \{\}\) \{(.*?)^\}", js, re.S | re.M).group(1)
-    assert 'meta.append(el("span", "chip src", t.channel));' in body and "noIdChip(t)" in body
-    assert body.count("t.channel") == 1
+    # the channel once, its name from the one resolver (static/radio-names.js via chName: the admins' name, else the
+    # row's own channel), never in the talker's place
+    assert 'const src = el("span", "chip src", chName(t));' in body and "meta.append(src);" in body and "noIdChip(t)" in body
+    assert body.count('"chip src"') == 1 and body.count("chName(t)") == 1 and "t.channel" not in body
     for k in ("No ID sent", "ID not decoded"):
         assert k in js

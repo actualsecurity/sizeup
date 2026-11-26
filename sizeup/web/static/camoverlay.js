@@ -86,6 +86,8 @@ window.CamOverlay = (() => {
     o.map.getContainer().append(o.layer);
     for (const ev of ["move", "zoom", "rotate", "pitch"]) o.map.on(ev, schedule);
     o.map.on("resize", () => { o.box = null; schedule(); });   // (the map's size, measured again)
+    // the web font in: a label measured in the fallback font measured again in it
+    try { if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { for (const m of o.marks.values()) m.lsz = null; schedule(); }); } catch (_) { /* */ }
     return true;
   }
   function schedule() {

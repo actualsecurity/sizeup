@@ -323,6 +323,13 @@ class RecordingSink:
         self.digests.append(list(evs))
 
 
+def _log_id(key) -> str:
+    """A pack name or a rule id as a log line may carry it ("pd.shots"); anything else a Settings key could hold
+    (free text) is never logged."""
+    k = str(key)
+    return k if re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", k) else "(a key that is no id)"
+
+
 def _snapshot(settings) -> dict:
     s = settings() if callable(settings) else settings
     return {k: dict((s or {}).get(k) or {}) for k in SECTIONS}
@@ -443,11 +450,13 @@ class IntelEngine:
                     rules_mod.load_packs(None, {sec: {key: val}})
                 except (ValueError, OSError) as e:
                     good[sec].pop(key, None)
-                    self.log(f"intel: Settings' {sec}/{key} not applied ({e})")
+                    # the id and the exception's type only: its text quotes the admin's phrases and town names
+                    self.log(f"intel: Settings' {sec}/{_log_id(key)} not applied ({type(e).__name__})")
         try:
             return rules_mod.load_packs(None, good)
         except (ValueError, OSError) as e:
-            self.log(f"intel: Settings' rule changes not applied ({err}; {e}): the pack files alone")
+            self.log(f"intel: Settings' rule changes not applied ({type(err).__name__}; {type(e).__name__}): "
+                     "the pack files alone")
             return rules_mod.load_packs(None, {})
 
     def ruleset_hash(self) -> str:
