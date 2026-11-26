@@ -399,6 +399,7 @@ def test_rows_with_no_radio_id_never_tie_on_a_generic_talker_text():
     assert _talker_ties({"system": "mrrs", "radio_id": "7703,7704"}, "unknown MRRS radio") == {"mrrs:7703", "mrrs:7704"}
     assert _talker_ties({"system": "mrrs", "radio_id": ""}, "unknown MRRS radio") == frozenset()
     assert _talker_ties({"system": "mrrs", "radio_id": ""}, "CAR 3") == {"CAR 3"}
+    assert _talker_ties({"system": "mrrs", "radio_id": "-1"}, "unknown MRRS radio") == frozenset()   # (#980: undecoded)
 
 
 @pytest.mark.parametrize("txs", [
