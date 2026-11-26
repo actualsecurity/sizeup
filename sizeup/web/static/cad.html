@@ -284,6 +284,9 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <h2 class="view-title">Intel</h2>
         <span id="il-count" class="dim small" aria-live="polite"></span>
         <button id="il-refresh" type="button" class="sm quiet" title="Read it again (a long or filtered view isn't refreshed on its own)" hidden>Refresh</button>
+        <span class="spacer"></span>
+        <a id="il-csv" class="nav sm" href="#" download hidden title="These events with their notes, scores, rule hits and transcripts (admins; in your activity)">CSV</a>
+        <a id="il-jsonl" class="nav sm" href="#" download hidden title="The same as JSON lines (admins; in your activity)">JSONL</a>
       </div>
       <form id="il-filters" class="rv-filters il-filters" autocomplete="off" role="search">
         <select id="il-level" aria-label="Level" title="Level: pushed, held at push, map, log, shadow"><option value="">Any level</option>
@@ -295,6 +298,9 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <select id="il-held" aria-label="Not pushed because" title="Why it didn't push"><option value="">Any reason</option></select>
         <select id="il-status" aria-label="Status"><option value="">Any status</option>
           <option value="open">open</option><option value="ended">ended</option><option value="expired">expired</option><option value="dismissed">dismissed</option></select>
+        <input id="il-q" type="search" placeholder="Notes" aria-label="Words in the notes" spellcheck="false" maxlength="200">
+        <select id="il-tag" aria-label="Note tag"><option value="">Any tag</option></select>
+        <button id="il-review" type="button" aria-pressed="false" title="Review queue: notes tagged for a rule or model change, not done yet (every date)">Review</button>
         <label class="inline" title="From this day (default: the last 24 h)"><span class="dim">From</span> <input id="il-from" type="date"></label>
         <label class="inline" title="To the end of this day"><span class="dim">To</span> <input id="il-to" type="date"></label>
         <button id="il-clear" type="button">Clear</button>
@@ -321,6 +327,8 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       <div class="pi-grid">
         <div class="pi-main">
           <section id="pi-why" class="pi-sec" hidden aria-label="Why"></section>
+          <!-- a radio pre-alert's notes and tags (intel-notes.js, sizeup/intel/notes.py) -->
+          <section id="pi-notes" class="pi-sec" hidden aria-label="Notes"></section>
           <section id="pi-trigger" class="pi-sec" hidden aria-label="Heard"></section>
           <section id="pi-around" class="pi-sec" hidden aria-label="Timeline"></section>
           <section id="pi-site" class="pi-sec" hidden aria-label="Site history"></section>
@@ -466,6 +474,8 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
               </div>
               <div id="d-here-body" class="here-body" hidden></div>
             </section>
+            <!-- the notes on the radio intel events at this call (intel-notes.js): signed-in viewers, folded -->
+            <section id="d-intel" class="d-intel" hidden aria-label="Intel notes"></section>
             <!-- an Airport event (#105): what the tower passed, one compact row; the subtype's FAA definition behind "?" -->
             <div id="d-airport" class="d-airport" hidden aria-label="Airport: what the tower passed"></div>
             <div id="d-roads" class="d-roads" hidden aria-label="Road closures and projects nearby"></div>
@@ -909,6 +919,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/addr-history.js"></script>
 <script src="/static/search-view.js"></script>
 <script src="/static/prealert-info.js"></script>
+<script src="/static/intel-notes.js"></script>
 <script src="/static/intel-page.js"></script>
 <script src="/static/preplan.js"></script>
 <script src="/static/bldg-highlight.js"></script>

@@ -3,8 +3,10 @@ and why one wasn't pushed. Admin decision, 2026-11-25: "a page in the app where 
 they do not trigger". Anyone signed in reads it, as the console's intel card (sourcekeys.may_see_context, the API's
 gate); names and PII as the events have them; nothing here leaves the hub.
 
-    GET /api/cad/intel/list?from=&to=&level=&category=&source=&system=&decided=&held=&status=&page=&size=
-        from / to: a date (2026-11-01, the CAD's time zone; "to" a whole day) or unix seconds; none: the last 24 h.
+    GET /api/cad/intel/list?from=&to=&level=&category=&source=&system=&decided=&held=&status=&q=&tag=&review=&page=&size=
+        from / to: a date (2026-11-01, the CAD's time zone; "to" a whole day) or unix seconds; none: the last 24 h (the
+        review queue: every event kept). q: words in its notes; tag: a note's tag; review=1: a note tagged for a rule
+        or model change (notes.REVIEW_TAGS) not yet done (sizeup/intel/notes.py).
         {events: [row], total, page, size, since, until, facets: {categories, sources, systems}, held: [{key, label,
         tip}]}. Newest first (first_at, then id), PAGE_SIZE a page (at most PAGE_MAX), on intel_events_first.
 
@@ -48,6 +50,7 @@ PAGE_MAX = 100
 DEFAULT_S = 24 * 3600
 FACET_S = 300                      # the filters' choices: read again when the range moved this far (or the events changed)
 SPAN_MAX_S = 92 * 86400            # events are kept 90 days (events.py KEEP_EVENTS_S)
+NOTES_SPAN_S = 367 * 86400         # ... and a year with a note (KEEP_NOTES_S): the review queue's default range
 LEVELS = ("push", "held", "map", "log", "shadow")
 DECIDED = ("rules", "model", "both")
 STATUSES = ("open", "ended", "expired", "dismissed")
@@ -261,7 +264,8 @@ class IntelLog:
 
     # -- the page ------------------------------------------------------------------------------------------------------
 
-    def list(self, q: dict, operator: str = "") -> dict:
+    def query(self, q: dict) -> dict:
+        """The filters of a query string as SQL: {inner, outer, args, since, until, page, size} (list(), ids())."""
         def one(k: str, n: int = 80) -> str:
             return str((q.get(k) or [""])[0] or "").strip()[:n]
 
@@ -271,15 +275,21 @@ class IntelLog:
             if bad:
                 raise CadError(f"{k}: {' | '.join(allowed)}")
             return vals
+        from sizeup.intel.notes import REVIEW_TAGS, TAGS
         now = self.cad.clock()
+        review = one("review", 4) in ("1", "true", "yes")
+        # by the notes (their words, a tag): every event kept, a noted one up to a year (#913 review F2)
+        noted = review or bool(one("q", 200)) or bool(one("tag", 200))
+        span = NOTES_SPAN_S if noted else SPAN_MAX_S
         until = _when(one("to", 40), True)
         since = _when(one("from", 40), False)
         until = now + 60 if until is None else until
-        since = (until if one("to") else now) - DEFAULT_S if since is None else since
+        if since is None:
+            since = until - (span if noted else DEFAULT_S) if one("to") or noted else now - DEFAULT_S
         if until <= since:
             raise CadError("to: after from")
-        if until - since > SPAN_MAX_S:
-            since = until - SPAN_MAX_S
+        if until - since > span:
+            since = until - span
         try:
             page = max(0, int(one("page", 6) or 0))
             size = min(PAGE_MAX, max(1, int(one("size", 4) or PAGE_SIZE)))
@@ -287,6 +297,7 @@ class IntelLog:
             raise CadError("page, size: numbers") from None
         levels, statuses = many("level", LEVELS), many("status", STATUSES)
         decided = many("decided", DECIDED)
+        tags = many("tag", TAGS)
         held = [x for x in one("held", 200).split(",") if x]
         if any(not HELD_KEY.fullmatch(x) for x in held):       # (a value this page doesn't name yet still filters)
             raise CadError(f"held: {' | '.join(HELD)}")
@@ -308,15 +319,36 @@ class IntelLog:
         if held:
             where.append(f"held IN ({', '.join(':hd%d' % i for i in range(len(held)))})")
             args.update({f"hd{i}": s for i, s in enumerate(held)})
+        text = one("q", 200)
+        if text:                       # the notes' words (sizeup/intel/notes.py), each word anywhere in a note
+            for i, w in enumerate(text.split()[:8]):
+                where.append(f"id IN (SELECT event_id FROM intel_notes WHERE text LIKE :nq{i} ESCAPE '\\')")
+                args[f"nq{i}"] = "%" + re.sub(r"([\\%_])", r"\\\1", w) + "%"
+        if tags:
+            where.append("id IN (SELECT n.event_id FROM intel_notes n, json_each(n.tags) t WHERE t.value IN "
+                         f"({', '.join(':tg%d' % i for i in range(len(tags)))}))")
+            args.update({f"tg{i}": s for i, s in enumerate(tags)})
+        if review:                     # tagged for a rule or model change and not acted on yet: by the NOTE's time (its
+            # last change in the range), never the event's, so an item never drops out while it is kept (F3)
+            where.append("id IN (SELECT n.event_id FROM intel_notes n, json_each(n.tags) t WHERE n.done = '' AND "
+                         "n.updated_at >= :since AND n.updated_at < :until AND t.value IN "
+                         f"({', '.join(':rv%d' % i for i in range(len(REVIEW_TAGS)))}))")
+            args.update({f"rv{i}": s for i, s in enumerate(REVIEW_TAGS)})
         inner = (f"SELECT {', '.join('e.' + c.strip() for c in COLS.split(','))}, {HELD_SQL} AS held, "
-                 f"{DECIDED_SQL} AS decided FROM intel_events e WHERE e.first_at >= :since AND e.first_at < :until")
-        outer = " AND ".join(where) or "1"
+                 f"{DECIDED_SQL} AS decided FROM intel_events e WHERE "
+                 + ("1" if review else "e.first_at >= :since AND e.first_at < :until"))
+        return {"inner": inner, "outer": " AND ".join(where) or "1", "args": args, "since": since, "until": until,
+                "page": page, "size": size, "now": now}
+
+    def list(self, q: dict, operator: str = "") -> dict:
+        f = self.query(q)
+        inner, outer, args, page, size = f["inner"], f["outer"], f["args"], f["page"], f["size"]
         store = self.cad.store
         rev = self._rev()
         # a poll (the page's own, ?poll=1) counts again only when the events changed: the same filters, the same total
         fkey = json.dumps([sorted((k, v) for k, v in q.items() if k not in ("page", "poll")), self.classes()])
         hit = self._totals.get(fkey)
-        if one("poll", 4) == "1" and hit is not None and hit[0] == rev:
+        if str((q.get("poll") or [""])[0]) == "1" and hit is not None and hit[0] == rev:
             total = hit[1]
         else:
             total = store.one(f"SELECT COUNT(*) AS n FROM ({inner}) WHERE {outer}", args)["n"]
@@ -326,11 +358,27 @@ class IntelLog:
         rows = store.q(f"SELECT * FROM ({inner}) WHERE {outer} ORDER BY first_at DESC, id DESC LIMIT :lim OFFSET :off",
                        {**args, "lim": size, "off": page * size})
         names = source_names(self.cad)
-        votes, mine = self._votes([r["id"] for r in rows], operator)
-        out = [self.row(r, names, votes.get(r["id"], {}), mine.get(r["id"], [])) for r in rows]
-        return {"events": out, "total": total, "page": page, "size": size, "since": since, "until": until, "now": now,
-                "facets": self.facets(since, until, names), "held": held_options(), "levels": list(LEVELS),
-                "decided": list(DECIDED), "statuses": list(STATUSES)}
+        ids = [r["id"] for r in rows]
+        votes, mine = self._votes(ids, operator)
+        notes = self._notes(ids)
+        out = [{**self.row(r, names, votes.get(r["id"], {}), mine.get(r["id"], [])),
+                "notes": notes.get(r["id"], {"n": 0, "tags": [], "review": 0})} for r in rows]
+        from sizeup.intel.notes import REVIEW_TAGS, TAGS
+        return {"events": out, "total": total, "page": page, "size": size, "since": f["since"], "until": f["until"],
+                "now": f["now"], "facets": self.facets(f["since"], f["until"], names), "held": held_options(),
+                "levels": list(LEVELS), "decided": list(DECIDED), "statuses": list(STATUSES), "tags": list(TAGS),
+                "review_tags": list(REVIEW_TAGS)}
+
+    def _notes(self, ids: list[int]) -> dict:
+        n = getattr(self.cad.intel_admin, "notes", None) if hasattr(self.cad, "intel_admin") else None
+        return n.counts(ids) if n is not None else {}
+
+    def ids(self, q: dict, limit: int) -> list[int]:
+        """Every event id of the filters (all pages, newest first), at most limit: the export (notes.py)."""
+        f = self.query(q)
+        return [r["id"] for r in self.cad.store.q(
+            f"SELECT id FROM ({f['inner']}) WHERE {f['outer']} ORDER BY first_at DESC, id DESC LIMIT :lim",
+            {**f["args"], "lim": int(limit)})]
 
     def rows_by_id(self, ids: list[int]) -> list[dict]:
         """These events as the page's rows (level, would, held, decided ...), whatever their date."""

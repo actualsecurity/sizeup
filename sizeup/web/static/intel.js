@@ -95,7 +95,7 @@ window.IntelCard = (() => {
       m.addEventListener("click", (ev) => ev.stopPropagation());
       return m;
     };
-    if (deps.readonly) {
+    if (deps.readonly || (typeof canDo === "function" && !canDo("active"))) {     // (a deactivated account: no votes)
       if (deps.more) { const r = el("div", "aa-btns"); r.append(more()); li.append(r); }
       return li;
     }

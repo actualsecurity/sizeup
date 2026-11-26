@@ -35,6 +35,7 @@ window.PrealertInfo = (() => {
     const p = parse(rest);
     const key = p ? `${p.kind}/${p.id}` : "";
     if (key !== st.key) { st.key = key; st.data = null; st.sigs = {}; st.framed = ""; clear(); }
+    if (window.IntelNotes) IntelNotes.mount($("#pi-notes"), p && p.kind === "intel" ? p.id : null);   // read on a new id only
     if (!p) return fail("No such pre-alert");
     const seq = ++st.seq;
     try {
@@ -268,6 +269,8 @@ window.PrealertInfo = (() => {
         o.delivery ? (o.delivery.ok ? `ntfy took it (HTTP ${o.delivery.status}${o.delivery.id ? `, message ${o.delivery.id}` : ""})`
           : `ntfy didn't take it: ${o.delivery.error || o.delivery.status}`) : "Queued: no answer from ntfy yet"],
       ["Votes", fb.join("; ")],
+      ["Tags", Object.entries(o.note_tags || {}).map(([t, n]) => `${(window.IntelNotes && IntelNotes.TAGS[t]) || t}${n > 1 ? ` ×${n}` : ""}`).join(" · "),
+        "Its notes' tags (Notes)"],
     ]));
     return kids;
   }
