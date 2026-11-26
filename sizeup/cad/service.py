@@ -24,13 +24,13 @@ from pathlib import Path
 from typing import Callable
 
 from sizeup import polly, radionames, sourcekeys, tiers
-from sizeup.cad import airport, commonplaces, dispatcher, eta, export, feedtypes, mapview, radiofolders, runcards
+from sizeup.cad import airport, commonplaces, dispatcher, eta, export, feedtypes, mapview, radiofolders, radioviews, runcards
 from sizeup.cad.activity import Activity
 from sizeup.cad.prefs import Prefs
 from sizeup.cad.alarms import Alarms
 from sizeup.cad.automode import AutoDispatch
 from sizeup.cad.comms import (COUNT_MINUTES, MAIN_LIMIT, MAX_ROWS, MUTE_MAX, OTHER_LIMIT, PAGE, PAGE_MAX, SOURCES_MAX,
-                              VIEWS, Comms)
+                              UNITS_MAX, VIEWS, Comms)
 from sizeup.cad.history import AddressHistory
 from sizeup.cad.premise import Premise
 from sizeup.cad.sttfix import SttCorrections
@@ -65,7 +65,8 @@ from sizeup.tts import voices as tts_voices
 AUDIO_NAME = re.compile(r"[0-9a-f]{20}")
 COMMS_CACHE_S, COMMS_CACHE_N = 10.0, 32     # GET /api/cad/comms: an answer reused this long, at most this many kept (#284)
 # GET /api/cad/comms: any of these asks for a page of a view (#415, Cad._comms_page), none: Main and Other as before
-COMMS_PAGE_PARAMS = ("view", "system", "group", "source", "service", "tier", "dept", "safety", "mute", "before", "changed", "at")
+COMMS_PAGE_PARAMS = ("view", "system", "group", "source", "service", "tier", "dept", "safety", "mute", "before", "changed", "at",
+                     "linked")
 # radio_traffic columns the Radio view never reads (#284: smaller answer); corr_*: sent as fixed_text / fixes (#879)
 COMMS_UNSENT = ("call_id", "turn", "updated_at", "corr_text", "corr_rules", "corr_v")
 FIRE_KINDS = ("chief", "engine", "ladder", "tower", "rescue", "utility", "marine")
@@ -247,6 +248,7 @@ class Cad:
         self.map_display = mapview.display_zooms()           # the rigs' zooms on the maps (Settings > System, #376)
         self.em_prominent = list(settings_mod.EM_DEFAULT)    # the Radio page's loud emergencies (Settings > Radios)
         self.radio_folders: dict | None = None               # the Radio page's folders (#607): None the default
+        self.radio_views: list | None = None                 # ... and its views (radioviews.py): None the coded ones
         self.radio_services: dict[str, str] = {}             # the admins' service per source (Settings > Radios)
         self._retag_lock = threading.Lock()                  # one re-tag at a time (retag_services)
         self.retag_thread: threading.Thread | None = None    # the last one started
@@ -539,6 +541,8 @@ class Cad:
                 # the Radio page's folders (#607): only their rev ("" the default); the rail asks its sources again when
                 # it moves (the folders themselves come with them, GET /api/cad/comms/sources)
                 "radio_folders": radiofolders.rev(self.radio_folders),
+                # ... and its views (sizeup/cad/radioviews.py): their rev ("" the default), the views with the sources
+                "radio_views": radioviews.rev(self.radio_views),
                 # one name per source (sizeup/radionames.py): only its rev ("" none); every page asks the names again
                 "radio_names": radionames.rev(),
                 # the admins' service per source: only their rev ("" none); both pages ask again when it moves
@@ -2183,14 +2187,17 @@ class Cad:
         except ValueError:
             raise CadError("limit: a number") from None
         changed, at = one("changed") or None, when("at")       # changed: a page's cursor, as it was given
+        units = [x.strip() for v in q.get("unit") or [] for x in v.split(",") if x.strip()]    # a view's units: any of them
+        if len(units) > UNITS_MAX or any(len(x) > 60 for x in units):
+            raise CadError(f"unit: at most {UNITS_MAX} units")
         got = self.comms.page(
             main_tgs, self.s.airband, view=view, system=one("system"), group=one("group"), source=keys("source", SOURCES_MAX),
             service=service, tier=one("tier").lower(), dept=one("dept"), safety=one("safety") in ("1", "true", "on"),
             mute=keys("mute", MUTE_MAX), before=before, changed=changed, at=at, limit=limit,
-            unit=one("unit"), channel=one("channel"), event=one("event"),
+            unit=units[0] if len(units) == 1 else units, channel=one("channel"), event=one("event"),
             pcfd=pcfd if one("pcfd") in ("1", "true", "on") else None, since=when("since"), until=when("until"),
             kind={"radio": "radio", "notes": "notes"}.get(one("type"), ""), text=one("q"),
-            emergency=one("emergency") in ("1", "true", "on"), context=context)
+            emergency=one("emergency") in ("1", "true", "on"), context=context, linked=one("linked") in ("1", "true", "on"))
         self._comms_rows(got["rows"])
         out = {**got, "rev": now_rev, "view": view or "all", "pcfd": pcfd}
         if changed is None and before is None:           # a first page: the choices for the filters too
@@ -2212,13 +2219,14 @@ class Cad:
         on it not yet cleared (Comms.emergencies). In the tree's order: system, group, name. Nothing of what
         was said. A reader who may not see another system's traffic (sourcekeys.may_see_context) gets none of its
         sources. folders: the admins' folders for the tree (#607, sizeup/cad/radiofolders.py; null: the automatic
-        grouping), without another system's keys for such a reader."""
+        grouping), without another system's keys for such a reader. views: the rail's views ({rev, custom, views},
+        sizeup/cad/radioviews.py; the coded ones while none are set), without another system's keys or systems."""
         context = self.comms._sees_context()
         now = self.clock()
         minute = int(now // 60)
         folders = self.radio_folders
         rev = (f"{self.comms.rev_for(context)}.{minute}.{int(bool(context))}.{services_rev(self.radio_services)}"
-               f".{radiofolders.rev(folders)}")
+               f".{radioviews.rev(self.radio_views)}.{radiofolders.rev(folders)}")
         live = set()
         for e in self._talking():
             if e.get("ended"):
@@ -2292,6 +2300,8 @@ class Cad:
                 "folders": radiofolders.for_viewer(folders, sees_context=bool(context),
                                                    hidden_labels=self.context_labels()),
                 "services": self.settings.services_page(),
+                # the rail's views: the department's ({rev, custom, views}; the coded ones while none are set)
+                "views": radioviews.for_viewer(self.radio_views, sees_context=bool(context), sources=hit[1]),
                 # a source's re-tag waiting for the station's talkgroups (its automatic service not known yet)
                 "retag_waiting": sorted(k for k in self.retag_waiting if context or not radiofolders.context_key(k))}
 

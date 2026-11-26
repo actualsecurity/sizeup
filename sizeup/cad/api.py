@@ -231,14 +231,14 @@ GET  /api/cad/comms?unit=&channel=&event=&pcfd=1&emergency=1&since=&until=&main_
                                           and Other each their own newest main_limit (200) / limit (300), #241
                                           The Radio page's views (#415): any of ?view=ours|police|ems|transit|air|all
                                           ?system= ?group= ?source= ?service= ?tier= ?dept= ?safety=1 ?mute= ?before=
-                                          ?changed= ?at= gives one page {rows, older, newer, next, cursor, reload}
+                                          ?changed= ?at= ?linked=1 ?unit=a,b gives one page {rows, older, newer, next, cursor, reload}
                                           (Cad.comms_query). Another system's rows: only to a viewer who may see them
 GET  /api/cad/radio-names              {rev, names, shorts, systems, freqs}: what every channel / talkgroup label on
                                           the page shows (sizeup/radionames.py, static/radio-names.js); another
                                           system's keys only to a reader who may see its traffic
 GET  /api/cad/comms/sources?rev=          the Radio page's tree: {live, sources: [{key, system, group, name, service,
                                           tier, ours, last, counts: [[minutes ago, calls]], emergency}], folders: the
-                                          admins' folders (#607) | null} (Cad.comms_sources)
+                                          admins' folders (#607) | null, views: the rail's views} (Cad.comms_sources)
 GET  /api/cad/feed?limit=&tg=307,333      the pinned 60 Control feed: newest transmissions on the incident
                                           talkgroup(s), pc = why it is talking to us (sizeup/cad/feed.py)
 POST /api/cad/incident/<id>/link          {traffic_id, operator}  put a transmission on the event (why manual)
@@ -360,6 +360,8 @@ POST /api/cad/settings/radio_folders      {action: set {folders: [{id, name, sec
                                           base?} | reset {base?}}: the Radio page rail's folders for everyone (#607,
                                           sizeup/cad/radiofolders.py; name: one channel's display name, blank its own,
                                           also from Settings > Radios > Channels); admins
+POST /api/cad/settings/radio_views        {action: set {views: [{id, name, mark, color, filter}], base?} | reset {base?}}:
+                                          the Radio rail's views for everyone (sizeup/cad/radioviews.py); admins
 POST /api/cad/settings/radio_services     {action: set {key, service} | set_many {services: {key: service}}}: a source's
                                           service (fire | police | ems | transit | air | other; automatic: none chosen)
                                           over its talkgroups file's and its words (sizeup/sourcekeys.py); its rows of

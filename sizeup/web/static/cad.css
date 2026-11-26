@@ -787,6 +787,21 @@
   .rn-edto { flex: none; inline-size: 4.5rem; min-inline-size: 0; }
   .rn-edsec { color: var(--text-2); }
   .rn-edempty { padding-inline-start: var(--s-4); font-size: var(--fs-xs); line-height: var(--lh-xs); }
+  /* the views' editor (radio-views.js): the rail's ✎ and Settings > Radios > Views */
+  .rv-ed { display: grid; gap: var(--s-2); min-inline-size: 0; }
+  .rv-ed-list { display: grid; gap: var(--s-1); margin: 0; padding: 0; list-style: none; }
+  .rv-ed-row { display: flex; align-items: center; gap: var(--s-1); min-inline-size: 0; }
+  .rv-ed-row.off .rv-ed-name { color: var(--dim); }
+  .rv-ed-name { flex: 0 1 auto; min-inline-size: 0; }
+  .rv-ed-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1); }
+  .rv-ed-form { display: grid; gap: var(--s-2); min-inline-size: 0; }
+  .rv-ed-top { flex-wrap: wrap; align-items: end; gap: var(--s-2); }
+  .rv-ed-top .field:first-child { flex: 1 1 8rem; }
+  .rv-ed-top [data-f="mark"] { inline-size: calc(3 * var(--tag-h)); text-align: center; }
+  .rv-ed-set { display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-3); margin: 0; padding: var(--s-1) var(--s-2);
+               border: var(--bw) solid var(--line); border-radius: var(--radius); min-inline-size: 0; }
+  .rv-ed-src { inline-size: 100%; block-size: auto; padding-block: var(--s-1); }
+  .rn.mini .rn-rail :is(#rn-vedit, .rv-ed) { display: none; }
   .rn-grip { cursor: grab; color: var(--dim); flex: none; user-select: none; }
   .rn-drop { box-shadow: inset 0 var(--bw-mark) 0 var(--accent); }
   .rn-edf.rn-drop { box-shadow: 0 0 0 var(--bw-mark) var(--accent); }
