@@ -34,7 +34,11 @@ CLEAN = [
     ("Unit 7, Unit 7, Unit 7, Unit 7", 4.0), ("Engine 61 " * 4, 4.0), ("Go ahead " * 4, 3.0),
     ("Attention Port Chester, " * 4, 5.0), ("Chief 1 to command, " * 4, 6.0),
     ("Fire alarm. 1-2-3 Example Ave. " * 4, 10.0),     # a page read four times
-    ("Mayday" + " mayday" * 40, 2.0),                  # an urgent word, even looped: never blanked
+    ("Medic 5, Medic 5, Medic 5, Medic 5", 1.9),        # quick, digits and all: under LOOP_WPS
+    ("Chief 1 to command, " * 4, 3.9),
+    ("Get out, get out, get out, get out", 1.2),       # a safety word: never judged by the fast-repeat rule
+    ("Engine 61 respond El Camino Del Rio Las Palmas", 5.0),    # Spanish street names
+    ("PC 4 El Paseo Los Altos", 3.0), ("Subject is José Peña Núñez, white jacket", 4.0),     # an accented surname
 ]
 
 
@@ -43,10 +47,10 @@ def test_a_loop_is_repeated():
     assert Q.assess(LOOP) == "repeated"                    # (whatever the clip's length)
     assert Q.longest_run(Q.words(LOOP)) == (60, 3)
     assert Q.assess("copy that " * 8, 5.0) == "repeated"   # eight times in a row: a loop at any pace
-    assert Q.assess("copy that " * 4, 1.5) == "repeated"   # four, faster than a call is repeated
+    assert Q.assess("copy that " * 4, 1.0) == "repeated"   # four, faster than a call is repeated
     assert Q.assess("copy that " * 4, 3.0) == ""           # four at a speaking pace: said on purpose
     assert Q.assess("ten four " * 12, 4.0) == ""           # numbers alone are never a loop ("ten four": a code)
-    assert Q.assess("yes " * 12, 8.0) == "repeated" and Q.assess("yes " * 6, 1.0) == "repeated"
+    assert Q.assess("yes " * 12, 8.0) == "repeated" and Q.assess("yes " * 6, 0.8) == "repeated"
 
 
 def test_the_loop_shapes_seen_on_the_gpu_worker():
@@ -58,6 +62,14 @@ def test_the_loop_shapes_seen_on_the_gpu_worker():
     assert Q.assess("Tower, Cessna four two lima is ten miles south inbound full stop with the numbers. "
                     + "and then the " * 20, 8.0) == "repeated"                          # real words, then a loop (the tail)
     assert Q.assess("we have the hydrant " * 4, 2.0) == "repeated"                     # 4 times, faster than said
+
+
+def test_a_safety_word_never_excuses_a_loop():
+    # the false pre-alert's shape with an urgent word in it: a loop is unclear whatever it says (the alarms read it)
+    for t in ("help me at the kelm " * 30, "unit nine priority " * 30, "copy " + "help on the vell " * 30,
+              "Mayday" + " mayday" * 40):
+        assert Q.assess(t, 5.0) == "repeated", t[:30]
+    assert Q.assess("Mayday " * 6, 2.0) == ""                                           # said six times: said
     for said in ("Engine 60, Engine 60", "Copy, copy", "Engine 60, Engine 60, Engine 60", "Copy, copy, copy, copy"):
         assert Q.assess(said, 2.5) == "", said
 
@@ -70,7 +82,8 @@ def test_too_many_words_for_the_clip():
 def test_another_language_is_unclear_english_with_a_few_accents_or_ids_is_not():
     for t in ("Ég fer heim og það er ekki gott veður í dag hjá okkur",                    # Icelandic-looking
               "Yo creo que el carro está por aquí pero no sé dónde",                     # Spanish-looking
-              "Ich bin hier und das ist nicht gut für uns heute"):                       # German-looking
+              "Ich bin hier und das ist nicht gut für uns heute",                        # German-looking
+              "eg veit ekki hvar hann er og thad er mjog kalt nuna"):                    # Icelandic-like, no accents
         assert Q.assess(t, 4.0) == "not_english", t
     assert Q.assess("Engine 61 on location", 2.0, language="is") == "not_english"     # whisper's own detection
     for t, lang in (("Engine 61 on location", "en"), ("Engine 61 on location", None),
@@ -155,7 +168,7 @@ def test_with_aws_out_the_unclear_row_stays_unclear_and_the_stations_whisper_is_
     token = hub.app.hub.workers.add("gpu-1", "Test box")
     w = FakeWorker(hub.url, token, text=LOOP).start()
     tried = []
-    hub.app._rerun_station = lambda ids, as_alt=False: tried.append(list(ids))
+    hub.app._station_rerun = lambda ids, as_alt=False: tried.append(list(ids)) or len(ids)
     try:
         assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
         hub.app.aws.available = lambda key=None: (False, "test: AWS can't take audio now")
@@ -181,7 +194,7 @@ def test_a_pages_looped_voice_is_never_parsed_as_a_dispatch(tmp_path):
     token = hub.app.hub.workers.add("gpu-1")
     w = FakeWorker(hub.url, token, text="Port Chester engine 99 respond to" + " a structure fire at" * 20).start()
     hub.app.aws.available = lambda key=None: (False, "test: AWS can't take audio now")
-    hub.app._rerun_station = lambda ids, as_alt=False: None
+    hub.app._station_rerun = lambda ids, as_alt=False: 0
     try:
         assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
         send(hub, _page_event("South_2-901"))
@@ -203,7 +216,7 @@ def test_the_alarms_still_hear_an_unclear_row_and_only_a_loop_is_asked_again_onc
     hub = HubRun(hub_cfg(tmp_path))
     heard, asked = [], []
     hub.app.cad.alarms.on_traffic = lambda d: heard.append((d["id"], d["text"]))
-    hub.app._rerun_station = lambda ids, as_alt=False: asked.append(list(ids))
+    hub.app._station_rerun = lambda ids, as_alt=False: asked.append(list(ids)) or len(ids)
     hub.app.aws = None
     try:
         def tx(tid, text, **kw):
@@ -227,3 +240,70 @@ def test_the_alarms_still_hear_an_unclear_row_and_only_a_loop_is_asked_again_onc
         assert hub.app._find("FG1-c")[0].quality == "stock_phrase"
     finally:
         hub.close()
+
+
+def test_a_loop_from_a_later_engine_never_blanks_clean_words_and_the_hubs_re_ask_is_nobodys_re_run(tmp_path):
+    from sizeup.incidents import Traffic
+    hub = HubRun(hub_cfg(tmp_path))
+    finished, asked = [], []
+    hub.app._rerun_finish = lambda cid, result, model="": finished.append((cid, result))
+    hub.app._station_rerun = lambda ids, as_alt=False: asked.append(list(ids)) or len(ids)
+    hub.app.aws = None
+    try:
+        t = Traffic("FG1-r", "FG1", 1000.0, 1004.0, "", status="done")
+        t.raw, t.model = "Engine 61 on location, nothing showing", "aws-transcribe"
+        hub.app._transcribed(t)
+        assert hub.app._retext("FG1-r", LOOP, "done", None, "large-v3-turbo-q5_0 (GPU gpu-1)") is False
+        r = hub.app.cad.store.one("SELECT text, status, quality FROM radio_traffic WHERE id = ?", ("FG1-r",))
+        assert dict(r) == {"text": "Engine 61 on location, nothing showing", "status": "done", "quality": ""}
+        assert t.status == "done" and not getattr(t, "quality", "")
+        # a GPU loop with AWS out: the station's whisper, once, and its "re-run over" is nobody's re-run
+        u = Traffic("FG1-s", "FG1", 1000.0, 1002.0, "", status="done")
+        u.raw, u.model = LOOP, "large-v3-turbo-q5_0 (GPU gpu-1)"
+        hub.app._transcribed(u)
+        assert wait(lambda: asked == [["FG1-s"]], 5)
+        hub.app.apply("rerun", {"id": "FG1-s", "result": "same", "model": "whisper.bin"}, None)
+        assert finished == []
+        hub.app.apply("rerun", {"id": "FG1-s", "result": "same", "model": "whisper.bin"}, None)
+        assert finished == [("FG1-s", "same")]               # (only the re-ask's own answer is kept off the row)
+    finally:
+        hub.close()
+
+
+def test_the_re_ask_stops_short_of_the_aws_budget(tmp_path):
+    from sizeup.incidents import Traffic
+    fake = FakeTranscribe(phrases={500: AWS_TEXT})
+    hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
+    sent, asked = [], []
+    hub.app.aws.submit = lambda key, job, pcm: sent.append(job.id)
+    hub.app._station_rerun = lambda ids, as_alt=False: asked.append(list(ids)) or len(ids)
+    hub.app._rerun_pcm = lambda item: b"pcm"
+    hub.app.aws.available = lambda key=None: (True, "")
+    try:
+        hub.app.aws.spent = lambda pool="": {"usd": 9.5, "limit_usd": 10.0}       # 95 % spent
+        u = Traffic("FG1-b1", "FG1", 1000.0, 1002.0, "", status="done")
+        u.raw, u.model = LOOP, "large-v3-turbo-q5_0 (GPU gpu-1)"
+        hub.app._transcribed(u)
+        assert wait(lambda: asked == [["FG1-b1"]], 5) and sent == []
+        hub.app.aws.spent = lambda pool="": {"usd": 5.0, "limit_usd": 10.0}       # half
+        v = Traffic("FG1-b2", "FG1", 1000.0, 1002.0, "", status="done")
+        v.raw, v.model = LOOP, "large-v3-turbo-q5_0 (GPU gpu-1)"
+        hub.app._transcribed(v)
+        assert sent == ["FG1-b2"]
+    finally:
+        hub.close()
+        fake.close()
+
+
+def test_another_systems_row_turning_unclear_is_told_to_the_context_hook(tmp_path):
+    from tests.test_context_text_hook import Clock, cad, ctx
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    c.radiolog.inline = True
+    calls = {"context": []}
+    c.comms.on_context_text = lambda tid: calls["context"].append(tid)
+    c.record_traffic(ctx("metro-u1", clock.t - 5, "zorbly flimmet quandle"))
+    c.record_traffic(dict(ctx("metro-u1", clock.t - 5, ""), status="unclear", quality="repeated",
+                          unclear_text="flim flam " * 20))
+    c.record_traffic(ctx("metro-u2", clock.t - 5, ""))                                  # no text, not unclear: nothing
+    assert calls["context"] == ["metro-u1", "metro-u1"]

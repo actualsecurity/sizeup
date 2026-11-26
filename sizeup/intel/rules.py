@@ -42,6 +42,13 @@ the file's). With an area, the address lookup searches those towns (and the town
 them, or whose words name only towns outside them, is out of area: kept at log, never raised (engine.py). No area
 (the police pack, whose sources are local): every place counts, as before.
 
+"agency_towns": {agency: town} (Settings: intel_packs.<pack>.agency_towns over the file's; the public files have none):
+the town of a talker's department, its agency as Settings > Radios labels its radios (sizeup/intel/talkers.py). On a
+source shared by several towns, the address lookup prefers the dispatching department's town (engine.py _town_prior).
+An agency named as one of the source's towns, or by its initials ("<Town> PD"), needs no entry.
+"console_cue": off | shadow (the default) | on (Settings: intel_packs.<pack>.console_cue): whether a labelled dispatch
+console's call-out gets the pack's dispatch cue without the cue words (engine.py); shadow records where it would have.
+
 A category with "place": true (the police pack's fire_call) is held at log until its event has a place a crew can
 drive to (an address, intersection, block or landmark) in the source's towns ("towns"), else the pack's area: a
 burning smell with no address is no pre-alert yet; the read-back that places it lets it go (engine.py: only its own
@@ -335,6 +342,9 @@ class Pack:
     resolved: list = field(default_factory=list)   # phrases that end a "possibly cancelled" call with "cancel_ttl_min"
     fd: dict = field(default_factory=dict)    # "fd_present" compiled: {kind: [(any, nots)], priorities} (fd_said)
     hw: dict = field(default_factory=dict)    # "highway" compiled (highway_cfg): a "highway": true category's numbers
+    agency_towns: dict = field(default_factory=dict)   # {agency label: town}: a talker's department's town (talkers.py;
+                                      # the file's "agency_towns", Settings intel_packs.<pack>.agency_towns over it)
+    console_cue: str = "shadow"       # a labelled console's call-out as a dispatch cue (CONSOLE_CUE; engine.py)
     stt_high: bool = True             # its sources are push sources for speech-to-text's priority ("stt_high": false:
                                       # never, engine.push_sources; Settings intel_packs.<pack>.stt_high over the file's)
 
@@ -487,6 +497,39 @@ def fd_present(v, name: str) -> dict:
     return out
 
 
+CONSOLE_CUE = ("off", "shadow", "on")
+
+
+def console_cue(v, what: str) -> str:
+    """"on": a labelled dispatch console's call-out gets the pack's dispatch cue without the words; "shadow" (the
+    default): only recorded, as a hit "<cue id>.console" of weight 0 (what it would have done); "off": neither."""
+    if v is None:
+        return "shadow"
+    if v not in CONSOLE_CUE:
+        raise ValueError(f"{what}: one of {', '.join(CONSOLE_CUE)}")
+    return str(v)
+
+
+def agency_towns(v, what: str) -> dict:
+    """{agency label: town} (ValueError with the reason): a talker label's agency ("<Agency> PD", as Settings > Radios
+    names its radios) -> one of the county's towns. The labels are an admin's (Settings), never this repository's."""
+    if v is None:
+        return {}
+    if not isinstance(v, dict) or len(v) > 40:
+        raise ValueError(f"{what}: {{agency: town}}, at most 40")
+    known = town_names()
+    out = {}
+    for k, t in v.items():
+        k = " ".join(str(k or "").split())
+        if not k or len(k) > 60:
+            raise ValueError(f"{what}: an agency of 1 to 60 characters")
+        name = known.get(str(t or "").strip().lower())
+        if name is None:
+            raise ValueError(f"{what}: {str(t)[:40]!r} isn't a town of data/westchester_towns.txt")
+        out[k] = name
+    return out
+
+
 def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = None) -> Pack:
     """One pack from its file's dict and the Settings over it (ValueError with the reason)."""
     name = str(d.get("name") or "")
@@ -563,6 +606,9 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                 towns=dict(d.get("towns") or {}), categories=cats, rules=rules,
                 suppress=_phrases(d.get("suppress") or [], f"{name}.suppress"), src=dict(d), norm=norm,
                 area=area(po.get("area") or d.get("area"), f"{name}.area"),
+                agency_towns={**agency_towns(d.get("agency_towns"), f"{name}.agency_towns"),
+                              **agency_towns(po.get("agency_towns"), f"{name}.agency_towns")},
+                console_cue=console_cue(po.get("console_cue", d.get("console_cue")), f"{name}.console_cue"),
                 calm={c: [Phrase(x) for x in cd["deescalate"]] for c, cd in cats.items() if cd["deescalate"]},
                 rise={c: ([Phrase(x) for x in cd["escalate"]], [Phrase(x) for x in cd["escalate_not"]],
                           [Phrase(x) for x in cd["escalate_always"]])
@@ -674,6 +720,8 @@ def ruleset_hash(packs: list[Pack]) -> str:
                          else {c: sorted(ts) for c, ts in v.items()} if isinstance(v, dict) else v
                          for k, v in p.fd.items()},
                         *([[p.norm.name, p.norm.digest]] if p.norm is not None else []),
-                        *([p.hw] if p.hw else [])] for p in packs],
+                        *([p.hw] if p.hw else []),
+                        *([p.agency_towns] if p.agency_towns else []),
+                        *([p.console_cue] if p.console_cue != "shadow" else [])] for p in packs],
                       sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()[:12]
