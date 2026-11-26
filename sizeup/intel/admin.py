@@ -261,7 +261,7 @@ class IntelAdmin:
                 "delivery": e.get("delivery"),        # the last push at ntfy: {ok, at, status, id | error} or None
                 "traffic_ids": e["traffic_ids"][-12:], "rules": e["rules"], "accept": bool(p.accept) if p else False,
                 "dismissed_by": e.get("dismissed_by", ""), "note": e.get("note", ""),
-                "near_incident": e.get("near_incident"),
+                "near_incident": e.get("near_incident"), "handoff": e.get("handoff") or [],
                 "fd": e.get("fd") or "", "fd_shown": self._fd_shown(e),
                 # the model's category when it is the model's alone (not pushed): "model: MVA with injuries?" on the card
                 "suggested": label if any(str(r[0]).startswith("infer.") for r in e["rules"] or [])

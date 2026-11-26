@@ -32,7 +32,8 @@ A row (terse; the page shows it as is):
     id, at (first_at), last_at, status, pack, pack_label, category, label, level, would, what, score_level, parts
     ([[rule id, weight]]), decided, source_key, source (its name: source_name()), system, place, precision, confirmed,
     town, lat, lon, radius_m (null / 0 when unplaced), held ({key, label, detail} | None when pushed), pushed_at, n
-    (transmissions), votes ({verdict: n}), mine (this reader's verdicts), near_incident, incident_id
+    (transmissions), votes ({verdict: n}), mine (this reader's verdicts), near_incident, incident_id, siblings
+    ([{id, at, category, label}]: the other calls in its window, siblings())
 
 level      what happened: push (pushed_at set), held (at push, not pushed: the policy's or the sink's reason), else
            its mode: map, log, shadow
@@ -46,6 +47,11 @@ held       why it didn't push: HELD_SQL, one CASE over the row (the same express
            else from its mode and status by today's settings (DERIVED): the pack's or the category's mode, the
            model's cap (uncorroborated: no dispatch cue or rule word of its category and no confirmed place, backing.py
            _corroborated), the rules' own rung, shadow; at push with no reason, its status (dismissed, expired, ended)
+
+siblings   the other events on its source (any pack, category, level or status) whose first_at..last_at is within
+           its window of its own first_at..last_at: the engine's merge span (max(window_s, merge_min): the span an
+           open event takes a new mention over, where a second call used to be taken in), oldest first, at most
+           SIBLINGS_MAX. One read per source of the page, on intel_events_source.
 
 Source names come from one helper, source_name() (the radio log's channel per source key, comms.sources_seen: the
 Radio page's own), so a Settings > Radios name resolver can replace it in one place.
@@ -67,10 +73,12 @@ PAGE_SIZE = 50
 PAGE_MAX = 100
 MAP_MAX = 2000                     # the map's pins: the newest of the filters (the rest counted)
 SEARCH_MAX = 100                   # Search's intel matches returned (the rest counted)
+SIBLINGS_MAX = 20                  # a row's other calls in its window (siblings()): the nearest this many
 SEARCH_SCAN = 5000                 # ... out of the range's newest this many events
 SEARCH_WORDS = 8
 WORD_CHUNK = 500                   # ... looked through for words this many at a time, newest first
 DEFAULT_S = 24 * 3600
+DEFAULT_SIBLING_S = 20 * 60        # siblings(): an event's window when its pack isn't loaded (merge_min's default)
 FACET_S = 300                      # the filters' choices: read again when the range moved this far (or the events changed)
 SPAN_MAX_S = 92 * 86400            # events are kept 90 days (events.py KEEP_EVENTS_S)
 NOTES_SPAN_S = 367 * 86400         # ... and a year with a note (KEEP_NOTES_S): the review queue's default range
@@ -417,8 +425,10 @@ class IntelLog:
         ids = [r["id"] for r in rows]
         votes, mine = self._votes(ids, operator)
         notes = self._notes(ids)
+        sibs = self.siblings(rows)
         out = [{**self.row(r, names, votes.get(r["id"], {}), mine.get(r["id"], [])),
-                "notes": notes.get(r["id"], {"n": 0, "tags": [], "review": 0})} for r in rows]
+                "notes": notes.get(r["id"], {"n": 0, "tags": [], "review": 0}), "siblings": sibs.get(r["id"], [])}
+               for r in rows]
         from sizeup.intel.notes import REVIEW_TAGS, TAGS
         return {"events": out, "total": total, "page": page, "size": size, "since": f["since"], "until": f["until"],
                 "now": f["now"], "facets": self.facets(f["since"], f["until"], names), "held": held_options(),
@@ -551,6 +561,48 @@ class IntelLog:
         return {"events": out, "total": len(rows), "more": more, "limit": SEARCH_MAX,
                 "scanned": scanned, "capped": capped, "since": since,
                 "until": until}
+
+    # -- the other calls in an event's window ------------------------------------------------------------------------
+
+    def span(self, pack: str) -> float:
+        """An event's window for its siblings: the engine's merge span of its pack (max(window_s, merge_min))."""
+        p = self.engine.pack(pack) if hasattr(self.engine, "pack") else None
+        try:
+            return float(self.engine._merge_span(p)) if p is not None else DEFAULT_SIBLING_S
+        except Exception:  # noqa: BLE001 - an engine without one: the default
+            return DEFAULT_SIBLING_S
+
+    def siblings(self, rows: list[dict]) -> dict[int, list[dict]]:
+        """{event id: [{id, at, category, label}]}: the other events on each row's source whose first_at..last_at is
+        within the row's window (span()) of its own, oldest first, the nearest SIBLINGS_MAX. One read per source."""
+        from sizeup.intel.push import category_label
+        groups: dict[str, list[dict]] = {}
+        for r in rows:
+            if r.get("source_key"):
+                groups.setdefault(r["source_key"], []).append(r)
+        spans = {r["id"]: self.span(r["pack"]) for r in rows}
+        labels: dict = {}
+        out: dict[int, list[dict]] = {}
+        for key, rs in groups.items():
+            lo = min(float(r["first_at"]) - spans[r["id"]] for r in rs)
+            hi = max(float(r["last_at"]) + spans[r["id"]] for r in rs)
+            near = self.cad.store.q("SELECT id, pack, category, first_at, last_at FROM intel_events WHERE source_key = ? "
+                                    "AND last_at >= ? AND first_at <= ? ORDER BY first_at, id LIMIT 1000", (key, lo, hi))
+            for r in rs:
+                w = spans[r["id"]]
+                got = [o for o in near if o["id"] != r["id"] and float(o["first_at"]) <= float(r["last_at"]) + w
+                       and float(o["last_at"]) >= float(r["first_at"]) - w]
+                got = sorted(sorted(got, key=lambda o: abs(float(o["first_at"]) - float(r["first_at"])))[:SIBLINGS_MAX],
+                             key=lambda o: (o["first_at"], o["id"]))
+                for o in got:
+                    lk = (o["pack"], o["category"])
+                    if lk not in labels:
+                        p = self.engine.pack(o["pack"]) if hasattr(self.engine, "pack") else None
+                        labels[lk] = category_label(p.category(o["category"]) if p else {}, p.label if p else "",
+                                                    o["category"])
+                out[r["id"]] = [{"id": o["id"], "at": o["first_at"], "category": o["category"],
+                                 "label": labels[(o["pack"], o["category"])]} for o in got]
+        return out
 
     def _rq(self, sql: str, args) -> list[dict]:
         """Search's reads off the store's lock: the calls search's read-only connection (history.py _rq: WAL, it never

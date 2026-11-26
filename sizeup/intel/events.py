@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS intel_events (
   note TEXT NOT NULL DEFAULT '',
   near_incident INTEGER, incident_id INTEGER,
   fd TEXT NOT NULL DEFAULT '',                       -- the FD at a fire-related event's place: on_scene | dispatched | there | cleared
+  handoff TEXT NOT NULL DEFAULT '[]',                -- [from console, to console]: a call another console took over
   updated_at REAL NOT NULL,
   dismissed_by TEXT NOT NULL DEFAULT '',
   delivery TEXT NOT NULL DEFAULT ''                  -- the last push's outcome at ntfy (JSON; the module doc)
@@ -125,7 +126,7 @@ CREATE TABLE IF NOT EXISTS intel_note_audit (
 CREATE INDEX IF NOT EXISTS intel_note_audit_note ON intel_note_audit(note_id);
 """
 
-JSON_COLS = ("rules", "alts", "traffic_ids")
+JSON_COLS = ("rules", "alts", "traffic_ids", "handoff")
 EVENT_COLS = tuple(f.name for f in fields(Event) if f.name != "id")
 
 
@@ -206,6 +207,8 @@ class SqlEvents:
                 store.db.execute("ALTER TABLE intel_events ADD COLUMN delivery TEXT NOT NULL DEFAULT ''")
             if "fd" not in cols:                    # a table from before the FD check (engine._fire)
                 store.db.execute("ALTER TABLE intel_events ADD COLUMN fd TEXT NOT NULL DEFAULT ''")
+            if "handoff" not in cols:               # a table from before the handoff (engine._handed)
+                store.db.execute("ALTER TABLE intel_events ADD COLUMN handoff TEXT NOT NULL DEFAULT '[]'")
             fcols = {r[1] for r in store.db.execute("PRAGMA table_info(intel_feedback)")}
             if "note_id" not in fcols:              # a note's tags as verdicts (sizeup/intel/notes.py)
                 store.db.execute("ALTER TABLE intel_feedback ADD COLUMN note_id INTEGER")

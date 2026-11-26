@@ -39,7 +39,10 @@ The bundle (SCHEMA_VERSION; every section says why it is empty in "empty", "" wh
                   non-admin sees: the rules the event fired on, or ones that map or push now
     now           open calls near it and the units on them; for the airport, the aircraft as recorded with the alert
                   (only those it names: the traffic around it is not kept)
-    outcome       accepted / dismissed / expired / ended, by whom and when; the event it made or is near; the verdicts
+    outcome       accepted / dismissed / expired / ended, by whom and when; the event it made or is near; the verdicts;
+                  an intel event's handoff ([from console, to console]: another department's console took the call)
+    siblings      intel only: the other events on its source in its window ({items: [{id, at, category, label}],
+                  window_s}: sizeup/intel/eventlog.py siblings), each one's own More info a link away
 
 Another P25 system's transmissions (an intel pre-alert's) are in it only for a reader who may see them: the caller
 sets sizeup.sourcekeys.request_context (the API does), else comms leaves them out, as everywhere."""
@@ -517,6 +520,8 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
                 "model": _model(cad, e["id"])},
         "trigger": _empty(trigger, why),
         "before_after": _window(cad, list(found.values()), float(windows.get("intel", 600.0)), set(ids)),
+        # the other calls on its source in its window (eventlog.siblings: the engine's merge span), with their links
+        "siblings": _siblings(cad, raw),
         "place": {"point": ({"lat": lat, "lon": lon, "radius_m": e["radius_m"], "approx": not e["confirmed"],
                              "precision": e["precision"]} if placed else None),
                   "label": e["place"], "town": e["town"], "basis": e["basis"], "phrases": [], "alts": e["alts"] or [],
@@ -536,6 +541,7 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
                     "note": e["note"], "acknowledged": None, "incident": _incident(cad, raw.get("incident_id")),
                     "near_incident": _incident(cad, e.get("near_incident")), "fd": e.get("fd_shown") or "",
                     "fd_state": e.get("fd") or "",
+                    "handoff": e.get("handoff") or [],     # [from console, to console]: another console took it over
                     "feedback": votes, "pushed": e["pushed_at"] is not None,
                     "pushed_at": e["pushed_at"], "suppressed": e["suppressed"], "delivery": e.get("delivery"),
                     # why it didn't push, as the Intel page says it (sizeup/intel/eventlog.py): {key, label, tip, detail}
@@ -545,6 +551,17 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
     rev = [raw["updated_at"], e["status"], len(feedback), feedback[0]["at"] if feedback else 0, raw.get("delivery") or "",
            sorted(note_tags.items())]
     return out, rev
+
+
+def _siblings(cad, raw: dict) -> dict:
+    """{items: [{id, at, category, label}], window_s, empty}: the other events on the event's source in its window."""
+    try:
+        log = cad.intel_admin.eventlog
+        items = log.siblings([raw]).get(raw["id"], [])
+        span = log.span(raw["pack"])
+    except Exception:  # noqa: BLE001 - the bundle never fails on its neighbours
+        return {"items": [], "window_s": 0, "empty": "not read"}
+    return {"items": items, "window_s": span, "empty": "" if items else "no other calls in this window"}
 
 
 def _held(cad, eid) -> dict | None:

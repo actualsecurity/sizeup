@@ -85,6 +85,13 @@ How a row becomes an event, per pack whose scope it is in:
      (1 + w) for each damper (negative weight); at or over the threshold (the category's, else the pack's) it is an
      event: the open one of this pack, category and source still within the window, or the open one at the same place
      (subject = pack:category:place), else a new one;
+     ANOTHER CALL in an open one's window (_call): a row that says the category starts its own event when the
+     evidence says it is another call: another place, a labelled dispatch console of another department (talkers.py),
+     units none of which are the open call's, or a second assignment after the call went quiet; and it is scored on
+     its own call's rows only (_own_window: never an open event's it is apart from, nor a row set apart from it). The
+     same place, a shared unit or talker, "another caller" / "as well" (MORE_OF_SAME), a read-back still join. One
+     console passing the call to another (a relay, RELAY, then the other's dispatch at the same place or none) is ONE
+     call (_handed): Event.handoff [from console, to console], its town the one that took it;
   4. WHERE: the window's words through locate() (only while not confirmed); on a source shared by several towns, the
      talker's department's town first (_town_prior, below), a preference that never confirms (place.py);
   5. mode = the lowest of the pack's, the category's and the rules' rung (off: no event; shadow: an event only in the
@@ -197,6 +204,17 @@ NEW_CALL = re.compile(r"\b(new call|second call|another call|different (call|loc
 MOVE_WORDS = re.compile(r"\b(now at|now on|last seen|fled|fleeing|heading|continuing|still|turned onto|turning onto)\b", re.I)
 # a dispatcher / HQ talker (they voice every job); never a unit's alias such as "RYE PD CAR 3"
 DISPATCH_WORDS = re.compile(r"\bdisp\b|dispatch|\bhq\b|headquarters|\bcontrol\b|console|\bdesk\b", re.I)
+# more of the open call, never another one (_call): another caller, a unit sent as well or to back one up, the same spot
+MORE_OF_SAME = re.compile(r"\b(another caller|other caller|second caller|more callers|additional (callers?|units?|cars?)"
+                          r"|also|as well|back ?up|backing|assist|same (location|address|call|job)"
+                          r"|that (location|address|call|job))\b", re.I)
+# one dispatch console passing a call to another ("<town>, can you send a car to ..."; "we'll send one"): a handoff
+RELAY = re.compile(r"\b(can you (send|have|get|start|take)|could you (send|have)|send (a|one|somebody|someone) "
+                   r"(car|unit|officer)|relay|relaying|transfer|transferring|in your (town|village|jurisdiction|area)"
+                   r"|your (jurisdiction|side)|(it's|its|that's|thats) (yours|in your)|we('ll| will) (send|take)"
+                   r"|we're sending)\b", re.I)
+SPLITS = ("place", "console", "units", "cue")      # _call: why a row is another call than an open one
+DEPT_WORDS = frozenset({"pd", "police", "fd", "fire", "ems", "dept", "department", "village", "town", "city", "of"})
 PEOPLE = {"weapons", "edp", "dispute"}   # incidents about a person, who may move ("last seen at")
 SAFETY = {"weapons", "barricade", "water_rescue", "fire_report"}   # never ended by a disregard that names nothing; nor
                                                                     # is any category its pack marks "safety" (_safe)
@@ -924,7 +942,11 @@ class IntelEngine:
         if suppressed:
             changed += self._end_window(pack, key, at, tid, win, ws)
             win = whole.around(at, pack.window_s)     # (what the window held is spent: _consume)
-        cats = self._scores(pack, win)
+        # a row that says a category is scored with its own call's rows only (_own_window: never another open event's,
+        # nor a row the new-call judgement sets apart): a second call's score is its own
+        swin = (self._own_window(pack, key, win, tid, at)
+                if not suppressed and any(w > 0 and r.category in pack.categories for r, w in hits) else win)
+        cats = self._scores(pack, swin)
         mine = {r.category for r, _w in hits}
         event_of: dict[str, Event] = {}
         over = False                          # a category this row speaks of reached its threshold
@@ -948,7 +970,7 @@ class IntelEngine:
                 continue
             if dfr:
                 continue
-            ev = self._raise(pack, row, key, cat, cd, what, contrib, mode, win, at, tid)
+            ev = self._raise(pack, row, key, cat, cd, what, contrib, mode, swin, at, tid)
             if ev is not None:
                 event_of[cat] = ev
                 changed.append(ev)
@@ -971,7 +993,9 @@ class IntelEngine:
                 moving = self._moving(pack, ev, win.entries[tid])
                 if (ev.category not in event_of and (not ev.confirmed or moving) and self.locate is not None
                         and (self._may_place(pack, ev, win.entries[tid], False) if ev.suppressed == "unplaced"
-                             else self._same_job(pack, ev, win.entries[tid], ws, mine))):
+                             else self._same_job(pack, ev, win.entries[tid], ws, mine))
+                        # (another console's or other units' row never places this call: _call, its place aside)
+                        and self._split(pack, ev, win.entries[tid], with_place=False) not in SPLITS):
                     up = self._relocate(pack, ev, row, key, win, tid, at)
                     if up is not None:
                         changed.append(up)
@@ -1250,6 +1274,150 @@ class IntelEngine:
         if pack.category(ev.category).get("moves"):
             return True
         return ev.category in PEOPLE and bool(MOVE_WORDS.search(entry.text))
+
+    # -- the new-call judgement: another call inside an open one's window -------------------------------------------
+
+    def _split(self, pack, ev: Event, entry, with_place: bool = True) -> str:
+        """_call of a row against an open event: its rows at hand (but this one), every unit it named (_who_of too),
+        its place unless this row moves it (a pursuit, "last seen at"). with_place False: a place is no evidence (a
+        row that may place or correct the event: the not-hits path)."""
+        rows = [e for e in self._event_entries(pack, ev) if e is not entry]
+        units = frozenset(u for e in rows for u in e.units) | self._who_of.get(ev.id, (set(), frozenset()))[1]
+        place = ev.place() if with_place and ev.precision in PLACED and not self._moving(pack, ev, entry) else None
+        before = [e.at for e in rows if e.at <= entry.at] or ([ev.last_at] if ev.last_at <= entry.at else [])
+        return self._call(pack, entry, rows, units, place, ev.first_at, ev.source_key, max(before, default=None))
+
+    def _call(self, pack, entry, rows, units, place, first_at: float, key: str, last: float | None = None) -> str:
+        """Is this row (one that says a category) another call than the one these rows make (an open event's, or one
+        row of the window)? "" nothing says, "same" a tie, "handoff" one console passing the call to another (one
+        call: _relayed), else why it is another (SPLITS):
+          place    both name a place a crew can drive to (PLACED), and not the same one
+          console  a labelled dispatch console of a department none of the call's consoles is (talkers.py)
+          units    it names units, the call named units, and none of them is the call's
+          cue      a second assignment (_assigns: the dispatch cue or a console's call-out, naming units or a place)
+                   after the call had its own, more than window_s after the call's last row before it, and neither
+                   the units nor the places decided it
+        A tie wins over all but a place: the same place, more of the same (MORE_OF_SAME: "another caller", "as
+        well", "back up"), a read-back of an address alone, a unit or a talker (never a dispatcher) of the call's
+        within window_s of it. A "new call" (NEW_CALL) is _raise's own. No labels and no units: as before."""
+        rp = entry.place if entry.place is not None and entry.place.precision in PLACED else None
+        if rp is not None and place is not None and place.precision in PLACED:
+            if same_place(rp, place):
+                return "same"
+            # the same address read in the town of the console that took the call over: a handoff, else another place
+            same_words = _street_part(rp.label) == _street_part(place.label) != ""
+            return "handoff" if same_words and self._console(pack, entry, rows, first_at, key) == "handoff" else "place"
+        if MORE_OF_SAME.search(entry.text or "") or self._address_only(entry):
+            return "same"
+        near = [e for e in rows if abs(e.at - entry.at) <= pack.window_s]
+        mine = frozenset(u for u in entry.units if not _unit_placeholder(u))
+        theirs = frozenset(u for u in units if not _unit_placeholder(u))
+        if mine & frozenset(u for e in near for u in e.units):
+            return "same"
+        if (entry.talker and not entry.dispatcher
+                and entry.talker in {e.talker for e in near if e.talker and not e.dispatcher}):
+            return "same"
+        con = self._console(pack, entry, rows, first_at, key)
+        if con:
+            return con
+        if mine and theirs:
+            return "" if mine & theirs else "units"
+        if (self._assigns(pack, entry) and last is not None and entry.at - last > pack.window_s
+                and any(self._assigns(pack, e) for e in rows if e.at < entry.at)):
+            return "cue"
+        return ""
+
+    def _assigns(self, pack, e) -> bool:
+        """A fresh assignment: a row that says a category with the pack's dispatch cue (or a labelled console's
+        call-out), naming units or a place a crew can drive to ("car 3 respond to ..."; never "report of smoke,
+        location unknown": the call, its address to come)."""
+        if not any(w > 0 and r.category in pack.categories for r, w in e.hits):
+            return False
+        cue = self._dispatch_cue(pack)
+        if not (e.dispatcher and e.label) and not any(w > 0 and cue is not None and r.id == cue.id for r, w in e.hits):
+            return False
+        return bool(e.units) or (e.place is not None and e.place.precision in PLACED)
+
+    @staticmethod
+    def _consoles(rows) -> dict:
+        """{department: its first row}: the labelled dispatch consoles among these rows, by air time."""
+        out: dict = {}
+        for e in sorted(rows, key=lambda x: x.at):
+            if e.dispatcher and e.label:
+                out.setdefault(_agency(e.label), e)
+        return out
+
+    def _console(self, pack, entry, rows, first_at: float, key: str) -> str:
+        """"console": this row is a labelled dispatch console's of a department none of the call's consoles is;
+        "handoff" when one of them passed the call to the other first (_relayed); "" otherwise."""
+        if not (entry.dispatcher and entry.label):
+            return ""
+        theirs = self._consoles(rows)
+        if not theirs or _agency(entry.label) in theirs:
+            return ""
+        return "handoff" if self._relayed(pack, entry, theirs, first_at, key) else "console"
+
+    def _relayed(self, pack, entry, theirs: dict, first_at: float, key: str) -> bool:
+        """A relay between the call's console and this row's, aired from window_s before the call up to this row: a
+        labelled console of either side with relay words (RELAY: "can you send a car", "we'll take it") naming the
+        other side (its town, or its department's own name)."""
+        win = self.windows.get((pack.name, key))
+        if win is None:
+            return False
+        towns = pack.towns_for(key) or list(pack.area)
+        mine = _agency(entry.label)
+        for e in win.entries.values():
+            if (e.suppressed or not (e.dispatcher and e.label) or not first_at - pack.window_s <= e.at <= entry.at
+                    or not RELAY.search(e.text or "")):
+                continue
+            a = _agency(e.label)
+            if a in theirs and a != mine and _names_side(e.text, entry.label, entry.town, towns):
+                return True
+            if a == mine and any(_names_side(e.text, x.label, x.town, towns) for x in theirs.values()):
+                return True
+        return False
+
+    def _handed(self, pack, ev: Event, row: dict, key: str, entry) -> None:
+        """A handoff (_console): another department's console took this call over (one call that moved towns, never
+        two). Recorded (Event.handoff: [the call's first console, this one], as Settings > Radios labels them), and
+        the call's town follows the console that took it: an unplaced call takes its town; an unconfirmed place in
+        another town is read again with that town first (_town_prior: this row's talker); a confirmed one stays."""
+        if not (entry.dispatcher and entry.label) or (ev.handoff and ev.handoff[-1] == entry.label):
+            return
+        theirs = self._consoles([e for e in self._event_entries(pack, ev) if e is not entry])
+        if not theirs or _agency(entry.label) in theirs or not self._relayed(pack, entry, theirs, ev.first_at, key):
+            return
+        ev.handoff = [next(iter(theirs.values())).label, entry.label]
+        town = entry.town
+        if not town or ev.town == town:
+            return
+        if ev.precision == "none":
+            ev.town = town
+        elif not ev.confirmed:
+            p = self._where(pack, row, key, self._texts(pack, key, ev.traffic_ids), self._who(pack, ev))
+            if p is not None and p.town == town:
+                ev.set_place(p)
+
+    def _own_window(self, pack, key: str, win: Window, tid: str, at: float) -> Window:
+        """The rows a row that says a category is scored with: the window's, less the rows of an open event it is
+        another call than (_split), and less a row in no open event that it is another call than (_call, row against
+        row: a place, a console or units apart). The rows of an event it is already in always stay."""
+        entry = win.entries[tid]
+        drop, keep, owned = set(), {tid}, set()
+        for ev in self._open_for(pack, None, key, at, self._merge_span(pack)):
+            owned |= set(ev.traffic_ids)
+            if tid in ev.traffic_ids:
+                keep |= set(ev.traffic_ids)
+            elif self._split(pack, ev, entry) in SPLITS:
+                drop |= set(ev.traffic_ids)
+        for t, e in win.entries.items():
+            if (t in owned or t == tid or e.suppressed
+                    or not any(w > 0 and r.category in pack.categories for r, w in e.hits)):
+                continue
+            if self._call(pack, entry, [e], e.units, e.place, e.at, key, e.at) in SPLITS:
+                drop.add(t)
+        drop = (drop - keep) & set(win.entries)
+        return Window({t: e for t, e in win.entries.items() if t not in drop}) if drop else win
 
     def _texts(self, pack, key: str, tids) -> list[str]:
         win = self.windows.get((pack.name, key))
@@ -1557,7 +1725,10 @@ class IntelEngine:
         to = pack.category(cat).get("defer_to")
         if not to:
             return False
+        speaks = any(r.category == cat and w > 0 for r, w in entry.hits)
         for e in self._open_for(pack, to, key, at, self._merge_span(pack)):
+            if speaks and self._split(pack, e, entry) in SPLITS:
+                continue                      # another call (_call): never deferred to this one, never its place
             if e.precision == "none":
                 return e if entry.place is not None and entry.place.precision in PLACED else True
             if entry.place is None or same_place(entry.place, e.place()):
@@ -1629,13 +1800,18 @@ class IntelEngine:
                 ev = e                        # the same place again ("another caller ...": more of the same)
             elif fresh:
                 continue                      # "new call": another place, or none said: a new incident
+            elif (rp is not None and ep is not None and self._moving(pack, e, entry)
+                  and (cd.get("moves") or self._same_job(pack, e, entry, rules_mod.words(entry.text), {cat}))):
+                ev, moved = e, True           # a moving incident ("now at", a pursuit): its place moves
+            elif speaks and (why := self._split(pack, e, entry)) in SPLITS:
+                continue                      # another call inside this one's window (another console, place, units,
+                                              # a fresh dispatch: _call): its own event
+            elif speaks and why == "handoff":
+                ev = e                        # another department's console took this call over: one call (_handed)
             elif rp is None and (speaks or self._same_job(pack, e, entry, rules_mod.words(entry.text), {cat})):
                 ev = e                        # no place said ("still smoke showing"): the open one (#492 re-check)
             elif rp is not None and ep is None and (e.last_at >= at - pack.window_s or e.suppressed == "unplaced"):
                 ev = e                        # the place, right after a call-out that had none (or held for one)
-            elif (rp is not None and ep is not None and self._moving(pack, e, entry)
-                  and (cd.get("moves") or self._same_job(pack, e, entry, rules_mod.words(entry.text), {cat}))):
-                ev, moved = e, True           # a moving incident ("now at", a pursuit): its place moves
             if ev is not None:
                 break
         after = ev is not None and at >= self._aired(pack, ev)    # aired after the disregard / de-escalation (FIFO)
@@ -1707,6 +1883,8 @@ class IntelEngine:
             ev.set_place(place)
             if moved:
                 ev.note = "moved"
+        if change != "raised" and tid in tids:
+            self._handed(pack, ev, row, key, entry)     # another console took this call over: recorded, its town
         ev.subject = f"{pack.name}:{cat}:{ev.place().key or key}"
         self._hold(pack, ev, mode)
         if entry.late and change == "raised":
@@ -2396,9 +2574,36 @@ def _unit_placeholder(unit: str) -> bool:
         return False
 
 
+def _agency(label: str) -> str:
+    """A labelled radio's department ("example pd" of "Example PD dispatch"), else its label, as words."""
+    t = talkers_mod.parse(label)
+    return " ".join(rules_mod.words(t.agency or t.label))
+
+
+def _street_part(label: str) -> str:
+    """A place label without its town ("12 sample rd" of "12 Sample Rd, Port Chester"), as words."""
+    return " ".join(rules_mod.words(str(label or "").split(",")[0]))
+
+
+def _names_side(text: str, label: str, town: str, towns=()) -> bool:
+    """The words name this side of a relay: its town (never inside a longer town's name: "Rye" in "Rye Brook"), or
+    its department's own name ("Example" of "Example PD")."""
+    low = f" {' '.join(rules_mod.words(text))} "
+    if town:
+        tw = " ".join(rules_mod.words(town))
+        for other in towns:
+            ow = " ".join(rules_mod.words(other))
+            if ow != tw and f" {tw} " in f" {ow} ":
+                low = low.replace(f" {ow} ", "  ")
+        if f" {tw} " in low:
+            return True
+    head = " ".join(w for w in rules_mod.words(talkers_mod.parse(label).agency) if w not in DEPT_WORDS and len(w) > 2)
+    return bool(head) and f" {head} " in low
+
+
 def _same(a: Event, b: Event) -> bool:
     keys = ("what_score", "level", "rules", "traffic_ids", "mode", "priority", "precision", "lat", "lon", "label_full",
-            "confirmed", "status", "category", "near_incident", "suppressed", "fd")
+            "confirmed", "status", "category", "near_incident", "suppressed", "fd", "town", "handoff")
     return all(getattr(a, k) == getattr(b, k) for k in keys)
 
 

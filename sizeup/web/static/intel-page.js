@@ -4,7 +4,7 @@
 // set). Admin decision, 2026-11-25: "a page in the app where we can view these intel events even if they do not
 // trigger". Anyone signed in (the tab shows only when the state carries intel).
 //
-// A row: time · category · level (→ the level it would have had if not held) · source · place + precision ·
+// A row: time (with "N other calls" in its window, each a link) · category · level (→ the level it would have had if not held) · source · place + precision ·
 // score and its parts (rule weights; the model's as "model 95%") · why it didn't push · Useful / Noise / Should
 // have pushed (POST /api/cad/intel/<id>/feedback: intel_feedback, what tuning reads). A click opens its More info
 // (/cad#prealert/intel/<id>, prealert-info.js). Terse: what a label means is in its hover.
@@ -240,6 +240,8 @@ window.IntelPage = (() => {
     const t = cell("t", when(e.at));
     t.title = e.last_at && e.last_at !== e.at ? `Last heard ${when(e.last_at)} · ${e.n} tx` : `${e.n} tx`;
     if (e.status !== "open") t.append(el("div", "dim small", STATUS[e.status] || e.status));
+    const sib = siblings(e);
+    if (sib) t.append(sib);
     // category
     const c = cell("il-cat", e.label || e.category);
     c.title = `${e.pack_label} · ${e.category}`;
@@ -281,6 +283,23 @@ window.IntelPage = (() => {
     const nc = window.IntelNotes ? IntelNotes.chip(e.notes) : null;
     tr.append(t, c, lvc, s, pl, sc, why, cell("act il-acts", nc, ...votes(e)));
     return tr;
+  }
+
+  // the other calls on its source in its window (eventlog.py siblings): "2 other calls", each a link to its More info
+  function siblings(e) {
+    const xs = e.siblings || [];
+    if (!xs.length) return null;
+    const d = el("div", "dim small il-sibs", `${xs.length} other call${xs.length === 1 ? "" : "s"} `);
+    d.title = "Other events on this channel in its window";
+    xs.forEach((x, i) => {
+      if (i) d.append(" ");
+      const a = el("a", "il-sib", `#${x.id}`);
+      a.href = window.PrealertInfo ? PrealertInfo.href("intel", x.id) : `#prealert/intel/${x.id}`;
+      a.title = `${x.label || x.category} · ${when(x.at)}`;
+      a.addEventListener("click", (ev) => ev.stopPropagation());     // (the row's own click opens this one's)
+      d.append(a);
+    });
+    return d;
   }
 
   // Useful / Noise / Should have pushed: the intel feedback store (what the rules' and the model's tuning read)
