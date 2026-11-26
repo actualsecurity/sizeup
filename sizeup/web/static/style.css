@@ -824,6 +824,7 @@
     }
   }
   :where(body > header.fold-links) > :where(#runcards-open, a[href="/monitor"]) { display: none; }   /* as on a phone */
+  :where(body > header.fold-links) #intel-open { display: none; }   /* the Intel page: still the 60 Control column's link */
   :where(body > header.fold-tight) { column-gap: var(--s-1); }
   :where(body > header.fold-tight) .tabs .tab { padding-inline: var(--s-1); }
   /* last: the state texts may shrink, cut, rather than push the clock and the profile off; never a control */
@@ -854,3 +855,7 @@
   .trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
   .sr-only { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 }
+
+/* the engine selector (#875, radio-controls.js): an engine not available now is greyed, still selectable */
+.tg-eng option.off, .tg-eng.off { color: var(--dim); }
+.tg-geng { margin-right: 6px; }

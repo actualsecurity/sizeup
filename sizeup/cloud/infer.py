@@ -196,6 +196,8 @@ class Worker:
     stt: str = ""
     llm: str = ""
     llm_version: str = ""
+    llm_state: str = ""                     # its LLM's state ("ok", "unavailable: gave its VRAM to the speech models")
+    llm_id: str = ""                        # the llm_models id it runs ("" worker.toml's)
     seen: float = 0.0
     polling: int = 0
     lease: str = ""
@@ -218,6 +220,7 @@ class Lane:
                  llm_on: Callable[[str], bool] = lambda wid: True):
         self.stt_busy, self.may_write, self.clock, self.log = stt_busy, may_write, clock, log
         self.enabled, self.llm_on = enabled, llm_on
+        self.on_queued: Callable[[], None] = lambda: None   # LLM work queued: the pool's challengers step aside (#869)
         self._cv = threading.Condition()
         self._queue: list[Job] = []
         self._leases: dict[str, Job] = {}
@@ -375,7 +378,11 @@ class Lane:
                     w.llm_version = ""
                 if isinstance(models.get("llm_version"), str) and w.llm:
                     w.llm_version = models["llm_version"][:64]
-                w.had_llm = w.had_llm or bool(w.llm)
+                if isinstance(models.get("llm_state"), str):
+                    w.llm_state = models["llm_state"][:80]
+                if isinstance(models.get("llm_id"), str):
+                    w.llm_id = models["llm_id"][:48]
+                w.had_llm = w.had_llm or bool(w.llm) or bool(w.llm_state)
             if w.lease and (w.state != "online" or not w.llm):
                 job = self._leases.get(w.lease)
                 if job is not None:
@@ -437,7 +444,18 @@ class Lane:
                 self._cv.notify_all()
         if stopped:                                # (stop() ran in between: nothing would ever answer it)
             self._resolve(job, None, "no_worker", inline=True)
+        else:
+            try:
+                self.on_queued()                   # (#869: never held or preempted by a challenger)
+            except Exception as e:  # noqa: BLE001 - the ask is queued all the same
+                self.log(f"infer: on_queued: {type(e).__name__}")
         return fut
+
+    def llm_busy(self, wid: str) -> bool:
+        """LLM work queued, or held by this worker now (#869: no challenger meanwhile). Read without the lane's lock
+        (the pool asks under its own: never the two locks at once)."""
+        w = self.workers.get(wid)
+        return bool(self._queue) or bool(w is not None and w.lease)
 
     def _job(self, task, messages, schema, deadline_s, priority, meta, fut, t0) -> Job:
         if not isinstance(task, str) or not TASK.fullmatch(task):
@@ -692,6 +710,7 @@ class Lane:
             workers = [{"id": w.id, "state": ("offline" if now - w.seen >= OFFLINE_S and w.polling <= 0
                                               else "cooling" if w.state == "online" and now < w.cool_until else w.state),
                         "stt": w.stt, "llm": w.llm, "llm_version": w.llm_version, "busy": bool(w.lease),
+                        "llm_state": w.llm_state, "llm_id": w.llm_id,
                         "llm_on": self._worker_on(w.id),
                         "jobs_h": sum(1 for x in hour if x[2] == w.id),
                         "fails_h": sum(1 for x in hour if x[2] == w.id and x[3] != "ok")}

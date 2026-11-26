@@ -1,0 +1,13 @@
+{
+  "base": "stt-worker-state/valid/gpu-worker-online.json",
+  "patch": [
+    {
+      "op": "add",
+      "path": "/keep_awake",
+      "value": {
+        "on": true,
+        "held": true
+      }
+    }
+  ]
+}

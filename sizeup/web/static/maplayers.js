@@ -38,7 +38,9 @@
 // <details data-fold> group's open state from the box as it was (the rebuild keeps the scroll, the focus
 // and the folds, #111); keys() the group's layers for the event's set; refresh() after a change. An attached
 // group with top: true is drawn right under the layer list (camoverlay.js's Camera overlay, #168: by Cameras),
-// the rest at the foot of the box; attach() may return {} for a map the group isn't on.
+// the rest at the foot of the box; attach() may return {} for a map the group isn't on. A group whose panel has a title
+// (.ml-ghead > b) is folded under it to one line with its "N on" (#952: the box fits its map), open as the viewer left
+// it (fold "layers:<title>"); the rest of its head (its source) goes to the Sources fold at the box's foot.
 "use strict";
 
 window.MapLayers = (() => {
@@ -506,8 +508,8 @@ window.MapLayers = (() => {
       // a rebuild keeps the viewer's place (#111): the scroll, the focused control and each group's fold
       const scroll = panel.scrollTop;
       const active = document.activeElement && panel.contains(document.activeElement) ? document.activeElement.dataset.key || "" : "";
-      const folds = {};
-      for (const f of panel.querySelectorAll("details[data-fold]")) folds[f.dataset.fold] = f.open;
+      const folds = {};                // (a closed box's are stale: opened again, it is as the viewer's folds are now)
+      if (!panel.hidden) for (const f of panel.querySelectorAll("details[data-fold]")) folds[f.dataset.fold] = f.open;
       const head = h("div", "ml-head");
       head.append(h("b", "", this.perEvent() && this.override ? "Layers for this event" : "Layers"));
       const x = h("button", "icon quiet sm");
@@ -549,13 +551,9 @@ window.MapLayers = (() => {
         list.append(lab);
       }
       const groupPanel = (g) => { try { return (g.panel && g.panel(folds)) || null; } catch (e) { console.error(e); return null; } };
-      panel.replaceChildren(head);
-      if (this.perEvent()) panel.append(this.eventRow());
-      panel.append(list);
-      for (const g of this.groups) { const el = g.top ? groupPanel(g) : null; if (el) panel.append(el); }
-      if (!d) this.panel.append(h("div", "dim small", "Loading…"));
-      else if (!d.configured) this.panel.append(h("div", "dim small", /^highway layers off/i.test(d.note || "") ? d.note[0].toUpperCase() + d.note.slice(1) : "Highway layers off: " + (d.note || "not configured")));
-      if (d && !d.highway_places) this.panel.append(h("div", "dim small", "Mileposts, exits: not loaded"));
+      // the box fits the map (admin, 2026-11-26: "I shouldn't have to scroll inside of the map's window"): each titled
+      // group folds to one line with its "N on", and every source is in one Sources fold at the foot
+      const sources = [];
       for (const s of (d && d.sources) || []) {                   // each source that is on, and when it last read
         if (!s.configured) continue;
         const line = h("div", "dim small ml-source");
@@ -564,16 +562,73 @@ window.MapLayers = (() => {
         a.target = "_blank";
         a.rel = "noopener";
         line.append(a, s.at ? ` · ${hhmm(s.at)}` : " · waiting", s.note ? ` (${s.note})` : "");
-        this.panel.append(line);
+        sources.push([s.label, line]);
       }
+      if (window.AirportLayer && AirportLayer.credit()) sources.push(["Airport", h("div", "dim small ml-source", AirportLayer.credit())]);
+      const folded = (el) => this.foldGroup(el, folds, sources);
+      panel.replaceChildren(head);
+      if (this.perEvent()) panel.append(this.eventRow());
+      panel.append(list);
+      for (const g of this.groups) { const el = g.top ? groupPanel(g) : null; if (el) panel.append(folded(el)); }
+      if (!d) this.panel.append(h("div", "dim small", "Loading…"));
+      else if (!d.configured) this.panel.append(h("div", "dim small", /^highway layers off/i.test(d.note || "") ? d.note[0].toUpperCase() + d.note.slice(1) : "Highway layers off: " + (d.note || "not configured")));
+      if (d && !d.highway_places) this.panel.append(h("div", "dim small", "Mileposts, exits: not loaded"));
       if (d && d.configured && d.note) this.panel.append(h("div", "dim small", d.note));
-      if (window.AirportLayer && AirportLayer.credit()) this.panel.append(h("div", "dim small", AirportLayer.credit()));
-      for (const g of this.groups) { const el = g.top ? null : groupPanel(g); if (el) panel.append(el); }
+      for (const g of this.groups) { const el = g.top ? null : groupPanel(g); if (el) panel.append(folded(el)); }
+      if (sources.length) panel.append(this.sourcesFold(sources, folds));
       panel.scrollTop = scroll;
       if (active) {
         const el = panel.querySelector(`[data-key="${CSS.escape(active)}"]`);
         if (el) el.focus({ preventScroll: true });
       }
+    }
+
+    // a fold in the box: one line (its summary) until opened; open as it was a moment ago, else as this viewer left it
+    // (remembered with the County GIS sub-headings' folds: "layers:<name>"), else closed
+    foldBox(name, folds, summary, body) {
+      const key = `layers:${name}`;
+      const det = h("details", "ml-gfold");
+      det.dataset.fold = key;
+      const sum = h("summary", "ml-gsum");
+      sum.dataset.key = key;                         // the rebuild keeps the focus on it
+      sum.append(...summary);
+      const was = typeof folds[key] === "boolean" ? folds[key] : fold(key);
+      det.open = was === true;
+      // a person's click or key (Enter on the summary sends no click) is kept; the toggle the open above queues is not
+      let last = det.open;
+      det.addEventListener("toggle", () => { if (det.open !== last) { last = det.open; setFold(key, det.open); } });
+      det.append(sum, ...body);
+      return det;
+    }
+    // another script's group (addGroup) with a title (.ml-ghead > b): folded under it with how many of its layers are on;
+    // what else its head had (its source's link) goes to the Sources fold. One without a title is left as it is.
+    foldGroup(el, folds, sources) {
+      const head = el.querySelector(":scope > .ml-ghead");
+      const title = head && head.querySelector(":scope > b");
+      if (!title) return el;
+      const name = title.textContent.trim();
+      const rest = [...head.childNodes].filter((n) => n !== title && !(n.classList && n.classList.contains("spacer")));
+      if (rest.some((n) => n.textContent.trim())) {
+        const line = h("div", "dim small ml-source");
+        line.append(`${name}: `, ...rest.flatMap((n, i) => (i ? [" · ", n] : [n])));
+        sources.push([name, line]);
+      }
+      head.remove();
+      // its layers on (not a sub-toggle such as Animate, nor the tilt), and a trouble mark when something in it failed
+      const on = [...el.querySelectorAll('input[type="checkbox"]:checked:not(:disabled)')]
+        .filter((x) => !x.closest(".ml-sub-check") && x.dataset.key !== "gis:3d").length;
+      const err = el.querySelector(".ml-err");
+      const summary = [h("b", "", name), " "];
+      if (err) { const e = h("span", "ml-err small", "error"); e.title = err.textContent; summary.push(e); }
+      summary.push(h("span", "ml-count dim small", on ? `${on} on` : ""));
+      return this.foldBox(name, folds, summary, [el]);
+    }
+    // every source in one line at the foot: their names on hover, each with its link and time when opened
+    sourcesFold(sources, folds) {
+      const det = this.foldBox("Sources", folds, [h("span", "dim small", "Sources")], sources.map(([, line]) => line));
+      det.classList.add("ml-sources");
+      det.firstChild.title = sources.map(([name]) => name).join(" · ");
+      return det;
     }
 
     // on an event's map (#111): whose set this is, "Reset to default" and "Use as default" when the event has its own

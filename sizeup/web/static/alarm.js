@@ -42,7 +42,10 @@ window.Alarm = (() => {
   const windowOf = (a) => st.windows.find((w) => w.alarm_id === a.id)
     || (a.emergency && a.talkgroup !== null && a.talkgroup !== undefined ? st.windows.find((w) => w.talkgroup === a.talkgroup) : null);
   const untilText = (w) => `Recording until ${hm(w.until)} (emergency)`;
-  const windowTitle = (w) => `Everything on ${w.channel || `TG ${w.talkgroup}`}${(w.radios || []).length ? `, and radio `
+  // a channel's one name (cad.js chName: radio-names.js), its real label (or its talkgroup) where that isn't loaded
+  const ch = (a) => (typeof chName === "function" && (a.channel || (a.talkgroup !== null && a.talkgroup !== undefined))
+    ? chName(a) : a.channel || `TG ${a.talkgroup}`);
+  const windowTitle = (w) => `Everything on ${ch(w)}${(w.radios || []).length ? `, and radio `
     + `${w.radios.join(", ")} on any talkgroup,` : ""} is kept until ${hm(w.until)}, even with Record off: the emergency `
     + "window. All clear ends it now; Acknowledge doesn't.";
   const dispatcher = () => (typeof canDo === "function" ? canDo("dispatch") : true);
@@ -183,7 +186,7 @@ window.Alarm = (() => {
 
   function card(a) {
     const c = mk("article", `alarm-card${a.drill ? " drill" : ""}`);
-    c.setAttribute("aria-label", `${a.drill ? "Drill: " : ""}${a.what} ${a.who} on ${a.channel}`);
+    c.setAttribute("aria-label", `${a.drill ? "Drill: " : ""}${a.what} ${a.who} on ${ch(a)}`);
     const head = mk("div", "alarm-what");
     if (a.drill) head.append(mk("span", "alarm-drill", "DRILL"));
     head.append(mk("span", "", a.what.toUpperCase()));
@@ -195,7 +198,7 @@ window.Alarm = (() => {
     if (unit && unit[1]) who.append(mk("span", "", ` · ${unit[1]}`));
     if (a.radio_id) who.append(mk("span", "", ` · radio ${a.radio_id}`));
     c.append(who);
-    c.append(mk("div", "alarm-where", `${a.channel}${a.talkgroup !== null && a.talkgroup !== undefined ? ` (TG ${a.talkgroup})` : ""} · ${hms(a.at)}`));
+    c.append(mk("div", "alarm-where", `${ch(a)}${a.talkgroup !== null && a.talkgroup !== undefined ? ` (TG ${a.talkgroup})` : ""} · ${hms(a.at)}`));
     const w = windowOf(a);
     if (w) {
       const r = mk("div", "alarm-meta alarm-window", untilText(w));
@@ -279,7 +282,7 @@ window.Alarm = (() => {
       st.strip.replaceChildren(...ns.map((a) => {
         const r = mk("div", "alarm-notice");
         r.append(mk("b", "", `${a.drill ? "DRILL · " : ""}Emergency button (not ours)`),
-          mk("span", "", ` ${a.who} on ${a.channel} at ${hms(a.at)}${a.text ? `: “${a.text}”` : ""}`));
+          mk("span", "", ` ${a.who} on ${ch(a)} at ${hms(a.at)}${a.text ? `: “${a.text}”` : ""}`));
         if (a.stuck) {                // #190: it went on flagging routine calls: said once, its later flags not alarms
           const s = mk("span", "alarm-stuck", ` · flag stuck: ${a.stuck}`);
           s.title = "The same flag on call after call of routine traffic: a radio left in emergency mode, or a talkgroup "
@@ -302,7 +305,7 @@ window.Alarm = (() => {
         const r = mk("div", "alarm-notice alarm-window-row");
         r.title = windowTitle(w);
         r.append(mk("b", "alarm-window", "Emergency window"),
-          mk("span", "", ` ${w.channel || `TG ${w.talkgroup}`}${w.radios && w.radios.length ? ` · radio ${w.radios.join(", ")}` : ""}`
+          mk("span", "", ` ${ch(w)}${w.radios && w.radios.length ? ` · radio ${w.radios.join(", ")}` : ""}`
             + ` · ${untilText(w)}`), mk("span", "spacer"));
         if (dispatcher() && w.alarm_id) r.append(clearButton({ id: w.alarm_id }, "sm"));
         return r;
@@ -332,12 +335,12 @@ window.Alarm = (() => {
     for (const a of s.recent || []) {
       if (st.seen && st.seen.has(a.id) && !st.acked.has(a.id)) {
         UI.toast(`Alarm acknowledged by ${(a.ack_by || "").replace(/\s*<[^>]*>\s*$/, "")}`, "ok",
-          `${a.what} · ${a.who} on ${a.channel} at ${hms(a.at)}`);
+          `${a.what} · ${a.who} on ${ch(a)} at ${hms(a.at)}`);
       }
       st.acked.add(a.id);
     }
     for (const a of st.notices) {
-      if (st.seen && !st.seen.has(a.id)) UI.toast(`Emergency button: ${a.who} on ${a.channel}`, "alert", "Not ours · notice");
+      if (st.seen && !st.seen.has(a.id)) UI.toast(`Emergency button: ${a.who} on ${ch(a)}`, "alert", "Not ours · notice");
     }
     st.seen = new Set([...open, ...st.notices, ...(s.recent || [])].map((a) => a.id));
     if (fresh.length && st.overlay) st.overlay._sig = "";

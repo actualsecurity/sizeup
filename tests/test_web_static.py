@@ -51,7 +51,7 @@ def test_pages_load_only_scripts_that_exist_and_nothing_points_at_the_old_pages(
     html = (STATIC / "cad.html").read_text()
     assert 'id="settings-radios"' in html and 'id="settings-radio-controls"' in html
     assert 'RadiosPanel.mount($("#settings-radios")' in js("settings.js")
-    assert 'const rc = $("#settings-radio-controls");' in js("settings.js") and "RadioControls.mount(rc, { reception: true, tab: S.rtab, names: S_RC_NAMES, services: S_RC_SERVICES," in js("settings.js")
+    assert 'const rc = $("#settings-radio-controls");' in js("settings.js") and "RadioControls.mount(rc, { reception: true, tab: S.rtab, names: S_RC_NAMES, services: S_RC_SERVICES, main: S_RC_MAIN," in js("settings.js")
     # one header: the console's tabs and the board's links on the same bar
     for tab in ("dispatch-open", "overview-open", "radio-open", "settings-open"):
         assert f'id="{tab}" class="tab' in html
@@ -130,7 +130,8 @@ def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
                                   ("/api/cad/stt/corrections.jsonl", '"/api/cad/stt/corrections.jsonl"', "stt-fix.js"),
                                   ("/api/cad/intel", '"/api/cad/intel"', "intel.js"),      # the pre-alert rules (#411)
                                   ("/api/cad/hydrants", "`/api/cad/hydrants?", "hydrants.js"),            # Settings > Hydrants (#799)
-                                  ("/api/cad/hydrants.csv", "`/api/cad/hydrants.csv?", "hydrants.js")):
+                                  ("/api/cad/hydrants.csv", "`/api/cad/hydrants.csv?", "hydrants.js"),
+                                  ("/api/cad/intel/export.csv", "`/api/cad/intel/export.${f}", "intel-page.js")):
         assert literal in js(script), f"{script} doesn't read {path}"
         assert path in ADMIN_READS, path
     # ... and a reception test's captured audio (#410: served by server.py, played in Settings > Radios)
@@ -144,7 +145,8 @@ def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
                                 "/api/cad/stt/corrections", "/api/cad/stt/corrections.jsonl",
                                 "/api/cad/stations",         # stations and their tokens (sizeup/cloud/stations.py)
                                 "/api/cad/stt-workers",      # GPU workers and their tokens (sizeup/cloud/sttworkers.py)
-                                "/api/cad/metrics"}          # the station's signal metrics (#605; graphs: #606)
+                                "/api/cad/metrics",          # the station's signal metrics (#605; graphs: #606)
+                                "/api/cad/intel/export.csv", "/api/cad/intel/export.jsonl"}   # notes, transcripts at once
     # #606: the Signal tab, the Squelch card's suggestions and Health's sparks read it, nothing else
     assert '"/api/cad/metrics"' in js("signal-panel.js") and '"/api/cad/metrics?view=squelch"' in js("squelch-panel.js")
     assert '"/api/cad/metrics?view=spark"' in js("health.js")
@@ -249,8 +251,8 @@ def test_fg1_open_with_no_id_yet_says_id_on_release():
     strip (and the Overview) says "FG1 · ID on release", muted; never a guessed talker; P25 never (its IDs
     come with the grant). sizeup/radio/live.py sets id_on_release (tests/test_radios.py)."""
     radio = js("radio.js")
-    assert 'if (e.system === "fm" && e.id_on_release) return `${e.channel} · ID on release`;' in radio
-    assert radio.index("if (w) return `TX ${w} ${e.channel}`;") < radio.index("ID on release")   # a decoded unit wins
+    assert 'if (e.system === "fm" && e.id_on_release) return `${ch(e)} · ID on release`;' in radio      # (its one name: radio-names.js)
+    assert radio.index("if (w) return `TX ${w} ${ch(e)}`;") < radio.index("ID on release")   # a decoded unit wins
     assert '(e.id_on_release && !e.rig ? " unid" : "")' in radio and "Radio.chipClass(e)" in js("cadmap.js")
     assert re.search(r":where\(\.talk-chip\.unid\) \{[^}]*color: var\(--text-2\)", (STATIC / "style.css").read_text())
 

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sizeup import stt_time
+from sizeup.stt_correct import DEFAULT_TOWNS as CORRECT_TOWNS
 from sizeup.api.v1.switches import DEFAULT_MAX_REQUESTS, DEFAULT_MAX_STREAMS
 from sizeup.cloud.access import team_host
 from sizeup.polly import DEFAULT_VOICE as POLLY_DEFAULT
@@ -135,6 +136,10 @@ class Config:
     stt_talker_prompt: str = "off"    # "ids": hint whisper with who keyed up ("77 Alpha 4, 60 Control"); "ids+time": + HHMM
     # the dispatcher's trailing time checked on these channels ([stt] time_channels, #727, sizeup/stt_time.py)
     stt_time_channels: tuple[str, ...] = stt_time.DEFAULT_CHANNELS
+    # post-ASR vocabulary correction on these channels ([stt] correct_channels, #879, sizeup/stt_correct.py), into the
+    # streets of these towns only ([stt] correct_towns)
+    stt_correct_channels: tuple[str, ...] = stt_time.DEFAULT_CHANNELS
+    stt_correct_towns: tuple[str, ...] = CORRECT_TOWNS
     # Amazon Transcribe streaming ([stt] aws*, sizeup/transcribe.py, sizeup/channels.py): where it runs (the hub;
     # all-in-one only with credentials here), and which channels default to it (Settings > Radios changes that).
     stt_aws: bool = False             # this process may call Transcribe (the hub: deploy/hub/config.hub.toml)
@@ -1544,6 +1549,7 @@ def load(path: str | Path) -> Config:
         if t.get("ours", False):
             ours.add(t["name"])
     stt = _take(data.get("stt", {}), "stt", {"server_binary", "model", "port", "threads", "prompt", "talker_prompt", "beam_size", "time_channels",
+                                             "correct_channels", "correct_towns",
                                              "aws", "aws_region", "aws_endpoint", "aws_api_endpoint", "aws_idle_s", "aws_pace",
                                              "aws_monthly_limit_usd", "aws_channels", "aws_vocabulary",
                                              "aws_context_budget_usd", "record_only", "terms_dir", "terms_whisper",
@@ -1554,6 +1560,12 @@ def load(path: str | Path) -> Config:
     tchans = stt.get("time_channels", list(stt_time.DEFAULT_CHANNELS))
     if not isinstance(tchans, list) or not all(isinstance(c, (int, str)) and not isinstance(c, bool) for c in tchans):
         raise ConfigError('stt.time_channels: a list of talkgroups and channel keys, e.g. [307, "tg:303"] ([] = off)')
+    cchans = stt.get("correct_channels", list(stt_time.DEFAULT_CHANNELS))
+    if not isinstance(cchans, list) or not all(isinstance(c, (int, str)) and not isinstance(c, bool) for c in cchans):
+        raise ConfigError('stt.correct_channels: a list of talkgroups and channel keys, e.g. [307, "tg:303"] ([] = off)')
+    ctowns = stt.get("correct_towns", list(CORRECT_TOWNS))
+    if not isinstance(ctowns, list) or not all(isinstance(t, str) and t.strip() for t in ctowns):
+        raise ConfigError('stt.correct_towns: a list of town names, e.g. ["Port Chester"]')
     aws_stt = _stt_aws(stt)
     if "aws_channels" not in stt:     # an airband channel (HPN ATC, #233) is a priority channel: AWS by default
         aws_stt["stt_aws_channels"] = tuple(dict.fromkeys([*aws_stt["stt_aws_channels"],
@@ -1713,6 +1725,7 @@ def load(path: str | Path) -> Config:
         stt_port=int(stt.get("port", 8179)), stt_threads=int(stt.get("threads", 8)), stt_prompt=stt.get("prompt", ""),
         stt_talker_prompt=talker_mode, stt_beam_size=int(stt.get("beam_size", 0)), **aws_stt,
         stt_time_channels=stt_time.channels_of(tchans),
+        stt_correct_channels=stt_time.channels_of(cchans), stt_correct_towns=tuple(t.strip() for t in ctowns),
         p25_dir=rel(p25.get("capture_dir", "")),
         p25_talkgroups=p25_tgs, p25_tg_info=p25_info, p25_tg_file_rows=p25_tg_rows,
         p25_incident_talkgroups=frozenset(int(x) for x in p25.get("incident_talkgroups", [307, 333])),

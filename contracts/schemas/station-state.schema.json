@@ -22,6 +22,12 @@
       "maxLength": 64,
       "description": "This boot of the station's machine: Linux's /proc/sys/kernel/random/boot_id, null where there is none (macOS) or where the station can't keep `wall_steps` across a restart (no state folder: a `:memory:` outbox); null means the count is unknown across restarts. On every post since #773's clock fields (sizeup/cloud/wallclock.py); a station from before sends none. A new one means the station rebooted and `wall_steps` started again from 0. The hub reads neither yet."
     },
+    "proc": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "This sizeup process on the station: 32 hex characters made at random when it started (PROC_ID, sizeup/cloud/station.py; #927). On every post. A new one means sizeup started again (an update, a crash, a kill, a reboot): the hub asks the new process which of the transmissions still waiting for their text it has (the `stt_held` call, when its status `caps` say so) and sheds the ones it doesn't know. The hub keeps 64 characters; a station from before sends none."
+    },
     "wall_steps": {
       "type": "integer",
       "minimum": 0,
@@ -403,6 +409,67 @@
                 }
               }
             },
+            "replace": {
+              "type": "array",
+              "description": "From #903 on (a station from before sends none): each dongle with a job, or in an antenna group, gone 60 s or more in this run, with the new dongles that fit its jobs (App.replace_offers, sizeup/radio/replace.py); [] when there are none.",
+              "items": {
+                "title": "One gone dongle's offer",
+                "description": "A gone dongle and the new dongles that may take its jobs.",
+                "x-complete": true,
+                "type": "object",
+                "required": ["missing", "name", "jobs", "group", "absent_s", "pick", "only", "critical", "auto", "choices", "why"],
+                "additionalProperties": true,
+                "properties": {
+                  "missing": {"type": "string", "description": "The gone dongle's serial."},
+                  "name": {"type": "string", "description": "Its name in the web app."},
+                  "jobs": {"type": "array", "description": "Its job; [] when it had none (only a place in a group).", "items": {"type": "string"}},
+                  "group": {"type": "string", "description": "Its antenna group's name; \"\" when in none."},
+                  "absent_s": {"type": "integer", "minimum": 0, "description": "How long it has been gone in this run, in seconds."},
+                  "pick": {"type": "string", "description": "The new dongle the pairing chose for it; \"\" when a person must pick."},
+                  "only": {"type": "boolean", "description": "Exactly one new dongle fits it and that one fits no other gone dongle (what auto-replace needs)."},
+                  "critical": {"type": "boolean", "description": "Its job is one auto-replace may move (the county P25 job, paging)."},
+                  "auto": {"type": "boolean", "description": "The hub's auto-replace may move it by itself (App._auto_ok): critical; exactly one new dongle fits and it fits no other gone dongle with a job; on the gone one's USB port; first seen after the gone one; its job running on no dongle; the same tuner when both are known."},
+                  "choices": {
+                    "type": "array",
+                    "description": "The new dongles that fit, best first.",
+                    "items": {
+                      "description": "One new dongle that fits.",
+                      "x-complete": true,
+                      "type": "object",
+                      "required": ["serial", "name", "product", "tuner"],
+                      "additionalProperties": true,
+                      "properties": {
+                        "serial": {"type": "string", "description": "The new dongle's serial."},
+                        "name": {"type": "string", "description": "Its name in the web app."},
+                        "product": {"type": "string", "description": "Its USB product; \"\" when unknown."},
+                        "tuner": {"type": "string", "description": "Its tuner; \"\" when unknown."}
+                      }
+                    }
+                  },
+                  "why": {"type": "object", "description": "The new dongles that do not fit, {serial: why}.", "additionalProperties": {"type": "string"}}
+                }
+              }
+            },
+            "missing": {
+              "type": "array",
+              "description": "From #903 on (a station from before sends none): every dongle with a job, or in an antenna group, that is not plugged in (App.missing_rows); [] when there are none.",
+              "items": {
+                "title": "One gone dongle",
+                "description": "A dongle with a job, or in a group, not plugged in now.",
+                "x-complete": true,
+                "type": "object",
+                "required": ["serial", "name", "jobs", "group", "absent_s", "last_seen"],
+                "additionalProperties": true,
+                "properties": {
+                  "serial": {"type": "string", "description": "Its serial."},
+                  "name": {"type": "string", "description": "Its name in the web app."},
+                  "jobs": {"type": "array", "description": "Its job; [] when it had none.", "items": {"type": "string"}},
+                  "group": {"type": "string", "description": "Its antenna group's name; \"\" when in none."},
+                  "absent_s": {"type": "integer", "minimum": 0, "description": "How long it has been gone in this run, in seconds."},
+                  "last_seen": {"type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 100000000000, "description": "When it was last seen plugged in, Unix seconds; null when never."}
+                }
+              }
+            },
             "no_park": {"type": "array", "description": "The jobs that may not be parked.", "items": {"type": "string"}},
             "groups_problem": {"type": "string", "description": "Why the groups file was dropped; \"\" when fine."}
           }
@@ -452,6 +519,8 @@
             "deny_ok": {"const": true, "description": "This station takes `aws.deny` from the hub. An implicit capability flag, like `squelch_ok`."},
             "promote_ok": {"const": true, "description": "This station takes `aws.promote` from the hub (the county talkgroups an incident is worked on now, transcribed like ours: sizeup/cad/opchannel.py). An implicit capability flag, like `deny_ok`; a station from before it sends none."},
             "promote_p25_ok": {"const": true, "description": "This station takes another P25 system's keys (`p25:<system>:<tg>`) in `aws.promote` too (a highway-crash pre-alert's channel, sizeup/intel/engine.py promoted_since). An implicit capability flag, like `promote_ok`; a station from before it sends none and is sent county keys only."},
+            "engine_norm_ok": {"const": true, "description": "This station takes Auto · normal (`auto_norm`: sizeup/sttroute.py) in its channel choices. An implicit capability flag; a station with `engine_select_ok` but not this is sent `auto` instead."},
+            "engine_select_ok": {"const": true, "description": "This station takes the engine selector's engines (`auto`, `auto_bg`, `pin:<id>`: sizeup/sttroute.py) in its channel choices. An implicit capability flag, like `promote_ok`; a station from before it sends none and is sent the nearest old engine (`aws` or `local`)."},
             "sig": {"type": "string", "description": "A short hex digest of everything above (sizeup/channels.py sig), compared for equality only."}
           }
         },
@@ -708,6 +777,7 @@
               "additionalProperties": {"type": "integer", "minimum": 0}
             },
             "hub_takes": {"type": "boolean", "description": "The hub's last `caps` had `stt_input`."},
+            "wake_on_ack": {"type": "boolean", "description": "The lane is woken by the events' ack, so each input follows its own event at once (#678). The hub then waits for a pool job's input only its class's budget (sttpool.SRC_WAIT_S); a station without it gets the old 2 s wait."},
             "dropped_pre": {"type": "integer", "minimum": 0, "description": "Of the dropped, those of pre-alert channels."},
             "dropped_fire": {"type": "integer", "minimum": 0, "description": "Of the dropped, those of fire channels."},
             "encoder": {"type": "string", "description": "Where inputs are encoded: \"\" before the first, else `scope`, `process` or `thread (<why>)`."},
@@ -746,6 +816,13 @@
             "state": {"type": "string", "description": "`off`, `paused` or `online`."},
             "why": {"type": "string", "description": "Why it is off or paused; \"\" when online."}
           }
+        },
+        "caps": {
+          "type": "array",
+          "description": "Capability strings: what this station takes from the hub (StationLink.status, STATION_CAPS in sizeup/cloud/station.py). The hub reads them only while the station is connected, and asks nothing of a station without the string. Today: `stt_withdraw` (the `stt_withdraw` call: the hub's pool takes clips back from this station's whisper, #927), `stt_held` (the `stt_held` call: which waiting clips a new process still has, #927).",
+          "items": {"type": "string", "description": "One capability name, lower case with underscores."},
+          "uniqueItems": true,
+          "x-known": ["stt_withdraw", "stt_held"]
         },
         "stt_alert_rev": {
           "type": "integer",
@@ -1150,6 +1227,14 @@
               "tier": {
                 "type": ["string", "null"],
                 "description": "Another system's talkgroup: its tier (`alert`, `text`, `record`, ...); null for the county system's own switches. The hub adds `tier_set` (tier is not null) when the row has none."
+              },
+              "transcribe": {
+                "type": "boolean",
+                "description": "Its Transcribe switch: another system's, its tier (`alert` or `text`); the county's, its channel choice. The hub adds it from the tier when the row has none."
+              },
+              "alerts": {
+                "type": ["boolean", "null"],
+                "description": "Its Alerts switch: another system's, its tier is `alert`; null for the county's (its pre-alerts are the intel packs'). The hub adds it from the tier when the row has none."
               }
             }
           }

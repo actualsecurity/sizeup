@@ -20,7 +20,15 @@ works as before; this is next to it, keyed by the same clip id.
                             time_conf, time_fixed_text (the text with that time written the canonical way: a match whose
                             text it changes only; the raw text is never changed), fix_rule (the rule and its version,
                             "ttime/1:words") and label_flag (auto_label | review); time_check "prompted": the engine's
-                            prompt carried the clip's time, never counted. Pruned by the hub's
+                            prompt carried the clip's time, never counted; the vocabulary correction (#879,
+                            sizeup/stt_correct.py; "" / None where it isn't on): corr_text (the text with the channel's
+                            terms put back: only when it changes it; the raw text is never changed), corr_n (how many
+                            corrections: 0 when it ran and found none), corr_rules (JSON [[heard, to, rule, score], ...])
+                            and corr_v (the rule, the term list's version and its sections' and towns',
+                            "vcorr/1@county_fire@0123456789ab@01234567"; "pending": on there, its matcher not built yet).
+                            input (#678): the audio the engine heard, "stt-src" (the station's own whisper input,
+                            16 kHz) | "listening-8k" (the 8 kHz listening clip in its place) | "" (not known: a run from
+                            before it). Pruned by the hub's
                             janitor: older than KEEP_DAYS, and a run whose radio log row is gone (its channel's transcript
                             retention: never longer than the transcript), batch after batch for up to PRUNE_BUDGET_S
     LatencyBook             transmission end -> text on the hub, per channel, over WINDOW_S in memory: p50 / p95 and
@@ -48,21 +56,36 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS stt_runs (
   text TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT '', confidence REAL, words TEXT NOT NULL DEFAULT '',
   channel TEXT NOT NULL DEFAULT '', class TEXT NOT NULL DEFAULT '', clip_end REAL, queued_at REAL, engine_start REAL,
   done_at REAL NOT NULL, wait_s REAL, run_s REAL, keyup TEXT NOT NULL DEFAULT '', call_id TEXT NOT NULL DEFAULT '',
-  turn INTEGER, vocab_v TEXT NOT NULL DEFAULT '');
+  turn INTEGER, vocab_v TEXT NOT NULL DEFAULT '', input TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS stt_runs_clip ON stt_runs (clip_id);
 CREATE INDEX IF NOT EXISTS stt_runs_done ON stt_runs (done_at);"""
 COLUMNS = ("clip_id", "engine", "model", "worker", "prompt_v", "role", "text", "status", "confidence", "words",
            "channel", "class", "clip_end", "queued_at", "engine_start", "done_at", "wait_s", "run_s", "keyup", "call_id", "turn",
-           "vocab_v")
+           "vocab_v", "input")
 ENGINES = ("gpu-worker", "aws", "station-whisper")
-ROLES = ("text", "alt", "late", "rerun", "catchup", "discarded", "challenger")   # discarded: a repetition loop
-# (not used); challenger: a challenger model's transcript (sizeup/sttscore.py), kept and pruned like the others
+INPUTS = ("stt-src", "listening-8k")     # (#678; sizeup/cloud/sttinput.py INPUT_SRC / INPUT_LISTENING)
+# the audio each engine hears when nothing else says: the station's whisper its own input; Amazon Transcribe the
+# listening clip (the hub sends it that). A pool worker's (GPU, or a station's whisper as one) is what the hub gave it
+ENGINE_INPUT = {"station-whisper": "stt-src", "aws": "listening-8k"}
+
+
+def engine_input(engine: str) -> str:
+    return ENGINE_INPUT.get(engine, "")
+ROLES = ("text", "alt", "late", "rerun", "catchup", "discarded", "challenger")   # discarded: a loop or its context
+# read back, not used; challenger: a challenger model's transcript (sizeup/sttscore.py: never the text of record)
 KEEP_DAYS = 90.0
 # the dispatcher's trailing time (#727): added to a file from before them (Runs._open)
 _TEXT = "TEXT NOT NULL DEFAULT ''"
 CHECK_TYPES = {"time_check": _TEXT, "time_said": _TEXT, "time_off": "INTEGER", "time_conf": "REAL",
                "time_fixed_text": _TEXT, "fix_rule": _TEXT, "label_flag": _TEXT}
 CHECK_COLUMNS = tuple(CHECK_TYPES)
+# the way the text of record went (#875, sizeup/sttroute.py Route: "auto·priority: gpu-pc → AWS (gpu-pc: gaming)";
+# "" for none): added to a file from before it (Runs._open)
+EXTRA_TYPES = {"route": _TEXT}
+EXTRA_COLUMNS = tuple(EXTRA_TYPES)
+# the vocabulary correction (#879, sizeup/stt_correct.py): added the same way
+CORR_TYPES = {"corr_text": _TEXT, "corr_n": "INTEGER", "corr_rules": _TEXT, "corr_v": _TEXT}
+CORR_COLUMNS = tuple(CORR_TYPES)
 # the per-channel models (#639, sizeup/sttmodels.py): the context the engine decoded with, never its content: prompt_n its
 # length (prompt_v its hash), ctx its form (prompt | list | none; "" before them), gate "quiet" (the worker's silence
 # gate: not decoded), want the model the channel asked for (model: the one that wrote it)
@@ -116,6 +139,15 @@ def _check_row(c) -> tuple:
     off = getattr(c, "off_min", None)
     return (str(c.result or "")[:20], str(c.said or "")[:8], int(off) if isinstance(off, int) else None, _fin(c.conf),
             str(c.text or "")[:20000], str(c.rule or "")[:40], str(c.flag or "")[:20])
+
+
+def _corr_row(c) -> tuple:
+    """A vocabulary correction's columns (CORR_COLUMNS, a sizeup.stt_correct.Result), "" / None for none."""
+    if c is None:
+        return ("", None, "", "")
+    if getattr(c, "pending", False):          # on there, its list's matcher not built yet: not run (corr_n None)
+        return ("", None, "", str(c.v)[:80])
+    return (str(c.text or "")[:20000], int(c.n), c.rules_json(20000), str(c.v or "")[:80])
 
 
 def _rate(match: int, said: int) -> float | None:
@@ -180,15 +212,18 @@ class Runs:
                 db.execute("PRAGMA synchronous = NORMAL")
                 db.execute("PRAGMA busy_timeout = 5000")
                 db.executescript(SCHEMA)
-                if "vocab_v" not in {r[1] for r in db.execute("PRAGMA table_info(stt_runs)")}:   # a file from before it
+                cols = {r[1] for r in db.execute("PRAGMA table_info(stt_runs)")}
+                if "vocab_v" not in cols:                                                         # a file from before it
                     db.execute("ALTER TABLE stt_runs ADD COLUMN vocab_v TEXT NOT NULL DEFAULT ''")
+                if "input" not in cols:                                                           # ... or before #678
+                    db.execute("ALTER TABLE stt_runs ADD COLUMN input TEXT NOT NULL DEFAULT ''")
             except Exception:
                 db.close()                        # (never a connection left open: the next write tries again)
                 raise
             self._db = db
             try:
                 have = {r[1] for r in db.execute("PRAGMA table_info(stt_runs)")}
-                for c, t in {**CHECK_TYPES, **MODEL_TYPES}.items():
+                for c, t in {**CHECK_TYPES, **EXTRA_TYPES, **CORR_TYPES, **MODEL_TYPES}.items():
                     if c not in have:
                         db.execute(f"ALTER TABLE stt_runs ADD COLUMN {c} {t}")
                 want, other = (TIME_INDEX_V, TIME_INDEX) if "vocab_v" in have else (TIME_INDEX, TIME_INDEX_V)
@@ -209,13 +244,15 @@ class Runs:
     def add(self, clip_id: str, engine: str, *, text: str = "", status: str = "", model: str = "", worker: str = "",
             prompt_v: str = "", role: str = "text", confidence: float | None = None, words: list | None = None,
             check=None,                            # (its trailing-time check, a sizeup.stt_time.Check: #727)
+            corr=None,                             # (its vocabulary correction, a sizeup.stt_correct.Result: #879)
             channel: str = "", cls: str = "", clip_end: float | None = None, queued_at: float | None = None,
             engine_start: float | None = None, done_at: float | None = None, wait_s: float | None = None,
             run_s: float | None = None, keyup: dict | None = None, call_id: str = "", turn: int | None = None,
-            vocab_v: str = "", prompt_n: int | None = None, ctx: str = "", gate: str = "", want: str = "",
-            score: dict | None = None) -> bool:
+            vocab_v: str = "", input: str = "", route: str = "",    # noqa: A002 - the column's name
+            prompt_n: int | None = None, ctx: str = "", gate: str = "", want: str = "", score: dict | None = None) -> bool:
         """One transcript. True when it was written. vocab_v: the term list or vocabulary that biased it
-        (sizeup/stt_terms.py; prompt_v is the whole prompt's hash, prompt_n its length); ctx, gate, want: MODEL_TYPES."""
+        (sizeup/stt_terms.py; prompt_v is the whole prompt's hash, prompt_n its length). input: the audio it heard
+        (INPUTS; "" unknown). route: the way the text of record went (#875). ctx, gate, want: MODEL_TYPES."""
         row = (str(clip_id)[:128], engine if engine in ENGINES else "other", str(model or "")[:120], str(worker or "")[:40],
                str(prompt_v or "")[:20], role if role in ROLES else "text", str(text or "")[:20000],
                str(status or "")[:20], _fin(confidence),
@@ -223,14 +260,14 @@ class Runs:
                str(cls or "")[:20], _fin(clip_end), _fin(queued_at), _fin(engine_start),
                self.clock() if done_at is None else done_at, _sec(wait_s), _sec(run_s), _keyup(keyup),
                str(call_id or "")[:128], int(turn) if isinstance(turn, int) and not isinstance(turn, bool) else None,
-               str(vocab_v or "")[:80])
+               str(vocab_v or "")[:80], input if input in INPUTS else "")
         if not self.may_write():
             return False
         try:
             with self._lock:
-                cols = COLUMNS + CHECK_COLUMNS + MODEL_COLUMNS
+                cols = COLUMNS + CHECK_COLUMNS + CORR_COLUMNS + EXTRA_COLUMNS + MODEL_COLUMNS
                 self._open().execute(f"INSERT INTO stt_runs ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
-                                     row + _check_row(check) + (
+                                     row + _check_row(check) + _corr_row(corr) + (str(route or "")[:300],) + (
                                          int(prompt_n) if isinstance(prompt_n, int) and not isinstance(prompt_n, bool)
                                          and 0 <= prompt_n < 100000 else None,
                                          ctx if ctx in ("prompt", "list", "none") else "",
@@ -247,7 +284,7 @@ class Runs:
             return []
         try:
             with self._lock:
-                cols = COLUMNS + CHECK_COLUMNS + MODEL_COLUMNS
+                cols = COLUMNS + CHECK_COLUMNS + CORR_COLUMNS + EXTRA_COLUMNS + MODEL_COLUMNS
                 cur = self._open().execute(f"SELECT {', '.join(cols)} FROM stt_runs WHERE clip_id = ? ORDER BY id",
                                            (clip_id,))
                 rows = [dict(zip(cols, r)) for r in cur.fetchall()]
@@ -256,6 +293,7 @@ class Runs:
         for d in rows:
             d["words"] = json.loads(d["words"]) if d.get("words") else []
             d["keyup"] = json.loads(d["keyup"]) if d.get("keyup") else None
+            d["corr_rules"] = json.loads(d["corr_rules"]) if d.get("corr_rules") else []
         return rows
 
     def challenges(self, channel: str, since: float = 0.0, limit: int = 2000) -> list[dict]:

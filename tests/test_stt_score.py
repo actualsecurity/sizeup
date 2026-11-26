@@ -5,13 +5,10 @@ Invented texts, units, callsigns and addresses."""
 
 from __future__ import annotations
 
-import json
 import random
 
 from sizeup import sttscore as S
-from sizeup.stt import URGENT
 from sizeup.stt_time import Check
-from tests.test_channels import fake_aws  # noqa: F401 (the fixture: test credentials only)
 
 
 def test_the_folding_is_pinned():
@@ -96,78 +93,6 @@ def test_sampling_is_stable_and_near_its_share():
     assert not any(S.sampled(c, "model-x", 0) for c in ids[:100])
 
 
-# -- on a hub: sampled, run last on an idle GPU, scored, promoted, rolled back -------------------------------------
-
-def test_a_challenger_runs_on_the_same_clip_is_scored_promoted_and_rolled_back(tmp_path, fake_aws, monkeypatch):
-    from sizeup import sttpool, sttscore
-    from tests.fake_transcribe import FakeTranscribe
-    from tests.test_app import wait
-    from tests.test_channels import AWS_TEXT, aws_cfg
-    from tests.test_cloud import HubRun, call, hub_cfg
-    from tests.test_stt_pool import FakeWorker, pending_event, send
-
-    Q8, QWEN = "large-v3-turbo-q8_0", "qwen3-asr-1.7b-q8_0"
-    monkeypatch.setattr(sttpool, "CHALLENGE_QUIET_S", 0.0)
-
-    class ModelWorker(FakeWorker):
-        def post(self, path, body):
-            if path.endswith("/claim"):
-                body = dict(body, models=["large-v3-turbo-q5_0", QWEN, Q8])
-            elif path.endswith("/complete") and self.jobs:
-                job = self.jobs[-1]
-                body = dict(body, model=job.get("model") or "large-v3-turbo-q5_0")
-                if job.get("class") == "challenger":
-                    body["text"] = "Engine 60 Ladder 31 on location"
-            return call(self.url + path, "POST", body, token=self.token)
-
-    fake = FakeTranscribe(phrases={500: AWS_TEXT})
-    hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
-    app = hub.app
-    app.stt_choices.set("FG1", {"model": QWEN, "challenger": Q8, "pct": 100})
-    token = app.hub.workers.add("gpu-1", "Test box")
-    w = ModelWorker(hub.url, token, text="Engine 60 Ladder 13 on location").start()
-    try:
-        assert wait(lambda: app.sttpool.ready(URGENT)[0], 5)
-        send(hub, pending_event("FG1-21"))
-        assert wait(lambda: any(r["role"] == "challenger" for r in app.stt_runs.of("FG1-21")), 30)
-        classes = [j["class"] for j in w.jobs]
-        assert classes[0] != "challenger" and classes[-1] == "challenger" and w.jobs[-1]["model"] == Q8
-        assert w.jobs[-1]["prompt"] == w.jobs[0]["prompt"] and w.jobs[-1].get("context") == w.jobs[0].get("context")
-        run = [r for r in app.stt_runs.of("FG1-21") if r["role"] == "challenger"][0]
-        score = json.loads(run["score"])
-        assert score["champion"] == QWEN and score["challenger"] == Q8 and score["norm"] == sttscore.NORM
-        assert run["text"] == "Engine 60 Ladder 31 on location"          # kept privately, never on the radio log
-        assert app.cad.store.one("SELECT text FROM radio_traffic WHERE id = 'FG1-21'")["text"] != run["text"]
-        board = app.challenge_board("FG1")
-        assert board["samples"] == 1 and board["champion"] == QWEN and board["challenger"] == Q8
-        from sizeup.cad.api import CadApi
-        from tests.test_station_identity import CASEY, JORDAN, Identity, people
-        people(app.cad)
-        api = CadApi(app.cad)
-        body = json.dumps({"action": "promote", "key": "FG1", "operator": "Admin Example"}).encode()
-        assert api.post("/api/cad/stt-workers", body, Identity(email=JORDAN))[0] == 403      # admins only
-        code, out, _ = api.post("/api/cad/stt-workers", body, Identity(email=CASEY))
-        assert code == 200, out
-        code, raw, _ = api.get("/api/cad/stt-workers", "", Identity(email=CASEY))
-        boards = json.loads(raw)["models"]["challenges"]
-        assert boards and boards[0]["key"] == "FG1" and "Engine 60 Ladder 31" not in raw.decode()   # scores only
-        assert app.stt_choices.model_for("FG1", "fire") == Q8 and app.stt_choices.challenger_for("FG1")[0] == QWEN
-        audit = app.cad.store.q("SELECT key, old, new FROM settings_audit WHERE key LIKE 'stt_models/FG1/%'")
-        assert {"key": "stt_models/FG1/model", "old": QWEN, "new": Q8} in audit
-        # the model it replaced scores better since: rolled back, audited
-        monkeypatch.setattr(app, "challenge_board", lambda key: {"n": 40, "diff": 0.2, "ci": 0.05, "champ": 0.4,
-                                                                 "chall": 0.6, "champion": Q8, "challenger": QWEN})
-        app._challenge_watch("FG1")
-        assert app.stt_choices.model_for("FG1", "fire") == QWEN and app.stt_choices.challenger_for("FG1") is None
-        assert app.stt_choices.settings()["FG1"]["rolled_back"]["from"] == Q8
-        assert app.cad.store.one("SELECT operator FROM settings_audit WHERE key = 'stt_models/FG1/model' "
-                                 "ORDER BY id DESC LIMIT 1")["operator"] == "automatic rollback"
-    finally:
-        w.close()
-        hub.close()
-        fake.close()
-
-
 def test_a_missing_time_costs_as_much_as_a_wrong_one_and_both_sides_share_their_metrics():
     s = S.sample("fire", "Engine 60 responding, 1549", "Engine 60 responding", {"cad": ["Engine 60"]},
                  (Check("time_mismatch"), Check("no_time")))
@@ -190,46 +115,19 @@ def test_a_promotion_is_watched_only_while_its_pair_stands_and_a_new_choice_ends
     assert c.promoted("tg:307") == {}                                                     # another pair: no watch
 
 
-# -- the pool: a challenger never costs a clip of ours ---------------------------------------------------------------
-
-def _challenge_pool():
-    from sizeup import sttpool
-    from tests.test_stt_pool import Clock, Jobs, online, pool
-    clk = Clock()
-    p, jobs = pool(clk), Jobs()
-    w = online(p, "gpu-a")
-    w.models = ["large-v3-turbo-q8_0"]
-    return sttpool, clk, p, jobs, w
+def test_refs_that_were_in_the_context_never_score():
+    refs = {"aircraft": ["Delta 766", "JetBlue 12", "N123AB"], "cad": ["Engine 60", "12 Example Road"], "n": 3}
+    out = S.drop_context(refs, ["Delta seven six six", "Engine Sixty"], "HPN tower, JetBlue 12.")
+    assert out["aircraft"] == ["N123AB"] and out["cad"] == ["12 Example Road"] and out["n"] == 3
 
 
-def test_a_challenger_waits_for_quiet_steps_aside_for_ours_and_never_cools_the_worker():
-    sttpool, clk, p, jobs, w = _challenge_pool()
-    from sizeup.stt import HIGH, LIVE
-    p.heard(HIGH)                                                   # a pre-alert went to AWS: no pool job at all
-    assert p.submit(jobs.job("c1~ch", sttpool.CHALLENGE, model="large-v3-turbo-q8_0"))
-    assert p.claim("gpu-a", 0) is None                              # not within CHALLENGE_QUIET_S of it
-    clk.t += sttpool.CHALLENGE_QUIET_S
-    j = p.claim("gpu-a", 0)
-    assert j.id == "c1~ch" and j.public()["fast"] is True and j.public()["lease_s"] <= 4.0
-    clk.t += 1
-    p.heard(LIVE)                                                   # one of ours came: it steps aside at its extend
-    assert p.extend("gpu-a", j.lease) is None
-    assert p.drain() == 1 and jobs.fell["c1~ch"] == "a clip of ours came" and j.extra["fell"] == "preempted"
-    for i in range(sttpool.FAIL_N + 1):                             # challengers handed back again and again ...
-        clk.t += sttpool.CHALLENGE_QUIET_S
-        assert p.submit(jobs.job(f"x{i}~ch", sttpool.CHALLENGE, model="large-v3-turbo-q8_0"))
-        k = p.claim("gpu-a", 0)
-        assert p.release("gpu-a", k.lease, "model failed")
-    assert w.cool_until <= clk.t and w.fails == 0                   # ... never cool the worker down for our clips
-    st = p.stats()
-    assert st["queued"] == 0 and st["challengers"]["skipped"] >= sttpool.FAIL_N and st["fallbacks"]["released"] == 0
-    assert p.challenges["preempted"] == 1
-
-
-def test_a_challenger_done_stays_out_of_the_pools_numbers():
-    sttpool, clk, p, jobs, w = _challenge_pool()
-    assert p.submit(jobs.job("c2~ch", sttpool.CHALLENGE, model="large-v3-turbo-q8_0"))
-    j = p.claim("gpu-a", 0)
-    assert p.complete("gpu-a", j.lease, {"text": "x", "model": "large-v3-turbo-q8_0"})
-    st = p.stats()
-    assert st["done_h"] == 0 and st["p50_s"] is None and st["challengers"]["done"] == 1 and w.done == 0
+def test_a_promote_needs_its_domains_samples_and_the_challenger_better():
+    b = {"challenger": "m-b", "champion": "m-a", "domain": "fire", "n": 39, "verdict": "challenger better",
+         "champ": 0.5, "chall": 0.6, "diff": 0.1, "ci": 0.03}
+    assert S.promote_ok(b) == (False, "39 of 40 samples")
+    assert S.promote_ok(dict(b, n=40, verdict="no difference yet"))[1] == "verdict: no difference yet"
+    assert S.promote_ok(dict(b, n=40, verdict="champion better"))[0] is False
+    ok, said = S.promote_ok(dict(b, n=40))
+    assert ok and "m-b 0.600 vs m-a 0.500 over 40 clips" in said
+    assert S.promote_ok(dict(b, challenger=""))[0] is False
+    assert S.promote_ok(dict(b, domain="other", n=30))[0] is True

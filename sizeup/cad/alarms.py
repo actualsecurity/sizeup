@@ -62,6 +62,7 @@ import time
 from datetime import datetime
 from typing import Callable
 
+from sizeup import logscrub, radionames
 from sizeup.cad.store import OPERATOR_MAX, TZ, CadError
 
 SECTION = "alarms"                         # settings_overrides section (audited under "system")
@@ -73,6 +74,9 @@ KEYWORDS = ("mayday", "may day may day", "emergency traffic", "firefighter down"
 OTHER = ("notice", "alarm", "off")         # the emergency button on a talkgroup that isn't ours, by someone not ours
 MAX_KEYWORDS, MAX_PHRASE_CHARS, MAX_PHRASE_WORDS, MAX_CHANNELS = 50, 60, 8, 20
 MAX_AGE_S = 30 * 60                        # a transmission that ended longer ago than this raises nothing
+# (#927) words that came long after air (a station's fill: its whisper behind, the station cut off): an alarm labelled
+# late up to MAX_AGE_S and LATE_FILL_SLACK more (#773's margin), past it a late notice (on the screens, never pushed)
+LATE_FILL_SLACK = 1.1
 REPEAT_S = 120                             # the same radio's button again on the same channel, its alarm still open:
                                            # the same alarm (radios repeat the emergency burst, key after key)
 NOTICE_S = 15 * 60                         # a notice nobody acknowledged drops off after this
@@ -623,7 +627,8 @@ class Alarms:
             label, name = rig, alias if not name else f"{name}, {alias}"
         units = [(label, name)] if label else []
         rid = (a.get("radio_id") or "").strip()
-        channel = a.get("channel") or ""
+        # the admins' name for it (sizeup/radionames.py: one name everywhere), its talkgroup beside it
+        channel = radionames.name(a) if (a.get("channel") or a.get("talkgroup") is not None) else ""
         if a.get("talkgroup") is not None and f"TG {a['talkgroup']}" not in channel:
             channel = f"{channel} (TG {a['talkgroup']})" if channel else f"TG {a['talkgroup']}"
         return {"units": units, "talker": f"radio {rid}" if rid and rid != label else ("" if units else "an unidentified radio"),
@@ -708,11 +713,14 @@ class Alarms:
             if cur is None:
                 if not emergency and not heard:
                     return None
-                if now - end > MAX_AGE_S:
+                old = now - end > MAX_AGE_S * (LATE_FILL_SLACK if t.get("late_fill") else 1.0)
+                if old and not t.get("late_fill"):
                     self.log(f"alarms: {tid} on {t.get('source')}: {'emergency button' if emergency else ', '.join(heard)} "
                              f"{(now - end) / 60:.0f} min after it ended: too old to raise now (logged only)")
                     return None
                 level = "alarm" if heard or fire or self._ours(rig) else cfg["other"]
+                if old and level != "off":
+                    level = "notice"                    # (#927: its words came too late to push: on the screens only)
                 if level == "off":
                     self.log(f"alarms: emergency button on {t.get('source')} (radio {t.get('radio_id') or '?'}): "
                              "not our channel or rig, notices off")
@@ -730,7 +738,7 @@ class Alarms:
                          max(1.0, now - end) if late else 0.0)).lastrowid
                 a = self.get(aid)
                 self.log(f"alarms: {'DRILL ' if a['drill'] else ''}{level.upper()} {line(a)}"
-                         + (f": {text}" if text else ""))
+                         + (f" ({logscrub.said(text)})" if text else ""))     # (never the words)
                 if level == "alarm":
                     pushed = a
             else:
@@ -738,7 +746,10 @@ class Alarms:
                 kws = list(a["keywords"]) + [k for k in heard if k not in a["keywords"]]
                 em = a["emergency"] or emergency
                 level = a["level"]
-                if level == "notice" and (heard or (em and (fire or self._ours(rig or a["rig"])))):
+                # (#927) a notice about words that came too late to push (past MAX_AGE_S and LATE_FILL_SLACK) stays one,
+                # whatever later text comes for it (AWS's "both", a re-ask, a re-run): never a pushed alarm hours late
+                stale = now - float(a.get("end") or a.get("at") or end) > MAX_AGE_S * LATE_FILL_SLACK
+                if level == "notice" and not stale and (heard or (em and (fire or self._ours(rig or a["rig"])))):
                     level = "alarm"
                 new_text = text if text else a["text"]
                 new_spans = spans if text else a["spans"]

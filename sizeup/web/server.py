@@ -10,13 +10,19 @@ GET  /api/stream[?since=<id>]  SSE: the whole state, then each second only the s
                                clock); each event's id resumes a reconnect (Last-Event-ID); gzip when accepted
 GET  /api/audio/<id>.wav       a page or transmission clip
 POST /api/incident/<id>/close  close an incident by hand
-POST /api/talkgroup {"source": "p25:<system>:<tg>" | "tg": 307 (the county's), "record": bool?, "main": bool?, "tier": str?}
-     per-talkgroup switches (state "talkgroups"; tier: #409); a bare number another system lists is refused
+POST /api/talkgroup {"source": "p25:<system>:<tg>" | "tg": 307 (the county's), "record": bool?, "main": bool?, "tier": str?,
+                     "transcribe": bool?, "alerts": bool?}
+     per-talkgroup switches (state "talkgroups"; tier: #409); a bare number another system lists is refused.
+     Another system's transcribe / alerts are written as its tier (sizeup/tiers.py from_switches); the county's are refused,
+     and so is a tier with them (400: one or the other)
 POST /api/talkgroup-group {"group": "County Police", "record": bool?, "main": bool?}  a whole section (the county's)
 POST /api/mode {"mode": ...}  one shared dongle: hand it to a channel or trunk-recorder (state "sdr")
 POST /api/adsb-receiver {"sdr": serial | "", "confirm": true}  admins: name (or unname) the station's ADS-B dongle
                         (#235; App.set_adsb_receiver; the hub sends it to the station): reserved for its decoder,
                         never one of the radios (state "sdr".adsb). Without "confirm": true it is refused
+POST /api/sdr-replace {"missing": serial, "new"?: serial, "action"?: "use" | "not_now" | "drop"}  admins: a gone dongle's
+                        jobs (and its place in its antenna group) to a new one that fits, its offer put off, or a gone
+                        dongle out of its group (App.replace_sdr, sizeup/radio/replace.py; the hub sends it to the station)
 POST /api/antenna-groups {"groups": [{"name", "sdrs": [serial], "jobs": [job, highest priority first]}], "confirm"?: the ask confirmed}  admins: the
                         station's antenna groups, all of them ([]: none) (App.set_antenna_groups, sizeup/radio/groups.py;
                         the hub sends it to the station): a grouped dongle runs only its group's jobs (state "sdr".groups)
@@ -507,6 +513,18 @@ def cross_site(headers) -> str | None:
     return None
 
 
+def swap_audit(cad, missing: str) -> dict:
+    """POST /api/sdr-replace's audit: the gone dongle's jobs and antenna group as the station's offer has them (the
+    CAD state's dongle_swaps), never what the client sent. {"jobs": [], "group": ""} when none is offered."""
+    try:
+        rows = cad.cad.dongle_swaps() if cad is not None else []
+    except Exception:  # noqa: BLE001 - the audit never stops the answer
+        rows = []
+    o = next((o for o in rows if isinstance(o, dict) and o.get("missing") == missing), None) or {}
+    jobs = o.get("jobs") if isinstance(o.get("jobs"), list) else []
+    return {"jobs": [str(j)[:40] for j in jobs][:4], "group": str(o.get("group") or "")[:40]}
+
+
 def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | None],
                  close_incident: Callable[[str], bool], set_mode: Callable[[str], str | None] | None = None,
                  set_talkgroup: Callable[..., str | None] | None = None,
@@ -516,6 +534,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                  role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None, stream_gzip: bool = True,
                  aircraft=None, roadwork=None, set_adsb: Callable[[str], str | None] | None = None, vessels=None,
                  set_groups: Callable[..., str | None] | None = None,
+                 replace_sdr: Callable[..., str | None] | None = None,
                  airband_ab: Callable[..., str | None] | None = None, reception=None,
                  gate: Gate | None = None, health_fn: Callable[[], dict] | None = None, perf=None,
                  clip_context: Callable[[str], bool] | None = None, adapter_password=None, mobile=None,
@@ -1124,6 +1143,13 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
                     body = json.loads(self.rfile.read(min(n, 1024)) or b"{}")
+                    # the switches beside the tier (only when sent: a setter from before them takes five arguments)
+                    sw = {k: body[k] for k in ("transcribe", "alerts") if body.get(k) is not None}
+                    if any(not isinstance(v, bool) for v in sw.values()):
+                        raise ValueError("transcribe / alerts: true or false")
+                    if sw and body.get("tier") is not None:     # never the tier silently over the switches
+                        from sizeup import tiers as _tiers
+                        raise ValueError(_tiers.BOTH)
                     if body.get("tier") is not None or body.get("system") or body.get("source"):
                         # another P25 system's talkgroup (#409): {"source": "p25:<system>:<tg>"} or {"tg", "system"}
                         from sizeup import sourcekeys as _sources
@@ -1135,9 +1161,10 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                         # (the county's too: its system says it is the county's even where the number is also
                         # another system's; the hub sends it bare to a station from before #409)
                         err = set_talkgroup(got[1], body.get("record"), body.get("main"),
-                                            None if tier is None else str(tier), got[0])
+                                            None if tier is None else str(tier), got[0], **sw)
                     else:
-                        err = set_talkgroup(int(body["tg"]), body.get("record"), body.get("main"))
+                        err = set_talkgroup(int(body["tg"]), body.get("record"), body.get("main"),
+                                            **(dict(tier=None, system="", **sw) if sw else {}))
                 except (ValueError, KeyError, TypeError) as e:
                     err = f"bad request: {e}"
                 if err:
@@ -1225,6 +1252,27 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 if err:
                     return self._send(400, json.dumps({"error": err}).encode(), "application/json")
                 self._did(path, body)
+                return self._send(200, b'{"ok":true}', "application/json")
+            if path == "/api/sdr-replace" and replace_sdr is not None:
+                # a gone dongle's jobs to a new one (sizeup/radio/replace.py): Health's / the console's Use it, Not now,
+                # or a gone dongle out of its antenna group
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                    body = json.loads(self.rfile.read(min(n, 1024)) or b"{}")
+                    if not isinstance(body, dict) or not isinstance(body.get("missing"), str) \
+                            or not isinstance(body.get("new", ""), str) or body.get("action", "use") not in ("use", "not_now", "drop"):
+                        raise ValueError("{missing: serial, new?: serial, action?: use | not_now | drop}")
+                    act = body.get("action", "use")
+                    if act == "use" and not body.get("new"):
+                        raise ValueError("new: the new dongle's serial")
+                    said = swap_audit(cad, body["missing"])     # (what the station offered, before it goes)
+                    err = replace_sdr(body["missing"][:64], body.get("new", "")[:64], act)
+                except (ValueError, TypeError) as e:
+                    err = f"bad request: {e}"
+                if err:
+                    return self._send(400, json.dumps({"error": err}).encode(), "application/json")
+                if self.who is not None and cad is not None:
+                    cad.did(path, self.who, body, said, self._client())
                 return self._send(200, b'{"ok":true}', "application/json")
             if path == "/api/retranscribe" and retranscribe is not None:
                 # {"ids": ["307-...", ...]} re-runs those; {"all": true} every recording still on disk
@@ -1517,6 +1565,7 @@ class WebServer:
                  aircraft=None, roadwork=None, set_adsb=None, fence=None, health_fn: Callable[[], dict] | None = None,
                  airband_ab=None, listener=None, vessels=None, perf=None, reception=None,
                  clip_context: Callable[[str], bool] | None = None, adapter_password=None, set_groups=None,
+                 replace_sdr=None,
                  mobile=None, mobile_resolver=None):
         """listener: a socket already bound and listening on (host, port) to serve from (sizeup/app.py run_gated: the
         hub's port answered "updating" while the app was built; the connections that came meanwhile are served)."""
@@ -1545,7 +1594,7 @@ class WebServer:
             set_talkgroup, set_talkgroup_group, retranscribe, cad, self.cad_broadcaster, station,
             json.dumps(health or {"ok": True}, separators=(",", ":")).encode(), access, access_log, station_mode, role,
             roads, gis, trains, weather, station_health, aircraft=aircraft, roadwork=roadwork, set_adsb=set_adsb,
-            vessels=vessels, set_groups=set_groups,
+            vessels=vessels, set_groups=set_groups, replace_sdr=replace_sdr,
             airband_ab=airband_ab, reception=reception, gate=self.gate, health_fn=health_fn, perf=perf,
             clip_context=clip_context, adapter_password=adapter_password, mobile=mobile,
             mobile_resolver=mobile_resolver))

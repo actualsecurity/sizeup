@@ -1,6 +1,6 @@
 // Settings > Station > STT workers (sizeup/cloud/sttworkers.py, #639): the GPU speech-to-text workers' tokens and the
 // pool's switches; admins, the hub only. GET /api/cad/stt-workers: each worker (id, name, last used, revoked, its live
-// state) and the pool {on, classes}; never a token or a hash. POST {action: add | rename | rotate | revoke | llm | update | pool}: add
+// state) and the pool {on}; never a token or a hash. POST {action: add | rename | rotate | revoke | llm | update | pool}: add
 // and rotate answer the new token, shown here ONCE (this page's memory until Done, never stored) with a copy button.
 // The speech models (sizeup/sttmodels.py, GET's models): each worker's loaded ones and those not ready on its row; the
 // catalog and each channel's context and call signs in a section under them (POST channel_model, audited as Radios).
@@ -8,9 +8,6 @@
 "use strict";
 const SttWorkersCard = (() => {
   const POLL_MS = 10000;
-  const CLASS_LABELS = { urgent: "Pages, Fire/EMS 15, firegrounds", high: "Airband", live: "Other main channels",
-    rerun: "Re-runs", "context-fallback": "Police alert (AWS budget out)", context: "Police alert", low: "Context talkgroups",
-    catchup: "Shed clips (catch-up)" };
   let card = null, status = null, form = null, reveal = null, timer = null, busy = false, last = null, said = "";
   let idIn = null, nameIn = null, fresh = null;
   let pinForm = null, pinHead = null, pinCommit = null, pinSha = null, pinning = "";
@@ -109,7 +106,7 @@ const SttWorkersCard = (() => {
   }
 
   function poolRow(d) {
-    const p = d.pool || { on: false, classes: {} };
+    const p = d.pool || { on: false };
     const wrap = el("div", "row");
     const on = el("label", "check");
     const cb = el("input");
@@ -117,20 +114,9 @@ const SttWorkersCard = (() => {
     cb.checked = !!p.on;
     cb.addEventListener("change", () => act({ action: "pool", on: cb.checked }, cb.checked ? "Pool on" : "Pool off"));
     on.append(cb, " Pool on");
-    on.title = "Off: every clip goes the way it went before (AWS, the station's whisper)";
+    on.title = "Off: no clip goes to a worker (each channel's engine falls back: AWS, the station's whisper). "
+      + "Where a channel's clips go: its engine (Settings > Radios > Channels)";
     wrap.append(on);
-
-    for (const [k, v] of Object.entries(p.classes || {})) {
-      const l = el("label", "check");
-      const c = el("input");
-      c.type = "checkbox";
-      c.checked = !!v;
-      c.disabled = !p.on;
-      c.addEventListener("change", () => act({ action: "pool", classes: { [k]: c.checked } }, ""));
-      l.append(c, ` ${CLASS_LABELS[k] || k}`);
-      l.title = "Clips of this class go to a ready GPU worker first";
-      wrap.append(l);
-    }
     return wrap;
   }
 
@@ -304,10 +290,11 @@ const SttWorkersCard = (() => {
   function channelsTable(m) {
     const t = el("table", "evtable");
     const hr = el("tr");
-    for (const h of ["Channel", "Model", "Context", "Call signs", "Challenger", ""]) hr.append(el("th", "", h));
+    for (const h of ["Channel", "Model", "Context", "Call signs", ""]) hr.append(el("th", "", h));
     t.append(el("thead"), el("tbody"));
     t.tHead.append(hr);
-    const ctxTitle = "Default: the model's (catalog). On / Off: this channel's, whichever model decodes it";
+    const ctxTitle = "Default: the model's (catalog). On / Off: this channel's, whichever model decodes it"
+      + "\nAirband: a whisper model never gets a prompt; the aircraft go only to a list model";
     for (const [key, v] of Object.entries(m.channels || {}).sort(([a], [b]) => a.localeCompare(b, "en", { numeric: true }))) {
       const tr = el("tr");
       const mod = el("td", v.model ? "mono" : "dim", v.model || "default");
@@ -319,7 +306,7 @@ const SttWorkersCard = (() => {
       const tdc = el("td", ""), tds = el("td", "");
       tdc.append(cs);
       tds.append(ci);
-      tr.append(el("td", "mono", key), mod, tdc, tds, challengerCell(m, key, v), el("td", ""));
+      tr.append(el("td", "mono", key), mod, tdc, tds, el("td", ""));
       t.tBodies[0].append(tr);
     }
     // a channel not listed yet: its key, then its context and call signs
@@ -344,82 +331,9 @@ const SttWorkersCard = (() => {
     tdc.append(cs);
     tds.append(ci);
     tda.append(add);
-    tr.append(tdk, el("td", "dim", "default"), tdc, tds, el("td", ""), tda);
+    tr.append(tdk, el("td", "dim", "default"), tdc, tds, tda);
     t.tBodies[0].append(tr);
     return t;
-  }
-
-  // a channel's challenger (sizeup/sttscore.py): a catalog model and its share of the channel's clips
-  function challengerCell(m, key, v) {
-    const td = el("td", "");
-    const s = el("select", "sm");
-    s.append(new Option("—", ""));
-    for (const c of m.catalog || []) if (c.id !== v.model) s.append(new Option(c.id, c.id));
-    s.value = v.challenger || "";
-    s.title = "Decodes a share of this channel's clips after its model, same context, only on an idle GPU; scored, "
-      + "never shown as the transcript";
-    s.setAttribute("aria-label", "Challenger");
-    const pct = el("input", "mono t");
-    pct.type = "number";
-    pct.min = "1";
-    pct.max = "100";
-    pct.step = "1";
-    pct.value = v.challenger ? String(v.pct || 10) : "";
-    pct.placeholder = "10";
-    pct.style.width = "4.5em";
-    pct.title = "% of the channel's clips";
-    pct.setAttribute("aria-label", "Challenger share, %");
-    pct.hidden = !v.challenger;
-    s.addEventListener("change", () => setChannel(key, { challenger: s.value || null },
-      s.value ? `${key}: challenger ${s.value}` : `${key}: no challenger`));
-    pct.addEventListener("change", () => setChannel(key, { pct: pct.value ? Number(pct.value) : null }, `${key}: ${pct.value || 10}%`));
-    td.append(s, pct);
-    return td;
-  }
-
-  // champion and challenger per channel (m.challenges: scores only, never a transcript); Promote (admin, audited)
-  function boardTable(m) {
-    const t = el("table", "evtable");
-    const hr = el("tr");
-    for (const h of ["Channel", "Champion", "Challenger", "n", "Champion", "Challenger", "Δ", "", ""]) hr.append(el("th", "", h));
-    t.append(el("thead"), el("tbody"));
-    t.tHead.append(hr);
-    const f = (x) => (x == null ? "—" : x.toFixed(3));
-    for (const b of m.challenges || []) {
-      const tr = el("tr");
-      const diff = el("td", "t", b.diff == null ? "—" : `${b.diff > 0 ? "+" : ""}${b.diff.toFixed(3)} ± ${(b.ci || 0).toFixed(3)}`);
-      diff.title = "Challenger - champion, 95% interval";
-      const v = el("td", b.verdict === "challenger better" ? "ok" : b.verdict === "champion better" ? "warn" : "dim",
-                   b.paused ? "paused" : b.verdict || "");
-      v.title = (b.promoted && b.promoted.at ? `Promoted ${when(b.promoted.at)}: watched (rolled back if it does worse)\n` : "")
-        + (b.rolled_back && b.rolled_back.at ? `Rolled back ${when(b.rolled_back.at)}: ${b.rolled_back.why || ""}\n` : "")
-        + `${b.samples} sampled, ${b.edits} corrected · ${b.norm}`;
-      const n = el("td", "t", String(b.n));
-      n.title = "Clips both sides were scored on";
-      const tda = el("td", "");
-      if (b.challenger) {
-        tda.append(btn("Promote", "sm", async () => {
-          if (!await UI.confirm(`${b.key}: make ${b.challenger} the model (${b.champion} goes on as the challenger)?`,
-                         { ok: "Promote", danger: false })) return;
-          promote(b.key);
-        }));
-      }
-      tr.append(el("td", "mono", b.key), el("td", "mono", b.champion || "—"),
-        el("td", "mono", b.challenger ? `${b.challenger} · ${b.pct}%` : "—"), n, el("td", "t", f(b.champ)),
-        el("td", "t", f(b.chall)), diff, v, tda);
-      t.tBodies[0].append(tr);
-    }
-    return t;
-  }
-
-  async function promote(key) {
-    msaid = "";
-    try {
-      const d = await post({ action: "promote", key });
-      if (last && d.models) last.models = d.models;
-      msaid = `${key}: promoted`;
-    } catch (e) { msaid = `${key}: ${e.message}`; }
-    renderModels(true);
   }
 
   // drawn again only when the panel changed (or after a save), never under a field being typed in
@@ -435,7 +349,7 @@ const SttWorkersCard = (() => {
     if (mcard.contains(document.activeElement) && /^(INPUT|SELECT)$/.test(document.activeElement.tagName)) { mlater = true; return; }
     msig = sig;
     mlater = false;
-    mbody.replaceChildren(catalogTable(m), channelsTable(m), ...((m.challenges || []).length ? [boardTable(m)] : []));
+    mbody.replaceChildren(catalogTable(m), channelsTable(m));
   }
 
   function buildModels() {
@@ -495,6 +409,10 @@ const SttWorkersCard = (() => {
       return (await r.json()).models || null;
     },
     save: async (key, body) => (await post({ action: "channel_model", key, ...body })).models,
+    // ... and the workers' LLM (Settings > Station > Health beside its status: health.js): {model?, priority?}
+    setLlm: async (body) => (await post({ action: "llm_model", ...body })).llm,
+    // ... and a channel's promote (#869): without confirm {confirm: the evidence}; with it {models}
+    promote: async (key, confirm) => post({ action: "promote", key, confirm: !!confirm }),
   };
 
   document.addEventListener("visibilitychange", () => { if (isOpen() && !timer) poll(); });

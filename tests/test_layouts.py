@@ -115,8 +115,8 @@ def test_the_overlay_is_a_layers_toggle_on_the_overview_map():
     assert "localStorage" not in js                                                 # remembered by maplayers.js's prefs
     assert 'const overlay = mode !== "cameras" && isOn();' in js                      # wherever the map shows
     ml = read("maplayers.js")
-    assert "for (const g of this.groups) { const el = g.top ? groupPanel(g) : null; if (el) panel.append(el); }" in ml
-    assert "for (const g of this.groups) { const el = g.top ? null : groupPanel(g); if (el) panel.append(el); }" in ml
+    assert "for (const g of this.groups) { const el = g.top ? groupPanel(g) : null; if (el) panel.append(folded(el)); }" in ml
+    assert "for (const g of this.groups) { const el = g.top ? null : groupPanel(g); if (el) panel.append(folded(el)); }" in ml
     assert ml.index("g.top ? groupPanel(g)") > ml.index("panel.append(list);")
 
 

@@ -58,7 +58,7 @@ def setup(backend=None, cfg=None, packs=None, clock=None, logs=None, locate=exam
 
 
 def fight_cat(e) -> str:
-    return "assault" if "assault" in e.pack("police").categories else "dispute"
+    return "dispute" if "dispute" in e.pack("police").categories else "assault"     # (fighting: its cue, not assault's)
 
 
 # -- new events --------------------------------------------------------------------------------------------------------
@@ -232,7 +232,7 @@ def test_out_of_the_window_on_the_source_another_category_is_its_own_event():
     e, sink, b = setup(B.FakeBackend(answer(fight_cat(e0), 0.9)), packs=full(), clock=clock)
     e.feed(row("t1", SHOTS, 1000))
     clock.t = 1400
-    [ev] = e.feed(row("t2", "there are several people in the street pushing each other near the corner", 1390))
+    [ev] = e.feed(row("t2", "there are several people in the street punching each other near the corner", 1390))
     assert ev.category == fight_cat(e0) and len(e.events.all()) == 2
 
 
@@ -672,7 +672,7 @@ def test_the_record_in_the_store_the_more_info_bundle_and_the_prune(tmp_path):
 
 def test_a_model_fire_event_at_a_place_the_fd_is_working_is_held_like_a_rules_one():
     from tests.test_intel_fd_present import NOW, engine as fd_engine, inc, locate as fd_locate
-    text = "Car 3, check on a dumpster behind 20 Example Road, the caller says it is glowing and crackling"
+    text = "Car 3, check on a dumpster behind 20 Example Road, the caller says it is glowing and burning"
     for incs, pushes in (((inc(fd="dispatched"),), False), ((), True)):
         e, sink = fd_engine(*incs)
         b = B.FakeBackend(answer("fire_report", 0.9, weapon="none"))
@@ -773,6 +773,167 @@ def test_a_category_with_cues_is_raised_only_when_the_trigger_says_one_or_two_co
     e, sink, b = setup(B.FakeBackend(water()))                               # the trigger says it
     [ev] = e.feed(row("t1", CUED, 1000))
     assert ev.category == "water_rescue"
+
+
+# -- the police pack's per-category cues (an answer of a category the words never said is kept, raises nothing) ----------
+
+YELLING = "the caller says two neighbors are yelling at each other about a parking space on Sample St"
+FIGHTING = "the caller says two neighbors are in a fight about a parking space on Sample St right now"
+EN_ROUTE = "copy that, two cars heading over now from the north end, show us on the way over there"
+CUED_CATS = ("dispute", "edp", "mva_injury", "pursuit", "barricade", "weapons", "assault", "hazmat", "fire_report",
+             "fire_call", "officer")
+
+
+def test_a_category_answer_the_words_never_cue_raises_nothing_and_a_cue_word_raises_it():
+    e, sink, b = setup(B.FakeBackend(answer("dispute", 0.9, weapon="none")))
+    assert e.feed(row("t1", YELLING, 1000)) == [] and len(b.asked) == 1          # no dispute cue: kept, nothing raised
+    assert e.events.all() == [] and sink.pushes == [] and e.backing.today["uncued"] == 1
+    assert e.backing.records[-1]["used"] == "uncued" and e.backing.records[-1]["category"] == "dispute"
+    e, sink, b = setup(B.FakeBackend(answer("dispute", 0.9, weapon="none")))
+    [ev] = e.feed(row("t1", FIGHTING, 1000))                                      # "fight": raised
+    assert ev.category == "dispute" and e.backing.today["uncued"] == 0
+
+
+DISPATCH = "units respond to Sample St and Test Rd, the caller says two males are fighting out front"
+
+
+def en_route(msgs):
+    """dispute for the unit's "en route" trigger only (never for the rows around it)."""
+    trig = msgs[-1]["content"].split("Same talkgroup")[0]
+    return answer("dispute", 0.9, weapon="none") if "north end" in trig else answer("none", 0.1)
+
+
+def test_a_cue_in_the_dispatch_aired_just_before_the_trigger_counts():
+    e, sink, b = setup(B.FakeBackend(en_route))
+    assert e.feed(row("t1", DISPATCH, 1000)) == []                                # the dispatch cue (nothing else)
+    [ev] = e.feed(row("t2", EN_ROUTE, 1010))
+    assert ev.category == "dispute" and ev.traffic_ids == ["t2"]
+
+
+def test_the_same_words_in_a_row_that_is_no_dispatch_do_not_count():
+    e, sink, b = setup(B.FakeBackend(en_route))
+    assert e.feed(row("t1", "i think those two were fighting out front of the store earlier on", 1000)) == []
+    assert e.feed(row("t2", EN_ROUTE, 1010)) == [] and e.backing.today["uncued"] == 1
+
+
+def test_the_dispatchers_voice_is_a_dispatch_without_the_cue_rules_words():
+    text = "two males fighting out front of the deli on Sample St, one of them has his shirt off"
+    e, sink, b = setup(B.FakeBackend(en_route))
+    assert e.feed(row("t1", text, 1000, dispatcher=True)) == []
+    assert not any(r.id == "pd.dispatch_cue" for r, _w in e.windows[("police", "p25:mrrs:9211")].entries["t1"].hits)
+    [ev] = e.feed(row("t2", EN_ROUTE, 1010))
+    assert ev.category == "dispute"
+    e, sink, b = setup(B.FakeBackend(en_route))                                    # the same words, not the dispatcher
+    e.feed(row("t1", text, 1000))
+    assert e.feed(row("t2", EN_ROUTE, 1010)) == [] and e.backing.today["uncued"] == 1
+
+
+def test_a_dispatch_aired_after_the_trigger_but_read_first_is_not_before_it():
+    e, sink, b = setup(B.FakeBackend(en_route))
+    e.feed(row("t2", DISPATCH, 1010))                                              # aired 10 s after, read first
+    assert e.feed(row("t1", EN_ROUTE, 1000)) == [] and e.backing.today["uncued"] == 1
+
+
+def test_a_unit_row_between_the_dispatch_and_the_trigger_leaves_it_uncued():
+    e, sink, b = setup(B.FakeBackend(en_route))
+    e.feed(row("t1", DISPATCH, 1000))
+    e.feed(row("t2", "car two show me out at the gas station on the corner, plate check", 1005))
+    assert e.feed(row("t3", EN_ROUTE, 1010)) == [] and e.backing.today["uncued"] == 1
+
+
+def test_a_dispatch_on_another_source_or_past_the_window_is_not_used():
+    e, sink, b = setup(B.FakeBackend(en_route))
+    e.feed(row("t1", DISPATCH, 1000, source="p25:mrrs:9213", talkgroup=9213))     # another of the pack's sources
+    assert e.feed(row("t2", EN_ROUTE, 1010)) == [] and e.backing.today["uncued"] == 1
+    e, sink, b = setup(B.FakeBackend(en_route))
+    e.feed(row("t1", DISPATCH, 1000))
+    assert e.feed(row("t2", EN_ROUTE, 1000 + e.pack("police").window_s + 5)) == [] and e.backing.today["uncued"] == 1
+
+
+def test_aided_and_alarm_have_no_cues_an_answer_alone_raises_them():
+    for cat, text in (("aided", "the caller says her neighbor has not answered the door all day and she is worried"),
+                      ("alarm", "the company called about the building on Sample St, zone four in the back hallway")):
+        e, sink, b = setup(B.FakeBackend(answer(cat, 0.9, weapon="none")))
+        [ev] = e.feed(row("t1", text, 1000))
+        assert ev.category == cat and e.backing.today["uncued"] == 0, cat
+
+
+def test_every_police_category_but_aided_and_alarm_loads_its_cues_whole_words_only():
+    pack = next(p for p in full() if p.name == "police")
+    for cat in pack.categories:
+        cues = pack.category(cat).get("model_cues") or []
+        if cat in ("aided", "alarm"):
+            assert cues == [], cat
+        elif cat in CUED_CATS:
+            assert len(cues) >= 6, cat
+    assert set(CUED_CATS) <= set(pack.categories)
+    m = B.ModelBacking(lambda: {}, clock=Clock(0), log=lambda t: None, backend=B.FakeBackend(answer()))
+    assert m._cued(pack, "officer", "officers down at the corner", [])
+    assert m._cued(pack, "officer", "car 3 10-13", [])
+    assert m._cued(pack, "hazmat", "a co detector going off on the second floor", [])
+    assert not m._cued(pack, "weapons", "the battery is dead on the patrol car again", [])   # "bat": a whole word
+    assert not m._cued(pack, "edp", "he jumped the fence and ran", [])                       # "jump": a whole word
+    assert not m._cued(pack, "fire_call", "the fdny unit from the city is on the parkway", [])  # "fd"
+    for cat, text in (("officer", "car 3 i need backup"), ("officer", "send me another car"), ("weapons", "a shooting"),
+                      ("weapons", "gunshots heard"), ("pursuit", "he fled the scene"), ("barricade", "two hostages"),
+                      ("edp", "a jumper on the roof"), ("mva_injury", "the driver is not moving"), ("mva_injury", "a roll over on the ramp"),
+                      ("dispute", "a large crowd outside the bar"), ("dispute", "disorderly group")):
+        assert m._cued(pack, cat, text, []), (cat, text)
+    assert m._cued(pack, "aided", "anything at all", [])
+    for cat, text in (("mva_injury", "ems is requested for a fall"), ("dispute", "a possible heart attack"),
+                      ("fire_call", "a fire alarm drill at the school"), ("weapons", "he left a hammer in the truck"),
+                      ("officer", "she says she might have hurt her shoulder")):
+        assert not m._cued(pack, cat, text, []), (cat, text)                     # too broad: CUE_EXEMPT, never cues
+    for text in ("my partner is hurt", "i'm hurt send me another car", "officer down", "i'm hit"):
+        assert m._cued(pack, "officer", text, []), text
+
+
+# What each category's rules say, its cues must say too (or the model can't raise what the rules would have, under
+# their threshold): every wording a rule phrase can match, its "..." gaps dropped. The intended exceptions only:
+CUE_EXEMPT = {
+    "mva_injury": ("mva", "motor vehicle accident", "car accident", "crash",   # pd.mva: a crash alone is no injury
+                   "pin",                                                      # (pinned, trapped: cues)
+                   "ems"),                                                     # routine medical calls say it
+    "weapons": ("pipe", "bottle", "hammer", "crowbar", "golf club", "box cutter"),   # objects, not weapon words
+    "dispute": ("attack",),                                                    # "heart attack", "panic attack"
+    "fire_call": ("fire",),                                                    # alarms, drills (fd, fire department: cues)
+}
+
+
+def test_every_wording_of_a_categorys_rules_says_one_of_its_cues():
+    import itertools
+    raw = json.loads((rules_mod.DATA / "police.json").read_text())
+    pack = next(p for p in full() if p.name == "police")
+    m = B.ModelBacking(lambda: {}, clock=Clock(0), log=lambda t: None, backend=B.FakeBackend(answer()))
+    checked, missing = 0, []
+    for r in raw["rules"]:
+        cat = r["category"]
+        if not (raw["categories"].get(cat) or {}).get("model_cues"):
+            continue                                                            # no cues (aided, alarm, "*")
+        exempt = rules_mod._phrases(list(CUE_EXEMPT.get(cat, ())), "exempt")
+        for src in r.get("any") or []:
+            if src.startswith("re:"):
+                continue
+            items = [i for i in rules_mod._items(src) if i != rules_mod.GAP]
+            for combo in itertools.islice(itertools.product(*items), 2000):
+                text = " ".join(w for alt in combo for w in alt)
+                ws = rules_mod.words(text)
+                checked += 1
+                if not m._cued(pack, cat, text, []) and not any(p.found(text, ws) for p in exempt):
+                    missing.append((cat, r["id"], text))
+    assert checked > 1000 and missing == []
+
+
+def test_the_prompt_says_when_in_doubt_none_and_what_none_is():
+    cats = {"dispute": {"label": "Dispute / fight", "describe": "A fight."}}
+    system = B.messages(cats, {"at": 0, "text": "a test"}, [], [])[0]["content"]
+    assert B.NONE_LINE in system and system.endswith(B.NONE_LINE)
+    for s in ("a call already handled or cleared", "an alarm cancelled", "a theft or larceny reported after the fact",
+              "plate or vehicle checks",
+              "a parade barricade", "too garbled or partial"):
+        assert s in B.NONE_LINE, s
+    assert "below 0.5 when the transmission is garbled, partial or only hints at the incident" in B.SYSTEM
+    assert "or a dispatch in its context, describes that incident; when in doubt, none." in B.SYSTEM
 
 
 def test_the_model_alone_is_never_high_nor_pushed_and_one_short_row_is_low():

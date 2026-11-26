@@ -46,6 +46,16 @@ CALLSIGN = re.compile(r"[A-Za-z0-9][A-Za-z0-9 .'/-]{0,39}")
 WANT_MAX = 8
 FIELDS = ("model", "context", "callsigns", "challenger", "pct", "promoted", "rolled_back")
 PCT_DEFAULT = 10.0           # a challenger's share of its channel's clips
+# the GPU worker's local LLM (the intel lane's, sizeup/cloud/infer.py): models.json "llm_models" (the worker checks
+# it, downloads the GGUF and swaps llama-server; README "The local LLM"). The hub names one (Settings > Station >
+# Health, beside the LLM's status); DEFAULT_LLM is today's 8B: the 4B only once an admin picks it (intel's cue gate first)
+LLM_META = "stt_llm"
+DEFAULT_LLM = "qwen3-8b-q4_k_m"
+LLM_PRIORITIES = ("yield", "keep")      # "yield": speech first, the LLM gives its VRAM to the speech models (the admin's)
+DEFAULT_LLM_PRIORITY = "yield"
+# a champion change on a pre-alert channel (#728: intel is told before it applies): kept in hub.sqlite meta, newest last
+CHANGES_META = "stt_champion_log"
+CHANGES_MAX = 200
 
 
 def load(path: Path | str = PINS) -> tuple[dict, str]:
@@ -65,6 +75,21 @@ def load(path: Path | str = PINS) -> tuple[dict, str]:
                     "context": "list" if e["kind"] == "llama-asr" else "prompt",
                     "context_default": bool(e.get("context_default", True)), "what": str(e.get("what") or "")[:120]}
     return out, hashlib.sha256(raw).hexdigest()
+
+
+def load_llms(path: Path | str = PINS) -> dict:
+    """models.json's llm_models: {id: {id, what, vram_mb}} (what the hub shows and names; the worker checks the files).
+    {} when there are none (a catalog from before them: the workers keep worker.toml's)."""
+    try:
+        doc = json.loads(Path(path).read_bytes())
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for mid, e in (doc.get("llm_models") or {}).items() if isinstance(doc, dict) else ():
+        if mid.startswith("_") or not ID.fullmatch(mid) or not isinstance(e, dict):
+            continue
+        out[mid] = {"id": mid, "what": str(e.get("what") or "")[:120], "vram_mb": int(e.get("vram_mb") or 0)}
+    return out
 
 
 def clean_callsigns(v) -> list[str]:
@@ -115,12 +140,14 @@ class Choices:
     """Each channel's model, context switch and call signs (hub.sqlite meta META), over DEFAULTS. mdb: the MonitorDb
     (get / put of its meta)."""
 
-    def __init__(self, mdb, catalog: dict | None = None, digest: str = "", clock: Callable[[], float] = time.time):
+    def __init__(self, mdb, catalog: dict | None = None, digest: str = "", clock: Callable[[], float] = time.time,
+                 llms: dict | None = None):
         self.mdb, self.clock = mdb, clock
         if catalog is None:
             catalog, digest = load()
         self.catalog, self.digest = catalog, digest
-        self._lock = threading.Lock()
+        self.llms = load_llms() if llms is None else llms
+        self._lock = threading.RLock()        # (set() calls its before hook holding it: note_change takes it again)
         self._cache: tuple[float, dict] = (0.0, {})
         self.service_of: Callable[[str], str] = lambda key: ""    # a channel key's service (the hub's: _key_service)
 
@@ -155,11 +182,18 @@ class Choices:
         mid = (self.settings().get(key) or {}).get("model")
         return mid if isinstance(mid, str) and mid in self.catalog else self.default_for(service)
 
+    # an airband channel (the hub sets it: its kind): a whisper model there never gets a prompt (#900, HubApp's
+    # _pool_prompt_v: an ATC prompt costs words and makes it loop on a weak AM clip), whatever its context switch; the
+    # aircraft near the field go only to a model that takes a list
+    is_airband: Callable[[str], bool] = staticmethod(lambda key: False)
+
     def context_on(self, key: str, model: str) -> bool:
+        e = self.catalog.get(model)
+        if e is not None and e["context"] == "prompt" and self.is_airband(key):
+            return False
         c = (self.settings().get(key) or {}).get("context")
         if c in ("on", "off"):
             return c == "on"
-        e = self.catalog.get(model)
         return True if e is None else bool(e["context_default"])
 
     def plain(self, key: str) -> list[str]:
@@ -236,12 +270,20 @@ class Choices:
             for m in mids:
                 if isinstance(m, str) and m in self.catalog and m not in out:
                     out.append(m)
-        # then the challengers (after every champion: one that doesn't fit the VRAM is the one left out), fire's first
+        return out[:WANT_MAX]
+
+    def tries(self, services: dict | None = None, want: list | None = None) -> list[str]:
+        """The challengers (#869): the models a worker loads only on demand, never in its resident plan (want): only while
+        idle, only beside the champions AND the LLM, unloaded under pressure (the worker's stt_models.try). Fire's
+        first; none that is a champion already."""
+        services = services or {}
+        want = self.want(services) if want is None else want
         order = {s: i for i, s in enumerate(SERVICE_ORDER)}
         chall = sorted(((order.get(services.get(k, ""), len(order)), k, v.get("challenger"))
                         for k, v in self.settings().items() if v.get("challenger")), key=lambda x: (x[0], x[1]))
+        out: list[str] = []
         for _o, _k, m in chall:
-            if isinstance(m, str) and m in self.catalog and m not in out:
+            if isinstance(m, str) and m in self.catalog and m not in out and m not in want:
                 out.append(m)
         return out[:WANT_MAX]
 
@@ -258,8 +300,10 @@ class Choices:
             key = channels.tg_key(got[1])
         return key
 
-    def set(self, key: str, body: dict) -> tuple[dict, dict]:
-        """One channel's {model?, context?, callsigns?} (null or "" a field back to its default). (old, new). ValueError."""
+    def set(self, key: str, body: dict, before: Callable[[str, dict, dict], None] | None = None) -> tuple[dict, dict]:
+        """One channel's {model?, context?, callsigns?, challenger?, pct?} (null or "" a field back to its default).
+        (old, new). ValueError. before(key, old, new): called once every field is checked, before it is stored (a
+        champion change: intel told first, HubApp.stt_champion_change)."""
         key = self.key_of(key)
         with self._lock:
             cur = dict(self._read())
@@ -308,12 +352,75 @@ class Choices:
                 raise ValueError("challenger: not the channel's own model")
             if new.get("model") != old.get("model") or new.get("challenger") != old.get("challenger"):
                 new.pop("promoted", None)            # (a promotion is watched only while its pair stands)
+            if before is not None and old != new:
+                before(key, old, new)
             if new:
                 cur[key] = new
             else:
                 cur.pop(key, None)
             self._write(cur)
         return old, new
+
+    # -- the workers' local LLM: which model, and who gives way on VRAM ---------------------------------------------
+
+    def _llm_doc(self) -> dict:
+        try:
+            d = json.loads(self.mdb.get(LLM_META, "") or "{}")
+        except ValueError:
+            d = {}
+        return d if isinstance(d, dict) else {}
+
+    def llm(self) -> str:
+        """The LLM the workers are told to run (an llm_models id): the admin's, else DEFAULT_LLM; "" with no catalog
+        entry for it (the workers keep worker.toml's)."""
+        m = self._llm_doc().get("model")
+        m = m if isinstance(m, str) and m in self.llms else DEFAULT_LLM
+        return m if m in self.llms else ""
+
+    def llm_priority(self) -> str:
+        p = self._llm_doc().get("priority")
+        return p if p in LLM_PRIORITIES else DEFAULT_LLM_PRIORITY
+
+    def set_llm(self, model=None, priority=None) -> tuple[dict, dict]:
+        """The admin's LLM (an llm_models id; None or "" back to the default) and/or its priority. (old, new) as
+        {model, priority}. ValueError."""
+        with self._lock:
+            old = {"model": self.llm(), "priority": self.llm_priority()}
+            d = self._llm_doc()
+            if model is not None:
+                if model == "":
+                    d.pop("model", None)
+                elif not isinstance(model, str) or model not in self.llms:
+                    raise ValueError(f"model: one of {', '.join(self.llms) or '(no LLM catalog)'}")
+                else:
+                    d["model"] = model
+            if priority is not None:
+                if priority not in LLM_PRIORITIES:
+                    raise ValueError(f"priority: one of {', '.join(LLM_PRIORITIES)}")
+                d["priority"] = priority
+            self.mdb.put(LLM_META, json.dumps(d, separators=(",", ":"), sort_keys=True))
+            return old, {"model": self.llm(), "priority": self.llm_priority()}
+
+    def llm_panel(self) -> dict:
+        return {"model": self.llm(), "default": DEFAULT_LLM if DEFAULT_LLM in self.llms else "",
+                "priority": self.llm_priority(), "priorities": list(LLM_PRIORITIES),
+                "catalog": [dict(e) for e in self.llms.values()]}
+
+    # -- champion changes (intel is told first on a pre-alert channel) ------------------------------------------------
+
+    def changes(self, since: float = 0.0) -> list[dict]:
+        """The champion changes kept (newest last), after `since`: what the intel session reads (HubApp.stt_champion_log)."""
+        try:
+            rows = json.loads(self.mdb.get(CHANGES_META, "") or "[]")
+        except ValueError:
+            rows = []
+        return [r for r in rows if isinstance(r, dict) and float(r.get("at") or 0) > since] if isinstance(rows, list) else []
+
+    def note_change(self, row: dict) -> None:
+        with self._lock:
+            rows = self.changes()
+            rows.append(row)
+            self.mdb.put(CHANGES_META, json.dumps(rows[-CHANGES_MAX:], separators=(",", ":"), sort_keys=True))
 
     def panel(self) -> dict:
         """Settings: the catalog (id, kind, what, services, context default), the defaults by service and each
@@ -331,12 +438,24 @@ def _items(text: str) -> list[str]:
     return [" ".join(WORD.findall(x.lower())) for x in re.split(r"[,.;:!?]+", str(text or "")) if WORD.findall(x.lower())]
 
 
-def context_echo(text: str, context: list) -> bool:
+ECHO_MIN_ITEMS = 3        # a read-back: at least this many context phrases ...
+ECHO_SLOW_WPS = 0.8       # ... or (two, all of it) words this sparse for the clip's length: a long clip read as the list
+
+
+def context_echo(text: str, context: list, seconds: float | None = None) -> bool:
     """A llama-asr model gave its context back instead of what was said (Qwen3-ASR does when the list nearly matches a
-    short clip): two or more of the text's phrases are context items and they are 80% or more of its phrases."""
+    short clip). Every phrase of the text a context item, and either ECHO_MIN_ITEMS or more of them ("Engine 60, Ladder
+    31, 60 Control"), or two that are far too few words for the clip's length (seconds: under ECHO_SLOW_WPS words a
+    second). A real call-up of two names ("Sixty Control, Engine Sixty-Three" said in 2 s) is kept; a phrase that
+    isn't a name ("responding", "on scene") is speech."""
     if not text or not context:
         return False
     ctx = {" ".join(WORD.findall(str(c).lower())) for c in context}
     items = _items(text)
     hits = sum(1 for i in items if i in ctx)
-    return hits >= 2 and hits >= 0.8 * len(items)
+    if not items or hits < len(items):
+        return False
+    if hits >= ECHO_MIN_ITEMS:
+        return True
+    words = sum(len(i.split()) for i in items)
+    return hits >= 2 and isinstance(seconds, (int, float)) and seconds > 0 and words / seconds < ECHO_SLOW_WPS

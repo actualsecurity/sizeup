@@ -36,6 +36,9 @@ SUFFIXES = {"rd": "road", "st": "street", "ave": "avenue", "av": "avenue", "blvd
 NORM = "norm/2:" + __import__("hashlib").sha1(repr((sorted(SUFFIXES.items()), sorted(stt_terms._ONES.items()),
                                                     sorted(stt_terms._TENS.items()))).encode()).hexdigest()[:6]
 MIN_N = 20                  # samples before a verdict (and before a promotion's watch can roll it back)
+# a promote's evidence (the admin's rule): at least this many scored samples of the channel's domain, and the verdict
+# "challenger better"; shown before the admin confirms (HubApp.stt_promote)
+MIN_N_PROMOTE = {"fire": 40, "police": 40, "air": 40, "other": 30}
 ROLLBACK_MARGIN = 0.02      # a promoted model rolled back when it scores this much under the one it replaced (and the
                             # interval says so)
 DOMAINS = {"fire": "fire", "ems": "fire", "police": "police", "air": "air"}
@@ -226,6 +229,41 @@ def should_roll_back(cmp: dict) -> bool:
     if cmp.get("n", 0) < MIN_N or cmp.get("diff") is None or cmp.get("ci") is None:
         return False
     return cmp["diff"] - cmp["ci"] * ROLLBACK_Z / 1.96 > ROLLBACK_MARGIN
+
+
+def promote_ok(board: dict) -> tuple[bool, str]:
+    """May this board's challenger be promoted (an admin's action): (yes, the evidence said; or why not)."""
+    need = MIN_N_PROMOTE.get(str(board.get("domain") or "other"), MIN_N_PROMOTE["other"])
+    n = int(board.get("n") or 0)
+    if not board.get("challenger"):
+        return False, "no challenger"
+    if n < need:
+        return False, f"{n} of {need} samples"
+    if board.get("verdict") != "challenger better":
+        return False, f"verdict: {board.get('verdict') or 'none'}"
+    return True, (f"{board['challenger']} {board.get('chall', 0):.3f} vs {board.get('champion')} "
+                  f"{board.get('champ', 0):.3f} over {n} clips (diff {board.get('diff', 0):+.3f} ± {board.get('ci') or 0:.3f})")
+
+
+def drop_context(refs: dict, context=(), prompt: str = "") -> dict:
+    """The refs without what was in the context sent to the models (the admin's rule: a model that only echoes its
+    context, the ADS-B list or a talker's name, never scores for it): each ref whose NORM tokens are in a context item
+    or in the prompt is left out."""
+    sent = [" ".join(normalize(c)) for c in context or () if c]
+    joined = f" {' '.join(normalize(prompt))} " if prompt else ""
+    out: dict = {}
+    for k, v in (refs or {}).items():
+        if not isinstance(v, list):
+            out[k] = v
+            continue
+        keep = []
+        for r in v:
+            t = " ".join(normalize(r))
+            if not t or t in sent or (joined and f" {t} " in joined):
+                continue
+            keep.append(r)
+        out[k] = keep
+    return out
 
 
 def sampled(clip_id: str, model: str, pct: float) -> bool:

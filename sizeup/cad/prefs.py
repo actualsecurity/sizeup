@@ -9,13 +9,19 @@ name or a changed email), never by anything the request says: one person can onl
 too (it is their own screen). Without a verified sign-in (all-in-one, local dev) there is nobody to keep them for: GET
 says signed_in false and the page keeps them in the browser only; a PUT is refused.
 
-Namespaces, each a known shape of booleans only (anything else is refused, not trimmed):
+Namespaces, each a known shape (anything else is refused, not trimmed):
 
     map_layers   {overview: {layer: bool}, incident: {layer: bool}, folds: {group: bool}, hideDown: bool}
                  (static/maplayers.js; a layer key "cameras", "gis:hydrants"; a fold is a Layers box group's heading)
     preplan      {layer: bool} (static/preplan.js: the Pre-plan layer on every map)
     reminders    {sound: bool, board_sound: bool} (static/reminders.js: a short chime when a reminder starts flashing,
                  on the console; board_sound: on /monitor, the wall board. Both off unless turned on)
+    listen       {rules: {target: priority | normal | off}, mode: interrupt | duck | queue, max_age: s, ours_only: bool}
+                 (static/live-player.js: what the console's live player plays, and how). A target: "view:<id>" (a
+                 Radio view, the department's or the person's own: its filter), "sys:<system>", "src:<source key>",
+                 "mhz:<frequency>"; from before the views, "ours" and "svc:<service>" (moved to the matching view's
+                 where there is one). An earlier page's mute_police is taken and dropped (LISTEN_GONE), never kept
+    search       {intel: bool} (static/search-view.js: Search's Intel events, #937; off unless turned on)
 
 An event's own layer set (incidents.map_layers, POST /api/cad/incident/<id>) is the event's, not here.
 
@@ -30,6 +36,8 @@ from __future__ import annotations
 
 import json
 import re
+
+from sizeup import sourcekeys
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS person_prefs (
@@ -49,6 +57,17 @@ MAX_KEYS = 400                 # one set's entries (the county's GIS catalog is 
 LAYER_KEY = re.compile(r"[a-z][a-z0-9_:-]{0,47}")       # maplayers.js KEY_RE
 FOLD_MAX = 80                  # a Layers box group's heading (gislayers.js: the catalog's group names)
 NS = re.compile(r"[a-z][a-z0-9_]{0,31}")
+LISTEN_LEVELS = ("priority", "normal", "off")
+LISTEN_MODES = ("interrupt", "duck", "queue")
+LISTEN_AGE = (10, 600)         # max_age: a Normal transmission older than this (s) is dropped, never played late
+# view:<id> a Radio view (the department's or the person's own, sizeup/cad/radioviews.py VIEW_ID / MINE_ID: not
+# imported, the store imports this); "ours" and "svc:" are the targets before the views (an older page sends them;
+# static/live-player.js moves them to the matching view's)
+LISTEN_TARGET = re.compile(r"ours|svc:[a-z]{2,12}|sys:[a-z][a-z0-9_-]{0,23}|mhz:\d{2,4}(?:\.\d{1,4})?"
+                           r"|view:(?:ours|police|ems|transit|air|all|[up]:[a-z0-9]{4,24})")
+LISTEN_GONE = {"mute_police"}  # a key an earlier page sent (#895's Mute police): taken and dropped, never kept or served
+LISTEN_SRC_MAX = 120           # a source key's length (radiofolders.KEY_MAX)
+LISTEN_CHANNEL = re.compile(r"(?:fm|air):[^\x00-\x1f\x7f]{1,100}")      # an FM / airband channel (radiofolders.ITEM)
 
 
 class PrefsError(ValueError):
@@ -112,7 +131,74 @@ def _reminders(v) -> dict:
     return dict(v)
 
 
-NAMESPACES = {"map_layers": _map_layers, "preplan": _preplan, "reminders": _reminders}
+def _search(v) -> dict:
+    if not isinstance(v, dict) or set(v) - {"intel"}:
+        raise PrefsError("search: {intel: true | false}")
+    if "intel" in v and not isinstance(v["intel"], bool):
+        raise PrefsError("search.intel: true or false")
+    return dict(v)
+
+
+def _listen_target(k) -> bool:
+    if not isinstance(k, str):
+        return False
+    if k.startswith("src:"):
+        key = k[4:]
+        # (a source key's own shape, as sizeup/cad/radiofolders.py is_key: not imported, the store imports this)
+        return 0 < len(key) <= LISTEN_SRC_MAX and key.isprintable() and key == key.strip() and (
+            bool(LISTEN_CHANNEL.fullmatch(key)) or sourcekeys.parse(key) is not None)
+    if k.startswith("svc:"):
+        return k[4:] in sourcekeys.SERVICES
+    return bool(LISTEN_TARGET.fullmatch(k))
+
+
+def _listen(v) -> dict:
+    if not isinstance(v, dict):
+        raise PrefsError("listen: an object")
+    extra = set(v) - {"rules", "mode", "max_age", "ours_only"} - LISTEN_GONE
+    if extra:
+        raise PrefsError("listen: rules, mode, max_age and ours_only only")
+    out: dict = {}
+    if "rules" in v:
+        r = v["rules"]
+        if not isinstance(r, dict):
+            raise PrefsError("listen.rules: {target: priority | normal | off}")
+        if len(r) > MAX_KEYS:
+            raise PrefsError(f"listen.rules: at most {MAX_KEYS} entries", 413)
+        for k, lvl in r.items():
+            if not _listen_target(k):
+                raise PrefsError("listen.rules: a bad target")
+            if lvl not in LISTEN_LEVELS:
+                raise PrefsError(f"listen.rules: {', '.join(LISTEN_LEVELS)}")
+        out["rules"] = dict(r)
+    if "mode" in v:
+        if v["mode"] not in LISTEN_MODES:
+            raise PrefsError(f"listen.mode: {', '.join(LISTEN_MODES)}")
+        out["mode"] = v["mode"]
+    if "max_age" in v:
+        a = v["max_age"]
+        if isinstance(a, bool) or not isinstance(a, int) or not LISTEN_AGE[0] <= a <= LISTEN_AGE[1]:
+            raise PrefsError(f"listen.max_age: whole seconds, {LISTEN_AGE[0]} to {LISTEN_AGE[1]}")
+        out["max_age"] = a
+    for b in ("ours_only",):
+        if b in v:
+            if not isinstance(v[b], bool):
+                raise PrefsError(f"listen.{b}: true or false")
+            out[b] = v[b]
+    return out
+
+
+def _radio_views(v) -> dict:
+    from sizeup.cad import radioviews          # (here: store.py imports this module, radioviews store's CadError)
+    from sizeup.cad.store import CadError
+    try:
+        return radioviews.clean_prefs(v)
+    except CadError as e:
+        raise PrefsError(str(e)) from None
+
+
+NAMESPACES = {"map_layers": _map_layers, "preplan": _preplan, "reminders": _reminders, "listen": _listen,
+              "radio_views": _radio_views, "search": _search}
 
 
 def validate(ns: str, value) -> str:
@@ -148,9 +234,12 @@ class Prefs:
         for r in self.store.q("SELECT ns, value FROM person_prefs WHERE operator_id = ?", (oid,)):
             if r["ns"] in NAMESPACES:           # (a namespace a later build dropped: not handed out)
                 try:
-                    out[r["ns"]] = json.loads(r["value"])
+                    v = json.loads(r["value"])
                 except ValueError:
-                    pass
+                    continue
+                if r["ns"] == "listen" and isinstance(v, dict):
+                    v = {k: x for k, x in v.items() if k not in LISTEN_GONE}     # kept before it was dropped
+                out[r["ns"]] = v
         return out
 
     def put(self, oid: int, ns: str, value) -> dict:

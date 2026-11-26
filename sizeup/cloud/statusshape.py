@@ -65,7 +65,7 @@ OUTBOX = {"pending": (_opt(lambda v: _int(v) and v >= 0), "a count or null"), "o
 STT_INPUT = {"dropped": DICT, "worker": DICT}
 VERSION = {"build": OSTR, "hub": OSTR, "update": DICT, "adapter": ODICT, "state": OSTR, "text": OSTR}
 # the updater's state as the hub reads it (autoupdate.describe: on the deploy check's path)
-VERSION_UPDATE = {"state": OSTR, "to": OSTR, "from": OSTR, "since": ONUM, "failed": ODICT, "equivalent": ODICT,
+VERSION_UPDATE = {"state": OSTR, "phase": OSTR, "to": OSTR, "from": OSTR, "since": ONUM, "failed": ODICT, "equivalent": ODICT,
                   "retry": ODICT, "hold": ODICT, "last": ODICT}
 # whisper's queue as Health's watcher reads it (the backlog alert, its text and cause)
 STT_QUEUE = {**{k: ONUM for k in ("queued", "urgent", "oldest_s", "service_s", "in_h", "in_fallback_h")},
@@ -77,7 +77,7 @@ TALKGROUP = {"tg": INT}
 TOP: dict[str, tuple] = {
     "id": STR, "config_id": OSTR, "name": OSTR,
     "radios": LIST, "sdr": ODICT, "rerun": DICT, "channels": DICT, "p25_systems": LIST, "reception": ODICT,
-    "stt_terms": DICT, "outbox": DICT, "stt_input": DICT, "pool_worker": DICT, "stt_alert_rev": INT,
+    "stt_terms": DICT, "outbox": DICT, "stt_input": DICT, "pool_worker": DICT, "stt_alert_rev": INT, "caps": LIST,
     "version": DICT, "logship": DICT, "metrics": DICT, "health": DICT, "talkgroups": LIST,
 }
 NESTED: dict[str, dict] = {"sdr": SDR, "rerun": RERUN, "channels": CHANNELS, "reception": RECEPTION,

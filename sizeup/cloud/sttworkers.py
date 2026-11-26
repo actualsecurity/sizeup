@@ -11,15 +11,19 @@ Tokens
     Rotate              a new token; the old one works ROTATE_GRACE_S more (none after a revoke).
     Revoke              refused from its next request; what it holds falls back at once.
 
-The pool's switches (hub.sqlite meta "stt_pool", JSON): on (default on) and, per class, whether its clips go to the
-pool first (default all). With no active worker the pool is off whatever they say: nothing changes without one.
+The pool's switches (hub.sqlite meta "stt_pool", JSON): on (default on) and, per station, its whisper in the pool. With
+no active worker the pool is off whatever they say: nothing changes without one. Where a clip goes is its channel's
+engine alone (Settings > Radios > Channels, sizeup/sttroute.py, #896): the per-class switches that once sent a class to
+the pool first are gone (a saved one is ignored; a request to set one is refused), and no worker-side class opt-out
+replaces them.
 
 The worker API (every request: Authorization: Bearer sw1...; at the edge, a Cloudflare Access service token: best its
 own Access application scoped to /api/station/stt/*, so a worker's service token reaches nothing of the station's). JSON in and out; 401 {error, reason} for a token refused (no_token, token_unknown,
 token_revoked); 409 {error} for a lease that is gone.
 
     POST /api/station/stt/hello                   {worker?, version, model, gpu?, state} -> {ok, worker, poll_s, classes, pool_on}
-    POST /api/station/stt/state                   {state: online|gaming|paused, model, gpu, version} -> {ok, pool_on}
+    POST /api/station/stt/state                   {state: online|gaming|paused, model, gpu, version, keep_awake?,
+                                                  models?} -> {ok, pool_on, stt_models?}
     POST /api/station/stt/claim                   {wait <= 25, state, model, models?} -> {job: {lease, id, kind, channel,
                                                   class, prompt, seconds, lease_s, cap_at, fast, audio, model?,
                                                   context?, plain?} | null}; fast: one greedy pass (temperature_inc 0),
@@ -31,6 +35,9 @@ token_revoked); 409 {error} for a lease that is gone.
     POST /api/station/stt/jobs/<lease>/complete   {text, segments: [{start, end, text, words: [{word, start, end,
                                                   probability}]}], model, timing: {fetch_ms, infer_ms}} -> {ok}
     POST /api/station/stt/jobs/<lease>/release    {why} -> {ok}: the next engine takes it now
+    POST /api/station/stt/jobs/<lease>/watch      {wait <= 25} -> {live}: a challenger's lease (#869), a long poll: live
+                                                  false at once when the hub took it back (other work came: the worker
+                                                  stops the decode, no complete, no release); 409 a lease that is gone
     POST /api/station/stt/logs                    gzipped worker.log lines (see "Its log" below) -> {ok, accepted}
 
 The heartbeat contract: while it runs, a worker sends a request (state, extend or claim) at least every 6 s, during a
@@ -57,6 +64,11 @@ STT workers sets it per worker (hub.sqlite meta "stt_update"). The hub only name
 GitHub itself, only from main of actualsecurity/sizeup, and only a file with exactly that hash (its url is never used).
 A worker from before the move to deploy/ knows only tools/stt_worker/worker.py: the copy there is byte-identical (a test
 checks), so it finds the same hash at the same commit, and the version it updates to knows the new path.
+
+Keeping the PC awake (deploy/stt-worker/worker.py KeepAwake): a GPU worker on Windows says keep_awake {on, held} in its
+hello and state. Health shows "keeps PC awake" while held, and a worker gone silent as "offline since HH:MM", with
+"(asleep?)" when its last word said keep_awake off or not held, or its heartbeats just stopped while online (no pause,
+gaming or clean stop first: sttpool.Pool.asleep). A hub from before ignores the key.
 
 Its log (deploy/stt-worker/worker.py LogShip): POST /api/station/stt/logs, gzipped {v, worker, batch, lines: [[ms,
 level, msg]]} -> {ok, accepted, n | retry_s, reason}; a GPU worker's own token only. Into CloudWatch Logs
@@ -96,15 +108,19 @@ WORKER_FILE = Path(__file__).resolve().parents[2].joinpath(*WORKER_PATH.split("/
 COMMIT = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 API = "/api/station/stt/"
-LEASE_PATH = re.compile(r"/api/station/stt/jobs/([0-9a-f]{16})/(audio|extend|complete|release)")
+LEASE_PATH = re.compile(r"/api/station/stt/jobs/([0-9a-f]{16})/(audio|extend|complete|release|watch)")
 INFER_MAX_BODY = 32 * 1024     # an LLM job's answer (its 16 KB at most, sizeup/cloud/infer.py) and its counts
 MAX_BODY = 1024 * 1024                  # a result: the text and its words (a 2-minute clip's are ~100 KB)
 TEXT_MAX = 20000
 SEGMENTS_MAX = 1000
 WORDS_MAX = 4000
 POLL_S = 25.0
-AUDIO_WAIT_MAX_S = 2.0          # a job's audio: the station's STT input waited for this long at most (it usually comes a
-                                # moment after its event; one that doesn't come costs the worker this much of its lease)
+AUDIO_WAIT_MAX_S = 3.0          # a job's audio: the station's STT input waited for this long at most; per class far less
+                                # (sttpool.SRC_WAIT_S, counted from when the job was queued: a pre-alert clip 0.75 s), then
+                                # the listening clip (#678: a flat 2 s was every pre-alert job's fetch while the input came
+                                # ~2 s after its event)
+AUDIO_WAIT_OLD_S = 2.0          # ... the flat wait for a station whose STT lane is not woken by the events' ack (one from
+                                # before #678: its input comes ~2 s after its event; the hub deploys before the stations)
 STATION_PREFIX = "station:"     # a station's whisper as a pool worker: "station:<station id>" (never a token's id)
 STATION_ROUTES = (API + "hello", API + "state", API + "claim")            # what a station's identity may reach here
 STATION_LEASE_ROUTES = ("audio", "extend", "complete", "release")
@@ -177,6 +193,17 @@ def clean_self_update(v) -> dict | None:
             "bad": [b for b in bad[:5] if isinstance(b, str) and SHA256.fullmatch(b)]}
 
 
+def clean_keep_awake(v) -> dict:
+    """A GPU worker's keep_awake {on, held, why} (deploy/stt-worker/worker.py KeepAwake): the booleans, and why it isn't
+    held (40 characters); {} when it sent none (a worker from before, or not on Windows)."""
+    if not isinstance(v, dict):
+        return {}
+    out = {k: v[k] for k in ("on", "held") if isinstance(v.get(k), bool)}
+    if isinstance(v.get("why"), str) and v["why"].strip():
+        out["why"] = " ".join(v["why"].split())[:40]
+    return out
+
+
 class WorkerRegistry:
     """The hub's workers (hub.sqlite "stt_workers") and the pool's switches (meta "stt_pool"). mdb: the MonitorDb."""
 
@@ -229,9 +256,8 @@ class WorkerRegistry:
     # -- the pool's switches --------------------------------------------------------------------------------------
 
     def pool_settings(self) -> dict:
-        """{on, stations, classes: {name: bool}}: the defaults (on, the stations' whisper in the pool, every class) with
-        what an admin changed."""
-        out = {"on": True, "stations": {}, "classes": {sttpool.class_key(c): True for c in sttpool.CLASSES}}
+        """{on, stations}: the defaults (on, no station's whisper in the pool) with what an admin changed."""
+        out = {"on": True, "stations": {}}
         try:
             saved = json.loads(self.mdb.get(META_POOL, "") or "{}")
         except ValueError:
@@ -241,16 +267,14 @@ class WorkerRegistry:
                 out["on"] = saved["on"]
             if isinstance(saved.get("stations"), dict):          # (station id -> its whisper in the pool; off by default)
                 out["stations"] = {str(k): v for k, v in saved["stations"].items() if isinstance(v, bool)}
-            for k, v in (saved.get("classes") or {}).items() if isinstance(saved.get("classes"), dict) else ():
-                if k in out["classes"] and isinstance(v, bool):
-                    out["classes"][k] = v
-        return out
+        return out                                            # (a saved "classes" from before #896: ignored)
 
-    def enabled(self, cls: float) -> bool:
-        """Do this class's clips go to the pool first now: the pool is on, the class is on, and a worker can be there (a
-        GPU worker added, or a station's whisper an admin put in the pool: #639 phase 2)."""
+    def enabled(self, cls: float = 0.0) -> bool:
+        """Can the pool take clips now: it is on and a worker can be there (a GPU worker added, or a station's whisper an
+        admin put in the pool: #639 phase 2). The same for every class (cls: kept for the pool's callers): a clip's
+        channel's engine decides whether it goes there (#896)."""
         s = self.pool_settings()
-        if not s["on"] or not s["classes"].get(sttpool.class_key(cls), False):
+        if not s["on"]:
             return False
         return any(s["stations"].values()) or self.any()
 
@@ -264,7 +288,9 @@ class WorkerRegistry:
 
     def set_pool(self, on=None, classes=None, stations=None) -> tuple[dict, dict]:
         old = self.pool_settings()
-        new = {"on": old["on"], "stations": dict(old["stations"]), "classes": dict(old["classes"])}
+        if classes is not None:
+            raise WorkerError("classes: gone: a channel's engine decides where its clips go (Settings > Radios > Channels)")
+        new = {"on": old["on"], "stations": dict(old["stations"])}
         if on is not None:
             if not isinstance(on, bool):
                 raise WorkerError("on: true or false")
@@ -274,13 +300,6 @@ class WorkerRegistry:
                                                          for k, v in stations.items()):
                 raise WorkerError("stations: {station id: true or false}")
             new["stations"] = {**old["stations"], **{k[:64]: v for k, v in stations.items()}}
-        if classes is not None:
-            if not isinstance(classes, dict):
-                raise WorkerError("classes: an object")
-            for k, v in classes.items():
-                if k not in new["classes"] or not isinstance(v, bool):
-                    raise WorkerError(f"classes: {', '.join(new['classes'])}, each true or false")
-                new["classes"][k] = v
         self.mdb.put(META_POOL, json.dumps(new, sort_keys=True))
         self._switched()
         return old, new
@@ -407,6 +426,8 @@ class WorkerRegistry:
         wid = str(wid or "").strip()
         if not ID.fullmatch(wid):
             raise WorkerError("id: lower case letters, digits, - and _ (at most 40), e.g. \"gpu-1\"")
+        if wid == "aws":                   # (the engine selector's pinned AWS is "pin:aws": sizeup/sttroute.py)
+            raise WorkerError("id: \"aws\" is Amazon Transcribe's")
         return wid
 
     @staticmethod
@@ -526,9 +547,6 @@ class WorkerRegistry:
                 was, now_ = bool(old["stations"].get(sid)), bool(new["stations"].get(sid))
                 if was != now_:
                     note(f"stt workers/pool/station {sid}", "on" if was else "off", "on" if now_ else "off")
-            for k, v in new["classes"].items():
-                if old["classes"].get(k) != v:
-                    note(f"stt workers/pool/{k}", "on" if old["classes"].get(k) else "off", "on" if v else "off")
             return {"ok": True, "pool": new}
         raise WorkerError("action: add, rename, rotate, revoke, llm, update or pool")
 
@@ -589,11 +607,14 @@ class WorkerApi:
 
     def __init__(self, registry: WorkerRegistry, pool: sttpool.Pool, may_write: Callable[[], bool] = lambda: True,
                  log: Callable[[str], None] = print, station: Callable[[str], str | None] | None = None,
-                 build: dict | None = None):
+                 build: dict | None = None, src_fast: Callable[[], bool] = lambda: False):
         """station(bearer) -> the station id a station's own token proves (sizeup/cloud/stations.py), None when it
         isn't one: a station's whisper is a pool worker under its station identity ("station:<id>"), no token more.
-        build: the worker version this hub carries (worker_build(), read here once when not given)."""
+        build: the worker version this hub carries (worker_build(), read here once when not given). src_fast(): the
+        station sends each STT input at once after its event (#678: its status says stt_input.wake_on_ack), so a job's
+        audio waits only its class's budget (sttpool.SRC_WAIT_S); else the old flat AUDIO_WAIT_OLD_S."""
         self.reg, self.pool, self.may_write, self.log, self.station = registry, pool, may_write, log, station
+        self.src_fast = src_fast
         self._said: dict[tuple[str, str], float] = {}
         self.build = worker_build() if build is None else build
 
@@ -684,7 +705,7 @@ class WorkerApi:
                     word = self.stt_models()
                 except Exception as e:  # noqa: BLE001 - no models named is still an answer
                     word = None
-                    self.log(f"stt workers: the speech models' word: {type(e).__name__}: {e}")
+                    self.log(f"stt workers: the speech models' word: {type(e).__name__}")
                 if word:
                     told["stt_models"] = word
             ms = d.get("models") if isinstance(d.get("models"), dict) else {}
@@ -692,15 +713,19 @@ class WorkerApi:
             stt_state = ms.get("stt_state") if isinstance(ms.get("stt_state"), dict) else None
             if loaded is not None and model and state == "online":
                 loaded = [model] + [m for m in loaded if m != model]     # (its whisper_server's answers while online)
+            # keep_awake {on, held} and a clean stop's reason "shutdown": Health's "keeps PC awake" / "(asleep?)"
+            ka = clean_keep_awake(d.get("keep_awake")) if gpu else None
+            why = d.get("reason") if isinstance(d.get("reason"), str) else ""
             if path == API + "hello":
                 self.pool.seen(wid, state, model, d.get("gpu"), d.get("version") if isinstance(d.get("version"), str) else None,
-                               kind=kind, load=load, update=su, models=loaded, stt_state=stt_state)
-                s = self.reg.pool_settings()
+                               kind=kind, load=load, update=su, keep_awake=ka, reason=why, models=loaded,
+                               stt_state=stt_state)
                 return _json(200, {"ok": True, "worker": wid, "poll_s": POLL_S, "pool_on": self._pool_on(),
-                                   "classes": [k for k, v in s["classes"].items() if v], **told})
+                                   "classes": [sttpool.class_key(c) for c in sttpool.CLASSES], **told})
             if path == API + "state":
                 self.pool.seen(wid, state, model, d.get("gpu"), d.get("version") if isinstance(d.get("version"), str) else None,
-                               kind=kind, load=load, update=su, models=loaded, stt_state=stt_state)
+                               kind=kind, load=load, update=su, keep_awake=ka, reason=why, models=loaded,
+                               stt_state=stt_state)
                 return _json(200, {"ok": True, "pool_on": self._pool_on(), **told})
             if path == API + "claim":
                 wait = _num(d.get("wait")) or 0.0
@@ -713,6 +738,8 @@ class WorkerApi:
                 return _json(404, {"error": "not found"})
             self.pool.seen(wid)
             lease, what = m.group(1), m.group(2)
+            if what == "watch":                   # (#869: a challenger's, on the worker's own connection)
+                return _json(200, {"live": self.pool.watch(wid, lease, _num(d.get("wait")) or 0.0)})
             if what == "extend":
                 job = self.pool.extend(wid, lease)
                 if job is None:
@@ -749,9 +776,15 @@ class WorkerApi:
         if job is None:
             return _json(409, {"error": "lease lost"})
         try:
-            # (waiting for the station's own STT input, #671: half of what is left of the lease at most, so the clip is
-            # still transcribed in time; else the listening clip)
-            wait = max(0.0, min(AUDIO_WAIT_MAX_S, (job.expires - self.pool.clock()) / 2.0))
+            # (waiting for the station's own STT input, #671: its class's budget from when it was queued, half of what
+            # is left of the lease at most, so the clip is still transcribed in time; else the listening clip, #678)
+            now = self.pool.clock()
+            try:
+                fast = self.src_fast() is True
+            except Exception:  # noqa: BLE001 - not known: the old wait
+                fast = False
+            wait = (min(AUDIO_WAIT_MAX_S, sttpool.src_wait_s(job, now)) if fast
+                    else max(0.0, min(AUDIO_WAIT_OLD_S, (job.expires - now) / 2.0)))
             wav = job.audio(wait) if job.audio_wait else job.audio()
         except Exception as e:  # noqa: BLE001 - a store that can't be read now: the next engine takes it
             wav = None

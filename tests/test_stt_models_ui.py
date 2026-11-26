@@ -127,12 +127,12 @@ def test_the_workers_models_and_each_channels_context_and_call_signs(site):
         assert cat.locator("tr", has_text=Q5).first.locator("td").nth(3).inner_text() == "default"
         chans = m.locator("table").nth(1)
         fg1 = chans.locator("tr", has_text="FG1")
-        assert fg1.locator("input").first.input_value() == "Command" and fg1.locator("select").first.input_value() == "default"
-        fg1.locator("select").first.select_option("off")
+        assert fg1.locator("input").input_value() == "Command" and fg1.locator("select").input_value() == "default"
+        fg1.locator("select").select_option("off")
         until(pg, lambda: site.cad.stt_models.settings()["FG1"].get("context") == "off", "FG1 context off")
         fg1 = chans.locator("tr", has_text="FG1")
-        fg1.locator("input").first.fill("Command, Made-up Base")
-        fg1.locator("input").first.press("Tab")
+        fg1.locator("input").fill("Command, Made-up Base")
+        fg1.locator("input").press("Tab")
         until(pg, lambda: site.cad.stt_models.callsigns("FG1") == ["Command", "Made-up Base"], "FG1 call signs")
         # a channel not listed yet
         add = chans.locator("tr").last
@@ -143,8 +143,8 @@ def test_the_workers_models_and_each_channels_context_and_call_signs(site):
         chans.locator("td", has_text="South 2").wait_for()
         # a call sign that isn't one: said, nothing saved
         fg1 = chans.locator("tr", has_text="FG1")
-        fg1.locator("input").first.fill("Command, <b>")
-        fg1.locator("input").first.press("Tab")
+        fg1.locator("input").fill("Command, <b>")
+        fg1.locator("input").press("Tab")
         m.get_by_text("isn't a call sign").wait_for()
         assert site.cad.stt_models.callsigns("FG1") == ["Command", "Made-up Base"]
         if SHOTS:
@@ -173,54 +173,70 @@ def test_a_radios_hint_switch_shows_the_effective_state_and_sets_it(site):
         sys.select_option("mrrs")
         hq = pg.locator("#settings-radios tr", has_text="9900501").locator("button.sw")
         hq.wait_for()
-        assert hq.get_attribute("aria-checked") == "true" and "(default)" in hq.get_attribute("title")
+        # another P25 system's radio: off by default, even with its own exact label (MRRS: roles, agencies)
+        assert hq.get_attribute("aria-checked") == "false" and "(default)" in hq.get_attribute("title")
         assert "A range's label is never a hint" in hq.get_attribute("title")
         ranged = pg.locator("#settings-radios tr", has_text="9900150").locator("button.sw")
         assert ranged.get_attribute("aria-checked") == "false"                     # a range's label: off by default
         shot(pg, "#settings-radios .rp-scroll", "radio-ids-hint")
-        hq.click()
-        until(pg, lambda: r.get("mrrs", "9900501")["hint"] == 0, "its hint off")
+        hq.click()                                                                  # an admin's on: a console's name
+        until(pg, lambda: r.get("mrrs", "9900501")["hint"] == 1, "its hint on")
         hq = pg.locator("#settings-radios tr", has_text="9900501").locator("button.sw")
-        pg.wait_for_function("() => document.querySelector('#settings-radios tr button.sw[title^=\"Hint off\"]')")
+        pg.wait_for_function("() => document.querySelector('#settings-radios tr button.sw[title^=\"Hint on\"]')")
         assert "(default)" not in hq.get_attribute("title")
-        hq.click()                                                                  # on again: the default
-        until(pg, lambda: r.get("mrrs", "9900501")["hint"] is None, "back to the default")
         assert r.hint_on(r.get("mrrs", "9900501"))
+        hq.click()                                                                  # off again
+        until(pg, lambda: r.get("mrrs", "9900501")["hint"] == 0, "its hint off")
+        assert not r.hint_on(r.get("mrrs", "9900501"))
         assert pg.errors == []
     finally:
         browser.close()
         pw.stop()
 
 
-def test_a_channels_challenger_its_board_and_promote(site):
+def test_a_channels_challenger_its_evidence_and_promote_on_its_radios_row(site):
+    """#869: the challenger is on the channel's own row (never the STT workers pane), its evidence terse there (n of the
+    samples needed, the difference; the rest in the hover), and Promote only once the hub says the evidence is there,
+    shown again before the admin confirms."""
     from sizeup import sttscore
     boards = []
     site.cad.stt_challenges = lambda: boards
+
+    def promote(key, op, confirm=False):
+        ok, said = sttscore.promote_ok(boards[0])
+        if not ok:
+            raise ValueError(f"not enough evidence to promote: {said}")
+        if not confirm:
+            return {"confirm": said}
+        old, new = site.cad.stt_models.promote(key)
+        return {"old": old, "new": new, "evidence": said}
+    site.cad.stt_promote = promote
     pw, browser, pg = browser_page(site, CASEY)
     try:
-        pg.goto(site.base + "/cad#settings/station/workers")
-        chans = pg.locator("#s-station-workers .stt-models table").nth(1)
-        tg = chans.locator("tr", has_text="tg:307")
-        tg.wait_for()
-        tg.locator("select").nth(1).select_option(QWEN)
+        pg.goto(site.base + "/cad#settings/radios/channels")
+        row = lambda key: pg.locator(f"li.tg-row[data-ckey='{key}']")        # noqa: E731
+        ch = row("tg:307").locator("select.tg-chall")
+        ch.wait_for()
+        assert Q8 not in [o.get_attribute("value") for o in ch.locator("option").all()]   # (never its own champion)
+        ch.select_option(QWEN)
         until(pg, lambda: (site.cad.stt_models.challenger_for("tg:307") or ("",))[0] == QWEN, "a challenger set")
-        tg = chans.locator("tr", has_text="tg:307")
-        tg.locator("input[type=number]").fill("5")
-        tg.locator("input[type=number]").press("Tab")
-        until(pg, lambda: site.cad.stt_models.challenger_for("tg:307") == (QWEN, 5.0), "its share")
-        boards.append({"key": "tg:307", "champion": Q8, "challenger": QWEN, "pct": 5.0, "n": 42, "samples": 44,
+        assert not row("tg:307").locator("button.tg-promote").is_visible()       # (no evidence yet: no Promote)
+        boards.append({"key": "tg:307", "champion": Q8, "challenger": QWEN, "pct": 10.0, "n": 42, "samples": 44,
                        "champ": 0.612, "chall": 0.705, "diff": 0.093, "ci": 0.031, "verdict": "challenger better",
-                       "promoted": {}, "rolled_back": {}, "edits": 3, "norm": sttscore.NORM, "paused": False})
+                       "domain": "fire", "min_n": 40, "promoted": {}, "rolled_back": {}, "edits": 3,
+                       "norm": sttscore.NORM, "paused": False})
+        boards[0].update(dict(zip(("promote_ok", "evidence"), sttscore.promote_ok(boards[0]))))
         pg.reload()
-        board = pg.locator("#s-station-workers .stt-models table").nth(2)
-        row = board.locator("tr", has_text="tg:307")
-        row.wait_for()
-        assert row.locator("td").all_inner_texts()[:8] == ["tg:307", Q8, f"{QWEN} · 5%", "42", "0.612", "0.705",
-                                                           "+0.093 ± 0.031", "challenger better"]
+        ev = row("tg:307").locator(".tg-ev")
+        ev.wait_for()
+        assert ev.inner_text() == "42/40 · +0.09" and "0.612" in ev.get_attribute("title")
         pg.evaluate("document.activeElement && document.activeElement.blur()")
-        shot(pg, "#s-station-workers .stt-models", "sttworkers-challenger-board")
-        row.get_by_role("button", name="Promote").click()
-        pg.get_by_role("button", name="Promote").last.click()          # (the confirm dialog's)
+        shot(pg, "#settings-radio-controls .tg-group", "channels-challenger")
+        row("tg:307").locator("button.tg-promote").click()
+        dialog = pg.get_by_role("alertdialog")
+        dialog.wait_for()
+        assert "over 42 clips" in dialog.inner_text()                             # (the evidence, before it applies)
+        pg.get_by_role("button", name="Promote").last.click()
         until(pg, lambda: site.cad.stt_models.settings()["tg:307"].get("model") == QWEN, "promoted")
         assert site.cad.stt_models.challenger_for("tg:307")[0] == Q8
         audit = json.dumps(site.cad.settings.audit_log("radios"))
