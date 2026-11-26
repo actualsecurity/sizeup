@@ -476,6 +476,12 @@ window.RadioNav = (() => {
       st.svcAsked = sr;
       sources(true);
     } else if (sr !== null && st.svcAsked === undefined) st.svcAsked = sr;
+    // ... or a channel's Main switch (Our calls: Settings > Radios > Channels): the tree again, once for that rev
+    const mr = (cad.state && typeof cad.state.radio_main === "string") ? cad.state.radio_main : null;
+    if (mr !== null && st.mainAsked !== undefined && mr !== st.mainAsked && st.src.length) {
+      st.mainAsked = mr;
+      sources(true);
+    } else if (mr !== null && st.mainAsked === undefined) st.mainAsked = mr;
     // ... or the department's views: the tree (they come with it) again, once for that rev
     const vr = (cad.state && typeof cad.state.radio_views === "string") ? cad.state.radio_views : null;
     if (vr !== null && vr !== RV().rev() && vr !== st.viewsAsked && st.src.length) {
@@ -1085,7 +1091,8 @@ window.RadioNav = (() => {
     addEventListener("resize", onScroll);
     if (typeof ResizeObserver === "function") {
       const ro = new ResizeObserver(onScroll);
-      for (const n of [col, document.getElementById("lp"), document.querySelector("body > header")]) if (n) ro.observe(n);
+      // (the rail's own box too: a banner above it in the column moves it without resizing the column)
+      for (const n of [col, rn, document.getElementById("lp"), document.querySelector("body > header")]) if (n) ro.observe(n);
     }
   }
   function sizeRail() {                               // the width remembered on the layout (cad.css keeps it in its limits)

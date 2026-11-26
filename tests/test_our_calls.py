@@ -69,3 +69,13 @@ def test_a_station_stamp_is_never_what_counts(c):
     assert served(c, "fg-2")["ours"] == 0
     c.record_traffic(dict(other("pd-9", c.clockref.t - 1), ours=True))
     assert served(c, "pd-9")["ours"] == 0                                    # another system's: never ours
+
+
+def test_a_main_switch_changes_the_trees_rev_so_every_rail_asks_again(c):
+    rev = c.comms_sources()["rev"]
+    assert c.comms_sources({"rev": [rev]}).get("unchanged") is True
+    post(c, "radio_main", action="set", key="FG1", main=False)
+    again = c.comms_sources({"rev": [rev]})
+    assert not again.get("unchanged") and again["rev"] != rev
+    assert {s["key"]: s["ours"] for s in again["sources"]}["fm:FG1"] is False
+    assert c.state()["radio_main"] == "FG1=0"

@@ -59,20 +59,32 @@ def test_a_new_person_hears_the_our_calls_view_as_priority_and_nothing_else():
     assert got[1] == ["priority", "priority", "off", "off", "off"]
 
 
-def test_a_channel_first_then_the_first_view_in_the_persons_order_then_a_system():
+def test_a_channel_first_then_the_first_view_in_the_persons_order_then_a_system_then_all():
     got = run(rows() + VIEWS + """
       const q = p({ rules: { "view:ours": "priority", "view:police": "normal", "view:all": "off", "view:u:k3x9q2": "priority",
-                             "sys:metro": "normal", "src:fm:FG1": "normal", "mhz:118.6": "normal" } });
-      const noAll = V.filter((v) => v.id !== "all");
-      out([[FG1, DISP, PD, MTA, TWR].map((t) => C.level(t, q, V, OURS)), C.rule(TWR, q, V), C.rule(MTA, q, V),
-           C.rule(MTA, q, noAll), C.rule(FG1, q, V), C.rule(PD, q, [V[4], V[1]])]);
+                             "sys:metro": "normal", "src:fm:FG1": "normal", "mhz:118.6": "normal", "view:u:pd0001": "priority" } });
+      const OTHER = { id: "o1", source: "p25:westchester:5555", system: "westchester", service: "other", start: 1005 };
+      const PDV = { id: "u:pd0001", name: "PD", filter: { services: ["police"] } };
+      out([[FG1, DISP, PD, MTA, TWR, OTHER].map((t) => C.level(t, q, V, OURS)), C.rule(TWR, q, V), C.rule(MTA, q, V),
+           C.rule(FG1, q, V), C.rule(PD, q, [PDV, ...V]), C.rule(PD, q, [...V, PDV]), C.rule(OTHER, q, V)]);
     """)
-    assert got[0] == ["normal", "priority", "normal", "off", "normal"]
+    assert got[0] == ["normal", "priority", "normal", "normal", "normal", "off"]
     assert got[1] == ["mhz:118.6", "normal"]           # a frequency's own over any view
-    assert got[2] == ["view:all", "off"]               # the first view that holds it (All) over its system
-    assert got[3] == ["sys:metro", "normal"]           # All hidden (not in the list): its system's
-    assert got[4] == ["src:fm:FG1", "normal"]          # a channel's own over its view
-    assert got[5] == ["view:all", "off"]               # the person's order decides
+    assert got[2] == ["sys:metro", "normal"]           # a system over a view of everything (All)
+    assert got[3] == ["src:fm:FG1", "normal"]          # a channel's own over its view
+    assert got[4] == ["view:u:pd0001", "priority"]     # the person's order decides between two views that hold it
+    assert got[5] == ["view:police", "normal"]
+    assert got[6] == ["view:all", "off"]               # nothing else for it: All's
+
+
+def test_a_deleted_our_calls_view_keeps_its_level_on_main_and_a_hidden_view_still_decides():
+    got = run(rows() + VIEWS + """
+      const d = p(null), noOurs = V.filter((v) => v.id !== "ours");
+      const q = p({ rules: { "view:police": "normal" } });
+      out([C.level(FG1, d, noOurs, null), C.level(PD, d, noOurs, null),
+           C.level(PD, q, [...V.filter((v) => v.id !== "police"), { ...V[1], hidden: true }], OURS)]);
+    """)
+    assert got == ["priority", "off", "normal"]
 
 
 def test_the_our_calls_view_by_its_id_whatever_its_name_and_its_filter_is_what_counts():

@@ -155,6 +155,7 @@ window.RadioControls = (() => {
     st.namesApi = opts.names || null;              // Settings > Radios on the CAD (settings.js S_RC_NAMES); never the station's page
     if (st.namesApi && st.tab === "channels") loadNames();
     st.servicesApi = opts.services || null;        // ... and the service per source (settings.js S_RC_SERVICES)
+    st.mainApi = opts.main || null;                // ... and an FM channel's Main switch (settings.js S_RC_MAIN)
     if (st.servicesApi && st.tab === "channels") loadServices();
     poll();
   }
@@ -1340,13 +1341,12 @@ window.RadioControls = (() => {
   // An FM / airband channel's Main switch (Our calls everywhere): the hub's settings radio_main, admins, audited
   async function setFmMain(key, label) {
     const cur = fmRows().find((x) => x.chan === key);
-    if (!cur || cur.main === undefined) return;
+    if (!cur || cur.main === undefined || !st.mainApi || key in st.fmMain) return;      // (one at a time)
     st.fmMain[key] = !cur.main;
     st.error = "";
     renderTalkgroups();
     try {
-      await api("POST", "/api/cad/settings/radio_main", { action: "set", key, main: !cur.main,
-                                                          operator: typeof operator === "function" ? operator() : "" });
+      await st.mainApi.save(key, !cur.main);
       await poll();
     } catch (err) {
       st.error = `Couldn't change Main for ${label}: ${err.message}`;
@@ -1856,7 +1856,7 @@ window.RadioControls = (() => {
             if (other) recB.title += `\nTier: ${tierName}`;
             setSwitch(mainB, !!r.main, "Main");
             mainB.title = other ? "Another system: never Main" : r.main ? "Main: Our calls (up front in Radio, on our incident, the player's Our calls)" : "Other: folded in Radio, not Our calls";
-            show(mainB, !r.fm || r.main !== undefined);
+            show(mainB, !r.fm || (r.main !== undefined && !!st.mainApi));
             setSwitch(alrB, !!r.alerts, "Alerts");
             alrB.classList.toggle("na", !other);         // the county's: no Alerts of its own (no knob, the hover says why)
             alrB.title = !other ? "County: pre-alerts by the intel packs (Settings > System > Intel)"

@@ -95,13 +95,20 @@ window.ListenCore = (() => {
     return (!sv.length || sv.includes(t.service)) && (!sy.length || sy.includes(sysOf(t)));
   }
   // The rule that decides a row: its channel's or frequency's own, else the first of this person's views (in their
-  // order, the ones they show) that holds it and has a level, else its system's, else a rule from before the views;
-  // [target, level] (none: ["", "off"]). views: [{id, filter}]
+  // order, the hidden ones after: hiding a view takes it off the rail and the list, not its level) that holds it and
+  // has a level, else its system's, else a view of everything's, else a rule from before the views; [target, level]
+  // (none: ["", "off"]). views: [{id, filter}]
+  // A view of everything (no channel in its filter: All) is the least specific: after the systems
+  const catchAll = (f) => !(f && (f.ours || len(f.services) || len(f.systems) || len(f.sources)));
   function rule(t, p, views = []) {
     const r = p.rules;
     for (const k of [`src:${sourceOf(t)}`, mhzKey(t)]) if (k && r[k]) return [k, r[k]];
-    for (const v of views) if (r[`view:${v.id}`] && inView(t, v.filter)) return [`view:${v.id}`, r[`view:${v.id}`]];
-    for (const k of [`sys:${sysOf(t)}`, isOurs(t) ? "ours" : "", t.service ? `svc:${t.service}` : ""]) if (k && r[k]) return [k, r[k]];
+    for (const v of views) if (!catchAll(v.filter) && r[`view:${v.id}`] && inView(t, v.filter)) return [`view:${v.id}`, r[`view:${v.id}`]];
+    // the Our calls view deleted by the department: its level is Main on's (as before the views), never nobody's
+    if (r["view:ours"] && isOurs(t) && !views.some((v) => v.id === "ours")) return ["view:ours", r["view:ours"]];
+    if (r[`sys:${sysOf(t)}`]) return [`sys:${sysOf(t)}`, r[`sys:${sysOf(t)}`]];
+    for (const v of views) if (catchAll(v.filter) && r[`view:${v.id}`] && inView(t, v.filter)) return [`view:${v.id}`, r[`view:${v.id}`]];
+    for (const k of [isOurs(t) ? "ours" : "", t.service ? `svc:${t.service}` : ""]) if (k && r[k]) return [k, r[k]];
     return ["", "off"];
   }
   // priority | normal | off for a row: the quick toggle (only the Our calls view's: ours, its filter now; without the
@@ -223,10 +230,17 @@ window.LivePlayer = (() => {
   // Listening's groups are these, one thing with the rail's VIEWS. ourView: the seeded Our calls view (id "ours", its
   // name whatever it is now), shown or hidden; none (the department deleted it): Our calls only does nothing
   const RV = () => window.RadioViews || null;
-  const views = () => (RV() ? RV().views() : []);
+  // Listening's list: the views the rail shows (a coded one with no channel in the tree: not there either)
+  const views = () => (RV() ? RV().views().filter((v) => !RV().shows || !st.sources || RV().shows(v, st.sources)) : []);
+  // what decides: every view, the shown ones in this person's order, then the hidden ones (hiding is display only)
+  const ruleViews = () => {
+    if (!RV()) return [];
+    const a = RV().every();
+    return [...a.filter((v) => !v.hidden), ...a.filter((v) => v.hidden)];
+  };
   const ourView = () => (RV() ? RV().every().find((v) => v.id === "ours") || null : null);
   const choices = () => (ourView() ? st.p : { ...st.p, ours_only: false });
-  const levelOf = (row) => C.level(row, choices(), views(), ourView());
+  const levelOf = (row) => C.level(row, choices(), ruleViews(), ourView());
   // what waits and what plays judged again, the dock, the panel and the rail's marks drawn again
   function rejudged() {
     C.rejudge(st.q, st.p, levelOf);
@@ -632,6 +646,7 @@ window.LivePlayer = (() => {
     if (+v.value !== Math.round(st.volume * 100)) v.value = String(Math.round(st.volume * 100));
     const ov = ourView(), q = $id("lp-ours");          // the Our calls view's quick toggle, by its name now
     q.hidden = !ov;
+    if (q.parentElement) q.parentElement.hidden = !ov;   // (its group: none left without it)
     q.setAttribute("aria-pressed", String(!!ov && st.p.ours_only));
     if (ov) { setLabel(q, `${ov.name} only`); q.title = viewTitle(ov, `Only ${ov.name}`); }
     $id("lp-set").setAttribute("aria-expanded", String(st.panel));
@@ -736,17 +751,29 @@ window.LivePlayer = (() => {
       const links = [];
       const edit = el("a", "btn sm quiet", "Edit");
       edit.href = "#settings/radios/views";
+      edit.dataset.act = "edit-views";
       edit.title = "Edit views (✎ on the Radio rail, or Settings › Radios › Views)";
+      edit.setAttribute("aria-label", `Edit views (${v.name})`);
       links.push(edit);
       if ((v.filter || {}).ours) {
         const main = el("a", "btn sm quiet", "Main");
         main.href = "#settings/radios/channels";
+        main.dataset.act = "edit-main";
         main.title = "Which channels are Main: Settings › Radios › Channels";
+        main.setAttribute("aria-label", "Which channels are Main");
         links.push(main);
       }
       const r = row(v.name, `view:${v.id}`, ...(v.id === "ours" ? links : []));
-      if (RV() && RV().badge) r.prepend(RV().badge(v));
+      if (RV() && RV().badge) { const b = RV().badge(v); b.setAttribute("aria-hidden", "true"); r.prepend(b); }
       r.querySelector(".trunc").title = viewTitle(v, v.name);
+      out.push(r);
+    }
+    // a view this person hid that still has a level (it still decides): shown here, dimmed, to change or clear
+    const shown = new Set(vs.map((v) => v.id));
+    for (const v of ruleViews().filter((x) => !shown.has(x.id) && st.p.rules[`view:${x.id}`])) {
+      const r = row(`${v.name} (hidden)`, `view:${v.id}`);
+      r.classList.add("lp-hid");
+      r.querySelector(".trunc").title = viewTitle(v, `${v.name}, hidden on the rail`);
       out.push(r);
     }
     const srcs = st.sources || [];
@@ -824,7 +851,7 @@ window.LivePlayer = (() => {
   // ---- the Radio rail's per-channel control (radio-nav.js asks for it) -----------------------------------------------
   // A source's level: its own (src:) or, dimmed, what it gets from a broader rule; a menu to set it
   function sourceControl(s) {
-    const lv = C.sourceLevel(s, choices(), views(), ourView());
+    const lv = C.sourceLevel(s, choices(), ruleViews(), ourView());
     const face = el("span", `lp-lv lp-${lv.effective}${lv.own ? " own" : ""}`, LVL_MARK[lv.effective]);
     const label = `Listen ${LVL_TEXT[lv.effective]}${lv.own ? "" : " (default)"}`;
     const items = () => {

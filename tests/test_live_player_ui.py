@@ -291,7 +291,8 @@ def test_listening_is_the_rails_views_and_a_rename_follows_at_once(browser, site
     pg.click("#lp-set")
     wait(pg, "() => document.querySelector('#lp-panel [data-target=\"view:ours\"]')")
     names = pg.eval_on_selector_all("#lp-panel .lp-rule .trunc", "ns => ns.map((n) => n.textContent)")
-    assert names[:4] == ["PCFD Primary", "Police", "Transit", "All"]
+    # the rail's views: Transit has no channel in this tree, so neither the rail nor Listening shows it
+    assert names[:3] == ["PCFD Primary", "Police", "All"] and "Transit" not in names
     assert not pg.query_selector('#lp-panel [data-target^="svc:"]')                # no hard-coded service groups
     assert pg.get_attribute('#lp-panel a[href="#settings/radios/channels"]', "title").startswith("Which channels are Main")
     if SHOTS:
@@ -302,7 +303,10 @@ def test_listening_is_the_rails_views_and_a_rename_follows_at_once(browser, site
     wait(pg, "() => document.querySelector('#lp-ours').textContent === 'Engine Co only'")
     wait(pg, "() => [...document.querySelectorAll('#lp-panel .lp-rule .trunc')].some((n) => n.textContent === 'Engine Co')")
     assert pg.input_value('#lp-panel [data-target="view:ours"]') == "priority"
-    # a view hidden by this person: gone from Listening too
-    pg.evaluate("() => RadioViews.setMine({ ...RadioViews.mine(), hidden: ['transit'] })")
-    wait(pg, "() => !document.querySelector('#lp-panel [data-target=\"view:transit\"]')")
+    # a view hidden by this person: off the list; one with a level still decides, so it stays, dimmed, to change
+    pg.evaluate("() => RadioViews.setMine({ ...RadioViews.mine(), hidden: ['all'] })")
+    wait(pg, "() => !document.querySelector('#lp-panel [data-target=\"view:all\"]')")
+    pg.select_option('#lp-panel [data-target="view:police"]', "normal")
+    pg.evaluate("() => RadioViews.setMine({ ...RadioViews.mine(), hidden: ['all', 'police'] })")
+    wait(pg, "() => [...document.querySelectorAll('#lp-panel .lp-hid .trunc')].some((n) => n.textContent === 'Police (hidden)')")
     assert not pg.errors, pg.errors

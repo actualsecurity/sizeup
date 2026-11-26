@@ -548,8 +548,8 @@ class Cad:
                 "radio_names": radionames.rev(),
                 # the admins' service per source: only their rev ("" none); both pages ask again when it moves
                 "radio_services": services_rev(self.radio_services),
-                # the FM / airband channels' Main switches (Our calls): their rev; the live player asks the set again
-                "radio_main": ",".join(f"{k}={int(v)}" for k, v in sorted(self.fm_main_over.items())),
+                # the FM / airband channels' Main switches (Our calls): their rev; the rail and the player ask again
+                "radio_main": self.fm_main_rev(),
                 # the county talkgroups an incident may be moved to ("+ channel", sizeup/cad/opchannel.py)
                 "op_channels": [{"tg": tg, "name": radionames.name({"talkgroup": tg, "channel": n})}
                                 for tg, n in sorted(self.opchan.names().items())],
@@ -2145,7 +2145,12 @@ class Cad:
 
     def fm_main_default(self, label: str, kind: str = "") -> bool:
         """An FM channel's Main with no choice: on (firegrounds, paging); an airband channel's: off (busy, not ours)."""
-        return (kind or self.fm_kinds().get(label, "")) != "airband" and label not in self.s.airband
+        return kind != "airband" and label not in self.s.airband
+
+    def fm_main_rev(self) -> str:
+        """The FM / airband Main switches' choices as a short string ("" none): the state's radio_main, and part of the
+        Radio tree's rev (a switch changed: every rail asks the tree again)."""
+        return ",".join(f"{k}={int(v)}" for k, v in sorted(self.fm_main_over.items()))
 
     def fm_main(self, label: str, kind: str = "") -> bool:
         """An FM / airband channel's Main switch: the admins' choice (settings radio_main), else its default."""
@@ -2156,23 +2161,25 @@ class Cad:
         return tuple(sorted({*self.s.airband, *(k for k, v in self.fm_main_over.items() if not v)}
                             - {k for k, v in self.fm_main_over.items() if v}))
 
-    def row_ours(self, r: dict) -> bool:
-        """Whether a row of the radio log is Our calls now: its channel's or (the county's) talkgroup's Main switch. The
-        flag a station stamped when it was heard is not read: a switch changed since counts for every row."""
+    def row_ours(self, r: dict, not_main=None) -> bool:
+        """Whether a row of the radio log is Our calls now: its channel's or (the county's) talkgroup's Main switch, as
+        the Radio page's Main and Our calls view read it (an FM row: its channel not in not_main()). The flag a station
+        stamped when it was heard is not read: a switch changed since counts for every row."""
         if r.get("kind") == "note":
             return False
         tg, system = r.get("talkgroup"), str(r.get("system") or "")
         if tg is None:
-            return self.fm_main(str(r.get("channel") or ""), "airband" if system == "airband" else "")
+            return str(r.get("channel") or "") not in (self.not_main() if not_main is None else not_main)
         return system in ("", sourcekeys.COUNTY) and bool(self.main_tg(int(tg)))
 
     def _comms_rows(self, rows: list[dict]) -> None:
         """Each row as it is sent: whether its audio is here, whether it is Our calls now, without the columns nobody
         reads."""
+        nm = set(self.not_main())
         for r in rows:
             r["has_audio"] = r["kind"] == "radio" and self.has_clip(r["id"])
             if "ours" in r or r.get("kind") == "radio":
-                r["ours"] = int(self.row_ours(r))
+                r["ours"] = int(self.row_ours(r, nm))
             for k in COMMS_UNSENT:
                 r.pop(k, None)
 
@@ -2261,7 +2268,7 @@ class Cad:
         minute = int(now // 60)
         folders = self.radio_folders
         rev = (f"{self.comms.rev_for(context)}.{minute}.{int(bool(context))}.{services_rev(self.radio_services)}"
-               f".{radioviews.rev(self.radio_views)}.{radiofolders.rev(folders)}")
+               f".{self.fm_main_rev()}.{radioviews.rev(self.radio_views)}.{radiofolders.rev(folders)}")
         live = set()
         for e in self._talking():
             if e.get("ended"):
