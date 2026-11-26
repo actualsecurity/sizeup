@@ -23,7 +23,10 @@ gate); names and PII as the events have them; nothing here leaves the hub.
     GET /api/cad/intel/list?map=1&<the same filters>
         the Intel page's map (#937): every placed event of the filters, all pages, newest first, at most MAP_MAX;
         {pins: [{id, lat, lon, precision, radius_m, confirmed, level, category, label, held}], placed, unplaced,
-        limit, since, until}. held: the reason's short label ("" pushed). Unplaced events are counted, never pinned.
+        limit, since, until, corrected}. held: the reason's short label ("" pushed). Unplaced events are counted, never
+        pinned. corrected: [{id, lat, lon, label, precision}]: the place a note picked for an event of the filters (the
+        latest; sizeup/intel/notes.py), placed by the engine or not: drawn apart from its pin (static/intel-map.js).
+        map_rev moves with a note's picked place too.
     GET /api/cad/intel/search?where=&text=&from=&to=
         Search's opt-in Intel events (#937, static/search-view.js): Search's time, area and words. The range's newest
         SEARCH_SCAN events read (intel_events_first, off the store's lock: the calls search's read-only connection;
@@ -502,8 +505,16 @@ class IntelLog:
                          "level": "push" if pushed else "held" if r["mode"] == "push" else r["mode"],
                          "category": r["category"], "label": labels[lk],
                          "held": "" if pushed else held_label(r["held"] or "", r["mode"])[0]})
+        fixed: dict = {}                                # the latest picked place of each (updated_at order)
+        for r in store.q(f"SELECT event_id, corrected_lat, corrected_lon, corrected_label, corrected_precision FROM "
+                         f"intel_notes WHERE corrected_lat IS NOT NULL AND corrected_lon IS NOT NULL AND event_id IN "
+                         f"(SELECT id FROM ({inner}) WHERE {outer}) ORDER BY updated_at, id", args):
+            fixed[r["event_id"]] = {"id": r["event_id"], "lat": round(r["corrected_lat"], 6),
+                                    "lon": round(r["corrected_lon"], 6), "label": r["corrected_label"],
+                                    "precision": r["corrected_precision"]}
+        corrected = sorted(fixed.values(), key=lambda c: -c["id"])[:MAP_MAX]
         return {"pins": pins, "placed": n["placed"], "unplaced": n["unplaced"], "limit": MAP_MAX, "since": f["since"],
-                "until": f["until"]}
+                "until": f["until"], "corrected": corrected}
 
     # -- Search's Intel events (#937) ---------------------------------------------------------------------------------
 

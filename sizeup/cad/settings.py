@@ -125,6 +125,7 @@ import hashlib
 import json
 import math
 import re
+import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
@@ -319,6 +320,36 @@ STT_KEYS = ("vocabulary", "aws_monthly_limit_usd", "aws_context_budget_usd",   #
             "catchup", "catchup_max_age_h")    # shed clips caught up (sizeup/sttcatchup.py): on/off, how far back
 MAX_VOCAB_BYTES = 50_000          # AWS's limit; also keeps the Settings request under its 64 KB
 MAX_PLACE_NAMES = 300
+TRAFFIC_DAYS = 7                   # an alias tried over the last week's transmissions (add_place_alias)
+TRAFFIC_CAP = 3000                 # ... the newest this many
+TRAFFIC_REFUSE = 20                # ... placing this many: refused (a unit, a call type); fewer, from TRAFFIC_ASK: asked
+TRAFFIC_ASK = 3
+ALIAS_MAX = 40                     # an alias added one at a time (add_place_alias): a place's other name, never a phrase
+# One word the radio says all the time, never a place's alias (with sizeup/geo/pagegeo.py DEPARTMENT_WORDS and
+# NOT_A_STREET): services and units, apparatus, what a call is, and filler.
+RADIO_WORDS = frozenset({
+    "ems", "fd", "pd", "als", "bls", "emt", "emd", "mva", "mvc", "fdny", "ambulance", "medic", "medics", "paramedic",
+    "engine", "engines", "ladder", "ladders", "truck", "rescue", "squad", "tower", "battalion", "chief", "car",
+    "unit", "units", "sector", "post", "patrol", "dispatch", "control", "respond", "responding", "response", "en",
+    "route", "code", "alarm", "alarms", "assist", "assisting", "lift", "wires", "odor", "smoke", "fire", "fires",
+    "gas", "leak", "call", "caller", "standby", "copy", "clear", "structure", "working", "motor", "vehicle",
+    "vehicles", "accident", "collision", "pin", "fall", "injury", "injuries", "aided", "sick", "cardiac",
+    "arrest", "box", "detail", "backup", "officer", "officers",
+})
+FILLER_WORDS = frozenset({"uh", "um", "uhh", "umm", "er", "ah", "ok", "okay", "copy", "yeah", "yes", "no", "roger",
+                          "affirmative", "negative", "sir", "maam"})       # (norm_tokens drops the apostrophe)
+# Ordinary radio traffic with no place in it (invented): an alias that makes the radio's page locator read a place in
+# any of these, with a town said, is refused (alias_problem's outcome guard). "{town}": each of our towns and the
+# place's own.
+ORDINARY_RADIO = (
+    "{town} ems respond to example avenue", "{town} engine 1 uh respond", "{town} pd copy, ok",
+    "{town} units responding, smoke showing", "{town} car 3 en route", "{town} ladder 31 on scene",
+    "{town} medic responding for a fall", "{town} fire alarm activation, respond", "{town} um okay, 10-4",
+    "{town} chief to control, on location", "{town} rescue responding code 3", "{town} wires down, odor of gas",
+    "{town} lift assist", "{town} units clear, back in service", "{town} roger, affirmative",
+    "{town} negative, no fire", "{town} battalion responding", "{town} tower ladder on scene",
+    "{town} uh standby", "{town} copy that, show us en route",
+)
 # The county's "common place names" list (sizeup/cad/commonplaces.py): imported into section "places" under keys
 # "county/...", replaced as a whole on each import; Settings > Lists > Place names (admins), audited as Lists, counts only.
 COMMON_SECTION = "common_places"
@@ -495,6 +526,19 @@ def overlay(d: dict, ov: dict) -> dict:
                                        **({"third_party_only": [c for c in ag["third_party_only"] if c not in gone_st]}
                                           if isinstance(ag.get("third_party_only"), list) else {}))
     return d
+
+
+class PlaceNameTaken(CadError):
+    """An alias that is already another place's name or alias (Editor.alias_problem): the API's 409."""
+
+
+class AliasNeedsConfirm(CadError):
+    """An alias that would place a few of the last week's transmissions (Editor.add_place_alias): the API's 409
+    {error: the question, confirm: true, count}; added when sent again with confirm: true."""
+
+    def __init__(self, msg: str, count: int):
+        super().__init__(msg)
+        self.count = count
 
 
 class LastAdmin(CadError):
@@ -1920,8 +1964,13 @@ class Editor:
             if key not in cur:
                 raise CadError(f"no place name {key!r}")
             return self._commit([("places", key, REMOVE)], op, [("lists", f"place/{cur[key]['name']}", cur[key], None)])
+        if action in ("alias", "unalias"):                # one alias of any place name (a county entry's too)
+            key = _text(body.get("key"), "key", 200)
+            if action == "alias":
+                return self.add_place_alias(key, str(body.get("alias") or ""), op, confirm=body.get("confirm") is True)
+            return self.remove_place_alias(key, str(body.get("alias") or ""), op)
         if action != "set":
-            raise CadError("action: set or delete")
+            raise CadError("action: set or delete (or alias / unalias {key, alias})")
         name = _text(body.get("name"), "name", 60)
         key = " ".join(re.sub(r"[^a-z0-9]+", " ", name.lower()).split())
         if not key:
@@ -1948,6 +1997,214 @@ class Editor:
                "muni": _text(where.get("sub"), "town", 80, required=False),
                "note": _text(body.get("note"), "note", 120, required=False)}
         return self._commit([("places", key, val)], op, [("lists", f"place/{name}", cur.get(key), val)])
+
+    def _alias_entry(self, key: str, cur: dict) -> tuple[str, dict]:
+        """(key, entry) of the place an alias goes on: a site's other address -> its primary."""
+        e = cur.get(key)
+        if e is None:
+            raise CadError("no such place name")
+        if e.get("site") and e["site"] in cur and e["site"] != key:
+            return e["site"], cur[e["site"]]
+        return key, e
+
+    @staticmethod
+    def _place_label(key: str, e: dict) -> str:
+        """A place name as people write it: the county's label, a hand-made one's name (its label is where)."""
+        return (e.get("label") if commonplaces.is_imported(key, e) else "") or e.get("name") or key
+
+    def _names_town(self, toks: list[str]) -> bool:
+        """The words are a town's, exactly ("Port Chester", "Village of Rye Brook", "Rye"): the lists' towns and their
+        aliases, the county's (data/westchester_towns.txt), the page locator's phrases. Never a name merely made of
+        words towns use ("Pleasant Manor", "River Vista", "Lake Hills")."""
+        L = self.cad.lists
+        got = getattr(self, "_town_names", None)
+        if got is None or got[0] is not L:             # (built again when the lists change: a town alias added)
+            from sizeup.geo.gazetteer import MUNI_PHRASES
+            from sizeup.intel.rules import town_names
+            phrases = {tuple(norm_tokens(t)) for t in (*L.geo_town_order, *L.geo_town_aliases,
+                                                        *L.geo_town_aliases.values(), *town_names().values())}
+            phrases |= {tuple(p) for p, _m, _n in MUNI_PHRASES}
+            got = self._town_names = (L, phrases - {()})
+        return tuple(toks) in got[1]
+
+    def alias_problem(self, key: str, alias: str, cur: dict | None = None) -> tuple[str, str] | None:
+        """Why alias can't be another name of place key: ("taken", why) (a town, one word of a town's name, a place on
+        the map, or another place's name or alias already: the API's 409, PlaceNameTaken) | ("bad", why) (empty, too
+        long, a number, a street's name; one word the radio says all the time (RADIO_WORDS, FILLER_WORDS), that is
+        common ("Market"), or of two or three letters not typed in capitals; several with none but generic words; or,
+        the outcome guard, one that would make the radio's page locator read a place in ordinary traffic
+        (ORDINARY_RADIO, tried in memory): 400); None: it may. cur: {key: entry} (local_places by key), else read."""
+        a = " ".join(str(alias or "").split())
+        if not a:
+            return ("bad", "alias: empty")
+        if len(a) > ALIAS_MAX:
+            return ("bad", f"alias: at most {ALIAS_MAX} characters")
+        toks = norm_tokens(a)
+        if not toks or all(t.isdigit() for t in toks):
+            return ("bad", "alias: a number names no place")
+        if self._names_town(toks):                     # the county feed's "<town>" alone would pin the place
+            return ("taken", f'"{a}" is a town')
+        if len(toks) == 1 and toks[0] in self._town_words():
+            return ("taken", f'"{a}" is part of a town\'s name')
+        from sizeup.geo.pagegeo import DEPARTMENT_WORDS, NOT_A_STREET
+        radio = RADIO_WORDS | FILLER_WORDS | DEPARTMENT_WORDS | NOT_A_STREET
+        if all(t in radio or t.isdigit() for t in toks):   # "EMS", "Engine 60", "Medic 5", "Structure Fire"
+            return ("bad", "alias: words the radio says all the time")
+        ix = self.cad.place_index() if hasattr(self.cad, "place_index") else None
+        if ix is not None and getattr(ix, "names_street", None) and ix.names_street(a):
+            return ("bad", "alias: a street's name")    # (the location box would offer the place for the street)
+        if ix is not None and getattr(ix, "names_place", None) and ix.names_place(a):
+            return ("taken", f'"{a}" is already a place on the map')
+        from sizeup.geo.commonwords import COMMON_WORDS
+        from sizeup.geo.pagegeo import GENERIC
+        # its words with "&", "." and "'" gone first ("A&P", "C.V.S.", "BJ's" -> ap, cvs, bjs: heard words often lower case)
+        words = norm_tokens(re.sub(r"[&.'’]", "", a))
+        own = [t for t in words if not t.isdigit() and t not in GENERIC and t not in COMMON_WORDS]
+        if len(words) == 1:                            # one word: its own ("Hudson", "KFC"), never a common one; two
+            raw = re.sub(r"[&.'’]", "", a)             # or three letters only as typed in capitals ("CVS", "BJs")
+            ok = bool(own) and (len(own[0]) >= 4 or (len(own[0]) >= 2 and sum(c.isupper() for c in raw) >= 2))
+        else:                                          # several ("Golden Star Diner", "NY Deli"): one not generic, or a
+            ok = any(len(t) >= 3 and not t.isdigit() and t not in GENERIC for t in words) or \
+                any(len(t) == 2 and t.isalpha() for t in own)                       # two-letter one not common
+
+        if not ok:
+            return ("bad", "alias: too short or too common to name a place on its own")
+        if cur is None:
+            cur = {r["key"]: r for r in self.local_places()}
+        key, e = self._alias_entry(key, cur)
+        mine = e.get("site") or key
+        k = commonplaces.name_key(a)
+        for ok, o in cur.items():
+            if ok == key or (o.get("site") or ok) == mine:
+                continue                                   # the place itself (a site: every address of it)
+            names = [o.get("name") or "", *(o.get("aliases") or [])]
+            if commonplaces.is_imported(ok, o):
+                names.append(o.get("label") or "")
+            if k in {commonplaces.name_key(x) for x in names if x}:
+                return ("taken", f'"{a}" is already a name of {self._place_label(ok, o)}')
+        if self._fires_on_radio(a, e, ix):
+            return ("bad", "alias: would match ordinary radio traffic")
+        return None
+
+    def _town_words(self) -> set:
+        """A word of a town's name, one alone never an alias: every word of our towns (the lists' towns and their
+        aliases, the page locator's: "port", "chester", "brook"), and the county's other towns' own words ("hudson",
+        "scarsdale"), never a word anyone says ("manor", "plains": those are refused as too common anyway)."""
+        L = self.cad.lists
+        got = getattr(self, "_town_word_set", None)
+        if got is None or got[0] is not L:
+            from sizeup.geo.commonwords import COMMON_WORDS
+            from sizeup.geo.gazetteer import MUNI_PHRASES
+            from sizeup.geo.pagegeo import GENERIC, TOWN_WORDS
+            from sizeup.intel.rules import town_names
+            everyday = {"of", "the", "on", "at", "city", "town", "village", "hamlet", "w", "west", "old", "new", "neck"}
+            ours = {w for t in (*L.geo_town_order, *L.geo_town_aliases, *L.geo_town_aliases.values())
+                    for w in norm_tokens(t)} | {w for p, _m, _n in MUNI_PHRASES for w in p} | set(TOWN_WORDS)
+            county = {w for t in town_names().values() for w in norm_tokens(t)}
+            got = self._town_word_set = (L, (ours - everyday) | {w for w in county - everyday
+                                                                  if w not in COMMON_WORDS and w not in GENERIC})
+        return got[1]
+
+    def _fires_on_radio(self, alias: str, e: dict, ix) -> bool:
+        """The outcome guard: the radio's page locator, with the alias alone as a place name in memory (nothing
+        written), reads a place in any of ORDINARY_RADIO, said with each of our towns and the place's own."""
+        if ix is None or getattr(ix, "gaz", None) is None or e.get("lat") is None or e.get("lon") is None:
+            return False
+        from sizeup.geo.pagegeo import locator
+        try:
+            loc = locator(ix.gaz)
+        except Exception:  # noqa: BLE001 - no page locator: the word rules alone
+            return False
+        row = {"name": alias, "aliases": [], "label": alias, "lat": e["lat"], "lon": e["lon"], "muni": e.get("muni") or ""}
+        towns = {t.lower() for t in (*self.cad.lists.geo_town_order[:3], e.get("muni") or "") if t}
+        return any(loc.local_said(p.format(town=t), rows=[row]) for t in towns for p in ORDINARY_RADIO)
+
+    def traffic_matches(self, alias: str, e: dict) -> tuple[int, int]:
+        """(how many of the last TRAFFIC_DAYS days' transmissions the radio's page locator would place with alias as
+        a place name, how many were read): the newest TRAFFIC_CAP, their text as intel reads it (the corrected text
+        when there is one), on a read-only connection (never the store's lock), the alias tried in memory. (0, 0)
+        without a place index, a point or the table. Counts only are ever logged."""
+        ix = self.cad.place_index() if hasattr(self.cad, "place_index") else None
+        if ix is None or getattr(ix, "gaz", None) is None or e.get("lat") is None or e.get("lon") is None:
+            return 0, 0
+        from sizeup.geo.pagegeo import locator
+        from sizeup.intel.engine import text_sql
+        try:
+            loc = locator(ix.gaz)
+        except Exception:  # noqa: BLE001 - no page locator: the word rules alone
+            return 0, 0
+        since = float(self.store.clock()) - TRAFFIC_DAYS * 86400
+        path = getattr(self.store, "path", ":memory:")
+        try:
+            if path == ":memory:":
+                cols = [r["name"] for r in self.store.q("PRAGMA table_info(radio_traffic)")]
+                texts = [r["text"] for r in self.store.q(f"SELECT {text_sql(cols)} FROM radio_traffic WHERE start >= ? "
+                                                         "ORDER BY start DESC LIMIT ?", (since, TRAFFIC_CAP))]
+            else:
+                db = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=5.0)
+                try:
+                    cols = [r[1] for r in db.execute("PRAGMA table_info(radio_traffic)")]
+                    texts = [r[0] for r in db.execute(f"SELECT {text_sql(cols)} FROM radio_traffic WHERE start >= ? "
+                                                      "ORDER BY start DESC LIMIT ?", (since, TRAFFIC_CAP))]
+                finally:
+                    db.close()
+        except Exception as x:  # noqa: BLE001 - no transmissions to try it on: the other checks alone
+            if hasattr(self.cad, "log"):
+                self.cad.log(f"settings: alias trial skipped ({type(x).__name__})")
+            return 0, 0
+        row = {"name": alias, "aliases": [], "label": alias, "lat": e["lat"], "lon": e["lon"], "muni": e.get("muni") or ""}
+        n = sum(1 for t in texts if t and loc.local_said(t, rows=[row]))
+        if hasattr(self.cad, "log"):
+            self.cad.log(f"settings: alias trial: {n} of {len(texts)} transmissions ({TRAFFIC_DAYS} days)")
+        return n, len(texts)
+
+    def add_place_alias(self, key: str, alias: str, op: str, confirm: bool = False) -> dict:
+        """Another name for one of the department's place names, its aliases as Settings > Lists > Place names keeps
+        them (the place search, the radio's page locator and the county feed read them): an admin's from an intel
+        note's misheard name (sizeup/intel/notes.py), or Settings' action "alias". A county entry's too (a re-import
+        keeps them: commonplaces.plan); a site's other address: its primary's. Never another place's name or alias
+        (PlaceNameTaken: 409), a street's name, a number or a word too common (alias_problem). Then tried over the
+        last week's transmissions (traffic_matches): placing TRAFFIC_REFUSE or more, refused (409); TRAFFIC_ASK or
+        more, asked (AliasNeedsConfirm: 409 with confirm) and added only with confirm. Audited with the lists.
+        -> {ok, key (where it went), name, had (its aliases before), aliases, added, matches}"""
+        cur = {r["key"]: {k: v for k, v in r.items() if k != "key"} for r in self.local_places()}
+        key, e = self._alias_entry(key, cur)
+        a = " ".join(str(alias or "").split())
+        had = list(e.get("aliases") or [])
+        out = {"ok": True, "key": key, "name": self._place_label(key, e), "had": had, "added": False}
+        names = {commonplaces.name_key(x) for x in (e.get("name") or "", e.get("label") or "", *had)}
+        if a and commonplaces.name_key(a) in names:
+            return dict(out, aliases=had)                  # its name, or one it has: nothing to add
+        why = self.alias_problem(key, a, {k: dict(v, key=k) for k, v in cur.items()})
+        if why:
+            raise (PlaceNameTaken if why[0] == "taken" else CadError)(why[1])
+        if len(had) >= 10:
+            raise CadError("aliases: up to 10 other names")
+        n, _read = self.traffic_matches(a, e)
+        if n >= TRAFFIC_REFUSE:
+            raise PlaceNameTaken(f'"{a}" would place {n} radio transmissions from the last {TRAFFIC_DAYS} days')
+        if n >= TRAFFIC_ASK and not confirm:
+            raise AliasNeedsConfirm(f"Would place {n} transmissions from the last {TRAFFIC_DAYS} days. Add anyway?", n)
+        val = dict(e, aliases=[*had, a])
+        self._commit([("places", key, val)], op, [("lists", f"place/{e.get('name') or key}", {"aliases": had},
+                                                   {"aliases": val["aliases"]})])
+        return dict(out, aliases=val["aliases"], added=True, matches=n)
+
+    def remove_place_alias(self, key: str, alias: str, op: str) -> dict:
+        """One alias off a place name (a county entry's too: Settings > Lists > Place names, Common places' "−"; an
+        intel note's "− Alias"). Audited with the lists. -> {ok, key, name, had, aliases, removed}"""
+        cur = {r["key"]: {k: v for k, v in r.items() if k != "key"} for r in self.local_places()}
+        key, e = self._alias_entry(key, cur)
+        had = list(e.get("aliases") or [])
+        k = commonplaces.name_key(str(alias or ""))
+        left = [x for x in had if commonplaces.name_key(x) != k]
+        out = {"ok": True, "key": key, "name": self._place_label(key, e), "had": had, "aliases": left,
+               "removed": len(left) != len(had)}
+        if not out["removed"]:
+            return out
+        self._commit([("places", key, dict(e, aliases=left))], op,
+                     [("lists", f"place/{e.get('name') or key}", {"aliases": had}, {"aliases": left})])
+        return out
 
     # -- the department's own address points (sizeup/geo/localaddr.py) ----------------------------------
 
@@ -2077,7 +2334,10 @@ class Editor:
             (imported if commonplaces.is_imported(r["key"], r) else made).append(r)
         lost = [{"name": r["name"], "address": r.get("address") or "", "town": r.get("muni") or ""}
                 for r in imported if r.get("lat") is None]
-        return {"items": made, "max": MAX_PLACE_NAMES,
+        aliased = [{"key": r["key"], "name": self._place_label(r["key"], r), "town": r.get("muni") or "",
+                    "aliases": list(r["aliases"]), "imported": commonplaces.is_imported(r["key"], r)}
+                   for r in self.local_places() if r.get("aliases")]
+        return {"items": made, "max": MAX_PLACE_NAMES, "aliased": sorted(aliased, key=lambda x: x["name"].lower()),
                 "imported": {"source": commonplaces.SOURCE, "names": len(imported),
                              "addresses": len({commonplaces.name_key(r.get("address") or "") for r in imported}),
                              "located": len(imported) - len(lost), "unresolved": lost[:300],

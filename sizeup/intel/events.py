@@ -10,6 +10,8 @@ Tables (created IF NOT EXISTS here; no SCHEMA_VERSION bump):
                    out_of_area | rule_to_add: a note's tags, sizeup/intel/notes.py, note_id its note), a year
     intel_notes    people's notes on an event (sizeup/intel/notes.py): text, tags, corrections, "done / PR #"
     intel_note_audit  every add, edit, delete and done of a note, before and after
+    intel_correction_candidates  misheard -> real pairs from notes' corrected places, for the speech-to-text side
+                   (sizeup/intel/notes.py correction_candidates, #956)
 
 Events are kept 90 days (the radio log's own default for context traffic), hits 30; an event with a note is kept as
 long as its notes (a year: KEEP_NOTES_S), so the notes stay usable for tuning.
@@ -111,6 +113,11 @@ CREATE TABLE IF NOT EXISTS intel_notes (
   corrected_category TEXT NOT NULL DEFAULT '', corrected_place TEXT NOT NULL DEFAULT '',
   corrected_level TEXT NOT NULL DEFAULT '',
   author TEXT NOT NULL DEFAULT '', author_email TEXT NOT NULL DEFAULT '',
+  corrected_lat REAL, corrected_lon REAL,            -- the corrected place picked (notes.py PLACE_COLS; NULL: none,
+  corrected_precision TEXT NOT NULL DEFAULT '',      -- or an older note's free text alone, corrected_place)
+  corrected_label TEXT NOT NULL DEFAULT '', corrected_qualifier TEXT NOT NULL DEFAULT '',
+  corrected_place_key TEXT NOT NULL DEFAULT '',      -- a common place's key (settings_overrides "places")
+  heard TEXT NOT NULL DEFAULT '',                    -- the words heard for it ("Sampel Diner")
   created_at REAL NOT NULL, updated_at REAL NOT NULL,
   done TEXT NOT NULL DEFAULT '', done_by TEXT NOT NULL DEFAULT '', done_at REAL   -- acted on: "PR #123", "rule added"
 );
@@ -123,9 +130,25 @@ CREATE TABLE IF NOT EXISTS intel_note_audit (
   before TEXT NOT NULL DEFAULT '', after TEXT NOT NULL DEFAULT ''     -- the note as JSON ('' none)
 );
 CREATE INDEX IF NOT EXISTS intel_note_audit_note ON intel_note_audit(note_id);
+CREATE TABLE IF NOT EXISTS intel_correction_candidates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, note_id INTEGER,      -- (never reused: mark_imported names what it read)
+  clip_id TEXT NOT NULL DEFAULT '',                  -- the transmission (radio_traffic id) the words were heard in
+  heard_phrase TEXT NOT NULL, real_phrase TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'other',                -- place | unit | street | other
+  source TEXT NOT NULL DEFAULT '',                   -- intel-note
+  who TEXT NOT NULL DEFAULT '', "when" REAL NOT NULL,
+  imported_at REAL                                   -- NULL: the speech-to-text side hasn't taken it yet
+);
+CREATE INDEX IF NOT EXISTS intel_correction_candidates_when ON intel_correction_candidates("when");
+CREATE INDEX IF NOT EXISTS intel_correction_candidates_note ON intel_correction_candidates(note_id);
 """
 
 JSON_COLS = ("rules", "alts", "traffic_ids")
+# intel_notes' picked place (sizeup/intel/notes.py), added to an older table at start
+NOTE_PLACE_COLS = (("corrected_lat", "REAL"), ("corrected_lon", "REAL"),
+                   ("corrected_precision", "TEXT NOT NULL DEFAULT ''"), ("corrected_label", "TEXT NOT NULL DEFAULT ''"),
+                   ("corrected_qualifier", "TEXT NOT NULL DEFAULT ''"), ("corrected_place_key", "TEXT NOT NULL DEFAULT ''"),
+                   ("heard", "TEXT NOT NULL DEFAULT ''"))
 EVENT_COLS = tuple(f.name for f in fields(Event) if f.name != "id")
 
 
@@ -206,6 +229,10 @@ class SqlEvents:
                 store.db.execute("ALTER TABLE intel_events ADD COLUMN delivery TEXT NOT NULL DEFAULT ''")
             if "fd" not in cols:                    # a table from before the FD check (engine._fire)
                 store.db.execute("ALTER TABLE intel_events ADD COLUMN fd TEXT NOT NULL DEFAULT ''")
+            ncols = {r[1] for r in store.db.execute("PRAGMA table_info(intel_notes)")}
+            for col, decl in NOTE_PLACE_COLS:       # a table from before the picked place: added, never dropped
+                if col not in ncols:
+                    store.db.execute(f"ALTER TABLE intel_notes ADD COLUMN {col} {decl}")
             fcols = {r[1] for r in store.db.execute("PRAGMA table_info(intel_feedback)")}
             if "note_id" not in fcols:              # a note's tags as verdicts (sizeup/intel/notes.py)
                 store.db.execute("ALTER TABLE intel_feedback ADD COLUMN note_id INTEGER")
@@ -374,6 +401,7 @@ class SqlEvents:
         with self._w() as db:
             n = db.execute("DELETE FROM intel_notes WHERE updated_at < ?", (now - KEEP_NOTES_S,)).rowcount
             n += db.execute("DELETE FROM intel_note_audit WHERE at < ?", (now - KEEP_NOTES_S,)).rowcount
+            n += db.execute('DELETE FROM intel_correction_candidates WHERE "when" < ?', (now - KEEP_NOTES_S,)).rowcount
             n += db.execute("DELETE FROM intel_events WHERE last_at < ? AND status != 'open' AND id NOT IN "
                             "(SELECT event_id FROM intel_notes)", (now - KEEP_EVENTS_S,)).rowcount   # (a note keeps it)
             n += db.execute("DELETE FROM intel_hits WHERE at < ?", (now - KEEP_HITS_S,)).rowcount

@@ -82,7 +82,7 @@ def test_the_map_reads_the_first_at_index(site, monkeypatch):
     monkeypatch.setattr(cad.store, "one", lambda sql, args=(): (seen.append((sql, args)), real1(sql, args))[1])
     pins(cad, held="quiet")
     reads = list({sql: (sql, args) for sql, args in seen if "intel_events e" in sql}.values())
-    assert len(reads) == 2                                             # the counts, the pins
+    assert len(reads) == 3                                             # the counts, the pins, the corrected places
     for sql, args in reads:
         plan = " ".join(r["detail"] for r in real(f"EXPLAIN QUERY PLAN {sql}", args))
         assert "intel_events_first" in plan and "SCAN e " not in plan + " ", sql
@@ -156,8 +156,14 @@ class FakeMap {
   on(t, a, b) { if (b) (this.lh[t + ":" + a] = this.lh[t + ":" + a] || []).push(b); else (this.h[t] = this.h[t] || []).push(a); }
   hasImage() { return false; }
   addImage() { calls.images++; }
-  addSource(id) { this.src = { setData: (d) => { calls.setData++; this.data = d; } }; }
-  getSource() { return this.src; }
+  addSource(id) {                       // the pins' source counted and kept; the corrected places' (-fixes) apart
+    this.srcs = this.srcs || {};
+    this.srcs[id] = { setData: (d) => { if (id.endsWith("-fixes")) { this.fixes = d; return; } calls.setData++; this.data = d; } };
+  }
+  getSource(id) { return this.srcs[id]; }
+  queryRenderedFeatures(pt, o) {                // the pins at the point clicked (the test's own click data)
+    return (o && o.layers || []).some((l) => l.endsWith("-pin")) ? (this.atPoint || []) : [];
+  }
   addLayer() {}
   setFilter(id, f) { calls.sel.push(f[2]); }
   easeTo(o) { calls.ease.push(o.center); }
@@ -260,7 +266,7 @@ const maps = () => calls.get.filter((p) => p.includes("map=1")).length;
     out = run_node(script, {"list": d, "map": m, "voted": voted, "more": more, "filtered": filtered, "mapf": mapf})
     ids = out["ids"]
     assert out["before"] == {"maps": 1, "made": True}
-    assert out["images"] == 2 * 10 + 9                                 # each glyph, light and dark, and each badge once
+    assert out["images"] == 2 * 10 + 9 + 1                             # each glyph, light and dark, each badge; the fix's diamond
     f = {p["id"]: p for p in out["feats"]}
     assert set(f) == {ids[0], ids[1], 999999}                          # placed only
     assert (f[ids[0]]["h"], f[ids[0]]["r"], f[ids[0]]["k"]) == (0, 0, "im-police-d")         # confirmed: filled
@@ -434,3 +440,38 @@ def test_the_maps_revision_starts_from_the_clock_so_a_restart_never_repeats_one(
     from sizeup.intel.events import SqlEvents
     before = int(time.time() * 1000)
     assert SqlEvents(cad.store).map_rev >= before
+
+
+@needs_node
+def test_a_diamond_over_stacked_pins_keeps_the_pins_step_through():
+    """#960 re-review 1: three events at one point and a corrected place there too. A click over both layers calls
+    each layer's listener; only the pins' step-through picks (event 3 reachable), and a diamond at its own engine pin's
+    point isn't drawn at all."""
+    script = f"""
+{MAPSTUB}
+{(STATIC / "intel-map.js").read_text()}
+const map = new FakeMap({{ container: null }});
+const picks = [];
+let h = null;
+h = IntelMap.attach(map, "t", {{ pick: (id) => {{ picks.push(id); h.select(id); }} }});
+const at = {{ lat: 41.0, lon: -73.7 }};
+const pins = [1, 2, 3].map((id) => ({{ id, ...at, confirmed: true, radius_m: 0, level: "map", category: "dispute" }}));
+// event 1 corrected to its own point (no diamond); event 2 corrected to a point beside the stack (a diamond)
+h.set(pins, [{{ id: 1, ...at }}, {{ id: 2, lat: 41.0001, lon: -73.7 }}]);
+const diamonds = map.fixes.features.filter((f) => f.geometry.type === "Point").map((f) => f.properties.id);
+const feats = map.data.features.slice().reverse();          // top first, as MapLibre gives them
+map.atPoint = feats;
+const click = () => {{                                       // a click over the stack and the diamond: both listeners
+  map.lh["click:t-pin"][0]({{ point: {{ x: 1, y: 1 }}, features: feats }});
+  map.lh["click:t-fix"][0]({{ point: {{ x: 1, y: 1 }}, features: [{{ properties: {{ id: 2 }} }}] }});
+}};
+for (let i = 0; i < 4; i++) click();
+const stack = picks.splice(0);
+map.atPoint = [];                                            // the diamond alone (no pin under it): its event
+map.lh["click:t-fix"][0]({{ point: {{ x: 9, y: 9 }}, features: [{{ properties: {{ id: 2 }} }}] }});
+console.log(JSON.stringify({{ diamonds, stack, alone: picks }}));
+"""
+    out = run_node(script, {})
+    assert out["diamonds"] == [2]
+    assert out["stack"] == [3, 2, 1, 3]
+    assert out["alone"] == [2]

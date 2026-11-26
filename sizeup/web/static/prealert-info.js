@@ -181,8 +181,11 @@ window.PrealertInfo = (() => {
     const kids = [head("Place")];
     if (!p.point) kids.push(none(p.empty));
     const pt = p.point;
+    const c = p.corrected;                            // a note's picked place (intel-notes.js): apart from the engine's
     kids.push(dl([
       ["Where", p.label ? `${p.label}${pt && pt.approx ? " ?" : ""}` : "", pt ? `${pt.lat}, ${pt.lon}${pt.radius_m ? ` within ${Math.round(pt.radius_m)} m` : ""}${pt.approx ? ": approximate" : ""}` : ""],
+      ["Corrected", c ? el("span", "pi-fixed", c.where || c.label) : "", c ? [`${c.lat}, ${c.lon} · ${c.precision}`,
+        c.heard ? `heard "${c.heard}"` : "", `note by ${c.by} ${tm(c.at)}`].filter(Boolean).join(" · ") : ""],
       ["Basis", p.basis && p.basis !== p.label ? p.basis : ""],
       ["Heard", (p.phrases || []).join("; ")],
       ["Or", (p.alts || []).map((a) => a.label).join("; "), "Other readings of the words"],
@@ -324,7 +327,9 @@ window.PrealertInfo = (() => {
     }
   }
 
-  // ---- the map: the place (its radius when approximate), other readings, the aircraft, the events -----------------
+  // ---- the map: the place (its radius when approximate), other readings, a note's corrected place, the aircraft, the
+  // events ------------------------------------------------------------------------------------------------------------
+  const FIX = (window.IntelMap && IntelMap.FIX) || "#3FB86B";     // a corrected place (intel-map.js: the same mark colour)
   function features(d) {
     const f = [];
     const pt = (lon, lat, k, props = {}) => f.push({ type: "Feature", properties: { k, ...props }, geometry: { type: "Point", coordinates: [lon, lat] } });
@@ -341,6 +346,8 @@ window.PrealertInfo = (() => {
       pt(p.lon, p.lat, p.approx ? "approx" : "place");
     }
     for (const a of d.place.alts || []) if (a.lat !== undefined && a.lat !== null) pt(a.lon, a.lat, "alt");
+    const c = d.place.corrected;                      // a note's picked place: its own mark
+    if (c && c.lat !== null && c.lat !== undefined) pt(c.lon, c.lat, "fix");
     for (const x of (d.now.aircraft || {}).items || []) if (x.lat !== undefined && x.lat !== null) pt(x.lon, x.lat, "acft");
     for (const i of [d.outcome.incident, d.outcome.near_incident, ...((d.now.calls || {}).items || [])]) {
       if (i && i.lat !== null && i.lat !== undefined) pt(i.lon, i.lat, "inc", { id: i.id });
@@ -364,10 +371,11 @@ window.PrealertInfo = (() => {
         st.map.addLayer({ id: "pi-area", type: "fill", source: "pi", filter: ["==", ["get", "k"], "area"],
                           paint: { "fill-color": "#F2B33D", "fill-opacity": 0.15, "fill-outline-color": "#F2B33D" } });
         st.map.addLayer({ id: "pi-pts", type: "circle", source: "pi", filter: ["!=", ["get", "k"], "area"], paint: {
-          "circle-radius": ["match", ["get", "k"], "place", 8, "approx", 8, "inc", 7, 6],
-          "circle-color": ["match", ["get", "k"], "place", "#EE6475", "approx", "#F2B33D", "acft", "#6AA6E8", "inc", "#9AA3AD", "rgba(0,0,0,0)"],
-          "circle-stroke-width": 2,
-          "circle-stroke-color": ["match", ["get", "k"], "alt", "#F2B33D", "#0B0F14"] } });
+          "circle-radius": ["match", ["get", "k"], "place", 8, "approx", 8, "inc", 7, "fix", 7, 6],
+          "circle-color": ["match", ["get", "k"], "place", "#EE6475", "approx", "#F2B33D", "acft", "#6AA6E8", "inc", "#9AA3AD",
+                           "fix", FIX, "rgba(0,0,0,0)"],
+          "circle-stroke-width": ["match", ["get", "k"], "fix", 3, 2],
+          "circle-stroke-color": ["match", ["get", "k"], "alt", "#F2B33D", "fix", "#F2F3F5", "#0B0F14"] } });
         st.map.on("click", "pi-pts", (e) => { const x = e.features && e.features[0]; if (x && x.properties.id && typeof openFromRecords === "function") openFromRecords(x.properties.id); });
         st.mapReady = true;
         if (st.data) mapPoints(st.data);

@@ -4,14 +4,18 @@
 //   IntelMap.attach(map, prefix, {pick(id)})   once the map has loaded: its source, layers and glyphs; a click on a
 //                                              pin calls pick(id). Returns {set(pins), select(id), center(lat, lon),
 //                                              bounds()}.
-//   set(pins)    [{id, lat, lon, precision, radius_m, confirmed, level, category}]: drawn only when they differ from
-//                the last set (true when drawn); never a draw per frame, never a timer.
+//   set(pins, fixes)  pins: [{id, lat, lon, precision, radius_m, confirmed, level, category}]; fixes (optional):
+//                [{id, lat, lon, label}], the place a note picked for an event (sizeup/intel/notes.py; the hub's map
+//                read: corrected). Drawn only when they differ from the last set (true when drawn); never a draw per
+//                frame, never a timer.
 //
 // A pin: the level's colour (the Intel page's level chips, its tokens), the category's glyph (KIND: fire, EMS, crash,
 // hazmat, water, rescue, alarm, police, mayday); an unconfirmed place hollow, with its radius as a ring (metres, drawn
 // by MapLibre from the zoom: no work here when the map moves). The selected pin ringed.
 // Pins at the same point (a street's or a corner's one point, read for several events): a pin each, one over the
 // other, the top one with a count badge (2-9, "9+"); a click there steps through them (the next one each click).
+// A corrected place: a diamond in FIX (never a level's colour), a dashed line from the engine's pin when it has one
+// (none where it is that pin); a click picks its event, unless a pin is under it (the pins' step-through wins).
 "use strict";
 
 window.IntelMap = (() => {
@@ -36,6 +40,7 @@ window.IntelMap = (() => {
     for (const [lv, [tok, fb]] of Object.entries(TOKENS)) colors[lv] = ((cs && cs.getPropertyValue(tok)) || "").trim() || fb;
     return colors;
   }
+  const FIX = "#3FB86B";                                // a corrected place (style.css --ok): prealert-info.js too
   const BG = "#15181B";                                 // map-style.js PALETTE.bg: a hollow pin's inside
   const EDGE = "#0B0F14";                               // Search's pins' edge
   const LIGHT = "#F2F3F5";
@@ -118,7 +123,33 @@ window.IntelMap = (() => {
       return feature(p, at.get(k), i === at.get(k));
     });
   }
-  const sigOf = (pins) => JSON.stringify(pins.map((p) => [p.id, p.lat, p.lon, p.confirmed ? 1 : 0, p.radius_m || 0, p.level, p.category]));
+  const sigOf = (pins, fixes = []) => JSON.stringify([pins.map((p) => [p.id, p.lat, p.lon, p.confirmed ? 1 : 0, p.radius_m || 0, p.level, p.category]),
+    fixes.map((f) => [f.id, f.lat, f.lon])]);
+  // the corrected places: a diamond each, and a dashed line from the engine's pin of the same event (when it has one)
+  function fixFeatures(fixes, pins) {
+    const at = new Map(pins.map((p) => [p.id, p]));
+    const out = [];
+    for (const f of fixes) {
+      const p = at.get(f.id);
+      if (p && p.lat === f.lat && p.lon === f.lon) continue;       // where the engine put it already: its pin says so
+      out.push({ type: "Feature", geometry: { type: "Point", coordinates: [f.lon, f.lat] }, properties: { id: f.id } });
+      if (p) {
+        out.push({ type: "Feature", geometry: { type: "LineString", coordinates: [[p.lon, p.lat], [f.lon, f.lat]] }, properties: { id: f.id } });
+      }
+    }
+    return out;
+  }
+  function diamond() {
+    const s = 32, c = document.createElement("canvas");
+    c.width = c.height = s;
+    const g = c.getContext("2d");
+    g.translate(s / 2, s / 2);
+    g.beginPath();
+    g.moveTo(0, -12); g.lineTo(12, 0); g.lineTo(0, 12); g.lineTo(-12, 0); g.closePath();
+    g.fillStyle = FIX; g.fill();
+    g.lineWidth = 3; g.strokeStyle = LIGHT; g.stroke();
+    return g.getImageData(0, 0, s, s);
+  }
 
   // metres -> px at the home latitude, by zoom (512 px tiles): MapLibre interpolates it (exponential 2), nothing here
   function ringRadius(lat) {
@@ -132,8 +163,11 @@ window.IntelMap = (() => {
       if (!map.hasImage(`im-${k}`)) map.addImage(`im-${k}`, glyph(k, LIGHT), { pixelRatio: 2 });
       if (!map.hasImage(`im-${k}-d`)) map.addImage(`im-${k}-d`, glyph(k, EDGE), { pixelRatio: 2 });
     }
+    if (!map.hasImage("im-fix")) map.addImage("im-fix", diamond(), { pixelRatio: 2 });
     for (let n = 2; n <= BADGE_MAX; n++) if (!map.hasImage(`im-n${n}`)) map.addImage(`im-n${n}`, badge(n), { pixelRatio: 2 });
     map.addSource(src, { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+    const fsrc = `${prefix}-fixes`;
+    map.addSource(fsrc, { type: "geojson", data: { type: "FeatureCollection", features: [] } });
     const home = typeof cad !== "undefined" && cad.scene && cad.scene.home;     // (cad.js's const: not on window)
     const lat = (home && home.center && home.center[1]) || 41;
     map.addLayer({ id: `${prefix}-ring`, type: "circle", source: src, filter: [">", ["get", "r"], 0], paint: {
@@ -149,7 +183,11 @@ window.IntelMap = (() => {
       "circle-radius": 13, "circle-color": "rgba(0,0,0,0)", "circle-stroke-width": 2.5, "circle-stroke-color": LIGHT } });
     map.addLayer({ id: `${prefix}-n`, type: "symbol", source: src, filter: ["!=", ["get", "b"], ""], layout: {
       "icon-image": ["get", "b"], "icon-offset": [10, -10], "icon-allow-overlap": true, "icon-ignore-placement": true } });
-    const pin = `${prefix}-pin`;
+    map.addLayer({ id: `${prefix}-fix-line`, type: "line", source: fsrc, filter: ["==", ["geometry-type"], "LineString"],
+      paint: { "line-color": FIX, "line-width": 2, "line-dasharray": [2, 2], "line-opacity": 0.9 } });
+    map.addLayer({ id: `${prefix}-fix`, type: "symbol", source: fsrc, filter: ["==", ["geometry-type"], "Point"], layout: {
+      "icon-image": "im-fix", "icon-allow-overlap": true, "icon-ignore-placement": true } });
+    const pin = `${prefix}-pin`, fix = `${prefix}-fix`;
     let selected = null;
     // the pins under the click, top first: the first, or the one after the selected one (a point's pins in turn)
     map.on("click", pin, (e) => {
@@ -158,16 +196,27 @@ window.IntelMap = (() => {
       const i = ids.indexOf(selected);
       opts.pick(ids[i < 0 ? 0 : (i + 1) % ids.length]);
     });
-    map.on("mouseenter", pin, () => { map.getCanvas().style.cursor = "pointer"; });
-    map.on("mouseleave", pin, () => { map.getCanvas().style.cursor = ""; });
-    let sig = null, pts = [];
+    // a corrected place's diamond: its event, only where no pin is under the click (one click path: the pins' turn)
+    map.on("click", fix, (e) => {
+      if (!opts.pick) return;
+      if (typeof map.queryRenderedFeatures === "function" && map.queryRenderedFeatures(e.point, { layers: [pin] }).length) return;
+      const f = e.features && e.features[0];
+      if (f) opts.pick(Number(f.properties.id));
+    });
+    for (const layer of [pin, fix]) {
+      map.on("mouseenter", layer, () => { map.getCanvas().style.cursor = "pointer"; });
+      map.on("mouseleave", layer, () => { map.getCanvas().style.cursor = ""; });
+    }
+    let sig = null, pts = [], fxs = [];
     return {
-      set(pins) {
-        const s = sigOf(pins || []);
+      set(pins, fixes) {
+        const s = sigOf(pins || [], fixes || []);
         if (s === sig) return false;                    // the same pins: nothing drawn
         sig = s;
         pts = pins || [];
+        fxs = fixes || [];
         map.getSource(src).setData({ type: "FeatureCollection", features: features(pts) });
+        map.getSource(fsrc).setData({ type: "FeatureCollection", features: fixFeatures(fxs, pts) });
         return true;
       },
       select(id) {
@@ -179,13 +228,13 @@ window.IntelMap = (() => {
         map.easeTo({ center: [lo, la], zoom: Math.max(map.getZoom(), 15), duration: 400 });
       },
       bounds() {
-        if (!pts.length) return null;
+        if (!pts.length && !fxs.length) return null;
         const b = new maplibregl.LngLatBounds();
-        for (const p of pts) b.extend([p.lon, p.lat]);
+        for (const p of [...pts, ...fxs]) b.extend([p.lon, p.lat]);
         return b;
       },
     };
   }
 
-  return { attach, kind, feature, features, sigOf, KIND, KINDS, BADGE_MAX };
+  return { attach, kind, feature, features, sigOf, fixFeatures, KIND, KINDS, BADGE_MAX, FIX };
 })();

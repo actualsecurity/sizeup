@@ -222,7 +222,11 @@ async function apiCall(method, path, body) {
       if (!(updating || unreached) || attempt >= API_RETRY_MS.length) {
         if (attempt) LiveConn.up();
         if ((r.status === 401 || r.status === 403) && cad.who) loadWho(true);   // signed out, or the role changed: who now?
-        if (!r.ok) throw new Error((data && data.error) || `${r.status} ${r.statusText}`);
+        if (!r.ok) {                     // a question the hub asks first (409 {error, confirm: true}): e.confirm
+          const err = new Error((data && data.error) || `${r.status} ${r.statusText}`);
+          if (data && data.confirm) err.confirm = true;
+          throw err;
+        }
         return data;
       }
     }

@@ -1626,11 +1626,41 @@ function sCommonPlaces() {
     det.append(ol);
     kids.push(det);
   }
+  const aka = sPlaceAliases((S.data.place_names || {}).aliased || [], admin);
+  if (aka) kids.push(aka);
   const pv = el("div", "");
   pv.id = "s-common";
   sShowCommon(pv);
   return sCard(sCardHead("Common places", info, sHelp("The county CAD's common place names. Re-import replaces the last "
     + "import; your own names stay. Kept in the CAD database only."), remove, pick), file, ...kids, pv);
+}
+
+// Every place's aliases, the county's included (an intel note's "+ Alias", or Settings' own): each with "−" (admins).
+function sPlaceAliases(rows, admin) {
+  if (!rows.length) return null;
+  const det = el("details", "s-more");
+  const n = rows.reduce((t, r) => t + r.aliases.length, 0);
+  const sum = el("summary", "", `Aliases · ${n}`);
+  sum.title = "Other names of a place: the location box and the radio read them. A re-import keeps them";
+  det.append(sum);
+  const ol = el("ol", "s-rows");
+  for (const r of rows) {
+    const li = el("li", "s-row");
+    li.append(el("b", "s-name", r.name), el("span", "dim small", r.town || ""), el("span", "spacer"));
+    for (const a of r.aliases) {
+      const chip = el("span", "chip s-alias", a);
+      if (admin) {
+        const x = sBtn("−", `Take "${a}" off ${r.name}`, () => sAsk(`Take "${a}" off ${r.name}'s names?`,
+          () => sPost("places", { action: "unalias", key: r.key, alias: a }, `Alias removed from ${r.name}`), "Remove"), "danger-quiet");
+        x.setAttribute("aria-label", `Remove alias ${a}`);
+        chip.append(x);
+      }
+      li.append(chip);
+    }
+    ol.append(li);
+  }
+  det.append(ol);
+  return det;
 }
 
 // "Pin": a common place's address not found, into Address points' form (then a click on the map where it is).

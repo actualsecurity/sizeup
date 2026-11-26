@@ -32,7 +32,8 @@ The bundle (SCHEMA_VERSION; every section says why it is empty in "empty", "" wh
     place         the point (approximate when it is), the words or the gazetteer's label, other readings, and what is
                   near: pre-plan points (hydrants, Knox boxes ... as entered), cameras (when the app wired a lookup).
                   Only for a site (SITE_PRECISIONS): an intel place confirmed, or unconfirmed but sure with no other
-                  reading ("unconfirmed": true); never ATC's approximate point
+                  reading ("unconfirmed": true); never ATC's approximate point. An intel event's corrected: the place a
+                  note picked for it, the latest (sizeup/intel/notes.py; None: none), shown apart from the engine's
     site_history  strictly before the pre-alert: the calls at that address or site (the address key, as History here;
                   the airport: its AIRPORT events), newest first, with their comments, disposition, units and times;
                   the earlier pre-alerts there; the address notes (premise notes the reader may see). Rule hits a
@@ -48,6 +49,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from datetime import datetime
 
 from sizeup import radionames, sourcekeys
@@ -189,6 +191,27 @@ def _window(cad, found: list[dict], window_s: float, evidence: set[str]) -> dict
 
 
 # -- the place and what is there ------------------------------------------------------------------------------------
+
+def _corrected(cad, eid: int) -> dict | None:
+    """The place a note picked for an intel event (sizeup/intel/notes.py), the latest edited: {where (as written, its
+    qualifier in front), label, lat, lon, precision, place_key, heard, by, at, note_id}; None: none."""
+    try:
+        r = cad.store.one("SELECT id, corrected_lat, corrected_lon, corrected_precision, corrected_label, "
+                          "corrected_qualifier, corrected_place, corrected_place_key, heard, author, updated_at "
+                          "FROM intel_notes WHERE event_id = ? AND corrected_lat IS NOT NULL "
+                          "ORDER BY updated_at DESC, id DESC LIMIT 1", (int(eid),))
+    except sqlite3.OperationalError:          # (a store without the notes' columns: none)
+        return None
+    if r is None:
+        return None
+    from sizeup.intel.notes import _who
+    q = r["corrected_qualifier"] or ""
+    text = r["corrected_place"] or r["corrected_label"] or ""
+    where = cad.lists.qualified(q, text) if hasattr(cad.lists, "qualified") else " ".join(x for x in (q, text) if x)
+    return {"where": where, "label": r["corrected_label"], "lat": r["corrected_lat"], "lon": r["corrected_lon"],
+            "precision": r["corrected_precision"], "qualifier": q, "place_key": r["corrected_place_key"],
+            "heard": r["heard"], "by": _who(r["author"]), "at": r["updated_at"], "note_id": r["id"]}
+
 
 def _site(cad, label: str, lat, lon) -> dict:
     """The address keys of a place (as an incident at it would have), for History here's lookups."""
@@ -521,7 +544,7 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
                              "precision": e["precision"]} if placed else None),
                   "label": e["place"], "town": e["town"], "basis": e["basis"], "phrases": [], "alts": e["alts"] or [],
                   "key": key, "nearby": _nearby(cad, key, lat, lon, may) if exact else {}, "site_unconfirmed": unsure,
-                  "empty": "" if placed else "location not heard"},
+                  "corrected": _corrected(cad, e["id"]), "empty": "" if placed else "location not heard"},
         "site_history": {
             "site": e["place"] if exact else "", "key": key, "unconfirmed": unsure,
             "calls": (_site_calls(cad, key, lat, lon, False, e["place"] if e["precision"] == "landmark" else "", e["first_at"])

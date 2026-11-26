@@ -530,7 +530,9 @@ def plan(rows: list[list[str]], cols: dict[str, int], locate, town_of, today: st
         if (address.lower(), mine) not in cache:
             cache[(address.lower(), mine)] = locate(address, mine)
         hit = cache[(address.lower(), mine)]
-        entries[key] = {"name": name, "aliases": [], "label": proper_name(name), "lat": hit["lat"] if hit else None,
+        # an admin's aliases (an intel note's misheard name, sizeup/intel/notes.py) are kept by a re-import
+        entries[key] = {"name": name, "aliases": list((current.get(key) or {}).get("aliases") or []),
+                        "label": proper_name(name), "lat": hit["lat"] if hit else None,
                         "lon": hit["lon"] if hit else None, "muni": mine or (hit or {}).get("muni") or town, "note": "",
                         "address": address, "at": hit["label"] if hit else "", "source": SOURCE, "imported": today,
                         "located": hit["precision"] if hit else ""}

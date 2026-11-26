@@ -2777,6 +2777,8 @@ class Cad:
             # the department's own: none, or the county list's address (sizeup/cad/commonplaces.py)
             out["place_address"] = (proper_case(h.get("address") or "") if h.get("source") == "local"
                                     else (h.get("detail") or ""))
+            if h.get("place_key"):       # which of them (settings_overrides "places"): an intel note's pick keeps it
+                out["place_key"] = h["place_key"]
         return out
 
     def places_map(self) -> tuple[bytes, str]:
