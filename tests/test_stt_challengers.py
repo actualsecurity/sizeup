@@ -273,3 +273,21 @@ def test_never_on_a_worker_from_before_challengers_nor_on_a_model_live_traffic_d
     assert not p.chall_ready("FG1", Q5, 3.0)[0]                     # (the worker's primary: whisper_server's)
     p.resident = frozenset()
     assert p.claim("gpu-a", 0).id == "c1~ch"
+
+
+def test_a_stations_identity_gets_403_on_a_challengers_watch(tmp_path):
+    """POST /api/station/stt/jobs/<lease>/watch is a GPU worker's route only (#869: challengers never go to a station):
+    a pooled station's whisper gets 403 gpu_only; a GPU worker reaches it (a lease that isn't its: live false)."""
+    from tests.test_cloud import HubRun, call, hub_cfg
+    hub = HubRun(hub_cfg(tmp_path, cloud_legacy_station_id="st-a"))
+    try:
+        tok = hub.app.hub.stations.add("st-b")
+        hub.app.hub.workers.act({"action": "pool", "stations": {"st-b": True}})
+        assert call(hub.url + "/api/station/stt/hello", "POST", {"state": "online"}, token=tok)[0] == 200
+        code, out = call(hub.url + "/api/station/stt/jobs/0123456789abcdef/watch", "POST", {"wait": 0}, token=tok)
+        assert code == 403 and out["reason"] == "gpu_only"
+        gpu = hub.app.hub.workers.add("gpu-1")
+        assert call(hub.url + "/api/station/stt/jobs/0123456789abcdef/watch", "POST", {"wait": 0},
+                    token=gpu) == (200, {"live": False})
+    finally:
+        hub.close()
