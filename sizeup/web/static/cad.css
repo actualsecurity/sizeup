@@ -919,6 +919,57 @@
   .aa-more { margin-right: auto; padding-inline: var(--s-0); }      /* a quiet link: its words, little padding */
   @media (max-width: 1100px) { .pi-grid { grid-template-columns: minmax(0, 1fr); } }
 
+  /* ---- Intel (intel-page.js, /cad#intel): every radio intel event, its level and why it didn't push -------------- */
+  body[data-view="intel"] .overview { display: none; }       /* the middle column is the page's (cadmap.js shows the Overview) */
+  .il-view { display: flex; flex-direction: column; gap: var(--gutter); min-inline-size: 0; }
+  .il-filters select { flex: 0 1 auto; max-inline-size: 14rem; }
+  .il-table tr.il-row { cursor: pointer; }
+  .il-table td { vertical-align: top; }
+  .il-table :is(td, th) { padding-inline: var(--s-1); }        /* eight columns in the middle one at 1280 px */
+  .il-table td.t { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .il-table td.loc { overflow-wrap: break-word; max-inline-size: 14rem; }
+  .il-cat, .il-src { overflow-wrap: break-word; }
+  .il-level, .il-why > .chip { white-space: nowrap; }
+  .il-lv { font-variant-numeric: tabular-nums; }
+  .il-lv-push { border-color: var(--accent-text); color: var(--accent-text); }
+  .il-lv-held { border-color: var(--warn); color: var(--warn); }
+  .il-lv-map { color: var(--text); }
+  .il-lv-log, .il-lv-shadow { color: var(--text-2); border-style: dashed; }
+  .il-would { font-variant-numeric: tabular-nums; }
+  .il-held { color: var(--text-2); }
+  .il-sl { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .il-sl.high { color: var(--accent-text); font-weight: 700; }
+  .il-sl.medium { color: var(--warn); }
+  .il-sl.low { color: var(--dim); }
+  .il-parts { overflow-wrap: break-word; font-family: var(--mono); font-size: var(--fs-2xs); line-height: var(--lh-2xs);
+              max-inline-size: 11rem; }                  /* (the score's parts: never what widens the table) */
+  .il-part { white-space: nowrap; }                      /* a part whole: the line wraps at its " · " */
+  .il-acts { min-inline-size: var(--ctl-sm); }          /* the buttons stack in a narrow table */
+  :is(.il-vote, .aa-acts .icon)[aria-pressed="true"] { color: var(--accent-text); border-color: var(--accent-text); }
+  .il-n { margin-inline-start: var(--s-0); font-size: var(--fs-2xs); line-height: var(--lh-2xs); font-variant-numeric: tabular-nums; }
+  .q-intel-all { margin-inline-start: auto; }
+  /* notes and tags (intel-notes.js): the row's chip, More info's notes, the incident's */
+  .il-filters #il-q { flex: 1 1 10rem; }
+  .nt-count { font-variant-numeric: tabular-nums; }
+  .nt-audit summary { cursor: pointer; }
+  .nt-audit-list { margin: 0; }
+  .nt-review { border-color: var(--warn); color: var(--warn); }
+  .nt-notes { margin: 0; }
+  .nt-note { display: flex; flex-direction: column; gap: var(--s-1); padding-block: var(--s-1); }
+  .nt-note-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s-1) var(--s-2); min-inline-size: 0; }
+  .nt-tag[aria-pressed="true"] { border-color: var(--accent-text); color: var(--accent-text); }
+  .nt-done { color: var(--ok); }
+  .nt-text { overflow-wrap: anywhere; white-space: pre-wrap; }
+  .nt-fix { overflow-wrap: anywhere; }
+  .nt-acts { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); }
+  .nt-done-in { inline-size: 10rem; }
+  .nt-form { display: flex; flex-direction: column; gap: var(--s-2); }
+  .nt-ta { inline-size: 100%; resize: vertical; }
+  .nt-tags { flex-wrap: wrap; }
+  .nt-fixrow { flex-wrap: wrap; gap: var(--s-2); }
+  .nt-fixrow input { flex: 1 1 10rem; }
+  .d-intel { display: flex; flex-direction: column; gap: var(--s-1); margin-block: var(--s-2); }
+
   /* ---- the incident card's address notes and History here (addr-history.js, #403) ------------------------- */
   .premise { display: flex; flex-direction: column; gap: var(--s-1); margin-block: var(--s-2); }
   .pn {

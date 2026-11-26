@@ -824,6 +824,7 @@
     }
   }
   :where(body > header.fold-links) > :where(#runcards-open, a[href="/monitor"]) { display: none; }   /* as on a phone */
+  :where(body > header.fold-links) #intel-open { display: none; }   /* the Intel page: still the 60 Control column's link */
   :where(body > header.fold-tight) { column-gap: var(--s-1); }
   :where(body > header.fold-tight) .tabs .tab { padding-inline: var(--s-1); }
   /* last: the state texts may shrink, cut, rather than push the clock and the profile off; never a control */

@@ -62,11 +62,13 @@ def test_the_silent_push_and_its_recovery_read_local_time():
     r.at(CLIP_EST - T0, status=station_status())                          # last heard 08:29 EST
     r.at(CLIP_EST - T0 + 181, post=False)
     a = next(a for a in r.h.alerts() if a["key"] == "silent")
-    assert "since 08:29 " in a["text"] and r.n.msgs[-1]["title"].endswith("last heard 08:29")
+    assert "since 08:29 " in a["text"]
+    r.at(CLIP_EST - T0 + 300, post=False)                                 # pushed as our dispatch lost (cover:station)
+    assert r.n.msgs[-1]["title"].endswith("last heard 08:29")
     r.at(CLIP_EST - T0 + 600, status=station_status())                    # back at 08:39
-    r.at(CLIP_EST - T0 + 600 + SETTLE_S, status=station_status())         # settled (#340)
-    m = next(m for m in r.n.msgs if m["title"].startswith("Recovered: Station silent"))
-    assert "cleared at 08:39 " in m["body"]
+    r.at(CLIP_EST - T0 + 600 + SETTLE_S, status=station_status())         # settled
+    m = next(m for m in r.n.msgs if m["title"].startswith("All clear: station back"))
+    assert "back at 08:39 " in m["body"]
 
 
 def test_the_station_update_lines_read_local_time():
