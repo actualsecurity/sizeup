@@ -249,8 +249,8 @@ def test_fg1_open_with_no_id_yet_says_id_on_release():
     strip (and the Overview) says "FG1 · ID on release", muted; never a guessed talker; P25 never (its IDs
     come with the grant). sizeup/radio/live.py sets id_on_release (tests/test_radios.py)."""
     radio = js("radio.js")
-    assert 'if (e.system === "fm" && e.id_on_release) return `${e.channel} · ID on release`;' in radio
-    assert radio.index("if (w) return `TX ${w} ${e.channel}`;") < radio.index("ID on release")   # a decoded unit wins
+    assert 'if (e.system === "fm" && e.id_on_release) return `${ch(e)} · ID on release`;' in radio      # (its one name: radio-names.js)
+    assert radio.index("if (w) return `TX ${w} ${ch(e)}`;") < radio.index("ID on release")   # a decoded unit wins
     assert '(e.id_on_release && !e.rig ? " unid" : "")' in radio and "Radio.chipClass(e)" in js("cadmap.js")
     assert re.search(r":where\(\.talk-chip\.unid\) \{[^}]*color: var\(--text-2\)", (STATIC / "style.css").read_text())
 
