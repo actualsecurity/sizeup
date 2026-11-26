@@ -1,0 +1,24 @@
+{
+  "base": "stt-worker-state/valid/gpu-worker-online.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/config",
+      "value": {
+        "applied_rev": "44136fa355b3678a",
+        "state": "rolled back",
+        "rev": "35bd305b272cee4a",
+        "keys": {
+          "gate_dbfs": "rolled back",
+          "gaming_mem_mb": "rolled back",
+          "keep_awake": "rolled back",
+          "llm_priority": "rolled back",
+          "whisper_flags": "failed"
+        },
+        "errors": {
+          "whisper_flags": "self-test: whisper-server exited (1)"
+        }
+      }
+    }
+  ]
+}

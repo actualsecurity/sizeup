@@ -1,0 +1,23 @@
+{
+  "ok": true,
+  "pool_on": true,
+  "worker_update": {
+    "mode": "auto"
+  },
+  "config": {
+    "rev": "35bd305b272cee4a",
+    "values": {
+      "gate_dbfs": 10.0,
+      "gaming_mem_mb": 2048.0,
+      "keep_awake": true,
+      "llm_priority": "yield",
+      "whisper_flags": [
+        "-t",
+        "6",
+        "--vad",
+        "-vm",
+        "models/ggml-silero-v5.1.2.bin"
+      ]
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "base": "stt-worker-hello-answer/valid/answer.json",
+  "patch": [
+    {
+      "op": "add",
+      "path": "/config",
+      "value": {
+        "rev": "35bd305b272cee4a",
+        "values": {
+          "whisper_flags": "-t 6"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "base": "stt-worker-hello/valid/online-with-gpu.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/config",
+      "value": {
+        "applied_rev": "35bd305b272cee4a",
+        "state": "applied",
+        "rev": "35bd305b272cee4a",
+        "keys": {
+          "gate_dbfs": "ok",
+          "gaming_mem_mb": "ok",
+          "keep_awake": "ok",
+          "llm_priority": "ok",
+          "whisper_flags": "ok"
+        }
+      }
+    }
+  ]
+}

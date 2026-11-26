@@ -310,11 +310,15 @@ POST /api/cad/stations                    {action: add {id, name?} | rename {id,
                                           answer {token, status_token} (no-store), the one time they are shown. In the
                                           Settings audit (System) and the person's activity: the action and id, no token
 GET  /api/cad/stt-workers                 Settings > Station > STT workers (sizeup/cloud/sttworkers.py, #639): each GPU worker
-                                          (id, name, created, rotated, revoked, last used, its live state) and the pool's
-                                          switches; never a hash. The hub's only; a signed-in admin only
+                                          (id, name, created, rotated, revoked, last used, its live state, its
+                                          settings from the hub: config {rev, values} and config_view) and the pool's
+                                          switches, config_keys (the settings' rules); never a hash. The hub's
+                                          only; a signed-in admin only
 POST /api/cad/stt-workers                 {action: add {id, name?} | rename {id, name} | rotate {id} | revoke {id} |
                                           llm {id, on} | update {id, mode: auto|hold|pin, commit?, sha256?} (its
-                                          self-update) | pool {on?, classes?}}: a signed-in admin only. add / rotate answer {token}
+                                          self-update) | config {id, set: {key: value | null}} (its settings from
+                                          the hub, #968: sizeup/cloud/workerconfig.py; a line per key in the audit)
+                                          | pool {on?, classes?}}: a signed-in admin only. add / rotate answer {token}
                                           (no-store), the one time it is shown. In the Settings audit (System) and the
                                           person's activity: the action and id, no token
 GET  /api/cad/metrics?subject=&station=&from=&to=&res=raw|hour|auto&kind=&metric=

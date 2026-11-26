@@ -1,0 +1,22 @@
+{
+  "base": "stt-worker-state/valid/gpu-worker-online.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/config",
+      "value": {
+        "applied_rev": "44136fa355b3678a",
+        "state": "pending",
+        "rev": "35bd305b272cee4a",
+        "why": "a clip",
+        "keys": {
+          "gate_dbfs": "pending",
+          "gaming_mem_mb": "pending",
+          "keep_awake": "pending",
+          "llm_priority": "pending",
+          "whisper_flags": "pending"
+        }
+      }
+    }
+  ]
+}

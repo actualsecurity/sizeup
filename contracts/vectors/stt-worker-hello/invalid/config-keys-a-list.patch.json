@@ -1,0 +1,16 @@
+{
+  "base": "stt-worker-hello/valid/online-with-gpu.json",
+  "patch": [
+    {
+      "op": "replace",
+      "path": "/config",
+      "value": {
+        "applied_rev": "",
+        "state": "none",
+        "keys": [
+          "gate_dbfs"
+        ]
+      }
+    }
+  ]
+}

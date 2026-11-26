@@ -1,0 +1,10 @@
+{
+  "ok": true,
+  "pool_on": true,
+  "worker_update": {
+    "mode": "auto"
+  },
+  "config": {
+    "rev": "35bd305b272cee4a"
+  }
+}

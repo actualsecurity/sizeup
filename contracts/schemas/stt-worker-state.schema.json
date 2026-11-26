@@ -85,6 +85,22 @@
         "state": {"type": "string", "description": "The updater's state in words (current, staged, refused, rolled back, ...). The hub keeps 80 characters and shows it.", "maxLength": 80},
         "bad": {"type": "array", "description": "Hashes it rolled back from and won't take again (the last 5).", "maxItems": 5, "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
       }
+    },
+    "config": {
+      "title": "Settings from the hub",
+      "description": "A GPU worker's settings from the hub (#968; deploy/stt-worker/worker.py HubConfig.report): what it applied of the hub's desired config, and each key's state. Sending it is the capability: the hub answers `config` only to a worker that sent it, and only while `applied_rev` isn't the hub's rev. Never a value. A station's whisper never sends it; a hub from before ignores it.",
+      "x-complete": true,
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["applied_rev", "state"],
+      "properties": {
+        "applied_rev": {"type": "string", "description": "The rev in effect: the last the worker applied (or kept from its last start); \"\" for none (worker.toml's values).", "pattern": "^([0-9a-f]{16})?$"},
+        "rev": {"type": "string", "description": "The last rev the hub sent: applied, waiting or rolled back. Left out before the first.", "pattern": "^[0-9a-f]{16}$"},
+        "state": {"type": "string", "description": "`none` (never sent any), `applied`, `pending` (waiting for the worker to be idle: `why`) or `rolled back` (`rev` failed its self-test; `applied_rev` is in effect again).", "x-known": ["none", "applied", "pending", "rolled back"]},
+        "why": {"type": "string", "description": "With `pending`: what it waits for (a clip, an LLM job, gaming, updating, busy).", "maxLength": 80},
+        "keys": {"type": "object", "description": "Each key of `rev`'s values (and each key it didn't take): its state. `unused`: a server's flags on a worker that doesn't run that server.", "additionalProperties": {"type": "string", "x-known": ["ok", "pending", "invalid", "unknown", "worker.toml only", "failed", "rolled back", "unused"]}},
+        "errors": {"type": "object", "description": "Why a key wasn't taken, in words (no value): an invalid value, or the self-test that failed.", "additionalProperties": {"type": "string", "maxLength": 120}}
+      }
     }
   }
 }

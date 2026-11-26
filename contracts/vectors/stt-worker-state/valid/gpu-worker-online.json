@@ -10,5 +10,6 @@
     "state": "starting",
     "bad": []
   },
+  "config": {"applied_rev": "44136fa355b3678a", "state": "applied", "rev": "44136fa355b3678a"},
   "gpu": {"util_pct": 3, "mem_used_mb": 1210, "mem_total_mb": 12282, "others": 0}
 }

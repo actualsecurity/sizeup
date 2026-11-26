@@ -1187,6 +1187,7 @@ class HubApp(App):
         self.stt_api.infer = self.infer_lane
         self.hub.workers.listeners.append(self.infer_lane.switched)     # (a switch holds at once, not a second later)
         self.cad.stt_workers = self.hub.workers        # Settings > Station > STT workers (sizeup/cad/api.py; admins)
+        self.hub.workers.gpu_total = self._worker_gpu_total     # (#968: a worker's VRAM settings within its GPU's)
         self.cad.stt_workers_live = self._worker_live
         self.cad.stt_pool_forget = lambda wid: (self.sttpool.forget(wid, "revoked"), self.infer_lane.forget(wid))[0]
         # station health (GitHub #79): the alerts, the admins' Settings > Station > Health (#203), the push to the status topic in effect (Settings, else
@@ -2891,7 +2892,14 @@ class HubApp(App):
         now = self.sttpool.clock()
         lw = self.infer_lane.workers.get(wid)
         return {"state": self.sttpool.state_of(w, now), "model": w.model, "seen": w.seen, "gpu": dict(w.gpu),
-                "version": w.version, "llm": lw.llm if lw is not None else "", **self._update_view(wid, w.update)}
+                "version": w.version, "llm": lw.llm if lw is not None else "", **self._update_view(wid, w.update),
+                **self.stt_api.config_view(wid)}
+
+    def _worker_gpu_total(self, wid: str) -> float | None:
+        """A GPU worker's GPU memory (MB) as its last word said; None when not known."""
+        w = self.sttpool.workers.get(wid)
+        v = (w.gpu if w is not None else {}).get("mem_total_mb")
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else None
 
     def _update_view(self, wid: str, update: dict) -> dict:
         """A GPU worker's self-update for Settings and Health: what it runs (update), what the hub wants it on
@@ -2913,6 +2921,8 @@ class HubApp(App):
         wl = getattr(self, "worker_logs", None)
         for w in stats["workers"]:
             w |= self._update_view(w["id"], w.get("update") or {})
+            if w.get("kind") != "station":
+                w |= self.stt_api.config_view(w["id"])     # its settings from the hub (#968): "<rev> ✓", pending, ✗ key
             if wl is not None and w.get("kind") != "station":
                 w["logs"] = wl.view(w["id"])          # its last log batch in CloudWatch, or why none goes
         return {"active": active, "settings": self.hub.workers.pool_settings(), **stats,

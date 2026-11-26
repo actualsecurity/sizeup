@@ -709,6 +709,26 @@ rollback) still starts with a newer one's keys; a known key with a bad value sto
 | `llm_priority` | `yield` | the local LLM vs a speech model that doesn't fit beside it: `yield` (the LLM stops for it) or `keep` (the model isn't loaded); the hub's word wins ([Speech models](#speech-models)) |
 | `catalog_file` | | a local `models.json` instead of the hub's (testing only) |
 | `keep_awake` | `true` | Windows: no idle sleep while the worker runs and isn't paused (see [Keeping the PC awake](#keeping-the-pc-awake)); `false`: Windows' own sleep settings. `true` or `false` only |
+| `log_level` | `info` | `worker.log`'s level: `debug`, `info` or `warning` |
+
+### Settings from the hub
+
+An admin can set most of these keys for each worker on the hub (#968); the hub sends them in its answers, and the
+worker applies them without a restart of `worker.py`. For those keys **the hub wins**: the `worker.toml` value is used
+only while the hub sends none (an older hub, or the admin cleared it), and `worker.log` says once when the hub overrides
+a value `worker.toml` sets. The hub never sends, and the worker never takes from it, `hub_url`, the tokens, the paths,
+`whisper_url`, `llm_url`, the model files or the protocol timings.
+
+- The hub's keys: the gaming thresholds, `gpu_poll_s`, `busy_grace_s`, `gaming_stop_whisper_min`, `llm_stop_gaming_s`,
+  the timeouts, checks and fail counts, `keep_awake`, `auto_update`, `log_ship`, `log_level` (at once); `gate_dbfs`,
+  `llm_priority`, `managed_models` and the VRAM keys (with no clip or LLM job in hand); and `whisper_flags` /
+  `llm_flags`: the servers' options after the program, without `-m`, `--host` and `--port`, from the same allow-lists.
+- New flags restart that server while the worker is idle and not gaming (no new jobs meanwhile), then a self-test: it
+  must answer a 1 s decode (whisper-server) or a tiny generation (llama-server). If it doesn't, the worker puts the
+  last good settings back, reports the key that failed (Health: `✗ whisper_flags`) and doesn't try that version again
+  for 30 minutes.
+- The last good settings are kept in `state\hub-config.json` and used from the next start on, before any server starts.
+- `auto_update = false` stops code updates only: the hub's settings still arrive.
 
 ## Troubleshooting
 
