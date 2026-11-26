@@ -270,12 +270,14 @@ class Registry:
     # -- rows -------------------------------------------------------------------------------------
 
     def _reload(self) -> None:
+        # read first, then swap under the registry's lock: never this lock held while waiting for the store's (a reader
+        # holding the store's lock may resolve a talker label, which takes this one: #977)
+        rows = {(r["system"], r["radio_id"]): r for r in self.store.q("SELECT * FROM radios")}
+        ranges: dict[str, list[dict]] = {}
+        for r in self.store.q("SELECT * FROM radio_ranges ORDER BY system, lo"):
+            ranges.setdefault(r["system"], []).append(r)
         with self._lock:
-            self._rows = {(r["system"], r["radio_id"]): r for r in self.store.q("SELECT * FROM radios")}
-            ranges: dict[str, list[dict]] = {}
-            for r in self.store.q("SELECT * FROM radio_ranges ORDER BY system, lo"):
-                ranges.setdefault(r["system"], []).append(r)
-            self._ranges = ranges
+            self._rows, self._ranges = rows, ranges
         self.rev += 1
 
     def rows(self) -> list[dict]:
