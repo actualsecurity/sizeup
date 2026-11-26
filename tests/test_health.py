@@ -104,32 +104,43 @@ class Rig:
 
 # -- conditions --------------------------------------------------------------------------------------------------
 
-def test_silent_starts_after_three_minutes_pushes_once_and_clears_with_a_recovery_notice():
+def test_silent_starts_after_three_minutes_and_is_pushed_as_our_dispatch_lost_at_five():
+    """"Station silent" is on Health at 3 min; it is pushed as our dispatch not heard ("cover:station": urgent at 5 min,
+    tests/test_dispatch_coverage.py), not on its own; "All clear: station back" once it reports again."""
+    from sizeup.cloud.health import COVER_SETTLE_S
     r = Rig()
     assert r.at(0, post=False) == [] and r.at(170, post=False) == []      # the hub just started: can't tell yet
     ch = r.at(181, post=False)
     assert [(k, a["key"]) for k, a in ch] == [("start", "silent")]
     (a,) = r.h.alerts()
     assert a["severity"] == "critical" and a["since"] == T0 and "since the hub started" in a["text"]
-    assert r.n.msgs[0]["title"] == "Station silent 3 min · the station · never reported" and r.n.msgs[0]["priority"] == 4
-    assert any(m.startswith("health: ALERT Station silent") for m in r.logs)
-    r.at(200, post=False)
+    assert r.n.msgs == [] and any(m.startswith("health: ALERT Station silent") for m in r.logs)
+    r.at(299, post=False)
+    assert r.n.msgs == []
+    ch = r.at(300, post=False)
+    assert [(k, a["key"]) for k, a in ch] == [("start", "cover:station")]
+    (m,) = r.n.msgs
+    assert m["title"] == "Fire/EMS 15 down 5 min: station silent · the station · never reported" and m["priority"] == 5
+    r.at(305, post=False)
     assert len(r.n.msgs) == 1                                             # once, not every tick
-    ch = r.at(210, status=station_status())
-    assert [(k, a["key"]) for k, a in ch] == [("clear", "silent")] and r.keys() == []
+    ch = r.at(310, status=station_status())
+    assert sorted(a["key"] for k, a in ch if k == "clear") == ["cover:station", "silent"] and r.keys() == []
     assert len(r.n.msgs) == 1 and any("health: cleared Station silent" in m for m in r.logs)   # not settled yet (#340)
-    r.at(210 + SETTLE_S - 5, status=station_status())
-    assert len(r.n.msgs) == 1
-    r.at(210 + SETTLE_S, status=station_status())                         # clear 15 min: settled, recovered
-    assert r.n.msgs[1]["title"].startswith("Recovered: Station silent") and "cleared at " + tz.hhmm(T0 + 210) in r.n.msgs[1]["body"]
+    r.at(310 + COVER_SETTLE_S, status=station_status())
+    assert r.n.msgs[1]["title"].startswith("All clear: station back") and "cleared" not in r.n.msgs[1]["body"]
+    assert "Fire/EMS 15 back at " + tz.hhmm(T0 + 310) in r.n.msgs[1]["body"]
+    r.at(310 + SETTLE_S, status=station_status())
+    assert len(r.n.msgs) == 2                                             # never "Recovered: Station silent"
     # the station goes quiet: "since" its last post, the push says when it was last heard
-    t = 210 + SETTLE_S
+    t = 310 + SETTLE_S
     r.at(t + 300)
     r.at(t + 300 + 179, post=False)
     assert r.keys() == []
     r.at(t + 300 + 181, post=False)
     assert r.keys() == ["silent"] and r.h.alerts()[0]["since"] == T0 + t + 300
-    assert r.n.msgs[-1]["title"] == "Station silent 3 min · PCFD station · last heard " + tz.hhmm(T0 + t + 300)
+    r.at(t + 300 + 300, post=False)
+    assert r.n.msgs[-1]["title"] == ("Fire/EMS 15 down 5 min: station silent · PCFD station · last heard "
+                                     + tz.hhmm(T0 + t + 300))
 
 
 def test_an_old_litestream_on_the_hub_is_a_warning_on_the_panel(monkeypatch):
@@ -160,10 +171,10 @@ def test_while_silent_nothing_else_starts_or_clears():
     r.at(0, status=station_status(radios=[radio("FG1", open=True, open_s=200.0, stuck=True)]))
     assert r.keys() == ["stuck:FG1"]
     r.at(400, post=False)                                                  # silent: the stuck flag is old news
-    assert r.keys() == ["silent", "stuck:FG1"]
+    assert r.keys() == ["cover:station", "silent", "stuck:FG1"]
     r.hub.status = station_status()                                        # (nothing new arrives: no post)
     r.at(500, post=False)
-    assert r.keys() == ["silent", "stuck:FG1"]
+    assert r.keys() == ["cover:station", "silent", "stuck:FG1"]
     r.at(510, status=station_status())                                     # back: judged again
     assert r.keys() == []
 

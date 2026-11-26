@@ -35,8 +35,13 @@ class Rig:
         self.h.observe(status)
         return self.h.tick()
 
+    def alerts(self):
+        """Health's alerts but the dispatch coverage one the trunk silent also is (tests/test_dispatch_coverage.py)."""
+        return [a for a in self.h.alerts() if not a["key"].startswith("cover:")]
+
     def keys(self):
-        return sorted(a["key"] for a in self.h.alerts())
+        """The alerts but the dispatch coverage one the trunk silent also is (tests/test_dispatch_coverage.py)."""
+        return sorted(a["key"] for a in self.h.alerts() if not a["key"].startswith("cover:"))
 
 
 def p25(last_any, tgs=None, cc=None, others=None, rec="ok"):
@@ -108,19 +113,19 @@ def test_the_whole_trunk_silent_past_the_window_alerts_and_recovers_on_a_call():
     assert r.keys() == []                                                # 19 min: the day window is 20
     assert r.h.model()["trunk"]["window_s"] == 20 * 60
     ch = r.at(21 * 60, st)
-    assert [(k, a["key"]) for k, a in ch] == [("start", "trunk")]
-    (a,) = r.h.alerts()
+    assert [(k, a["key"]) for k, a in ch] == [("start", "trunk"), ("start", "cover:Fire/EMS 15")]
+    (a,) = r.alerts()
     assert a["severity"] == "critical" and a["title"] == "P25 trunk silent" and a["since"] == T0
     assert a["text"].startswith("no calls on any talkgroup since ")
     assert "(trunk-recorder running) · check P25 dongle, antenna, control channel (alert after 20 min)" in a["text"]
     assert a["who"]["channel"] == P25 and a["who"]["dongle"] == "SDR 103"
-    (msg,) = r.n.msgs
-    assert msg["title"].startswith("P25 trunk silent 21 min") and msg["priority"] == 4
+    (msg,) = r.n.msgs                                                   # pushed as our dispatch lost (urgent)
+    assert msg["title"].startswith("Fire/EMS 15 down 21 min: no P25 call since ") and msg["priority"] == 5
     ch = r.at(22 * 60, p25(22 * 60, {"tg:333": 22 * 60}))              # a call on any talkgroup clears it
-    assert [(k, a["key"]) for k, a in ch] == [("clear", "trunk")]
+    assert [(k, a["key"]) for k, a in ch] == [("clear", "trunk"), ("clear", "cover:Fire/EMS 15")]
     from sizeup.cloud.health import SETTLE_S
     r.at(22 * 60 + SETTLE_S, p25(22 * 60 + SETTLE_S, {"tg:333": 22 * 60 + SETTLE_S}))   # settled (#340)
-    assert r.n.msgs[-1]["title"].startswith("Recovered: P25 trunk silent")
+    assert [m["title"].split(" · ")[0] for m in r.n.msgs[1:]] == ["All clear: Fire/EMS 15 back"]
 
 
 def test_the_night_window_and_the_learned_one(monkeypatch):
@@ -142,7 +147,7 @@ def test_the_night_window_and_the_learned_one(monkeypatch):
     tk = r.h.model()["trunk"]
     assert tk["usual_s"] == 600.0 and tk["window_s"] == 40 * 60 and r.keys() == []
     r.at(t + 41 * 60, p25(t))
-    (a,) = r.h.alerts()
+    (a,) = r.alerts()
     assert "usual gap 10 min; alert after 40 min" in a["text"]
     # A busy system (a call a minute) never shortens it below the default.
     r = Rig()
@@ -165,14 +170,13 @@ def test_only_while_trunk_recorder_runs_and_a_recorder_back_up_gets_the_window()
     r = Rig()
     r.at(0, p25(0, rec="down"))
     r.at(3 * 3600, p25(0, rec="down"))
-    # down: the recorder alert (and the dispatch coverage it costs), not the trunk's
-    assert r.keys() == ["cover:Fire/EMS 15", "recorder"]
+    assert r.keys() == ["recorder"]                                     # down: the recorder alert, not the trunk's
     r.at(3 * 3600 + 5, p25(0))                                           # back up, no call yet
     assert r.keys() == []
     r.at(3 * 3600 + 19 * 60, p25(0))
     assert r.keys() == []
     r.at(3 * 3600 + 21 * 60, p25(0))
-    (a,) = r.h.alerts()
+    (a,) = r.alerts()
     assert a["key"] == "trunk" and a["since"] == T0 + 3 * 3600 + 5
     st = p25(0)                                                          # its dongle Off: nothing expected of it
     st["health"]["recorder"] = {"state": "off", "restarts": 0, "detail": "", "expected": False}
@@ -251,9 +255,10 @@ def test_every_rate_logged_then_none_is_a_hung_decoder_and_alerts():
     assert r.keys() == [] and r.h.model()["trunk"]["cc"]["rate"] == 7.0
 
 
-def test_a_critical_alert_still_on_is_pushed_again_every_few_hours_then_recovers():
-    """#547: "P25 trunk silent" was pushed once and never again for 22 h. A pushed critical alert still on is pushed
-    again every remind_min (3 h), never more often; its recovery says it is over."""
+def test_the_trunk_silent_still_on_is_pushed_again_every_30_min_as_our_dispatch_lost_then_all_clear():
+    """#547: "P25 trunk silent" was pushed once and never again for 22 h. It is the county system's dispatch coverage
+    lost now (cover:Fire/EMS 15): urgent, again every COVER_REMIND_S (30 min), whatever remind_min, and an all clear;
+    "P25 trunk silent" itself stays on Health, never pushed on its own."""
     r = Rig()
     r.at(0, p25(0))
     for dt in range(60, 22 * 3600, 60):
@@ -261,24 +266,30 @@ def test_a_critical_alert_still_on_is_pushed_again_every_few_hours_then_recovers
     titles = [m["title"] for m in r.n.msgs]
     first = [t for t in titles if not t.startswith("Still")]
     still = [t for t in titles if t.startswith("Still")]
-    assert len(first) == 1 and first[0].startswith("P25 trunk silent 21 min")
-    # first pushed at 21 min, then at 3 h 21 min, 6 h 21 min ... 21 h 21 min: 7 reminders in 22 h, 3 h apart
-    assert len(still) == 7 and still[0].startswith("Still: P25 trunk silent 3 h 21 min")
+    assert len(first) == 1 and first[0].startswith("Fire/EMS 15 down 21 min: no P25 call since ")
+    # first pushed at 21 min, then at 51 min, 81 min ... 21 h 51 min: 43 reminders in 22 h, 30 min apart
+    assert len(still) == 43 and still[0].startswith("Still: Fire/EMS 15 down 51 min")
+    assert {m["priority"] for m in r.n.msgs} == {5} and not any("P25 trunk silent" in t for t in titles)
     r.at(22 * 3600, p25(22 * 3600 - 5))                                   # a call: clear, then settled
-    r.at(22 * 3600 + healthmod.SETTLE_S, p25(22 * 3600 + healthmod.SETTLE_S - 5))
+    r.at(22 * 3600 + healthmod.COVER_SETTLE_S, p25(22 * 3600 + healthmod.COVER_SETTLE_S - 5))
     rec = r.n.msgs[-1]
-    assert rec["title"].startswith("Recovered: P25 trunk silent") and "7 reminder(s) sent" in rec["body"]
-    assert len(r.n.msgs) == 9
+    assert rec["title"].startswith("All clear: Fire/EMS 15 back") and "43 reminder(s) sent" in rec["body"]
+    assert len(r.n.msgs) == 45
 
 
 def test_reminders_off_muted_or_warnings_are_not_repeated():
     r = Rig(alerts_remind_min=0.0)
     r.at(0, p25(0))
-    for dt in range(60, 8 * 3600, 300):
+    for dt in range(60, 2 * 3600, 300):
         r.at(dt, p25(0))
-    assert len(r.n.msgs) == 1                                             # 0: the first push only, as before
+    assert len(r.n.msgs) == 4                     # remind_min 0: our dispatch lost is still repeated (21, 51, 81, 111 min)
     r = Rig()
     r.h.mutes = lambda: {"trunk": {"until": T0 + 30 * 24 * 3600}}
+    r.at(0, p25(0))
+    r.at(21 * 60, p25(0))
+    assert len(r.n.msgs) == 1                     # "P25 trunk silent" muted: our dispatch lost isn't hidden
+    r = Rig()
+    r.h.mutes = lambda: {"cover": {"until": T0 + 30 * 24 * 3600}}
     r.at(0, p25(0))
     for dt in range(60, 8 * 3600, 300):
         r.at(dt, p25(0))
@@ -378,5 +389,5 @@ def test_no_decode_rate_is_pushed_only_after_the_watchdog_had_its_chance():
     r.at(30 + CC_LOST_S, p25(25, cc=hung))
     r.at(30 + healthmod.CC_SILENT_NOTIFY_S - 1, p25(25, cc=hung))
     assert r.n.msgs == []
-    r.at(30 + healthmod.CC_SILENT_NOTIFY_S, p25(25, cc=hung))
-    assert len(r.n.msgs) == 1 and r.n.msgs[0]["title"].startswith("P25 trunk silent")
+    r.at(30 + healthmod.CC_SILENT_NOTIFY_S, p25(25, cc=hung))           # (as our dispatch lost: 5 min, like its own)
+    assert len(r.n.msgs) == 1 and r.n.msgs[0]["title"].startswith("Fire/EMS 15 down 5 min: P25 control channel not")

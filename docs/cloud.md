@@ -583,14 +583,21 @@ it changes nothing.
   one isn't, and its "Recovered" says how many reminders went. A push ntfy didn't take is tried again after 1 min
   (3 times at most), as the same push: a lost first push is no longer followed only by the "Still:" 3 h later.
 * **Dispatch coverage lost (`cover:<job>`, urgent).** Fire/EMS 15 (the county P25 job, trunk-recorder) or a paging
-  channel (kind `paging`: South 2) not running for 5 min, whatever the cause (its dongle gone, trunk-recorder down, an
-  antenna group short, no audio #703, held by another app, its job down): one push at ntfy priority 5 ("urgent", the
-  level a phone can let through Do Not Disturb), "Fire/EMS 15 down 5 min: SDR V4 gone", then "Still: ..." every
-  30 min while it lasts (not `remind_min`), and "All clear: Fire/EMS 15 back" (priority 4) once it has stayed back
-  2 min. Its causes stay on Health and aren't pushed themselves meanwhile (one stream of pushes per outage); a cause
-  still on once the job runs again (on a stand-in) is pushed as usual. A dongle swap under 5 min pushes nothing, and
-  the station's update switch doesn't count (the updater "updating", at most 20 min, and 5 min after the switch ended:
-  the 5 min start after it). 2026-11-24: both lost ~6 h, and the pushes were the usual priority 4 ones.
+  channel (kind `paging`: South 2) not running or not heard for 5 min, whatever the cause (its dongle gone,
+  trunk-recorder down, "P25 trunk silent": no call or the control channel lost, an antenna group short, no audio #703,
+  its job down, or its dongle held by another app: "Fire/EMS 15 down 5 min: SDR held by shortfinal", switch it Off
+  there): one push at ntfy priority 5 ("urgent", the level a phone can let through Do Not Disturb), "Fire/EMS 15 down
+  5 min: SDR V4 gone", then "Still: ..." every 30 min while it lasts (not `remind_min`), and "All clear: Fire/EMS 15
+  back" (priority 4) once it has stayed back 2 min. Its causes stay on Health and aren't pushed themselves meanwhile
+  (one stream of pushes per outage); a cause still on once the job runs again (on a stand-in) is pushed as usual.
+  "P25 trunk silent" counts from its own start, so it is pushed when it comes on (20 min without a call by day).
+  The station silent is one such alert for all its dispatch jobs (`cover:station`, "Fire/EMS 15, South 2 down 5 min:
+  station silent", "All clear: station back"); "Station silent" itself stays on Health and isn't pushed. A job still
+  lost when the station is back carries on as its own alert at once. A dongle swap under 5 min pushes nothing. Only
+  the station update's **switch** doesn't count: the updater's phase `switch` (state.json, from the switch until the
+  result: services stopping and restarting), and 5 min after it ended, 10 min at most; the 5 min start after it. Its
+  build and the staged wait for a quiet moment do count: the radios keep running. 2026-11-24: Fire/EMS 15 and South 2
+  lost ~6 h, and the pushes were the usual priority 4 ones.
 * Alerts and 24 h of their history are in `hub.sqlite`: a redeploy neither forgets an alert nor pushes it again.
 * **Flapping (#340).** "Recovered" is pushed only once an alert has stayed clear 15 min (30 min once it came back 3
   times within an hour). Back before then, it is the same episode: no second push, no "Recovered", one row in the
