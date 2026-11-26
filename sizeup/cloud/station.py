@@ -69,7 +69,6 @@ import tempfile
 import threading
 import time
 import wave
-from collections import OrderedDict
 from pathlib import Path
 from typing import Callable
 
@@ -176,13 +175,6 @@ def source_rows(runner) -> list[dict]:
 
 POOL_CAP = "stt_pool"      # the hub takes clips handed to its pool (sizeup/cloud/hub.py POOL_CAP, #639 phase 2)
 RESTART_S = (1.0, 30.0)    # a link thread that raised starts again after this long (doubling, at most the second)
-# STT inputs in FIFO with their events (#678): an input goes into the outbox's lane only once its own traffic / page event
-# is in the outbox (the encoder can finish before the radio thread queues the event; a whisper-transcribed clip's event
-# comes with its text). Held here until then: at most this many / this long (then dropped, counted: "no_event")
-STT_HOLD_ITEMS = 200
-STT_HOLD_S = 600.0
-STT_EVENT_IDS = 4000       # the clip ids of the traffic / page events queued lately (an input made after its event)
-STT_EVENT_KINDS = ("traffic", "page")
 STT_LANE_LOOK_S = 2.0      # the STT lane looks again this often while it waits (an event's ack, or a new input, wakes it)
 
 
@@ -290,7 +282,6 @@ class StationLink:
         # (held while whisper is behind: the FLAC is made once it caught up, #677)
         self.stt_encoder = sttinput.Encoder(self._stt_made, log, held=self._whisper_behind)
         self._stt_wake = threading.Event()
-        self._fifo()                            # (#678) an STT input waits beside the lane for its own event
         # the hub's speech-to-text pool (#639 phase 2): its word (on, may this station's whisper claim, how many others
         # could take a clip now: its state answer's "pool"), and this station's whisper as one of its workers
         self.pool: dict = {}
@@ -304,19 +295,8 @@ class StationLink:
         if n:
             log(f"hub link: {n} event(s) still queued from before, sending them first")
 
-    stt_no_event = 0                        # held STT inputs dropped: their event never came (STT_HOLD_*, #678)
-
-    def _fifo(self) -> threading.Lock:
-        """The lock that orders an event before its STT input, with what it guards: _stt_held (clip id -> (data, flac,
-        meta, prio, made at): an input made before its event was queued) and _event_ids (the clip ids whose event is
-        queued lately). Made at first use too (a link built without __init__, as some tests do)."""
-        d = self.__dict__
-        if "_stt_fifo" not in d:
-            d["_stt_held"], d["_event_ids"] = OrderedDict(), OrderedDict()
-            d["_stt_fifo"] = threading.Lock()
-        return d["_stt_fifo"]
-
     def _wake_stt(self) -> None:
+        """The STT lane looks now (a link built without __init__, as some tests do, has no lane: nothing)."""
         wake = getattr(self, "_stt_wake", None)
         if wake is not None:
             wake.set()
@@ -455,17 +435,7 @@ class StationLink:
         if context and "p25_systems" not in self.hub_caps:
             return
         audio = clip_8k(self.app.clip(clip)) if clip else None
-        cid = str(clip or data.get("id") or "") if kind in STT_EVENT_KINDS else ""
-        with self._fifo():                      # (#678) the event first, then its STT input (one held for it)
-            self.outbox.add(kind, data, audio, context=context)
-            if cid:
-                self._event_ids[cid] = None
-                self._event_ids.move_to_end(cid)
-                while len(self._event_ids) > STT_EVENT_IDS:
-                    self._event_ids.popitem(last=False)
-                held = self._stt_held.pop(cid, None)
-                if held is not None:
-                    self.outbox.add_stt(held[0], held[1], held[2], prio=held[3])
+        self.outbox.add(kind, data, audio, context=context)
         self._wake.set()
 
     def pool_takes(self) -> bool:
@@ -525,28 +495,14 @@ class StationLink:
             return False
 
     def _stt_made(self, data: dict, flac: bytes, meta: dict, prio: int = sttinput.NORMAL) -> None:
-        """An STT input made (the encoder's thread): into the lane once its own event is queued, never before it
-        (#678: FIFO, the input follows its event; a clip whose event isn't queued yet waits here for emit)."""
-        cid = str(data.get("id") or "")
-        now = time.monotonic()
-        with self._fifo():
-            if cid and cid not in self._event_ids:
-                self._stt_held[cid] = (data, flac, meta, prio, now)
-                self._stt_held.move_to_end(cid)
-                while self._stt_held and (len(self._stt_held) > STT_HOLD_ITEMS
-                                          or now - next(iter(self._stt_held.values()))[4] > STT_HOLD_S):
-                    self._stt_held.popitem(last=False)
-                    self.stt_no_event += 1
-                return
-            self.outbox.add_stt(data, flac, meta, prio=prio)
+        self.outbox.add_stt(data, flac, meta, prio=prio)
         self._wake_stt()
 
     def stt_stats(self) -> dict:
         """The STT inputs: waiting (to be made, to go up), sent, and dropped by reason."""
         enc = self.stt_encoder.stats()
         n, b = self.outbox.stt_pending()
-        dropped = dict(enc["dropped"], outbox=self.outbox.dropped_stt, refused=self.stt_refused,
-                       no_event=self.stt_no_event)
+        dropped = dict(enc["dropped"], outbox=self.outbox.dropped_stt, refused=self.stt_refused)
         return {"queued": enc["queued"], "waiting": n, "bytes": b, "made": enc["made"], "sent": self.stt_sent,
                 "dropped": dropped, "hub_takes": sttinput.CAP in self.hub_caps,
                 # (#677) of the dropped, the pre-alert channels' (only once nothing of a lower priority was left)
@@ -940,10 +896,10 @@ class StationLink:
 
     def _stt_forward(self) -> None:
         """POST /api/station/stt: the STT inputs, gzipped, a few hundred KB at a time, only to a hub that takes them and
-        only while no event waits in the outbox (a page or a transmission never queues behind one). FIFO (#678): an
-        input is in the lane only after its own event was queued (_stt_made / emit), and a batch goes only when no event
-        waited after it was read, so every input in it follows its event to the hub; the lane's order (outbox.py
-        _stt_order, #677 / #701: the pre-alert channels' first, then by n) is never changed here."""
+        only while no event waits in the outbox (a page or a transmission never queues behind one), in the lane's order
+        (outbox.py _stt_order, #677 / #701: the pre-alert channels' first, then by n). An input never waits for its own
+        event: a clip's traffic event goes only with its text, and the hub keeps an input that comes first (its rows'
+        order is the hub's). The events' ack wakes it (#678)."""
         client = self._client(60.0)
         backoff = Backoff(first=2.0, fast_cap=10.0, cap=120.0)
         while not self._stop.is_set():
@@ -952,8 +908,6 @@ class StationLink:
                 self._stt_wake.clear()
                 continue
             rows = self.outbox.stt_batch()
-            if self.outbox.pending()[0]:            # an event queued meanwhile: it goes first (then the lane is woken)
-                continue
             body = {"v": 1, "station": self.station_id,
                     "items": [dict(r["data"], n=r["n"], stt=sttinput.to_wire(r["flac"], r["meta"])) for r in rows]}
             try:

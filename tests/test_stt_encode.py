@@ -538,7 +538,6 @@ def test_the_station_holds_its_normal_and_low_inputs_on_its_whispers_behind_live
     monkeypatch.setattr(st.stt, "behind_live", lambda: behind[0])
     page = Page("South2-1790000000400", "South 2", 470.2, 0.0, 6.0, "voice", [], 2.0, None, 20.0)
     a = voice(1.0, seed=7)
-    st.link.emit("page", {"id": page.id}, None)                             # (its event first, as App._segment)
     st.link.stt_input(page, a, PRE)
     fire = _transmission(st, "FG1-1790000000401", "FG1", voice(1.0, seed=8), True, eng="aws")
     air = _transmission(st, "HPNATC-1790000000402", "HPN ATC", voice(1.0, seed=9), False, eng="aws")

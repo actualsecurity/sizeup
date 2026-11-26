@@ -704,7 +704,7 @@
             "sent": {"type": "integer", "minimum": 0, "description": "Inputs the hub stored."},
             "dropped": {
               "type": "object",
-              "description": "Inputs dropped, by reason: `queue`, `too_big`, `failed` (the encoder's), `outbox` (over its budget), `refused` (by the hub, for good), `no_event` (made before its own traffic / page event was queued, and that event never came: #678). Each a count.",
+              "description": "Inputs dropped, by reason: `queue`, `too_big`, `failed` (the encoder's), `outbox` (over its budget), `refused` (by the hub, for good). Each a count.",
               "additionalProperties": {"type": "integer", "minimum": 0}
             },
             "hub_takes": {"type": "boolean", "description": "The hub's last `caps` had `stt_input`."},

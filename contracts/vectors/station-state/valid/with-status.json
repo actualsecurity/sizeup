@@ -374,7 +374,7 @@
       "bytes": 0,
       "made": 0,
       "sent": 0,
-      "dropped": {"queue": 0, "too_big": 0, "failed": 0, "outbox": 0, "refused": 0, "no_event": 0},
+      "dropped": {"queue": 0, "too_big": 0, "failed": 0, "outbox": 0, "refused": 0},
       "hub_takes": false,
       "wake_on_ack": true,
       "dropped_pre": 0,

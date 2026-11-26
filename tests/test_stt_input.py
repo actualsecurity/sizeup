@@ -386,7 +386,7 @@ def test_the_station_status_shows_dropped_stt_inputs_by_reason(tmp_path):
         st.link.stt_encoder.dropped["queue"] = 2
         assert "5 STT input(s) dropped" in st.link.status_row()["detail"]
         si = st.link.status(talkgroups=False)["stt_input"]
-        assert si["dropped"] == {"queue": 2, "too_big": 0, "failed": 0, "outbox": 3, "refused": 0, "no_event": 0}
+        assert si["dropped"] == {"queue": 2, "too_big": 0, "failed": 0, "outbox": 3, "refused": 0}
     finally:
         st.link.stop()
 

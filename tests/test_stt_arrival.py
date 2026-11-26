@@ -198,88 +198,33 @@ def test_the_stt_input_follows_its_event_at_once_not_at_the_lanes_next_look(tmp_
 
 
 
-class OrderHub(FakeHub):
-    """FakeHub that logs every events post and STT post in the order the hub got them: ("events", ids) / ("stt", ids)."""
-
-    def __init__(self, caps):
-        super().__init__(caps)
-        self.log = []
-
-    def request(self, method, path, body=None, timeout=None, gzip_body=False, raw_gzip=None):
-        out = super().request(method, path, body, timeout, gzip_body, raw_gzip)
-        if path == "/api/station/events":
-            with self.lock:
-                self.log.append(("events", [e["data"].get("id") for e in body["events"]
-                                            if e["type"] in ("traffic", "page")]))
-        elif path == "/api/station/stt":
-            with self.lock:
-                self.log.append(("stt", [it["id"] for it in body["items"]]))
-        return out
-
-
-@pytest.mark.parametrize("down", [False, True], ids=["hub-up", "hub-down-then-up"])
-def test_a_burst_keeps_fifo_each_stt_input_after_its_own_event_and_in_order_within_its_class(tmp_path, down):
-    """STT stays FIFO (#678): a burst of transmissions on a fireground (FIRE) and another channel (NORMAL), the hub's
-    engine's and the station whisper's (its event comes with its text): every STT input reaches the hub after its own
-    event, the inputs of a class in their events' order, and the fire traffic's ahead of the other's in a backlog
-    (#677 / #701). Waking the lane on the events' ack never sends one ahead of its event."""
-    hub = OrderHub(["p25_systems", "stt_input"])
-    hub.down = down
+def test_a_burst_goes_up_pre_alert_first_and_in_its_own_order_within_each_class(tmp_path):
+    """The events' ack wakes the lane (#678) and nothing else about its order changes (#677 / #701): after a backlog,
+    the pre-alert channels' inputs first, then fire traffic, then the rest, each class in the order its inputs were
+    queued. An input never waits for its own event (a whisper clip's traffic event goes only with its text)."""
+    hub = FakeHub(["p25_systems", "stt_input"])           # (down: the events wait, and the STT inputs behind them)
     st = offline_station(tmp_path, client=hub)
-    sent = []
     try:
-        for k in range(8):
-            src, eng = ("FG1", "aws") if k % 2 == 0 else ("Ops 3", "aws" if k % 4 == 1 else "local")
-            t = _transmission(st, f"{src.replace(' ', '')}-17900000{k:05d}", src, voice(0.6, seed=20 + k), True, eng=eng)
-            sent.append((t.id, st._stt_lane(t, src)))
-        assert {p for _, p in sent} == {FIRE, NORMAL}
-        if down:
-            assert wait(lambda: all(stt_rows(st, cid) for cid, _ in sent), 20)
-            assert hub.stt_posts == []                       # (the events can't go: nor may any input)
-            hub.down = False
-        stt_ids = lambda: [cid for kind, ids in list(hub.log) if kind == "stt" for cid in ids]   # noqa: E731
-        assert wait(lambda: len(stt_ids()) == len(sent), 30), hub.log
-        seen, ev_order = set(), []
-        for kind, ids in list(hub.log):
-            if kind == "events":
-                seen.update(ids)
-                ev_order += [i for i in ids if i not in ev_order]
-            else:
-                assert all(i in seen for i in ids), (ids, hub.log)          # each input after its own event
-        got = stt_ids()
-        assert sorted(got) == sorted(cid for cid, _ in sent) and len(set(got)) == len(got)
-        prio = dict(sent)
-        for p in (FIRE, NORMAL):                                              # in their events' order within a class
-            assert [i for i in got if prio[i] == p] == [i for i in ev_order if prio[i] == p]
-        if down:                                                              # a backlog: the fire traffic's first
-            assert [prio[i] for i in got] == sorted((prio[i] for i in got), reverse=True)
-    finally:
-        st.link.stop()
-
-
-def test_an_stt_input_made_before_its_event_is_queued_waits_for_it(tmp_path):
-    """The encoder can finish before the radio thread queues the event (or a whisper clip's event comes with its text):
-    the input waits beside the lane until then, never in it ahead of its event; one whose event never comes is dropped
-    after STT_HOLD_ITEMS / STT_HOLD_S, counted (#678)."""
-    from sizeup.cloud import station as station_mod
-    st = offline_station(tmp_path)
-    try:
-        link = st.link
-        link._stt_made({"id": "FG1-1", "kind": "traffic"}, b"f1", {}, prio=FIRE)
-        link._stt_made({"id": "FG1-2", "kind": "traffic"}, b"f2", {}, prio=FIRE)
-        assert link.outbox.stt_pending()[0] == 0
-        link.emit("traffic", {"id": "FG1-2", "source": "FG1"}, None)
-        link.emit("traffic", {"id": "FG1-1", "source": "FG1"}, None)
-        assert [r["data"]["id"] for r in link.outbox.stt_batch()] == ["FG1-2", "FG1-1"]   # its event's order
-        link.emit("page", {"id": "South2-1"}, None)
-        link._stt_made({"id": "South2-1", "kind": "page"}, b"p", {}, prio=PRE)              # its event is queued already
-        assert [r["data"]["id"] for r in link.outbox.stt_batch()][0] == "South2-1"
-        link.emit("alarm", {"id": "FG1-3"}, None)                                          # not its row's own event
-        link._stt_made({"id": "FG1-3", "kind": "traffic"}, b"f3", {}, prio=FIRE)
-        assert "FG1-3" not in [r["data"]["id"] for r in link.outbox.stt_batch()]
-        for k in range(station_mod.STT_HOLD_ITEMS):
-            link._stt_made({"id": f"X-{k}", "kind": "traffic"}, b"x", {}, prio=NORMAL)
-        assert link.stt_no_event == 1 and link.stt_stats()["dropped"]["no_event"] == 1      # FG1-3, the oldest
+        queued = []
+        for k in range(9):
+            src, eng = (("FG1", "aws"), ("Ops 3", "aws"), ("Ops 3", "local"))[k % 3]
+            t = _transmission(st, f"{src.replace(' ', '')}-17900001{k:05d}", src, voice(0.6, seed=40 + k), True, eng=eng)
+            assert wait(lambda: stt_rows(st, t.id), 10)                    # (queued one after the other: n order)
+            queued.append((t.id, st._stt_lane(t, src)))
+        from sizeup.radio.page import Page
+        page = Page("South2-1790000200000", "South 2", 470.2, 0.0, 6.0, "voice", [], 2.0, None, 20.0)
+        st.link.stt_input(page, voice(0.6, seed=60), PRE)
+        assert wait(lambda: stt_rows(st, page.id), 10)
+        queued.append((page.id, PRE))
+        assert hub.stt_posts == []
+        hub.down = False
+        assert wait(lambda: not st.link.outbox.stt_pending()[0] and hub.stt_posts, 20)
+        got = [it["id"] for body, _gz in hub.stt_posts for it in body["items"]]
+        prio = dict(queued)
+        assert sorted(got) == sorted(prio) and got[0] == page.id                    # the pre-alert first
+        assert [prio[i] for i in got] == sorted((prio[i] for i in got), reverse=True)  # then fire, then the rest
+        for p in (FIRE, NORMAL):                                                       # each class in its own order
+            assert [i for i in got if prio[i] == p] == [i for i, q in queued if q == p]
     finally:
         st.link.stop()
 
