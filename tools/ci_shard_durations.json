@@ -80,6 +80,7 @@
  "tests/test_design.py": 0.26,
  "tests/test_dev_seed.py": 3.14,
  "tests/test_dispatch.py": 0.01,
+ "tests/test_dispatch_coverage.py": 1.5,
  "tests/test_dispatch_modes.py": 4.01,
  "tests/test_dispatch_modes_review.py": 8.19,
  "tests/test_dispatch_rigs.py": 0.25,
