@@ -56,6 +56,9 @@ side by side: the new release is built and checked next to the running one, then
              One line per attempt and result: the journal (sizeup-update) and /var/log/sizeup-update.log.
              What it did: /var/lib/sizeup-update/state.json (root's, world-readable), shown on the
              station's Hub row, by sizeup-station status / doctor and, in the station's status, on the hub.
+             Its "phase" while "updating": "build" (fetch, build, preflight: the radios keep running) or
+             "switch" (from step 5 until the result: services stop and restart); last.switch_at is when the
+             switch began. The hub holds its dispatch coverage alert only for the switch (health.py).
     paused   install.conf SIZEUP_AUTO_UPDATE=off (sizeup-station autoupdate off), [station]
              auto_update = false in the config, a station installed with another --ref than main
              (testing a branch: the hub runs main), or one installed from a folder (--from-dir).
@@ -577,12 +580,12 @@ class Watch:
         if mtime != self._read[0]:
             self._read = (mtime, read_state(self.state_path) if mtime else {})
         st = self._read[1]
-        out = {k: st[k] for k in ("state", "since", "to", "from", "paused", "windows", "last", "equivalent", "retry",
-                                  "hold") if k in st}
+        out = {k: st[k] for k in ("state", "phase", "since", "to", "from", "paused", "windows", "last", "equivalent",
+                                  "retry", "hold") if k in st}
         for k in ("last", "equivalent", "retry", "hold"):     # (one shape, whatever an older run wrote: as report())
             if k in out and not isinstance(out[k], dict):
                 out[k] = {}
-        for k in ("state", "to", "from"):
+        for k in ("state", "phase", "to", "from"):
             if k in out and not isinstance(out[k], str):
                 del out[k]
         if "since" in out and not (isinstance(out["since"], (int, float)) and not isinstance(out["since"], bool)):
@@ -1650,6 +1653,8 @@ class Updater:
         for k in [k for k, v in kw.items() if v is None]:      # (None: that key goes)
             st.pop(k, None)
             del kw[k]
+        if "state" in kw and "phase" not in kw:
+            st.pop("phase", None)                   # (a phase is only ever the one "updating" was saved with)
         st.update(kw)
         if "state" in kw:
             st["since"] = self.clock()
@@ -1958,12 +1963,13 @@ class Updater:
             self.note(f"auto-update: {tag}: adapter {repo_name((ad or have or {}).get('repo'))} "
                       f"{have_c[:7] or 'none'} -> {ac[:7] or 'none'}")
             last = {"at": t0, "from": build, "to": build, "adapter": ac[:12], "adapter_from": have_c[:12]}
-            self.save(st, state="updating", to=build, paused="", adapter_to=ac, **{"from": name})
+            self.save(st, state="updating", phase="build", to=build, paused="", adapter_to=ac, **{"from": name})
             sha = build
         else:
             tag = f"update {short(build)} -> {short(want)}"
             last = {"at": t0, "from": build, "to": want}
-            self.save(st, state="updating", to=want, hub=want, paused="", adapter_to="", **{"from": name})
+            self.save(st, state="updating", phase="build", to=want, hub=want, paused="", adapter_to="",
+                      **{"from": name})
             try:
                 self.git("fetch", "--force", "origin", f"+refs/heads/{MAIN}:refs/remotes/origin/{MAIN}")
             except (StepError, subprocess.TimeoutExpired, OSError) as e:     # (git() makes the last two StepErrors)
@@ -2043,8 +2049,9 @@ class Updater:
             self.save(st, state="paused", current=build, paused=paused, hold=None, pending=None)
             return 0
         before = self.radios_ok()
-        self.save(st, state="updating", hold=None)
         t1 = self.clock()
+        last["switch_at"] = round(t1, 1)            # (the hub holds its dispatch coverage alert from here: health.py)
+        self.save(st, state="updating", phase="switch", hold=None)
         try:
             self.activate(target, name)
             why = self.healthy(sha)

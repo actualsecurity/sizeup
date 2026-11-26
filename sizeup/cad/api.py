@@ -231,14 +231,14 @@ GET  /api/cad/comms?unit=&channel=&event=&pcfd=1&emergency=1&since=&until=&main_
                                           and Other each their own newest main_limit (200) / limit (300), #241
                                           The Radio page's views (#415): any of ?view=ours|police|ems|transit|air|all
                                           ?system= ?group= ?source= ?service= ?tier= ?dept= ?safety=1 ?mute= ?before=
-                                          ?changed= ?at= gives one page {rows, older, newer, next, cursor, reload}
+                                          ?changed= ?at= ?linked=1 ?unit=a,b gives one page {rows, older, newer, next, cursor, reload}
                                           (Cad.comms_query). Another system's rows: only to a viewer who may see them
 GET  /api/cad/radio-names              {rev, names, shorts, systems, freqs}: what every channel / talkgroup label on
                                           the page shows (sizeup/radionames.py, static/radio-names.js); another
                                           system's keys only to a reader who may see its traffic
 GET  /api/cad/comms/sources?rev=          the Radio page's tree: {live, sources: [{key, system, group, name, service,
                                           tier, ours, last, counts: [[minutes ago, calls]], emergency}], folders: the
-                                          admins' folders (#607) | null} (Cad.comms_sources)
+                                          admins' folders (#607) | null, views: the rail's views} (Cad.comms_sources)
 GET  /api/cad/feed?limit=&tg=307,333      the pinned 60 Control feed: newest transmissions on the incident
                                           talkgroup(s), pc = why it is talking to us (sizeup/cad/feed.py)
 POST /api/cad/incident/<id>/link          {traffic_id, operator}  put a transmission on the event (why manual)
@@ -360,6 +360,8 @@ POST /api/cad/settings/radio_folders      {action: set {folders: [{id, name, sec
                                           base?} | reset {base?}}: the Radio page rail's folders for everyone (#607,
                                           sizeup/cad/radiofolders.py; name: one channel's display name, blank its own,
                                           also from Settings > Radios > Channels); admins
+POST /api/cad/settings/radio_views        {action: set {views: [{id, name, mark, color, filter}], base?} | reset {base?}}:
+                                          the Radio rail's views for everyone (sizeup/cad/radioviews.py); admins
 POST /api/cad/settings/radio_services     {action: set {key, service} | set_many {services: {key: service}}}: a source's
                                           service (fire | police | ems | transit | air | other; automatic: none chosen)
                                           over its talkgroups file's and its words (sizeup/sourcekeys.py); its rows of
@@ -391,13 +393,28 @@ GET  /api/cad/intel/events?since=&bbox=w,s,e,n&mode=map,push&status=open|all&lim
                                           what, level, where, precision, confirmed, lat, lon, radius_m, place, town, alts,
                                           mode, status, first_at, last_at, until, traffic_ids ...}], now}. Both: anyone
                                           signed in (sourcekeys.may_see_context), 403 otherwise
+GET  /api/cad/intel/list?from=&to=&level=&category=&source=&system=&decided=&held=&status=&page=&size=
+                                          the Intel page (sizeup/intel/eventlog.py): every event at every level and
+                                          status, newest first, 50 a page, and why each didn't push; anyone signed in
+GET  /api/cad/intel/<id>/notes            its notes (sizeup/intel/notes.py), oldest first; the audit for an admin;
+                                          anyone signed in
+POST /api/cad/intel/<id>/notes            {text?, tags?: [...], corrected_category?, corrected_place?, corrected_level?}:
+                                          a note, anyone signed in (its author: who signed in)
+POST /api/cad/intel/notes/<nid>           the same fields | {delete: true}: its author or an admin; audited
+POST /api/cad/intel/notes/<nid>/done      {done: "PR #123" | ""}: acted on (the review queue); admins
+GET  /api/cad/intel/export.csv|.jsonl     ?from=&to= and the Intel page's filters: each event with its notes, tags,
+                                          scores, rule hits, the model's record, verdicts and transcripts; admins
+                                          (ADMIN_READS), in their activity (kind "search")
+GET  /api/cad/incident/<id>/intel         the intel events linked to the incident (near_incident, incident_id) and
+                                          their notes; anyone signed in
 POST /api/cad/intel/<id>/dismiss          {verdict?}  a pre-alert that is nothing (dispatchers and admins)
 GET  /api/cad/prealerts/<kind>/<id>       a pre-alert's More info (kind airport | intel; /cad#prealert/<kind>/<id>): its
                                           context bundle (sizeup/context_bundle.py: why, the transmissions and their
                                           audio, before / after, the place, site history, now, the outcome). Anyone
-                                          signed in (403 otherwise, as the radio pre-alerts); 404 when there is none
-                                          (or it is a shadow / log one and the reader no admin)
-POST /api/cad/intel/<id>/feedback         {verdict: useful | noise | wrong_place | wrong_type | late | missed, category?}
+                                          signed in (403 otherwise, as the radio pre-alerts), every level (the Intel
+                                          page's rows open it); 404 when there is none
+POST /api/cad/intel/<id>/feedback         {verdict: useful | noise | wrong_place | wrong_type | late | missed | should_push,
+                                          category?}
                                           anyone signed in
 POST /api/cad/settings/intel              {action: set | pack | category | rule | local | reset, ...}: Settings > System >
                                           Intel; admins; audited
@@ -420,6 +437,7 @@ from sizeup.cad.service import Cad
 from sizeup.cad.settings import LastAdmin
 from sizeup.cad.store import TZ, CadError
 from sizeup.datasources import TooSoon
+from sizeup.intel.notes import Forbidden as NoteForbidden
 
 
 class NeedsConfirm(CadError):
@@ -450,6 +468,10 @@ HINT = re.compile(r"/api/cad/hint/(\d{1,9})/(accept|dismiss)")
 OOS_NOTICE = re.compile(r"/api/cad/oos-notice/(\d{1,9})/(service|dismiss)")      # automation refused (sizeup/cad/oos.py)
 INTEL_EVENT = re.compile(r"/api/cad/intel/(\d{1,9})/(dismiss|feedback)")        # radio pre-alerts (sizeup/intel)
 PREALERT_INFO = re.compile(r"/api/cad/prealerts/(airport|intel)/(\d{1,9})")      # a pre-alert's More info page
+INTEL_NOTES = re.compile(r"/api/cad/intel/(\d{1,9})/notes")                     # an intel event's notes (notes.py)
+INTEL_NOTE = re.compile(r"/api/cad/intel/notes/(\d{1,9})(/done)?")               # ... one note: edit, delete, done
+INTEL_EXPORT = re.compile(r"/api/cad/intel/export\.(csv|jsonl)")
+INCIDENT_INTEL = re.compile(r"/api/cad/incident/(\d{1,9})/intel")                # its linked intel events' notes
 ALARM_ACK = re.compile(r"/api/cad/alarm/(\d{1,9})/ack")
 ALARM_CLEAR = re.compile(r"/api/cad/alarm/(\d{1,9})/clear")
 REMINDER_ACK = re.compile(r"/api/cad/reminders/ack")                             # a reminder OK'd (reminders.py)
@@ -482,11 +504,14 @@ ADMIN_READS = {
     "/api/cad/stt-workers": "speech-to-text workers and their tokens are for admins (Settings > Station > STT workers)",
     "/api/cad/metrics": "the station's signal metrics are for admins (Settings > Radios)",
     "/api/cad/intel": "the radio pre-alert rules are for admins (Settings > System > Intel)",   # #411: rule phrases
+    "/api/cad/intel/export.csv": "the intel export is for admins",           # notes, names, transcripts at once
+    "/api/cad/intel/export.jsonl": "the intel export is for admins",
 }
 
 # Who may POST what (enforced only with a verified sign-in, see above): "dispatch" = dispatchers and
 # admins (running calls), "admin" = admins only (Settings in every form, and the radios), "read" =
-# anyone signed in (a POST that changes nothing). First match wins; a path not here is "admin".
+# anyone signed in (a POST that changes nothing), "active" = anyone signed in whose account is active, never a
+# deactivated one (a vote or a note on a radio pre-alert). First match wins; a path not here is "admin".
 WRITES = (
     (re.compile(r"/api/cad/incident(?:/\d{1,9}(?:/(?:accept|dismiss|close|reopen|note|recommend|preview|dispatch|upgrade"
                 r"|attach|link|unlink|keep|return|feed-use|auto-undo|merge))?)?"), "dispatch"),      # events, notes, dispatches, radio links
@@ -498,7 +523,10 @@ WRITES = (
     (HINT, "dispatch"),                                                     # a status suggested from the radio (#37)
     (OOS_NOTICE, "dispatch"),                                               # an out-of-service unit back in service
     (re.compile(r"/api/cad/intel/\d{1,9}/dismiss"), "dispatch"),             # a radio pre-alert that is nothing
-    (re.compile(r"/api/cad/intel/\d{1,9}/feedback"), "read"),                # ... a vote on it: anyone signed in
+    (re.compile(r"/api/cad/intel/\d{1,9}/feedback"), "active"),              # ... a vote on it: anyone signed in, active
+    (INTEL_NOTES, "active"),                                                # ... a note on it: the same
+    (re.compile(r"/api/cad/intel/notes/\d{1,9}/done"), "admin"),             # ... a note acted on (the review queue)
+    (re.compile(r"/api/cad/intel/notes/\d{1,9}"), "active"),                 # ... its edit: the author or an admin (notes.py)
     (ALARM_ACK, "dispatch"),                                                # an emergency alarm seen (#128)
     (ALARM_CLEAR, "dispatch"),                                              # ... and resolved: its window closed
     (REMINDER_ACK, "dispatch"),                                             # a reminder OK'd: quiet for everyone
@@ -766,7 +794,24 @@ def _toggles(b) -> str:
                       if b.get(k) is not None] + ([f"tier {_clip(b['tier'], 12)}"] if b.get("tier") else []))
 
 
+def _intel_note(m, b, o, c):
+    """An intel note's change in the person's activity: which, never its words (sizeup/intel/notes.py)."""
+    n = (o or {}).get("note") or {}
+    tags = ", ".join(n.get("tags") or [])
+    if m.re is INTEL_NOTES:
+        return (f"Added a note on radio pre-alert {m.group(1)}" + (f" ({tags})" if tags else ""), "")
+    if m.group(2):
+        return (f"Marked note {m.group(1)} done" + (f": {_clip(b.get('done'), 40)}" if b.get("done") else " (not yet)"), "")
+    if b.get("delete"):
+        return (f"Deleted note {m.group(1)}", "")
+    if (o or {}).get("unchanged"):
+        return None
+    return (f"Edited note {m.group(1)}" + (f" ({tags})" if tags else ""), "")
+
+
 DOES = (
+    (INTEL_NOTES, _intel_note),
+    (INTEL_NOTE, _intel_note),
     (re.compile(r"/api/cad/incident"), _created),
     (INCIDENT_CHANNEL, lambda m, b, o, c: (f"{'Removed' if b.get('remove') else 'Added'} channel TG {_clip(b.get('talkgroup'), 12)} "
                                            f"on {_number(c, int(m.group(1))) or 'event ' + m.group(1)}",
@@ -908,6 +953,8 @@ class CadApi:
             self.refused(path, who, f"signed in as {who.email}: {e}", client)
             return _json(403, {"error": f"signed in as {who.email}: {e}"})
         need = needs(path, body)
+        if need == "active" and (st["active"] or st.get("bootstrap")):
+            return None                    # a write any signed-in person may make, never a deactivated one's
         if need in MAY.get(st["may"], ("read",)):
             return None
         ask = f" (ask {', '.join(st['admins'])})" if st["admins"] else ""
@@ -1178,6 +1225,28 @@ class CadApi:
             return _json(404, {"error": str(e)})
         return 200, json.dumps(out, separators=(",", ":"), default=str).encode(), JSON, {"Cache-Control": "no-store"}
 
+    def _intel_export(self, fmt: str, query: str, who) -> tuple:
+        """GET /api/cad/intel/export.csv | .jsonl: admins (ADMIN_READS), signed in; in their activity (kind "search":
+        the count only, never the notes). Names and what was said: it leaves the hub only as this download."""
+        if not sourcekeys.may_see_context(self.cad.comms.context_broadcast) or not self._admin(who):
+            return _json(403, {"error": "Admins only: the intel export is for admins (signed in)"})
+        data, n = self.cad.intel_admin.notes.export(parse_qs(query), fmt)
+        self.cad.activity.record(who.email, "search", f"GET /api/cad/intel/export.{fmt}",
+                                 f"Intel export ({fmt.upper()}): {n} event{'s' if n != 1 else ''}",
+                                 logged=f"Intel export: {n} event{'s' if n != 1 else ''}")
+        name = f"intel-{datetime.now(TZ).strftime('%Y%m%d-%H%M')}.{fmt}"
+        ctype = "text/csv; charset=utf-8" if fmt == "csv" else "application/x-ndjson; charset=utf-8"
+        return 200, data, ctype, {"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"}
+
+    def _operator(self, who) -> str:
+        """The signed-in reader's operator name (what their POSTs are recorded as), "" for none."""
+        if who is None or not who.email:
+            return ""
+        try:
+            return str(self.cad.settings.standing(who.email)["operator"] or "")
+        except CadError:
+            return ""
+
     def _admin(self, who) -> bool:
         """A verified admin (with nobody verified: no, the shadow and log pre-alerts stay hidden)."""
         if who is None or not who.email:
@@ -1375,10 +1444,21 @@ class CadApi:
                     hours = 24.0
                 return _json(200, {"rows": self.cad.comms.activity_rows(self.cad.clock() - hours * 3600,
                                                                         (q.get("source") or [""])[0][:80])})
-            if path in ("/api/cad/intel", "/api/cad/intel/events"):    # radio pre-alerts: a signed-in person only
+            if m := INTEL_EXPORT.fullmatch(path):
+                return self._intel_export(m.group(1), query, who)
+            if (m := INTEL_NOTES.fullmatch(path)) or (mi := INCIDENT_INTEL.fullmatch(path)):    # notes: signed in
+                if not sourcekeys.may_see_context(self.cad.comms.context_broadcast):
+                    return _json(403, {"error": "radio pre-alerts need a sign-in (Cloudflare Access)"})
+                n = self.cad.intel_admin.notes
+                if m:
+                    return _json(200, n.of_event(int(m.group(1)), who.email if who is not None else "", self._admin(who)))
+                return _json(200, n.of_incident(int(mi.group(1))))
+            if path in ("/api/cad/intel", "/api/cad/intel/events", "/api/cad/intel/list"):    # radio pre-alerts: signed in
                 if not sourcekeys.may_see_context(self.cad.comms.context_broadcast):
                     return _json(403, {"error": "radio pre-alerts need a sign-in (Cloudflare Access)"})
                 ia = self.cad.intel_admin
+                if path == "/api/cad/intel/list":       # the Intel page (sizeup/intel/eventlog.py)
+                    return _json(200, ia.listing(parse_qs(query), self._operator(who)))
                 return _json(200, ia.page() if path == "/api/cad/intel" else ia.events(parse_qs(query), self._admin(who)))
             if m := PREALERT_INFO.fullmatch(path):
                 return self._prealert_info(m.group(1), int(m.group(2)), who)
@@ -1451,6 +1531,7 @@ class CadApi:
         c = self.cad
         signed = who is not None and bool(who.email)
         body.pop("_may", None)                     # never the page's: what the person may read (premise notes, #403)
+        body.pop("_email", None)                   # ... nor who wrote an intel note (notes.py: the sign-in's)
         if path in ("/api/cad/stations", "/api/cad/stt-workers") and not signed:
             return _json(403, {"error": "Admins only: sign in"})     # a station's keys: never without a verified admin
         try:
@@ -1461,6 +1542,8 @@ class CadApi:
                 body["operator"] = st["operator"]
                 if PREMISE.fullmatch(path) or PREPLAN.fullmatch(path) or DOCS.fullmatch(path):
                     body["_may"] = st["may"]
+                if INTEL_NOTES.fullmatch(path) or INTEL_NOTE.fullmatch(path):     # a note's author, and an admin's say
+                    body["_may"], body["_email"] = st["may"], who.email
             elif DOCS.fullmatch(path):
                 body["_may"] = "dispatcher"            # all-in-one: an editor of site documents, never an admin (#459)
             out = self._write(path, body, signed)
@@ -1468,6 +1551,10 @@ class CadApi:
             if signed:
                 self.refused(path, who, "the last admin", client)
             return _json(409, {"error": str(e)})
+        except NoteForbidden as e:             # an intel note not this person's (sizeup/intel/notes.py): refused, logged
+            if signed:
+                self.refused(path, who, str(e), client)
+            return _json(403, {"error": str(e)})
         except NeedsConfirm as e:              # live: the page asks (the error is the question), then sends confirm
             return _json(409, {"error": str(e), "confirm": True})
         except TooSoon as e:                   # a data source's Refresh now, refused (#186): rate limit, running, resting
@@ -1540,6 +1627,13 @@ class CadApi:
             return c.hint(int(m.group(1)), m.group(2), body)
         if m := OOS_NOTICE.fullmatch(path):
             return c.oos_notice(int(m.group(1)), m.group(2), body)
+        if (m := INTEL_NOTES.fullmatch(path)) or (mn := INTEL_NOTE.fullmatch(path)):
+            if not sourcekeys.may_see_context(c.comms.context_broadcast):
+                raise CadError("radio pre-alerts need a sign-in (Cloudflare Access)")
+            n = c.intel_admin.notes
+            if m:
+                return n.add(int(m.group(1)), body)
+            return (n.done if mn.group(2) else n.edit)(int(mn.group(1)), body)
         if m := INTEL_EVENT.fullmatch(path):
             if not sourcekeys.may_see_context(c.comms.context_broadcast):
                 raise CadError("radio pre-alerts need a sign-in (Cloudflare Access)")

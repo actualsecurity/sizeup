@@ -38,7 +38,7 @@ const S_STATION_TABS = [["health", "Health"], ["stations", "Stations"], ["worker
 // Settings > Radios, one tab per part (#115; the Lists page's tabs): which RadioControls card, the Tones page and the
 // Radio IDs editor each go under (data-rtab on each).
 const S_RADIO_TABS = [["receivers", "Receivers"], ["channels", "Channels"], ["squelch", "Squelch"], ["signal", "Signal"], ["tones", "Tones"],
-  ["ids", "Radio IDs"], ["vocabulary", "Vocabulary"], ["stt", "Speech-to-text"], ["emergencies", "Emergencies"]];
+  ["ids", "Radio IDs"], ["vocabulary", "Vocabulary"], ["stt", "Speech-to-text"], ["emergencies", "Emergencies"], ["views", "Views"]];
 const S_RC_TABS = new Set(["receivers", "channels", "vocabulary", "stt"]);    // radio-controls.js's cards
 // Channels' display names (#607): the radio rail's own store (sizeup/cad/radiofolders.py), so a name set in either place
 // shows in both. The CAD's (the station's own page mounts RadioControls without: no names there)
@@ -546,6 +546,7 @@ function sRadioTab() {
   for (const n of panel.querySelectorAll("[data-rtab]")) show(n, n.dataset.rtab === S.rtab);
   if (S.rtab === "squelch" && window.SquelchPanel) SquelchPanel.mount($("#settings-squelch"));   // squelch-panel.js
   if (S.rtab === "signal" && window.SignalPanel) SignalPanel.mount($("#settings-signal"));       // signal-panel.js (#606)
+  if (S.rtab === "views" && window.RadioViews) RadioViews.mountSettings($("#settings-views"));    // the rail's views
 }
 
 function sRadios() {
@@ -2886,6 +2887,7 @@ function sMutes(m) {
   if (window.Help && Help.info) head.append(Help.info("A muted alert still shows on Settings > Station > Health, not pushed. One pushed before the mute still gets its recovery."));
   const rows = m.kinds.map((k) => {
     const [lab, cb] = sCheck(k.label, k.muted, k.muted ? "Unmute: pushed again" : "Mute: Health only, no push");
+    if (k.hint) lab.title = `${k.hint}. ${lab.title}`;
     const sel = sSelect(k.timed_only ? S_MUTE_FOR.slice(1) : S_MUTE_FOR, "24", null, `${k.label}: mute for`);
     if (k.timed_only) sel.title = "Critical: muted for a time only";
     cb.disabled = sel.disabled = !canDo("admin");
