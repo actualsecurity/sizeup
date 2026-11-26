@@ -33,7 +33,7 @@ def in_wsl() -> bool:
 def _read(d: Path, name: str) -> str:
     try:
         return (d / name).read_text().strip()
-    except OSError:
+    except (OSError, ValueError):            # (ValueError: UnicodeDecodeError, a serial that is no UTF-8)
         return ""
 
 
@@ -52,6 +52,23 @@ def ident(serial: str, root: Path = SYS) -> tuple[int, int] | None:
         except ValueError:
             continue
     return found[0] if len(found) == 1 else None
+
+
+def ports(root: Path = SYS) -> dict[str, str]:
+    """{serial: its USB port path ("1-1.2": bus 1, port 1, then 2)} of the RTL-SDR dongles in /sys now; {} without /sys
+    (not Linux). A serial on two dongles is left out. (sizeup/radio/replace.py: a new dongle in the old one's port.)"""
+    found: dict[str, list[str]] = {}
+    try:
+        dirs = list(root.iterdir())
+    except OSError:
+        return {}
+    for d in dirs:
+        if ":" in d.name or _read(d, "idVendor") not in VENDORS:
+            continue
+        s = _read(d, "serial")
+        if s:
+            found.setdefault(s, []).append(d.name)
+    return {s: p[0] for s, p in found.items() if len(p) == 1}
 
 
 def reset(serial: str, root: Path = SYS, dev: str = "/dev/bus/usb", wsl=in_wsl) -> str:

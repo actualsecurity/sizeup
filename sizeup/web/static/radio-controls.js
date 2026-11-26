@@ -32,7 +32,7 @@ window.RadioControls = (() => {
                adsbBusy: false, adsbError: "",
                rerunBusy: false, rerunMsg: "", confirm: null, confirmTimer: 0, closing: null, closeTimer: 0, n: {},
                stt: null, sttTimer: 0, vocabMsg: "", vocabBusy: false, vocabDirty: false,
-               names: null, namesRev: null, namesBusy: false, renaming: "", namePending: new Map(),
+               names: null, shorts: {}, namesRev: null, namesBusy: false, renaming: "", namePending: new Map(), shortPending: new Map(),
                services: null, servicesRev: null, servicesBusy: false, svcPending: new Map(), svcWaiting: new Set() };
   const ENGINES = [["local", "Local"], ["aws", "AWS"], ["both", "Both"]];
   // Another P25 system's talkgroup has a tier instead of Record / Main / Transcribe (#409, sizeup/tiers.py)
@@ -56,6 +56,7 @@ window.RadioControls = (() => {
   // An FM / airband channel's source key, as the radio rail names it (sizeup/sourcekeys.py fm())
   const fmKey = (r) => `${r.kind === "airband" ? "air" : "fm"}:${r.chan}`;
   const NAME_MAX = 40;                        // a display name (sizeup/cad/radiofolders.py NAME_MAX)
+  const SHORT_MAX = 24;                       // its short label for chips (sizeup/radionames.py SHORT_MAX)
   // A source's service (sizeup/sourcekeys.py SERVICES): the admins' choice over its talkgroup file's and its name's
   const SERVICES = [["fire", "Fire"], ["police", "Police"], ["ems", "EMS"], ["transit", "Transit"], ["air", "Air"], ["other", "Other"]];
   const SERVICE_NAME = Object.fromEntries(SERVICES);
@@ -171,7 +172,8 @@ window.RadioControls = (() => {
         if (s && !s.error) { st.state = s; settle(); render(); }
       }
       // an admin named a channel (here or on the radio rail): the names again (the state push carries their rev)
-      const fr = typeof cad !== "undefined" && cad && cad.state && typeof cad.state.radio_folders === "string" ? cad.state.radio_folders : null;
+      const fr = typeof cad !== "undefined" && cad && cad.state && typeof cad.state.radio_folders === "string"
+        ? `${cad.state.radio_folders}|${cad.state.radio_names || ""}` : null;      // (names here, shorts: sizeup/radionames.py)
       if (fr !== null && st.namesApi && st.names !== null && fr !== st.namesRev && !st.namesBusy) loadNames();
       // ... or a source's service (the rail's Edit too): their rev in the push
       const sr = typeof cad !== "undefined" && cad && cad.state && typeof cad.state.radio_services === "string" ? cad.state.radio_services : null;
@@ -382,6 +384,16 @@ window.RadioControls = (() => {
       if (ad) {                                       // offered only while no dongle is reserved for ADS-B
         ad.hidden = !sdr.adsb || !!sdr.adsb.serial || !x.serial || ro() || !!x.group;   // (never a grouped one)
         ad.disabled = st.adsbBusy;
+      }
+    }
+    // an "SDR gone" alert's link (#settings/radios/receivers?sdr=<serial>): that dongle's row, marked, once per link
+    const want = (location.hash.match(/[?&]sdr=([^&#]*)/) || [])[1];
+    if (want && st.sdrFocus !== want) {
+      const r = [...box.children].find((x) => x.dataset.sdr === decodeURIComponent(want));
+      if (r) {
+        st.sdrFocus = want;
+        r.classList.add("focus");
+        r.scrollIntoView({ block: "center" });
       }
     }
   }
@@ -1502,6 +1514,7 @@ window.RadioControls = (() => {
     try {
       const f = await st.namesApi.load();
       st.names = (f && f.names) || {};
+      st.shorts = (f && f.shorts) || {};
       st.namesRev = (f && f.rev) || "";
     } catch (_) { /* the next push asks again */ }
     st.namesBusy = false;
@@ -1509,6 +1522,12 @@ window.RadioControls = (() => {
   }
   // a row's name key: its source ("fm:FG1", "air:HPN Tower", "p25:mrrs:9211")
   const nameKey = (r) => (r.fm ? fmKey(r) : r.src);
+  // its short label for chips (sizeup/radionames.py: none, the name)
+  function shownShort(r) {
+    const k = nameKey(r);
+    if (st.shortPending.has(k)) return st.shortPending.get(k);
+    return (st.shorts || {})[k] || (!r.fm && !r.tier_set ? (st.shorts || {})[`tg:${r.tg}`] : "") || "";
+  }
   function shownName(r) {
     const k = nameKey(r);
     if (st.namePending.has(k)) return st.namePending.get(k) || r.name;
@@ -1526,36 +1545,52 @@ window.RadioControls = (() => {
     if (i && i.focus) { i.focus(); if (i.select) i.select(); }
   }
   async function saveName(li, keep) {
-    const key = li.dataset.nkey, i = li.querySelector("input.tg-rename");
+    const key = li.dataset.nkey, i = li.querySelector("input.tg-rename"), si = li.querySelector("input.tg-short");
     if (!key || st.renaming !== key || !i) return;
     st.renaming = "";
     const orig = li.dataset.label, v = keep ? i.value.replace(/\s+/g, " ").trim().slice(0, NAME_MAX) : null;
     const cur = (st.names || {})[key] || "";
     const want = v === null || v === orig ? "" : v;          // its own name typed back in: no name of its own
-    if (v === null || want === cur) return renderTalkgroups();
-    st.namePending.set(key, want);
+    // its short label for chips: blank, or the name itself typed again: none (the chips show the name)
+    const sv = keep && si ? si.value.replace(/\s+/g, " ").trim().slice(0, SHORT_MAX) : null;
+    const scur = (st.shorts || {})[key] || "";
+    const swant = sv === null || sv === (want || orig) ? "" : sv;
+    const nameMoves = v !== null && want !== cur, shortMoves = sv !== null && swant !== scur && !!(st.namesApi && st.namesApi.saveShort);
+    if (!nameMoves && !shortMoves) return renderTalkgroups();
+    if (nameMoves) st.namePending.set(key, want);
+    if (shortMoves) st.shortPending.set(key, swant);
     st.error = "";
     renderTalkgroups();
     try {
-      const f = await st.namesApi.save(key, want);
-      st.names = (f && f.names) || {};
-      st.namesRev = (f && f.rev) || "";
+      if (nameMoves) {
+        const f = await st.namesApi.save(key, want);
+        st.names = (f && f.names) || {};
+      }
+      if (shortMoves) st.shorts = (await st.namesApi.saveShort(key, swant)) || {};
     } catch (err) {
       st.error = `Couldn't rename ${orig}: ${err.message}`;
     }
     st.namePending.delete(key);
+    st.shortPending.delete(key);
     renderTalkgroups();
   }
-  function renameInput() {
-    const i = el("input", "sm tg-rename");
-    Object.assign(i, { type: "text", maxLength: NAME_MAX, autocomplete: "off", spellcheck: false });
-    i.setAttribute("aria-label", "Display name");
+  // the name and its short label are edited together: Enter (either) saves both, Escape neither; the focus moving from
+  // one to the other is no save
+  function renameInput(short = false) {
+    const i = el("input", short ? "sm tg-short" : "sm tg-rename");
+    Object.assign(i, { type: "text", maxLength: short ? SHORT_MAX : NAME_MAX, autocomplete: "off", spellcheck: false });
+    i.setAttribute("aria-label", short ? "Short label (chips)" : "Display name");
+    if (short) i.title = "Short label on chips (blank: the name). The hover always says the system and the full name";
     i.hidden = true;
     i.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); saveName(i.closest(".tg-row"), true); }
       else if (e.key === "Escape") { e.preventDefault(); saveName(i.closest(".tg-row"), false); }
     });
-    i.addEventListener("blur", () => saveName(i.closest(".tg-row"), true));
+    i.addEventListener("blur", (e) => {
+      const to = e.relatedTarget;
+      if (to && to.closest && to.closest(".tg-row") === i.closest(".tg-row") && to.matches && to.matches("input.tg-rename, input.tg-short")) return;
+      saveName(i.closest(".tg-row"), true);
+    });
     return i;
   }
 
@@ -1669,7 +1704,7 @@ window.RadioControls = (() => {
     }
     const nameable = st.names !== null && !!st.namesApi && !lock;
     const servable = st.services !== null && !!st.servicesApi && !lock;
-    const rowSig = (r) => JSON.stringify([shownName(r), r.record, r.main, r.alerts, r.encrypted, r.count, r.last, r.dropped, !!r.pending, fmtTime(r.last),
+    const rowSig = (r) => JSON.stringify([shownName(r), shownShort(r), r.record, r.main, r.alerts, r.encrypted, r.count, r.last, r.dropped, !!r.pending, fmtTime(r.last),
                                          st.confirm === r.src, lock, r.transcribe, r.engine, r.effective, !!r.cpending, channelNote(r), r.tier,
                                          r.tier_set, (((st.state && st.state.channels) || {}).sync || {}).state,
                                          nameable, st.renaming === nameKey(r), servable, chosenService(r), autoService(r),
@@ -1724,8 +1759,8 @@ window.RadioControls = (() => {
             const pen = el("button", "mini quiet tg-ren", "✎");
             pen.type = "button";
             pen.setAttribute("aria-label", "Rename");
-            id.append(el("span", "tg-mark"), el("b", "tg-name"), renameInput(), pen, serviceSelect(), el("span", "tg-num"),
-                      el("span", "tg-badge", "MAIN"));
+            id.append(el("span", "tg-mark"), el("b", "tg-name"), renameInput(), renameInput(true), el("span", "chip tg-shortlbl"), pen,
+                      serviceSelect(), el("span", "tg-num"), el("span", "tg-badge", "MAIN"));
             const info = el("div", "tg-info");
             info.append(el("span", "tg-heard"), el("span", "tg-note"));
             const sw = el("div", "tg-sw");
@@ -1738,7 +1773,7 @@ window.RadioControls = (() => {
           },
           fill: (li, r) => {
             const [id, info, sw] = li.children;
-            const [mk, name, input, pen, svc, num, badge] = id.children;
+            const [mk, name, input, sinput, slbl, pen, svc, num, badge] = id.children;
             const [heard, note] = info.children;
             const confirming = !r.fm && st.confirm === r.src;
             const nk = nameKey(r), shownAs = shownName(r), renaming = nameable && st.renaming === nk;
@@ -1759,8 +1794,15 @@ window.RadioControls = (() => {
             show(name, !renaming);
             if (renaming && input.hidden) { input.value = (st.names || {})[nk] || ""; input.placeholder = r.name; }
             show(input, renaming);
+            // its short label (the chips'): beside the name, and edited with it
+            const sh = shownShort(r);
+            if (renaming && sinput.hidden) { sinput.value = sh; sinput.placeholder = "Short"; }
+            show(sinput, renaming && !!(st.namesApi && st.namesApi.saveShort));
+            setText(slbl, sh);
+            slbl.title = `On chips: ${sh}`;
+            show(slbl, !renaming && !!sh);
             show(pen, nameable && !renaming);
-            pen.title = `Rename (display only; blank: ${r.name})`;
+            pen.title = `Rename, short label (display only; blank: ${r.name})`;
             // its service: Auto (what its file or name says) or the admins' choice; the hover says what it does
             const auto = autoService(r), chosen = chosenService(r);
             show(svc, servable);

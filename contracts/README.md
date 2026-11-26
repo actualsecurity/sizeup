@@ -49,7 +49,7 @@ new key, or a new schema, behind a capability string.
 | `node-worker-hello` | designed | 1 | `stt-worker-hello` plus `capabilities`, `capabilities_rev` |
 | `station-events` | as built | 1 | the body of `POST /api/station/events`: `{epoch, station, events: [{seq, at, type, data, audio, audio_dropped}]}`, with one sub-schema per event `type` (12) |
 | `station-events-answer` | as built | 1 | the hub's 200 answer: `ok`, `acked` (its cursor), `applied`, and `rejected` (the events it did not take: `{i, seq, type, reason, error}`) when there is one |
-| `station-jobs` | as built | 1 | the hub's 200 answer to `GET /api/station/jobs?wait=`: `jobs`, each `{id, type, args}`; the arguments of `tts`, `sources_reset` and of each of the 17 functions of `call` |
+| `station-jobs` | as built | 1 | the hub's 200 answer to `GET /api/station/jobs?wait=`: `jobs`, each `{id, type, args}`; the arguments of `tts`, `sources_reset` and of each of the 18 functions of `call` |
 | `station-job-result` | as built | 1 | the body of `POST /api/station/jobs/<id>`: `ok`, `error`, `result`, `label`, `audio`; what `result` is per function |
 | `station-job-result-answer` | as built | 1 | the hub's 200 answer to a job's result: `ok` |
 | `capture-spool-sidecar` | designed | 1 | the sidecar that completes a spool item: a segment, a P25 call, a minute of metrics |

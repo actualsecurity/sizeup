@@ -98,7 +98,8 @@ MAIN_LIMIT, OTHER_LIMIT = 200, 300    # the Radio view's Main and Other: each it
 VIEWS = ("ours", "police", "ems", "transit", "air", "all")
 SERVICE_VIEWS = ("police", "ems", "transit", "air")
 PAGE, PAGE_MAX = 100, 200
-SOURCES_MAX, MUTE_MAX = 24, 100       # ?source= and ?mute= keys taken per request
+SOURCES_MAX, MUTE_MAX = 200, 100      # ?source= and ?mute= keys taken per request (a view resolved to its sources)
+UNITS_MAX = 20                        # ?unit= units taken per request (a view's units)
 COUNT_MINUTES = 60                    # GET /api/cad/comms/sources: calls per minute over the last hour
 SAFETY_WHERE = "t.safety != '' AND t.safety != 'dismissed'"     # as the partial index radio_traffic_safety is declared
 BRANCH_MAX = 64                       # a group or tier resolved to its sources: at most this many index walks
@@ -366,6 +367,10 @@ class Comms:
             vocab_v = str(t.get("vocab_v") or "")[:80]
             if vocab_v or have:                 # (its text written again: the version goes with it)
                 db.execute("UPDATE radio_traffic SET vocab_v = ? WHERE id = ?", (vocab_v, tid))
+            corr = corr_values(t)
+            if any(corr) or have:               # (#879) its channel's terms put back: with its text, always
+                db.execute("UPDATE radio_traffic SET corr_text = ?, corr_rules = ?, corr_v = ? WHERE id = ?",
+                           (*corr, tid))
             # unclear words (sizeup/stt_quality.py: a loop, noise): apart from the text, shown dimmed; a row written
             # again as unclear without them keeps its own; any other status takes them off
             if (t.get("status") or "") == "unclear":
@@ -816,7 +821,7 @@ class Comms:
 
     def retext(self, tid: str, text: str, status: str, model: str = "", alt: dict | None = None,
                notify: bool = True, vocab_v: str = "", late: bool = False, quality: str = "",
-               unclear_text: str = "") -> bool:
+               unclear_text: str = "", corr: dict | None = None) -> bool:
         """New text for a transmission. alt {text, model}: the other engine's transcript, kept to compare
         ("both": Amazon Transcribe's is the text, whisper's the alternative). Another P25 system's row goes to
         on_context_text only, never to on_text (as in record()). Must not be called with store.lock held: the hooks
@@ -826,19 +831,21 @@ class Comms:
         context pre-alerts) acts on old words. vocab_v: the term list that biased the new text ("" none or unknown).
         late (#747: a P25 call from while sizeup was down): on_late_text only (another system's row: neither).
         quality / unclear_text: an unclear transcript's reason and words (sizeup/stt_quality.py; its text is ""); new
-        words without them clear them."""
+        words without them clear them. corr {corr_text, corr_rules, corr_v}: the new text's vocabulary correction (#879,
+        sizeup/stt_correct.py), written with it in one statement (the search index's trigger sees both); none: the
+        one before cleared."""
         with self.store.tx() as db:
             self.touch(tid)
             if alt is not None:
                 db.execute("UPDATE radio_traffic SET alt_text = ?, alt_model = ? WHERE id = ?",
                            (str(alt.get("text") or ""), str(alt.get("model") or ""), tid))
             n = db.execute("UPDATE radio_traffic SET text = ?, status = ?, model = ?, vocab_v = ?, updated_at = ?, "
-                           "quality = ?, unclear_text = ?, "
+                           "quality = ?, unclear_text = ?, corr_text = ?, corr_rules = ?, corr_v = ?, "
                            "text_at = CASE WHEN text_at IS NULL AND ? IN ('done', 'no_speech', 'unclear') THEN ? "
                            "ELSE text_at END "
                            "WHERE id = ?", (text, status, model, str(vocab_v or "")[:80], self.clock(),
-                                            str(quality or "")[:20], str(unclear_text or "")[:UNCLEAR_MAX], status,
-                                            self.clock(), tid)).rowcount
+                                            str(quality or "")[:20], str(unclear_text or "")[:UNCLEAR_MAX],
+                                            *corr_values(corr or {}), status, self.clock(), tid)).rowcount
             row = db.execute("SELECT system, talkgroup FROM radio_traffic WHERE id = ?", (tid,)).fetchone() if n else None
             if n:
                 self.rev += 1
@@ -1155,8 +1162,9 @@ class Comms:
         for w in words:
             _word_where(where, args, "e.text", w)
         if unit:
-            where.append("(',' || e.units || ',') LIKE ?")
-            args.append(f"%,{unit},%")
+            units = [unit] if isinstance(unit, str) else list(unit)
+            where.append("(" + " OR ".join(["(',' || e.units || ',') LIKE ?"] * len(units)) + ")")
+            args += [f"%,{u},%" for u in units]
         if event:
             where.append("(i.number = ? OR CAST(i.id AS TEXT) = ?)")
             args += [event, event]
@@ -1432,12 +1440,13 @@ class Comms:
              before: tuple[float, str] | None = None, changed: str | None = None, at: float | None = None,
              limit: int = PAGE, unit: str = "", channel: str = "", event: str = "", pcfd: list[str] | None = None,
              since: float | None = None, until: float | None = None, kind: str = "", text: str = "",
-             emergency: bool = False, context: bool | None = None) -> dict:
+             emergency: bool = False, context: bool | None = None, linked: bool = False) -> dict:
         """One page of the radio log for the Radio page (#415), newest first: {rows, older, newer, next, cursor, reload,
         gone}.
 
         view: ours | police | ems | transit | air | all ("" = all). system / group / service / tier / dept: the row's
-        own (sizeup/sourcekeys.py). source: only these sources (keys). safety: only scene-safety rows. mute: sources left
+        own (sizeup/sourcekeys.py). source: only these sources (keys; past BRANCH_MAX one walk of the start index with
+        the keys as a condition). unit: a unit, or a list (any of them). linked: only rows on an incident. safety: only scene-safety rows. mute: sources left
         out (not with source=): never one of Our calls, and never a row with the emergency button or an alarm. The
         older filters (unit, channel, event, pcfd, since, until, kind, text, emergency) as in query().
         context: whether the reader may see another system's traffic (None: #419's gate, _sees_context). False:
@@ -1535,6 +1544,8 @@ class Comms:
             keep = ["+t.emergency = 1", ours_sql, f"(+t.service = 'fire' AND +t.system IN {sources.OURS_SQL})"] + (["t.id IN (SELECT traffic_id FROM alarms)"] if has_alarms(self.store) else [])
             cond.append(f"(+t.source NOT IN ({','.join('?' * len(muted))}) OR " + " OR ".join(keep) + ")")
             args += muted + ours_args
+        if linked:                                     # only rows on an incident (a note always is)
+            cond.append("t.id IN (SELECT traffic_id FROM radio_links)")
         hint = ""
         if safety:
             # few rows: from the safety index, the view and the sources as plain conditions on them
@@ -1547,6 +1558,14 @@ class Comms:
                 cond.append(ours_sql.replace("t.talkgroup", "+t.talkgroup"))
                 args += ours_args
             branches = [("1", [])]
+        elif srcs and len(srcs) > BRANCH_MAX:
+            # a view resolved to many sources: one walk along the start index, the keys a plain condition
+            cond.append(f"+t.source IN ({','.join('?' * len(srcs))})")
+            args += srcs
+            branches = [("1", [])]
+            if view == "ours":
+                cond.append(ours_sql)
+                args += ours_args
         elif srcs:
             branches = [("t.source = ?", [k]) for k in srcs]
             if view == "ours":
@@ -1722,10 +1741,10 @@ class Comms:
         where, args = [], []
         if emergency:
             where.append(EMERGENCY_WHERE if has_alarms(self.store) else "t.emergency = 1")
-        for w in words:
-            _word_where(where, args, "t.text", w)
+        for w in words:                         # (as heard, or as shown: its terms put back, #879)
+            _word_where(where, args, "(t.text || char(10) || t.corr_text)", w)
         if unit:
-            self._rig_where(where, args, [unit])
+            self._rig_where(where, args, [unit] if isinstance(unit, str) else list(unit))
         if channel:
             where.append("t.channel = ?")
             args.append(channel)
@@ -1788,7 +1807,7 @@ class Comms:
         if self.display is None:
             return
         for r in rows:
-            for k in ("text", "alt_text"):
+            for k in ("text", "alt_text", "corr_text"):
                 v = r.get(k)
                 if v and "-" in v:
                     try:
@@ -1834,6 +1853,16 @@ def events_of(store, tids: list[str]) -> dict[str, list[dict]]:
                          f"WHERE l.traffic_id IN ({','.join('?' * len(part))}) ORDER BY i.id", part):
             ev.setdefault(l.pop("traffic_id"), []).append(l)
     return ev
+
+
+CORR_MAX = 20000                            # corr_text, at most (corr_rules is cut by whole corrections: stt_correct)
+
+
+def corr_values(t: dict) -> tuple[str, str, str]:
+    """(corr_text, corr_rules, corr_v) of a transmission dict (#879, sizeup/stt_correct.py: what the text of record was
+    corrected to, the corrections as JSON and the version; "" each: none)."""
+    return (str(t.get("corr_text") or "")[:CORR_MAX], str(t.get("corr_rules") or ""),
+            str(t.get("corr_v") or "")[:80])
 
 
 def evidence_json(ev) -> str:
