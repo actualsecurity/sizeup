@@ -7,6 +7,7 @@
   "scope": {"services": ["police"], "sources": ["p25:mrrs:9211", "p25:mrrs:9212", "p25:mrrs:9213"], "tiers": [], "systems": ["mrrs"]},
   "accept": false,
   "window_s": 120,
+  "late_s": 300,
   "threshold": 0.6,
   "context_factor": 0.5,
   "mode": "push",

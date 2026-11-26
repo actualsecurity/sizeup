@@ -642,6 +642,10 @@ class ModelBacking:
                     src.remove(x)
             self.asked.pop(tid, None)          # its words back after a re-ask: asked afresh
         self.pending = [j for j in self.pending if j["tid"] != tid]
+        with self._q.mutex:                   # a question already queued for the model thread: never asked (_ask)
+            for item in self._q.queue:
+                if isinstance(item, tuple) and len(item) > 2 and isinstance(item[2], dict) and item[2].get("tid") == tid:
+                    item[2]["dead"] = True
         for job in list(self.open.values()):
             if job.get("tid") == tid:
                 job["dead"] = True
@@ -657,6 +661,8 @@ class ModelBacking:
 
     def _ask(self, engine, job: dict) -> list:
         """The model thread (live): the backend's availability, the site history, the messages, the question."""
+        if job.get("dead"):
+            return []                          # its row withdrawn since it was queued (forget)
         c = self.cfg()
         pack = engine.pack(job["pack"])
         if pack is None:

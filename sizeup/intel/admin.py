@@ -6,12 +6,12 @@ Settings sections (audited as "system", exported like any setting):
     intel         {enabled, push (the kill switch), push_pii (no PII scrub on intel pushes), per_hour, per_day,
                    per_category_hour, repush_min, max_repush, quiet_from, quiet_to, digest_min}
                    (sizeup/intel/policy.py DEFAULTS)
-    intel_packs   pack -> {mode, threshold, window_s, categories: {category: {mode, priority, ttl_min}}}
+    intel_packs   pack -> {mode, threshold, window_s, late_s, categories: {category: {mode, priority, ttl_min}}}
     intel_rules   rule id -> {mode, w, enabled}; "local.<name>": an admin's own rule {pack, category, any, not?, w, mode}
 
 POST /api/cad/settings/intel {action, ...}:
     set       {key: a policy key, value}                     the intel section
-    pack      {pack, mode?, threshold?, window_s?, area?: [town, ...] ([]: the pack file's own), highway?: {buffer_m?,
+    pack      {pack, mode?, threshold?, window_s?, late_s?, area?: [town, ...] ([]: the pack file's own), highway?: {buffer_m?,
               merge_m?, merge_min?, link_m?, link_min?, promote_min?} (a pack with a "highway": true category;
               rules.highway_cfg), stt_high?: true | false (its sources transcribed at HIGH: engine.py push sources),
               agency_towns?: {agency: town} ({}: the file's; a talker's department's town, rules.py),
@@ -139,11 +139,11 @@ class IntelAdmin:
             rules = [{"id": r.id, "v": r.v, "category": r.category, "w": r.w, "mode": r.mode, "enabled": r.enabled,
                       "any": [x.src for x in r.any], "not": [x.src for x in r.nots], "edited": r.id in ro,
                       "local": r.id.startswith("local."), **stats.get(r.id, {"hits": 0, "events": 0})} for r in p.rules]
-            packs.append({"name": p.name, "label": p.label, "mode": p.mode, "threshold": p.threshold, "window_s": p.window_s,
+            packs.append({"name": p.name, "label": p.label, "mode": p.mode, "threshold": p.threshold, "window_s": p.window_s, "late_s": p.late_s,
                           "accept": p.accept, "scope": p.scope, "area": list(p.area), "categories": cats, "rules": rules,
                           "agency_towns": dict(p.agency_towns), "agency_guesses": self._agency_guesses(p),
                           "console_cue": p.console_cue,
-                          "edited": {k: k in mine for k in ("mode", "threshold", "window_s", "area", "agency_towns",
+                          "edited": {k: k in mine for k in ("mode", "threshold", "window_s", "late_s", "area", "agency_towns",
                                                             "console_cue")}})
         counts = eng.events.counts(now - LIST_S) if hasattr(eng.events, "counts") else {}
         try:        # what the engine did with what it was handed, a line per pack (sizeup/intel/counters.py)
@@ -317,10 +317,11 @@ class IntelAdmin:
                 raise CadError(f"no pack {pname!r}")
             cur = copy.deepcopy(ov["intel_packs"].get(pname) or {})
             if action == "pack":
-                for k in ("mode", "threshold", "window_s"):
+                for k in ("mode", "threshold", "window_s", "late_s"):
                     if k in body:
                         cur[k] = (_mode(body[k], "mode") if k == "mode" else
-                                  _f(body[k], 0, 1, "threshold") if k == "threshold" else _f(body[k], 10, 1800, "window_s"))
+                                  _f(body[k], 0, 1, "threshold") if k == "threshold" else
+                                  _f(body[k], 30, 3600, "late_s") if k == "late_s" else _f(body[k], 10, 1800, "window_s"))
                 if "highway" in body:
                     if not self.engine.pack(pname).hw:
                         raise CadError(f"{pname} has no highway category")

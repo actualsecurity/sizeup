@@ -414,3 +414,94 @@ def test_a_cached_row_query_naming_a_missing_column_is_looked_up_again(live):
     cad.comms.record(ctx_row("c9-t0", SHOTS, cad.clock()))
     cad.intel.drain()
     assert len(n.sent) == 1 and "corr_text" not in cad.intel._row_q
+
+
+# -- #923 review: ties and disregards by air time, late from the clip's end, never two events of one row ---------------
+
+def test_the_same_talker_ten_minutes_later_never_moves_the_knife_call():
+    t = 5000.0
+    clock = Clock(t + 2)
+    e, sink = engine(clock=clock)
+    [ev] = e.feed(row("k", "respond to maybe 100 Example Ave, male with a knife", t, talker="Car 7"))
+    assert ev.label_full == "100 Example Ave, Port Chester" and not ev.confirmed
+    clock.t = t + 602
+    e.feed(row("r", "Car 7, I'm at Sample St and Test Rd", t + 600, talker="Car 7"))      # a traffic stop, another job
+    got = e.events.get(ev.id)
+    assert got.label_full == "100 Example Ave, Port Chester" and got.traffic_ids == ["k"]
+
+
+def test_a_placeholder_talker_never_ties_two_rows():
+    t = 5000.0
+    clock = Clock(t + 2)
+    e, sink = engine(clock=clock)
+    [ev] = e.feed(row("k", "respond to maybe 100 Example Ave, male with a knife", t, talker="Unknown radio"))
+    clock.t = t + 32
+    e.feed(row("r", "copy, Sample St and Test Rd", t + 30, talker="Unknown radio"))
+    assert e.events.get(ev.id).label_full == "100 Example Ave, Port Chester"
+    e2, _ = engine(clock=clock)
+    [ev2] = e2.feed(row("k", "respond to maybe 100 Example Ave, male with a knife", t, rig="DPT239"))
+    e2.feed(row("r", "copy, Sample St and Test Rd", t + 30, rig="DPT239"))
+    assert e2.events.get(ev2.id).label_full == "100 Example Ave, Port Chester"
+
+
+def test_a_disregard_ends_only_what_aired_before_it():
+    t = 5000.0
+    clock = Clock(t + 35)
+    e, sink = engine(clock=clock)
+    [ev] = e.feed(row("v", "vehicle pursuit, failed to stop", t + 30))      # read first
+    clock.t = t + 60
+    e.feed(row("d", "disregard, units disregard", t))                      # aired before it, read late
+    got = e.events.get(ev.id)
+    assert got.status == "open" and "v" in e.windows[("police", "p25:mrrs:9211")].entries   # never consumed
+    clock.t = t + 70
+    e.feed(row("d2", "disregard, units disregard", t + 65))                 # after it: ends it
+    assert e.events.get(ev.id).status == "ended"
+
+
+def test_lateness_is_measured_from_the_clips_end_and_per_pack():
+    t = 5000.0
+    e, sink = engine(clock=Clock(t + 330))
+    [ev] = e.feed(row("s", SHOTS, t, end=t + 40))                          # 290 s after it ended: in time
+    assert ev.suppressed == "" and len(pushed(sink)) == 1
+    e2, sink2 = engine({"intel_packs": {"police": {"late_s": 60}}}, clock=Clock(t + 120))   # Settings: 60 s
+    [ev2] = e2.feed(row("s", SHOTS, t, end=t + 20))
+    assert ev2.suppressed == "late" and pushed(sink2) == []
+    packs = {p.name: p.late_s for p in e.packs}
+    assert packs["police"] == 300 and packs["highway"] == 600 and packs["fire"] == 300
+
+
+def test_a_late_rows_neighbour_read_after_a_tick_joins_its_event():
+    t = 50_000.0
+    clock = Clock(t + 3 * 3600)
+    e, sink = engine(clock=clock)
+    [ev] = e.feed(row("m", SHOTS, t))                                       # 3 h old: at log, its until in the past
+    assert ev.until >= clock.t + 120
+    clock.t += 5
+    e.tick(clock.t)
+    assert e.events.get(ev.id).status == "open"                            # not expired under its neighbour
+    [up] = e.feed(row("n", "male with a gun at 100 Example Ave", t + 10))
+    assert up.id == ev.id and sorted(up.traffic_ids) == ["m", "n"] and len(e.events.all()) == 1
+
+
+def test_a_row_already_an_events_never_raises_a_second_after_a_restart(live):
+    cad, n = live
+    now = cad.clock()
+    cad.comms.record(ctx_row("o1-t0", SHOTS, now - 3 * 3600))
+    cad.intel.drain()
+    assert len(cad.intel.events.rows()) == 1
+    cad.intel.tick(now + 3600)                                              # expired
+    cad.intel._seen.clear()                                                 # a restart: nothing in memory
+    cad.intel.windows.clear()
+    cad.comms.on_context_text("o1-t0")
+    cad.intel.drain()
+    assert len(cad.intel.events.rows()) == 1 and n.sent == []
+
+
+def test_forget_drops_a_question_already_queued_for_the_model():
+    from tests.test_intel_backing import answer, setup
+    e, sink, b = setup(B.FakeBackend(answer()))
+    job = {"pack": "police", "key": "p25:mrrs:9211", "tid": "q1", "row": {"text": "x"}, "at": 1000.0, "place": None,
+           "who": [], "due": 1000.0}
+    e.backing._q.put_nowait(("ask", e, job, None))
+    e.backing.forget("q1")
+    assert job["dead"] and e.backing._ask(e, job) == [] and b.asked == []

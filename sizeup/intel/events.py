@@ -126,6 +126,12 @@ class MemoryEvents:
     def all(self) -> list[Event]:
         return sorted(self.rows.values(), key=lambda e: e.id or 0)
 
+    def bound(self, tid: str, pack: str, category: str) -> bool:
+        """This row is already one of an event's of this pack and category (SqlEvents.bound; never one withdrawn)."""
+        with self._lock:
+            return any(e.pack == pack and e.category == category and tid in e.traffic_ids
+                       and e.note != "source withdrawn" for e in self.rows.values())
+
     def delivered(self, eid: int, outcome: dict) -> None:
         self.delivery[int(eid)] = dict(outcome)
 
@@ -171,6 +177,12 @@ class SqlEvents:
 
     def open_events(self) -> list[Event]:
         return [row_event(r) for r in self.store.q("SELECT * FROM intel_events WHERE status = 'open'")]
+
+    def bound(self, tid: str, pack: str, category: str) -> bool:
+        """This row already has a hit of this pack and category bound to an event (a re-feed after a restart: never a
+        second event from it)."""
+        return self.store.one("SELECT 1 FROM intel_hits WHERE traffic_id = ? AND pack = ? AND category = ? AND "
+                              "event_id IS NOT NULL LIMIT 1", (tid, pack, category)) is not None
 
     def get(self, eid: int) -> Event | None:
         r = self.store.one("SELECT * FROM intel_events WHERE id = ?", (eid,))
