@@ -25,7 +25,7 @@ def _pool():
     clk = Clock()
     p, jobs = pool(clk), Jobs()
     w = online(p, "gpu-a")
-    w.models = [Q5, Q8]
+    w.models, w.caps, w.model = [Q5, Q8], frozenset({"challenger"}), f"ggml-{Q5}.bin"
     clk.t += sttpool.CHALL_QUIET_S + 1
     return clk, p, jobs, w
 
@@ -143,8 +143,9 @@ def test_on_a_hub_the_same_input_and_context_a_private_run_promote_on_evidence_a
 
     class ModelWorker(FakeWorker):
         def post(self, path, body):
-            if path.endswith("/claim"):
-                body = dict(body, models=[Q5, QWEN, Q8])
+            if path.endswith(("/claim", "/hello", "/state")):
+                body = dict(body, models=[Q5, QWEN, Q8] if path.endswith("/claim") else body.get("models"),
+                            caps=["challenger"])
             elif path.endswith("/complete") and self.jobs:
                 job = self.jobs[-1]
                 body = dict(body, model=job.get("model") or Q5)
@@ -206,9 +207,12 @@ def test_on_a_hub_the_same_input_and_context_a_private_run_promote_on_evidence_a
         assert code == 200 and "over 45 clips" in json.loads(out)["confirm"]    # the evidence, before it applies
         assert app.stt_choices.model_for("FG1", "fire") == QWEN
         before = app.stt_champion_log()
+        at_hook = []                                                # (intel told BEFORE the change applies)
+        app.stt_champion_hooks.append(lambda r: at_hook.append(app.stt_choices.model_for("FG1", "fire")))
         code, out, _ = promote(True)
         assert code == 200, out
         assert app.stt_choices.model_for("FG1", "fire") == Q8 and app.stt_choices.challenger_for("FG1")[0] == QWEN
+        assert at_hook == [QWEN]                                    # (still the old champion when intel heard)
         told = app.stt_champion_log()[len(before):]
         assert told[-1]["why"] == "promote" and told[-1]["new"] == Q8 and told[-1]["by"]
         audit = app.cad.store.q("SELECT key, old, new FROM settings_audit WHERE key LIKE 'stt_models/FG1/%'")
@@ -233,6 +237,7 @@ def test_on_a_hub_the_same_input_and_context_a_private_run_promote_on_evidence_a
 
 @pytest.mark.parametrize("why", ["model not loaded", "busy: LLM"])
 def test_a_challenger_handed_back_is_a_sample_less_never_a_pause(why):
+    """A challenger the worker hands back (its model unloaded, the LLM busy) is no failure: never a pause."""
     from types import SimpleNamespace
 
     from sizeup.cloud.hub import HubApp
@@ -240,7 +245,7 @@ def test_a_challenger_handed_back_is_a_sample_less_never_a_pause(why):
         CHALLENGE_FAILS, CHALLENGE_PAUSE_S = 1, 60.0
     app = App()
     app.hub = SimpleNamespace(log=print)
-    HubApp._challenge_fell(app, SimpleNamespace(channel="FG1", extra={"fell": "released"}), why)
+    HubApp._challenge_fell(app, SimpleNamespace(channel="FG1", extra={"fell": "released"}), f"GPU worker gpu-1 handed it back: {why}")
     assert not app.__dict__.get("_chall_pause")
     HubApp._challenge_fell(app, SimpleNamespace(channel="FG1", extra={"fell": "lease"}), "no text in time")
     assert app.__dict__["_chall_pause"]["FG1"] > 0                  # (a failure on the worker: paused)
@@ -254,3 +259,17 @@ def test_work_only_a_station_takes_never_takes_a_challenger_back():
     j = p.claim("gpu-a", 0)
     assert p.submit(jobs.job("s1", CATCHUP, bg=True, forced=True, extra={"station_only": True}))
     assert p.watch("gpu-a", j.lease, 0) is True                      # (the GPU isn't wanted for it)
+
+
+def test_never_on_a_worker_from_before_challengers_nor_on_a_model_live_traffic_decodes_on():
+    _clk, p, jobs, w = _pool()
+    w.caps = frozenset()                                            # (a worker from before #964: no watch, no greedy)
+    assert p.chall_ready("FG1", Q8, 3.0) == (False, "no worker has the model loaded")
+    assert p.submit(chall(jobs))
+    assert p.claim("gpu-a", 0) is None
+    w.caps = frozenset({"challenger"})
+    p.resident = frozenset({Q8})                                    # (a champion: its server serves live clips)
+    assert p.claim("gpu-a", 0) is None and not p.chall_ready("FG1", Q8, 3.0)[0]
+    assert not p.chall_ready("FG1", Q5, 3.0)[0]                     # (the worker's primary: whisper_server's)
+    p.resident = frozenset()
+    assert p.claim("gpu-a", 0).id == "c1~ch"

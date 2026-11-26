@@ -217,10 +217,13 @@ class Choices:
         self.mdb.put(META, json.dumps(cur, separators=(",", ":"), sort_keys=True))
         self._cache = (0.0, {})
 
-    def promote(self, key: str, service: str | None = None, why: str = "") -> tuple[dict, dict]:
+    def promote(self, key: str, service: str | None = None, why: str = "", expect: tuple | None = None,
+                before: Callable[[str, str, str], None] | None = None) -> tuple[dict, dict]:
         """The channel's challenger becomes its model; the model it replaces becomes the challenger (at the same share),
         so the two go on being compared: if the new one scores worse over the samples since (sttscore.should_roll_back),
-        roll_back() puts the old one back. (old, new). ValueError with no challenger."""
+        roll_back() puts the old one back. (old, new). ValueError with no challenger, or when the pair isn't expect
+        (champion, challenger: the one the evidence was for). before(key, from, to): under the lock, before it is
+        stored (intel told first: HubApp.stt_champion_change)."""
         with self._lock:
             cur = dict(self._read())
             key = self.key_of(key)
@@ -231,21 +234,28 @@ class Choices:
                 raise ValueError("no challenger on this channel")
             was = old.get("model") if old.get("model") in self.catalog else \
                 self.default_for(self.service_of(key) if service is None else service)
+            if expect is not None and (was, ch[0]) != tuple(expect):
+                raise ValueError("the channel's models changed meanwhile: look at the evidence again")
+            if before is not None:
+                before(key, was, ch[0])
             new = dict(old, model=ch[0], challenger=was, promoted={"from": was, "to": ch[0], "at": self.clock(),
                                                                    **({"why": why[:80]} if why else {})})
             cur[key] = new
             self._write(cur)
         return old, new
 
-    def roll_back(self, key: str, why: str) -> tuple[dict, dict] | None:
+    def roll_back(self, key: str, why: str, expect_to: str | None = None,
+                  before: Callable[[str, str, str], None] | None = None) -> tuple[dict, dict] | None:
         """A promotion undone: the model it replaced is the channel's again, the challenger cleared (the rolled-back
         model isn't sampled again until an admin says so). None when nothing was promoted."""
         with self._lock:
             cur = dict(self._read())
             old = dict(cur.get(key) or {})
             p = old.get("promoted") if isinstance(old.get("promoted"), dict) else None
-            if not p or p.get("from") not in self.catalog:
+            if not p or p.get("from") not in self.catalog or (expect_to is not None and p.get("to") != expect_to):
                 return None
+            if before is not None:
+                before(key, str(p.get("to") or ""), str(p["from"]))
             new = {k: v for k, v in old.items() if k not in ("promoted", "challenger", "pct")}
             new["model"] = p["from"]
             new["rolled_back"] = {"from": p.get("to"), "at": self.clock(), "why": why[:120]}

@@ -307,8 +307,9 @@ def test_the_challenger_path(tmp_path, logs, monkeypatch):
 
     class ModelWorker(FakeWorker):
         def post(self, path, body):
-            if path.endswith("/claim"):
-                body = dict(body, models=["large-v3-turbo-q5_0", qwen, q8])
+            if path.endswith(("/claim", "/hello", "/state")):
+                body = dict(body, models=["large-v3-turbo-q5_0", qwen, q8] if path.endswith("/claim")
+                            else body.get("models"), caps=["challenger"])
             elif path.endswith("/complete") and self.jobs:
                 job = self.jobs[-1]
                 body = dict(body, model=job.get("model") or "large-v3-turbo-q5_0")

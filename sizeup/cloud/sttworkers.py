@@ -36,8 +36,8 @@ token_revoked); 409 {error} for a lease that is gone.
                                                   probability}]}], model, timing: {fetch_ms, infer_ms}} -> {ok}
     POST /api/station/stt/jobs/<lease>/release    {why} -> {ok}: the next engine takes it now
     POST /api/station/stt/jobs/<lease>/watch      {wait <= 25} -> {live}: a challenger's lease (#869), a long poll: live
-                                                  false at once when the hub took it back (other work came: the worker
-                                                  stops the decode, no complete, no release); 409 a lease that is gone
+                                                  false at once when the hub took it back or the lease is gone (other
+                                                  work came: the worker stops the decode, no complete, no release)
     POST /api/station/stt/logs                    gzipped worker.log lines (see "Its log" below) -> {ok, accepted}
 
 The heartbeat contract: while it runs, a worker sends a request (state, extend or claim) at least every 6 s, during a
@@ -709,6 +709,7 @@ class WorkerApi:
                 if word:
                     told["stt_models"] = word
             ms = d.get("models") if isinstance(d.get("models"), dict) else {}
+            caps = d.get("caps") if gpu and isinstance(d.get("caps"), list) else None   # (#869: "challenger")
             loaded = ms.get("stt_loaded") if isinstance(ms.get("stt_loaded"), list) else None
             stt_state = ms.get("stt_state") if isinstance(ms.get("stt_state"), dict) else None
             if loaded is not None and model and state == "online":
@@ -719,19 +720,20 @@ class WorkerApi:
             if path == API + "hello":
                 self.pool.seen(wid, state, model, d.get("gpu"), d.get("version") if isinstance(d.get("version"), str) else None,
                                kind=kind, load=load, update=su, keep_awake=ka, reason=why, models=loaded,
-                               stt_state=stt_state)
+                               stt_state=stt_state, caps=caps)
                 return _json(200, {"ok": True, "worker": wid, "poll_s": POLL_S, "pool_on": self._pool_on(),
                                    "classes": [sttpool.class_key(c) for c in sttpool.CLASSES], **told})
             if path == API + "state":
                 self.pool.seen(wid, state, model, d.get("gpu"), d.get("version") if isinstance(d.get("version"), str) else None,
                                kind=kind, load=load, update=su, keep_awake=ka, reason=why, models=loaded,
-                               stt_state=stt_state)
+                               stt_state=stt_state, caps=caps)
                 return _json(200, {"ok": True, "pool_on": self._pool_on(), **told})
             if path == API + "claim":
                 wait = _num(d.get("wait")) or 0.0
                 cm = d.get("models")
                 cm = [m for m in cm[:16] if isinstance(m, str)] if isinstance(cm, list) else None
-                job = self.pool.claim(wid, wait, state, model, kind=kind, load=load, models=cm)
+                cc = d.get("caps") if gpu and isinstance(d.get("caps"), list) else None
+                job = self.pool.claim(wid, wait, state, model, kind=kind, load=load, models=cm, caps=cc)
                 return _json(200, {"job": job.public() if job is not None else None})
             m = LEASE_PATH.fullmatch(path)
             if m is None or m.group(2) == "audio":
