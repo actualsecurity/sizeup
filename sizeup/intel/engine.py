@@ -197,7 +197,7 @@ NEW_CALL = re.compile(r"\b(new call|second call|another call|different (call|loc
 # a moving incident's new place ("now at", "last seen", "fled", "heading", "continuing", "still")
 MOVE_WORDS = re.compile(r"\b(now at|now on|last seen|fled|fleeing|heading|continuing|still|turned onto|turning onto)\b", re.I)
 # a dispatcher / HQ talker (they voice every job); never a unit's alias such as "RYE PD CAR 3"
-DISPATCH_WORDS = re.compile(r"\bdisp\b|dispatch|\bhq\b|headquarters|\bcontrol\b|\bctrl\b|console|\bdesk\b", re.I)
+DISPATCH_WORDS = re.compile(r"\bdisp\b|dispatch|\bhq\b|headquarters|\bcontrol\b|console|\bdesk\b", re.I)
 PEOPLE = {"weapons", "edp", "dispute"}   # incidents about a person, who may move ("last seen at")
 SAFETY = {"weapons", "barricade", "water_rescue", "fire_report"}   # never ended by a disregard that names nothing; nor
                                                                     # is any category its pack marks "safety" (_safe)
@@ -900,7 +900,8 @@ class IntelEngine:
         units = {f"{m.group(1).lower()} {m.group(2).lower()}" for m in UNIT_MENTION.finditer(text)}
         units |= {u.strip().lower() for u in str(row.get("rig") or "").split(",") if u.strip()}
         disp = (bool(row.get("dispatcher")) or bool(tk and tk.console)
-                or bool(talker and (DISPATCH_WORDS.search(talker) or talker in self._hq(row))))
+                or bool(talker and (DISPATCH_WORDS.search(talker) or CTRL_WORD.search(talker)
+                                    or talker in self._hq(row))))
         if talker and not disp and UNIT_MENTION.fullmatch(talker):
             units.add(talker.lower())
         end = max(at, float(row.get("end") or at))
@@ -2389,6 +2390,8 @@ def rung(evidence: list, damp: list, thr: float, cues: list = ()) -> str:
 
 # a talker text that names no one talker, the whole text: an unlabelled radio's ("unknown MRRS radio":
 # sizeup/cad/radios.py), or a list of them; never an alias that only starts so ("UNKNOWN-4", "Unknown 12")
+# a dispatcher's talker as DISPATCH_WORDS, a console's "ctrl" too (talkers.CONSOLE_WORDS)
+CTRL_WORD = re.compile(r"\bctrl\b", re.I)
 _GENERIC_ONE = r"(?:unknown(?: \w+)? radio|unknown|unk|unidentified)(?: caller)?"
 GENERIC_TALKER = re.compile(rf"{_GENERIC_ONE}(?:\s*[,/&+]\s*{_GENERIC_ONE})*", re.I)
 
