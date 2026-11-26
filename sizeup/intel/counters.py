@@ -29,7 +29,7 @@ each pack last had a transcript in scope: when the engine was handed it, not whe
 row is in scope now). watching(now, names) says which packs are on and counted here; a pack is "watched since" the
 later of that and its last transcript in scope, and row() warns once that is NOTHING_S ago.
 
-state() / restore() carry the hours, the last-in-scope times and the watched-since times across a restart or a
+state() / restore() carry the hours, the last-in-scope times, the watched-since times and the rows counted late (late_ids) across a restart or a
 handover (the engine keeps them in the store's meta, written with its hourly log line: never at startup); "since
 start" begins again with each process. Only the packs named and the hours of the window are kept or taken back, and a
 kept state over STATE_MAX characters is refused (the engine starts fresh).
@@ -50,6 +50,8 @@ NOTHING_S = HOURS * HOUR_S             # a pack that is on with nothing in scope
 ALL = ""                               # the overall counts' name
 STATE_MAX = 64_000                     # the kept state, serialised: larger is not ours (refused)
 COUNT_MAX = 10 ** 9                    # no hour's count is larger
+LATE_IDS_MAX = 800                     # rows counted late (first_late), kept with the hours: a re-text or a re-record,
+                                       # after a restart too, never counts again (newest kept; ~25 characters each)
 WORDS = (("considered", "considered"), ("in_scope", "in scope"), ("out_of_scope", "out of scope"), ("too_old", "too old"),
          ("repeat", "same text again"), ("quiet", "in quiet hours"), ("matched", "matched a rule"),
          ("below", "below threshold"), ("events", "events"), ("pushed", "pushed"), ("held", "held"))
@@ -68,6 +70,7 @@ class Counters:
         self.hours: dict[str, dict[int, dict[str, int]]] = {}      # name -> {clock hour: {key: n}}
         self.last_in_scope: dict[str, float] = {}                  # pack -> when the engine last had one in scope
         self.on_since: dict[str, float] = {}                       # pack -> on and counted here since (watching())
+        self.late_ids: dict[str, float] = {}                       # "pack tid" -> when it was counted late
 
     def add(self, now: float, key: str, names=(), overall: bool = True, n: int = 1) -> None:
         """key, n more: for each pack named, and overall."""
@@ -78,6 +81,22 @@ class Counters:
                 t[key] = t.get(key, 0) + n
                 b = self.hours.setdefault(name, {}).setdefault(h, {})
                 b[key] = b.get(key, 0) + n
+
+    def first_late(self, tid: str, pack: str, now: float) -> bool:
+        """This row of this pack is counted late for the first time (then remembered: never twice, within the day)."""
+        k = f"{pack} {tid}"
+        with self._lock:
+            if k in self.late_ids:
+                return False
+            self.late_ids[k] = now
+            self._trim_late(now)
+            return True
+
+    def _trim_late(self, now: float) -> None:
+        for k in [k for k, at in self.late_ids.items() if at <= now - HOURS * HOUR_S]:
+            del self.late_ids[k]
+        while len(self.late_ids) > LATE_IDS_MAX:
+            self.late_ids.pop(next(iter(self.late_ids)))
 
     def in_scope(self, now: float, names) -> None:
         with self._lock:
@@ -133,6 +152,7 @@ class Counters:
             self._trim(now)
             return {"last_in_scope": {n: at for n, at in self.last_in_scope.items() if n in keep},
                     "on_since": {n: at for n, at in self.on_since.items() if n in keep},
+                    "late_ids": dict(self.late_ids),
                     "hours": {n: {str(h): dict(b) for h, b in hs.items()} for n, hs in self.hours.items() if n in keep}}
 
     def restore(self, d, now: float, names) -> None:
@@ -154,6 +174,11 @@ class Counters:
             for n, at in times("on_since"):
                 if n in self.on_since:
                     self.on_since[n] = min(self.on_since[n], at)
+            got = d.get("late_ids")
+            for k, at in sorted(got.items(), key=lambda x: x[1] if _num(x[1]) else 0) if isinstance(got, dict) else []:
+                if isinstance(k, str) and len(k) <= 200 and _num(at) and 0 < at <= now:
+                    self.late_ids.setdefault(k, float(at))
+            self._trim_late(now)
             for n, hs in (d.get("hours") or {}).items() if isinstance(d.get("hours"), dict) else []:
                 if n not in keep or not isinstance(hs, dict):
                     continue

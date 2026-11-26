@@ -277,17 +277,19 @@ def late_cause(row: dict) -> str:
     return "station" if m and m != "gpu-worker" else "other"
 
 
-def late_row(snap: dict, now: float) -> dict:
-    """Settings > Station > Health's Intel line for the push sources' late text (counters' late_* over 24 h)."""
+def late_row(snap: dict, now: float, packs=()) -> dict:
+    """Settings > Station > Health's Intel line for the push sources' late text (counters' late_* over 24 h). packs:
+    the ones that can push (their late s in the hover). The row's label says what it is, so the text is the numbers."""
     h = snap["h24"]
     n, lost = h.get("late", 0), h.get("late_lost", 0)
     by = ", ".join(f"{w} {h.get('late_' + c, 0)}" for c, w in LATE_CAUSES if h.get("late_" + c, 0))
-    text = f"Late PD text 24 h: {n}" + (f" ({by})" if by else "") + (f" · would have pushed: {lost}" if lost else "")
+    text = f"24 h: {n}" + (f" ({by})" if by else "") + (f" · would have pushed: {lost}" if lost else "")
+    limits = ", ".join(f"{p.label} {p.late_s / 60:g} min" for p in packs)
     title = ("Transcripts of the sources intel pushes from that reached it later than their pack's late s after the "
-             "clip ended (PD 5 min), or from an outage (#747): read as context and kept at log, never pushed. By what made the text: "
-             "the engine, a catch-up of a shed clip, an outage. Would have pushed: their words reached a category at "
-             "push, so a pre-alert was lost. To cut it: raise the police AWS budget, keep the PD channels on Auto · "
-             "priority.")
+             f"clip ended ({limits}), or recorded while the hub was down: read as context and kept at log, never "
+             "pushed. By what made the text: the engine, a catch-up of a shed clip, an outage. Would have pushed: on "
+             "time, the row would have raised a new pre-alert, so one was lost. To cut it: raise the police AWS "
+             "budget, keep the PD channels on Auto · priority.")
     return {"pack": "late", "label": "Late PD text", "on": True, "level": "warn" if lost else "ok", "text": text,
             "title": title, "late": n, "lost": lost}
 
@@ -438,6 +440,8 @@ class IntelEngine:
         self.stale = 0                        # rows too old to be a pre-alert (a backfill, a late re-record): skipped
         self._row_q: str | None = None        # ROW_SQL for this database (_row_sql)
         self._late_now: tuple | None = None   # feed(): the row read late, its cause (late_row)
+        self._lost_now = False                # _feed_pack/_raise: the late row would have raised a pre-alert on time
+        self._as_fresh = False                # _on_time_push: _fresh says yes
         self.unclear = 0                      # unclear transcripts (a loop, noise: sizeup/stt_quality.py): skipped
         self._seen: dict[str, int] = {}
         self.errors = 0
@@ -765,7 +769,9 @@ class IntelEngine:
             c = snap["packs"][p.name]
             rows.append({**counters_mod.row(c, self.enabled and p.mode != "off", snap["started"], now, p.label, p.name,
                                             here=here), "h24": c["h24"], "start": c["start"]})
-        return {"started": snap["started"], "all": snap["all"], "packs": rows, "late": late_row(snap["all"], now)}
+        pushing = [p for p in packs if can_push(p)]
+        late = late_row(snap["all"], now, pushing) if self.enabled and pushing else None     # nothing to lose: hidden
+        return {"started": snap["started"], "all": snap["all"], "packs": rows, "late": late}
 
     def save_policy(self) -> None:
         if self.store is not None:
@@ -821,7 +827,7 @@ class IntelEngine:
             self.stale += 1
             if scoped:
                 self._count(now, "too_old", scoped)
-            row = dict(row, late=True)
+            row = dict(row, aged=True)        # (never "late": that is radio_traffic.late, an outage's, late_cause)
         if scoped and policy_mod.quiet(self.policy.cfg, now, self.tz):
             self._count(now, "quiet", scoped)
         self._seen[tid] = sig
@@ -885,7 +891,8 @@ class IntelEngine:
         end = max(at, float(row.get("end") or at))
         entry = Entry(at, hits, text, who, suppressed, talker, frozenset(units), disp, end=end,
                       label=tk.label if tk else "", town=self._talker_town(pack, key, tk),
-                      late=bool(row.get("late")) or self.clock() - end > pack.late_s, read=self.clock())
+                      late=bool(row.get("late") or row.get("aged")) or self.clock() - end > pack.late_s,
+                      read=self.clock())
         # a re-text (#901's correction, a re-ask, a catch-up): the categories its old words said
         was = ({r.category for r, w in win.entries[tid].hits if w > 0 and not r.id.startswith(("model.", "infer."))}
                if known else set())
@@ -900,6 +907,7 @@ class IntelEngine:
         whole.prune(max(e.at for e in whole.entries.values()), self._keep_s(pack), keep=tid, now=self.clock())
         win = whole.around(at, pack.window_s)     # AIR-TIME order: the rows that aired around this one, whenever read
         changed: list[Event] = []
+        self._lost_now = False                # _raise: this late row, on time, would have raised a new pre-alert
         if suppressed:
             changed += self._end_window(pack, key, at, tid, win, ws)
             win = whole.around(at, pack.window_s)     # (what the window held is spent: _consume)
@@ -907,7 +915,6 @@ class IntelEngine:
         mine = {r.category for r, _w in hits}
         event_of: dict[str, Event] = {}
         over = False                          # a category this row speaks of reached its threshold
-        pushable = False                      # ... at push
         for cat, (what, contrib, best_mode) in cats.items():
             cd = pack.category(cat)
             thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
@@ -917,7 +924,6 @@ class IntelEngine:
                 continue                      # a candidate this row says nothing about: left as it is
             over = True
             mode = lowest(pack.mode, cd.get("mode", "push"), best_mode)
-            pushable = pushable or mode == "push"
             if mode == "off":
                 continue
             dfr = self._deferred(pack, cat, cats, key, at, win.entries[tid])
@@ -940,11 +946,11 @@ class IntelEngine:
                       + self._deescalate(pack, row, key, at, tid, text, ws, win.entries[tid])):
                 if not any(x is c for c in changed):
                     changed.append(x)
-        if entry.late and not known and can_push(pack):      # a push source's text read late: by cause (late_row)
-            cause = late_cause(row)
-            for k in ("late", f"late_{cause}", *(["late_lost"] if pushable else [])):
+        if entry.late and can_push(pack) and self.counters.first_late(tid, pack.name, self.clock()):
+            cause, lost = late_cause(row), self._lost_now     # a push source's text read late: by cause (late_row)
+            for k in ("late", f"late_{cause}", *(["late_lost"] if lost else [])):
                 self._count(self.clock(), k, [pack.name], overall=False)
-            self._late_now = (cause, pushable or bool(self._late_now and self._late_now[1]))
+            self._late_now = (cause, lost or bool(self._late_now and self._late_now[1]))
         if hits and pack.mode != "off":
             self._count(self.clock(), "matched", [pack.name])
             if not over:
@@ -1082,6 +1088,8 @@ class IntelEngine:
         """The event may be pushed a first time: its rows read in time (never late, Entry.late) reach the threshold of
         its category on their own, the newest of them ended within the pack's late_s. A late row corroborates (a place, a
         read-back, the score shown), it never makes a fresh row's event push."""
+        if self._as_fresh:
+            return True                       # (_on_time_push: as if read on time)
         rows = {t: e for (p, _k), w in self.windows.items() if p == pack.name
                 for t, e in w.entries.items() if t in ev.traffic_ids and not e.late}
         if not rows or self.clock() - max(e.end for e in rows.values()) > pack.late_s:
@@ -1090,6 +1098,20 @@ class IntelEngine:
         cd = pack.category(ev.category)
         thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
         return got is not None and got[0] >= thr
+
+    def _on_time_push(self, pack, ev: Event, mode: str, now: float) -> bool:
+        """This new event, raised by a late row, would have been pushed had the row been read on time: its holds
+        (out of area, our call, the FD, a place) judged as if fresh, pushes on, no quiet hours, no cap. What "would have
+        pushed" counts (late_row): a pre-alert lost, never a follow-up of one already pushed."""
+        probe = copy.deepcopy(ev)
+        probe.suppressed, probe.mode = "", mode
+        self._as_fresh = True
+        try:
+            self._hold(pack, probe, mode)
+        finally:
+            self._as_fresh = False
+        return (probe.mode == "push" and not probe.suppressed and bool(self.policy.cfg.get("push", True))
+                and not policy_mod.quiet(self.policy.cfg, now, self.tz) and not self.policy._over(ev.category, now))
 
     def _read_before(self, tid: str) -> bool:
         """This row was read (since the start; or before a restart: it is in an open event)."""
@@ -1677,6 +1699,7 @@ class IntelEngine:
         ev.subject = f"{pack.name}:{cat}:{ev.place().key or key}"
         self._hold(pack, ev, mode)
         if entry.late and change == "raised":
+            self._lost_now = self._lost_now or self._on_time_push(pack, ev, mode, now)
             ev.suppressed, ev.mode = "late", lowest(ev.mode, "log")   # logged late (#747): a record, never a push
         if before is not None and _same(before, ev):
             return None                       # idempotent: the same row again changes nothing

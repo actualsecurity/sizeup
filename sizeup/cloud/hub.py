@@ -1155,7 +1155,7 @@ class HubApp(App):
 
         def intel_rows():
             c = self.cad.intel.counts()
-            return ([r for r in (self.pushes.intel_health(), lk() and lk().health()) if r] + c["packs"] + [c["late"]]
+            return ([r for r in (self.pushes.intel_health(), lk() and lk().health()) if r] + c["packs"] + ([c["late"]] if c["late"] else [])
                     + ([bk().health_row()] if bk() is not None else []))
         self.health.intel = intel_rows
         # MTA TrainTime or its fallback (#362); Tapout's phone pre-alert (not configured until an admin sets the topic)
