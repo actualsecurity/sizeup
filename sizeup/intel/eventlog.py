@@ -232,7 +232,8 @@ def console_calls(txs: list[dict], event_tids: set, talker_of, gap_s: float, spa
 def _own(txs: list[dict], tks: list, event_tids: set, gap_s: float) -> set[int]:
     """The indexes of the event rows' own console traffic: from each event row, the chain of ADJACENT transmissions
     each within CHAIN_S of the one before it (either way), each the row's department's console or a unit, stopping at
-    another department's console or another event's row; the consoles in it are the row's call-up and follow-up. For a
+    another department's console or another event's row, and never past CALL_SPAN_S from the row; the consoles in it
+    are the row's call-up and follow-up. For a
     unit's row (its report), the chain forward only: its first console is the answer, and that console's department
     the chain's from there. A dispatch after a pause, or across another console, is shown (#961 review: lean to
     showing). gap_s is unused: the chain's step is CHAIN_S."""
@@ -243,11 +244,11 @@ def _own(txs: list[dict], tks: list, event_tids: set, gap_s: float) -> set[int]:
         mine = tks[i]
         start = _dept(mine) if mine is not None and mine.console else None
         for step in ((-1, 1) if start else (1,)):
-            dept, j, last = start, i + step, float(t["start"])
+            dept, j, last, at0 = start, i + step, float(t["start"]), float(t["start"])
             while 0 <= j < len(txs) and str(txs[j]["id"]) not in event_tids:
                 at = float(txs[j]["start"])
-                if abs(at - last) > CHAIN_S:
-                    break
+                if abs(at - last) > CHAIN_S or abs(at - at0) > CALL_SPAN_S:
+                    break                         # (never past CALL_SPAN_S: units' chatter never hides the next call)
                 tk = tks[j]
                 if tk is not None and tk.console:
                     if dept is None:

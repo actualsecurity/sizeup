@@ -459,3 +459,11 @@ def test_a_span_is_read_in_pages_and_past_the_cap_says_truncated(tmp_path, monke
     monkeypatch.setattr(eventlog, "TX_MAX", 4)
     [r] = [x for x in listing(cad)["events"] if x["id"] == a.id]
     assert r["truncated"] is True
+
+
+def test_units_chatter_never_hides_the_consoles_next_call():
+    """#961 re-review: an event's conversation chain stops CALL_SPAN_S from its row."""
+    from sizeup.intel.eventlog import console_calls
+    txs = [tx_("e1", 1000, A_ID)] + [tx_(f"o{i}", 1020 + 20 * i, OFFICER_ID) for i in range(14)]
+    txs += [tx_("c1", 1300, A_ID), tx_("c2", 1310, A_ID)]
+    assert console_calls(txs, {"e1"}, of_label, 120) == [{"at": 1300, "n": 2, "consoles": ["Example PD dispatch"]}]
