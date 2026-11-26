@@ -219,8 +219,9 @@ def test_repetition_loops(text, loop):
 
 def test_a_run_keeps_the_contexts_hash_and_length_never_its_content():
     runs = sttruns.Runs()
-    v, n = sttmodels.context_version("list", "a prompt", ["Engine 60", "908"])
-    assert n == len("Engine 60, 908") and len(v) == 10
+    # (a context item no timestamp, id or hex hash can hold by chance, unlike "908")
+    v, n = sttmodels.context_version("list", "a prompt", ["Engine 60", "Quebec Zulu"])
+    assert n == len("Engine 60, Quebec Zulu") and len(v) == 10
     assert sttmodels.context_version("none", "a prompt", ["x"]) == ("", 0)
     runs.add("c1", "gpu-worker", text="Engine 60 responding", status="done", model=QWEN, prompt_v=v, prompt_n=n,
              ctx="list", want=QWEN)
@@ -229,7 +230,7 @@ def test_a_run_keeps_the_contexts_hash_and_length_never_its_content():
     (r2,) = runs.of("c2")
     assert (r1["prompt_n"], r1["ctx"], r1["want"], r1["model"]) == (n, "list", QWEN, QWEN)
     assert (r2["gate"], r2["want"], r2["model"]) == ("quiet", QWEN, Q5)
-    assert "908" not in json.dumps([r1, r2]).replace("Engine 60 responding", "")
+    assert "Quebec Zulu" not in json.dumps([r1, r2])
 
 
 # -- the worker API ---------------------------------------------------------------------------------------------
