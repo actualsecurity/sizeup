@@ -1289,6 +1289,25 @@ them).
 - An event's own layer set (a dispatcher's change on its map) stays the event's, for everyone who opens it.
 - All-in-one, or a hub without Access: nobody to keep them for; the browser keeps them, as before.
 
+### Live audio on every view: the live player and Listening
+
+Live radio follows the dispatcher around the console (`static/live-player.js`): **Listen** in the header (or on the
+Radio view) turns it on with one click (the browser's autoplay rule), and a strip under every view (Overview, Incident,
+Radio, Search, Settings) shows what plays: service, channel, talker, elapsed, how many wait, play / pause, skip
+(`]`), mute (`M`), volume, *Our calls only*, *Mute police*, **Listening** and *Go to* (its row on the Radio view).
+The page never reloads between views, so a clip is never restarted. /monitor keeps its own **Sound**.
+
+- **What plays** is each person's own (`PUT /api/me/prefs/listen`, validated in `sizeup/cad/prefs.py`): a level
+  (*Priority*, *Normal*, *Off*) per target, the most specific first: a channel or talkgroup (also from each row of the
+  Radio rail), a frequency, *Our calls* (dispatch, paging, firegrounds), a system, a service. A new person: Our calls
+  Priority, the rest Off. Volume, mute and on/off are the device's own.
+- **Priority** plays first and is never dropped; over a Normal one it interrupts (the Normal one resumes after, unless
+  too old), ducks it or waits, as chosen. **Normal** ones queue oldest first and are dropped once older than *Max age*
+  (60 s) or when 15 wait. An emergency on a channel you listen to plays as Priority. Key-ups never play.
+- **Load**: no timer of its own. When the state push's `comms_rev` moves, one
+  `GET /api/cad/comms?view=all&type=radio&changed=<cursor>` (what changed since; the hub's #419 gate decides what this
+  person may hear), only while it is on. A clip played by hand holds it until that clip ends.
+
 ## Config
 
 Station (optional: the station page's Settings does the same; see `deploy/station/README.md`):
