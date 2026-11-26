@@ -89,6 +89,9 @@ ACTIVITY_KEEP_S = 90 * 24 * 3600     # radio_activity: its per-minute counts kep
 # record like a clip on a CAD event (kept_for_events), while Settings > System > Transcript corrections > Keep corrected
 # clips is on (the default): the corrected audio with its text is the speech-to-text training set.
 CORRECTIONS_SECTION, CORRECTIONS_KEEP = "stt_corrections", "keep"
+# A noted radio intel event's transmissions (sizeup/intel/notes.py: intel_notes) are keepers too while the note exists:
+# a note's tags point at them (the speech-to-text side reads a garbled one's clips), so they never go stale.
+NOTED = ("SELECT j.value FROM intel_notes n JOIN intel_events e ON e.id = n.event_id, json_each(e.traffic_ids) j")
 KEEP_UNLINKED_S = 365 * 24 * 3600
 KEEP_RECORD_S = 400 * 24 * 3600
 MAX_ROWS = 500
@@ -1006,6 +1009,11 @@ class Comms:
             return False
         return bool(self.store.q("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'stt_corrections'"))
 
+    def noted_kept(self) -> bool:
+        """There are intel notes to keep transmissions for (NOTED; tables made by sizeup/intel/events.py)."""
+        return len(self.store.q("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('intel_notes', "
+                                "'intel_events')")) == 2
+
     def prune(self, pause_s: float = 0.0) -> int:
         """Transmissions on no event, once older than the longer of their transcripts' retention (Settings, per channel /
         talkgroup, 365 days by default) and their audio's: a transcript never goes before its audio. A record
@@ -1029,18 +1037,23 @@ class Comms:
         not_fixed = " AND id NOT IN (SELECT traffic_id FROM stt_corrections)" if fixed else ""
         still_not_fixed = (" AND NOT EXISTS (SELECT 1 FROM stt_corrections c WHERE c.traffic_id = radio_traffic.id)"
                            if fixed else "")
+        # a noted intel event's: kept while its note is. The ids read ONCE per prune into a set, skipped in Python: never
+        # a subquery per row under the write lock (#913 re-check: 3-9 ms a row with a few thousand notes); a note added
+        # between the look and the delete is a harmless race (its transmission was old enough to go anyway)
+        keep_ids = {r["value"] for r in self.store.q(NOTED)} if self.noted_kept() else set()
         n = 0
         noted = {True: 0, False: 0}                    # rows noted one by one, each kind; past CHANGES_MAX: that kind's reset
         for cond, params, days in self._groups(tpol, apol):
             cutoff, after = now - days * 86400, float("-inf")
             while True:
-                rows = self.store.q(
+                looked = self.store.q(
                     f"SELECT rowid AS r, id, system, start FROM radio_traffic WHERE {cond} AND start < ? AND start >= ? "
                     f"AND id NOT IN (SELECT l.traffic_id FROM radio_links l WHERE {SURE_LINK}){not_fixed} "
                     f"AND NOT (start >= ? AND ({record})) ORDER BY start LIMIT ?",
                     (*params, cutoff, after, now - KEEP_RECORD_S, self.PRUNE_BATCH))
-                if not rows:
+                if not looked:
                     break
+                rows = [r for r in looked if r["id"] not in keep_ids] if keep_ids else looked
                 with self.store.tx() as db:            # the conditions again: a link confirmed since the look keeps it
                     for r in rows:
                         gone = db.execute(f"DELETE FROM radio_traffic WHERE rowid = ? AND NOT EXISTS (SELECT 1 FROM "
@@ -1058,8 +1071,8 @@ class Comms:
                             # a big clear-out: the pages ask afresh; of another system's rows: only the readers who may
                             # see them (that reset is theirs, so how many went is never told to anyone else)
                             self.touch_reset() if kind else self.touch("reset", r["system"])
-                after = rows[-1]["start"]
-                if len(rows) < self.PRUNE_BATCH:
+                after = looked[-1]["start"]
+                if len(looked) < self.PRUNE_BATCH:
                     break
                 if pause_s:
                     time.sleep(pause_s)
@@ -1069,9 +1082,10 @@ class Comms:
     def kept_for_events(self, ids: list[str]) -> set[str]:
         """Of these clip ids, the ones whose audio is a record (the hub's audio retention, #251): on a CAD event
         (radio_links, any why but an unconfirmed mention / fireground one, #311), with an alarm, or with the emergency button or an emergency window's keep;
-        or hand-corrected (corrections_kept: the training set's audio)."""
+        or hand-corrected (corrections_kept: the training set's audio), or a noted intel event's (NOTED)."""
         out: set[str] = set()
         fixed = self.corrections_kept()
+        noted = self.noted_kept()
         for k in range(0, len(ids), 500):
             chunk = list(ids[k:k + 500])
             marks = ",".join("?" * len(chunk))
@@ -1081,6 +1095,8 @@ class Comms:
             if fixed:
                 out.update(r["id"] for r in self.store.q(
                     f"SELECT traffic_id AS id FROM stt_corrections WHERE traffic_id IN ({marks})", chunk))
+            if noted:
+                out.update(r["value"] for r in self.store.q(f"SELECT value FROM ({NOTED}) WHERE value IN ({marks})", chunk))
             try:
                 out.update(r["id"] for r in self.store.q(f"SELECT traffic_id AS id FROM alarms WHERE traffic_id IN ({marks})", chunk))
             except Exception:  # (a CAD without the alarms table yet)

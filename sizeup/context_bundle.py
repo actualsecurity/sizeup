@@ -120,7 +120,7 @@ def _tx(cad, r: dict) -> dict:
     its audio is still kept."""
     out = {k: r.get(k) for k in TX_KEYS if r.get(k) not in (None, "", [])}
     out["text"] = r.get("text") or ""
-    shown = r.get("atc_text") or r.get("fixed_text") or out["text"]
+    shown = r.get("atc_text") or r.get("fixed_text") or r.get("corr_text") or out["text"]
     if shown != out["text"]:
         out["shown"] = shown
     out["transcript_kept"] = True
@@ -423,12 +423,16 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
     if not rows:
         raise NotFound(f"no radio pre-alert {pid}")
     e = cad.intel_admin.shown(rows[0])
-    if not admin and e["mode"] not in ("map", "push"):          # shadow and log: rules being tuned, the admins' only
-        raise NotFound(f"no radio pre-alert {pid}")
+    # every level for anyone signed in (the Intel page's rows open here: admin, 2026-11-25, "view these intel events
+    # even if they do not trigger"); the rule phrases and the hits of rules being tuned stay the admins' (shown_rule)
     raw = rows[0]
     fired = {str(r[0]) for r in e["rules"] or []}
-    ids = list(raw["traffic_ids"])[-CAP["trigger"]:]
-    found = _by_ids(cad, ids)
+    # the evidence in AIR-TIME order (traffic_ids is the order the transcripts were read in: a late one is last), the
+    # newest CAP["trigger"] by air time; one gone from the radio log first, in the order read
+    found = _by_ids(cad, list(raw["traffic_ids"]))
+    ids = sorted(raw["traffic_ids"], key=lambda t: (t in found, float(found[t]["start"]) if t in found else 0.0))
+    ids = list(dict.fromkeys(ids))[-CAP["trigger"]:]
+    found = {t: found[t] for t in ids if t in found}
     hits: dict[str, list[dict]] = {}
     for h in (cad.store.q(f"SELECT traffic_id, rule_id, weight FROM intel_hits WHERE traffic_id IN "
                           f"({','.join('?' * len(ids))})", ids) if ids else []):
@@ -454,7 +458,8 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
         t["rules"] = sorted((h for h in hits.get(tid, []) if shown_rule(h["id"])), key=lambda h: -h["weight"])
         if admin and r is not None:
             t["matched"] = list(dict.fromkeys(p for h in t["rules"] if h["id"] in by_rule
-                                              for p in _matched_phrases(by_rule[h["id"]], r.get("text") or "")))
+                                              for p in _matched_phrases(by_rule[h["id"]],
+                                                                        r.get("corr_text") or r.get("text") or "")))
         trigger.append(t)
     if not found and ids:
         why = "its transmissions are gone from the radio log"
@@ -478,8 +483,16 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
                          *addrkey.bbox(lat, lon), CAP["site_prealerts"] * 3)) if exact else []
     prior = [p for p in prior if (e["place"] and (p["label_full"] or "").lower() == e["place"].lower())
              or (p["lat"] is not None and addrkey.meters(lat, lon, p["lat"], p["lon"]) <= addrkey.GROUP_M)]
+    # people's votes only: a note's tags are its own (sizeup/intel/notes.py), never counted as votes (#913 review F1)
     feedback = cad.store.q("SELECT verdict, operator, at, corrected_category FROM intel_feedback WHERE event_id = ? "
-                           "ORDER BY at DESC, id DESC LIMIT ?", (e["id"], CAP["feedback"]))
+                           "AND note_id IS NULL AND traffic_id IS NULL ORDER BY at DESC, id DESC LIMIT ?", (e["id"], CAP["feedback"]))
+    note_tags: dict = {}
+    for n in cad.store.q("SELECT tags FROM intel_notes WHERE event_id = ?", (e["id"],)):
+        try:
+            for t in json.loads(n["tags"] or "[]"):
+                note_tags[t] = note_tags.get(t, 0) + 1
+        except ValueError:
+            pass
     votes = [dict(f) if admin else {k: f[k] for k in ("verdict", "at", "corrected_category")} for f in feedback]   # who: admins
     now_hash = cad.intel.ruleset_hash() if hasattr(cad.intel, "ruleset_hash") else ""
     status_by = e.get("dismissed_by") or ""
@@ -524,10 +537,22 @@ def _intel(cad, pid: int, admin: bool, may: str, now: float, windows: dict) -> t
                     "near_incident": _incident(cad, e.get("near_incident")), "fd": e.get("fd_shown") or "",
                     "fd_state": e.get("fd") or "",
                     "feedback": votes, "pushed": e["pushed_at"] is not None,
-                    "pushed_at": e["pushed_at"], "suppressed": e["suppressed"], "delivery": e.get("delivery")},
+                    "pushed_at": e["pushed_at"], "suppressed": e["suppressed"], "delivery": e.get("delivery"),
+                    # why it didn't push, as the Intel page says it (sizeup/intel/eventlog.py): {key, label, tip, detail}
+                    "held": _held(cad, e["id"]),
+                    "note_tags": note_tags},             # {tag: how many of its notes have it}
     }
-    rev = [raw["updated_at"], e["status"], len(feedback), feedback[0]["at"] if feedback else 0, raw.get("delivery") or ""]
+    rev = [raw["updated_at"], e["status"], len(feedback), feedback[0]["at"] if feedback else 0, raw.get("delivery") or "",
+           sorted(note_tags.items())]
     return out, rev
+
+
+def _held(cad, eid) -> dict | None:
+    try:
+        rows = cad.intel_admin.eventlog.rows_by_id([int(eid)])
+    except Exception:  # noqa: BLE001 - the bundle never fails on the label
+        return None
+    return rows[0]["held"] if rows else None
 
 
 def _model(cad, eid) -> dict | None:
@@ -542,7 +567,7 @@ def _model(cad, eid) -> dict | None:
 
 def build(cad, kind: str, pid: int, *, admin: bool = False, may: str = "viewer", now: float | None = None,
           windows: dict | None = None) -> dict:
-    """The bundle for one pre-alert (the module doc). admin: rule phrases and shadow / log events; may: the reader's
+    """The bundle for one pre-alert (the module doc). admin: rule phrases and every rule's hits; may: the reader's
     standing for address notes and pre-plan points (premise.py / preplan.py visibility)."""
     if kind not in KINDS:
         raise NotFound(f"kind: one of {', '.join(KINDS)}")

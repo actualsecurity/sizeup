@@ -6,12 +6,12 @@ Settings sections (audited as "system", exported like any setting):
     intel         {enabled, push (the kill switch), push_pii (no PII scrub on intel pushes), per_hour, per_day,
                    per_category_hour, repush_min, max_repush, quiet_from, quiet_to, digest_min}
                    (sizeup/intel/policy.py DEFAULTS)
-    intel_packs   pack -> {mode, threshold, window_s, categories: {category: {mode, priority, ttl_min}}}
+    intel_packs   pack -> {mode, threshold, window_s, late_s, categories: {category: {mode, priority, ttl_min}}}
     intel_rules   rule id -> {mode, w, enabled}; "local.<name>": an admin's own rule {pack, category, any, not?, w, mode}
 
 POST /api/cad/settings/intel {action, ...}:
     set       {key: a policy key, value}                     the intel section
-    pack      {pack, mode?, threshold?, window_s?, area?: [town, ...] ([]: the pack file's own), highway?: {buffer_m?,
+    pack      {pack, mode?, threshold?, window_s?, late_s?, area?: [town, ...] ([]: the pack file's own), highway?: {buffer_m?,
               merge_m?, merge_min?, link_m?, link_min?, promote_min?} (a pack with a "highway": true category;
               rules.highway_cfg), stt_high?: true | false (its sources transcribed at HIGH: engine.py push sources),
               agency_towns?: {agency: town} ({}: the file's; a talker's department's town, rules.py),
@@ -23,7 +23,8 @@ POST /api/cad/settings/intel {action, ...}:
 Every change compiles the packs with it first (a bad phrase, an unknown category: 400 with the reason).
 
 Who sees intel: everyone signed in (user, 2026-11-12), never anyone else: sourcekeys.may_see_context() (the
-verified sign-in gate, the same as context traffic), on the API and in the console's state.
+verified sign-in gate, the same as context traffic), on the API and in the console's state. The Intel page's list
+(GET /api/cad/intel/list, sizeup/intel/eventlog.py): every event at every level and status, the same gate.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ from sizeup import sourcekeys
 from sizeup.cad.store import CadError
 from sizeup.intel import policy as policy_mod
 from sizeup.intel import rules as rules_mod
-from sizeup.intel.events import VERDICTS
+from sizeup.intel.events import VERDICTS, VOTE_PAIRS
 from sizeup.intel.model import MODES
 from sizeup.intel.push import category_label
 
@@ -113,8 +114,12 @@ def _model_status(eng) -> dict:
 
 class IntelAdmin:
     def __init__(self, cad, engine):
+        from sizeup.intel.eventlog import IntelLog
+        from sizeup.intel.notes import IntelNotes
         self.cad, self.engine = cad, engine
         self._state = None
+        self.eventlog = IntelLog(cad, engine)
+        self.notes = IntelNotes(cad, engine)            # notes and tags per event (sizeup/intel/notes.py)
 
     # -- reading ----------------------------------------------------------------------------------------------------
 
@@ -139,11 +144,11 @@ class IntelAdmin:
             rules = [{"id": r.id, "v": r.v, "category": r.category, "w": r.w, "mode": r.mode, "enabled": r.enabled,
                       "any": [x.src for x in r.any], "not": [x.src for x in r.nots], "edited": r.id in ro,
                       "local": r.id.startswith("local."), **stats.get(r.id, {"hits": 0, "events": 0})} for r in p.rules]
-            packs.append({"name": p.name, "label": p.label, "mode": p.mode, "threshold": p.threshold, "window_s": p.window_s,
+            packs.append({"name": p.name, "label": p.label, "mode": p.mode, "threshold": p.threshold, "window_s": p.window_s, "late_s": p.late_s,
                           "accept": p.accept, "scope": p.scope, "area": list(p.area), "categories": cats, "rules": rules,
                           "agency_towns": dict(p.agency_towns), "agency_guesses": self._agency_guesses(p),
                           "console_cue": p.console_cue,
-                          "edited": {k: k in mine for k in ("mode", "threshold", "window_s", "area", "agency_towns",
+                          "edited": {k: k in mine for k in ("mode", "threshold", "window_s", "late_s", "area", "agency_towns",
                                                             "console_cue")}})
         counts = eng.events.counts(now - LIST_S) if hasattr(eng.events, "counts") else {}
         try:        # what the engine did with what it was handed, a line per pack (sizeup/intel/counters.py)
@@ -226,6 +231,12 @@ class IntelAdmin:
         rows = self.engine.events.rows(" AND ".join(where), args, limit) if hasattr(self.engine.events, "rows") else []
         return {"events": [self.shown(r) for r in rows], "now": now, "ruleset_hash": self.engine.ruleset_hash()}
 
+    def listing(self, q: dict, operator: str = "") -> dict:
+        """GET /api/cad/intel/list: the Intel page (sizeup/intel/eventlog.py), anyone signed in."""
+        if not sourcekeys.may_see_context(self.cad.comms.context_broadcast) or not hasattr(self.engine.events, "rows"):
+            raise CadError("intel needs a sign-in")
+        return self.eventlog.list(q, operator)
+
     def shown(self, e: dict) -> dict:
         """An event as the console and the map read it (no transcript text: the rows play from their ids)."""
         p = self.engine.pack(e["pack"])
@@ -274,8 +285,11 @@ class IntelAdmin:
         ev = self.engine.events.get(eid)
         if ev is not None:
             self.engine.dismissed(ev)             # its window spent; mute_min keeps it from coming straight back
-        self.engine.events.feedback(eid, None, str(body.get("verdict") or "noise") if body.get("verdict") in VERDICTS
-                                    else "noise", op, self.cad.clock())
+        v = str(body.get("verdict") or "noise") if body.get("verdict") in VERDICTS else "noise"
+        if v in VOTE_PAIRS and hasattr(self.engine.events, "ensure_vote"):
+            self.engine.events.ensure_vote(eid, v, op, self.cad.clock())     # a Noise vote already there: not twice
+        else:
+            self.engine.events.feedback(eid, None, v, op, self.cad.clock())
         return {"ok": True}
 
     def feedback(self, eid: int, body: dict) -> dict:
@@ -284,6 +298,9 @@ class IntelAdmin:
             raise CadError(f"verdict: {' | '.join(VERDICTS)}")
         if self.engine.events.get(eid) is None:
             raise CadError(f"no pre-alert {eid}")
+        if v in VOTE_PAIRS and hasattr(self.engine.events, "vote"):     # a vote: one each, again takes it back
+            fid, removed = self.engine.events.vote(eid, v, str(body.get("operator") or ""), self.cad.clock())
+            return {"ok": True, "id": fid, "removed": removed}
         cc = str(body.get("category") or "")[:40]
         fid = self.engine.events.feedback(eid, None, v, str(body.get("operator") or ""), self.cad.clock(),
                                           corrected_category=cc)
@@ -317,10 +334,11 @@ class IntelAdmin:
                 raise CadError(f"no pack {pname!r}")
             cur = copy.deepcopy(ov["intel_packs"].get(pname) or {})
             if action == "pack":
-                for k in ("mode", "threshold", "window_s"):
+                for k in ("mode", "threshold", "window_s", "late_s"):
                     if k in body:
                         cur[k] = (_mode(body[k], "mode") if k == "mode" else
-                                  _f(body[k], 0, 1, "threshold") if k == "threshold" else _f(body[k], 10, 1800, "window_s"))
+                                  _f(body[k], 0, 1, "threshold") if k == "threshold" else
+                                  _f(body[k], 30, 3600, "late_s") if k == "late_s" else _f(body[k], 10, 1800, "window_s"))
                 if "highway" in body:
                     if not self.engine.pack(pname).hw:
                         raise CadError(f"{pname} has no highway category")

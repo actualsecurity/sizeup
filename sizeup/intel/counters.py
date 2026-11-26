@@ -6,7 +6,8 @@ scope. These say which. In memory, by the clock hour, per pack and overall ("" b
     considered     transcripts handed to the engine (a re-transcription counts again)
     in_scope       ... in the pack's scope (overall: in any pack's)
     out_of_scope   ... not in it (overall: in no pack's): dropped, nothing read
-    too_old        in scope, older than max_age_min (the age gate): history, never a pre-alert
+    too_old        in scope, older than max_age_min (the age gate): history, never a pre-alert (read as context
+                   and recorded at log, "late", up to engine.IGNORE_S; never read past that)
     repeat         in scope, the same text as before (a re-record that changed nothing)
     quiet          in scope and read during quiet hours (events are made, nothing is pushed)
     matched        read, and a rule matched (not counted for a pack that is off)

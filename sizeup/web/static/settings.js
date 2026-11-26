@@ -62,6 +62,10 @@ const S_RC_SERVICES = {
   save: async (key, service) => (await api("POST", "/api/cad/settings/radio_services", { action: "set", key, service, operator: operator() }))
     .radio_services || {},
 };
+// ... and an FM / airband channel's Main switch (Our calls: the settings section radio_main; a talkgroup's is its own)
+const S_RC_MAIN = {
+  save: async (key, main) => api("POST", "/api/cad/settings/radio_main", { action: "set", key, main, operator: operator() }),
+};
 const S_TONE_TYPES = [["fire", "Fire"], ["ems", "EMS"], ["police", "Police"], ["other", "Other"]];   // the services (#122)
 const S_LISTS = [["event_types", "Event types"], ["event_subtypes", "Event subtypes"], ["type_subtypes", "Subtypes per type"],
   ["dispositions", "Dispositions"],
@@ -542,7 +546,7 @@ function sRadioTab() {
   const rc = $("#settings-radio-controls");
   show(rc, S_RC_TABS.has(S.rtab));
   // receivers, talkgroups, vocabulary; the reception test card under Receivers only (#436)
-  if (S_RC_TABS.has(S.rtab) && window.RadioControls) RadioControls.mount(rc, { reception: true, tab: S.rtab, names: S_RC_NAMES, services: S_RC_SERVICES });
+  if (S_RC_TABS.has(S.rtab) && window.RadioControls) RadioControls.mount(rc, { reception: true, tab: S.rtab, names: S_RC_NAMES, services: S_RC_SERVICES, main: S_RC_MAIN });
   for (const n of panel.querySelectorAll("[data-rtab]")) show(n, n.dataset.rtab === S.rtab);
   if (S.rtab === "squelch" && window.SquelchPanel) SquelchPanel.mount($("#settings-squelch"));   // squelch-panel.js
   if (S.rtab === "signal" && window.SignalPanel) SignalPanel.mount($("#settings-signal"));       // signal-panel.js (#606)
@@ -2887,6 +2891,7 @@ function sMutes(m) {
   if (window.Help && Help.info) head.append(Help.info("A muted alert still shows on Settings > Station > Health, not pushed. One pushed before the mute still gets its recovery."));
   const rows = m.kinds.map((k) => {
     const [lab, cb] = sCheck(k.label, k.muted, k.muted ? "Unmute: pushed again" : "Mute: Health only, no push");
+    if (k.hint) lab.title = `${k.hint}. ${lab.title}`;
     const sel = sSelect(k.timed_only ? S_MUTE_FOR.slice(1) : S_MUTE_FOR, "24", null, `${k.label}: mute for`);
     if (k.timed_only) sel.title = "Critical: muted for a time only";
     cb.disabled = sel.disabled = !canDo("admin");

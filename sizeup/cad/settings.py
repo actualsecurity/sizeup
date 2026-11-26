@@ -74,6 +74,9 @@ Reset to default = drop the override (one item, or a whole section).
     radio_views                    key "views" -> [{id, name, mark, color, filter: {ours, services, systems, sources, units,
                                    linked}}]: the Radio page rail's views, set for the department (sizeup/cad/radioviews.py;
                                    admins, from the rail or Settings > Radios > Views); not set: the views that were coded
+    radio_main                     key an FM / airband channel's label -> true | false: its Main switch (Settings > Radios >
+                                   Channels, admins): Main = Our calls; not set: on, but an airband channel's off (a
+                                   talkgroup's Main is in the talkgroups' own choices, sizeup/talkgroups.py)
     radio_shorts                   key a qualified source key -> a short label (1 to 24 characters) for the chips: the second
                                    field beside a channel's name in Settings > Radios > Channels (sizeup/radionames.py:
                                    every label on every page; admins); not set: its name
@@ -232,6 +235,11 @@ PAGE_SECTION[VIEWS_SECTION] = "radios"
 # -> a service; not set: automatic.
 SVC_SECTION = "radio_services"
 PAGE_SECTION[SVC_SECTION] = "radios"
+# An FM / airband channel's Main switch (a talkgroup's is in sizeup/talkgroups.py): Main is "Our calls" everywhere (the
+# Radio page's Main and Our calls view, the live player), Settings > Radios > Channels, admins, audited as Radios.
+# key a channel's label -> true | false; not set: on, but an airband channel's off (Cad.fm_main).
+FM_MAIN_SECTION = "radio_main"
+PAGE_SECTION[FM_MAIN_SECTION] = "radios"
 # A channel's or talkgroup's short label for chips (sizeup/radionames.py): a second field beside its name in Settings >
 # Radios > Channels, admins, audited as Radios. key a qualified source key -> the short label; not set: its name.
 SHORT_SECTION = radionames.SECTION
@@ -641,6 +649,8 @@ class Editor:
         self.cad.map_display = mapview.display_zooms(ov.get(MAPD_SECTION))     # the maps' rigs by zoom (#376)
         self.cad.premise_visible = dict(ov.get(PREMISE_SECTION) or {})     # premise notes by category (#403)
         self.cad.em_prominent = em_prominent(ov.get(EM_SECTION))          # the Radio page's loud emergencies
+        # each FM / airband channel's Main switch (Our calls): only the choices that differ from its default
+        self.cad.fm_main_over = {str(k): bool(v) for k, v in (ov.get(FM_MAIN_SECTION) or {}).items() if isinstance(v, bool)}
         self.cad.radio_folders = radiofolders.stored(ov)                  # the Radio page's folders (#607)
         self.cad.radio_views = radioviews.stored(ov)                      # ... and its views (None: the coded ones)
         # one name per source, every label (sizeup/radionames.py): the folders' names and the chips' shorts
@@ -995,7 +1005,8 @@ class Editor:
         now = self.store.clock()
         on = health_mod.active_mutes((self.section(MUTE_SECTION) if ov is None else (ov.get(MUTE_SECTION) or {})), now)
         return {"kinds": [{"key": k, "label": lab, "muted": k in on, "until": on.get(k),
-                           "timed_only": k in health_mod.MUTE_TIMED_ONLY}
+                           "timed_only": k in health_mod.MUTE_TIMED_ONLY,
+                           **({"hint": health_mod.MUTE_HINTS[k]} if k in health_mod.MUTE_HINTS else {})}
                           for k, lab in health_mod.MUTE_KINDS.items()], "hours_max": MUTE_HOURS_MAX}
 
     @staticmethod
@@ -1177,6 +1188,25 @@ class Editor:
         out = self._commit([(EM_SECTION, "prominent", REMOVE if v == list(EM_DEFAULT) else v)], op,
                            [("radios", f"{EM_SECTION}/prominent", ", ".join(cur) or "none", ", ".join(v) or "none")])
         return {**out, "radio_emergencies": self.em_page()}
+
+    def _fm_main_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key: an FM / airband channel's label, main: true | false}: its Main switch (Our calls), admins, audited as
+        Radios (radio_main/<label>, Main -> Other). Its default (on; an airband channel's off) is kept as no choice."""
+        if action != "set":
+            raise CadError("action: set")
+        key, main = body.get("key"), body.get("main")
+        kinds = self.cad.fm_kinds()
+        if not isinstance(key, str) or key not in kinds:
+            raise CadError("key: an FM or airband channel's label")
+        if not isinstance(main, bool):
+            raise CadError("main: true or false")
+        cur = self.cad.fm_main(key)
+        if main == cur:                                 # nothing changes: nothing written, nothing audited
+            return {"ok": True, "main": cur}
+        default = self.cad.fm_main_default(key)
+        out = self._commit([(FM_MAIN_SECTION, key, REMOVE if main == default else main)], op,
+                           [("radios", f"{FM_MAIN_SECTION}/{key}", "Main" if cur else "Other", "Main" if main else "Other")])
+        return {**out, "main": main}
 
     def services_page(self, cur: dict | None = None) -> dict:
         """{source key: service} the admins chose, as this reader may know of them (another system's: signed in only)."""
@@ -1616,7 +1646,7 @@ class Editor:
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
               channels_mod.SQUELCH_SECTION: self._squelch_op,
               "places": self._places_op, COMMON_SECTION: self._common_op, ADDR_SECTION: self._addresses_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
-              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, HYD_SECTION: self._hyd_op, SWAP_SECTION: self._swap_op, REM_SECTION: self._rem_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, SIGNAL_SECTION: self._signal_op, FOLDERS_SECTION: self._folders_op, VIEWS_SECTION: self._views_op, SVC_SECTION: self._services_op, RET_SECTION: self._retention_op,
+              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, HYD_SECTION: self._hyd_op, SWAP_SECTION: self._swap_op, REM_SECTION: self._rem_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, FM_MAIN_SECTION: self._fm_main_op, SIGNAL_SECTION: self._signal_op, FOLDERS_SECTION: self._folders_op, VIEWS_SECTION: self._views_op, SVC_SECTION: self._services_op, RET_SECTION: self._retention_op,
               TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, LOGS_SECTION: self._logs_op, DEPT_SECTION: self._dept_op, FT_SECTION: self._feed_types_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o),
               "intel": lambda a, b, o: self.cad.intel_admin.settings_op(a, b, o),
               FIX_SECTION: lambda a, b, o: self.cad.stt_fix.settings_op(a, b, o)}.get(section)
