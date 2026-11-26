@@ -192,13 +192,14 @@ def test_every_control_has_a_name_and_every_label_a_hover(site, browser):
     assert packs == 6                                                        # the first pack, the four log-only ones, highway
     assert [t for t, _, _ in labels] == ["/h", "/day", "/cat/h", "repush min", "max age min", "expiry min", "before s", "after s", "kbps",
                                          "model", "/day", "$/month", "sample %", "min conf", "/h", "/day", "wait s",
-                                         "quiet from", "to", "min", "m"] + ["mode", "threshold", "window s"] * packs
+                                         "quiet from", "to", "min", "m"] + ["mode", "threshold", "window s", "late s"] * packs
     for text, title, field_title in labels:
         assert len(title) > len(text) and title == field_title, (text, title)
     hovers = {t: h for t, h, _ in labels}
     for text, word in (("/h", "hour"), ("/cat/h", "category"), ("repush min", "Minutes"), ("max age min", "Minutes"), ("expiry min", "Minutes"),
                        ("before s", "Seconds"), ("after s", "Seconds"), ("kbps", "kbit/s"), ("$/month", "dollars"), ("sample %", "Percent"),
-                       ("quiet from", "local time"), ("threshold", "0 to 1"), ("window s", "Seconds")):
+                       ("quiet from", "local time"), ("threshold", "0 to 1"), ("window s", "Seconds"),
+                       ("late s", "clip ended")):
         assert word in hovers[text], (text, hovers[text])
     assert pg.errors == []
 
@@ -285,7 +286,7 @@ def test_every_control_posts_what_it_did(site, browser):
     if kinds:
         ncat, nrule = sum(len(p["categories"]) for p in d["packs"]), sum(len(p["rules"]) for p in d["packs"])
         assert len(d["packs"]) == 6 and nrule > 80                           # every pack's rows, each with its own controls
-        assert kinds[:5] == [7, 21 + 3 * len(d["packs"]), ncat, nrule, nrule] and kinds[5] == sum(kinds[:5]), kinds
+        assert kinds[:5] == [7, 21 + 4 * len(d["packs"]), ncat, nrule, nrule] and kinds[5] == sum(kinds[:5]), kinds
         names = pg.evaluate("() => [...document.querySelectorAll('#s-intel :is(.in-cats, .in-rules) select')].map((n) => n.getAttribute('aria-label'))")
         assert len(set(names)) == len(names) == ncat + nrule                 # no two controls of the card share a name
     # and the server took them: the card shows what was saved

@@ -146,9 +146,9 @@ How a row becomes an event, per pack whose scope it is in:
      out of air-time order, and a row's text can change later (a correction, an "unclear" re-ask, a catch-up). A row
      is read with the rows that AIRED within window_s of it (Window.around; a source's rows are kept max_age_min +
      window_s by air time, and as long again after they were read), whenever it arrives; a new event's first_at is its
-     first row's air time. A row read over LATE_S after it aired, older than max_age_min, or logged late by #747
+     first row's air time. A row read over its pack's late_s after its clip ended, older than max_age_min, or #747's
      (radio_traffic.late) is LATE (Entry.late): context and corroboration, never a push's origin, never asked of the
-     model. An event is pushed a first time only while its newest row aired within LATE_S and its rows read in time
+     model. An event is pushed a first time only while its newest row read in time ended within late_s, and those rows
      reach the threshold on their own (_fresh); else it is recorded at log ("late"). A late row, or a
      re-text of a row already in the event, never pushes it again. A re-text replaces the row's hits in place; one
      that no longer says an event's category scores that event again without it (_unsupport). A row whose text
@@ -216,9 +216,9 @@ FD_OPEN_S = 12 * 3600.0                # an open incident counts this long after
 PLACED = ("address", "intersection", "block", "landmark")     # a place a crew can drive to ("place": true categories)
 RELEASE_S = 300.0                      # an "unplaced" hold: a read-back this soon after the call-out places it, and a
                                        # place found later than this updates the event at log ("placed_late"), unpushed
-LATE_S = RELEASE_S                     # air-time order (FIFO): an event whose newest transmission aired longer ago than
-                                       # this is never pushed a first time ("late", at log), and a row that late never
-                                       # pushes an event again (speech-to-text's HIGH class sheds a clip after 300 s too)
+LATE_S = RELEASE_S                     # air-time order (FIFO): the default of a pack's late_s (rules.Pack.late_s; the
+                                       # police pack's 300 s is speech-to-text's HIGH shed, highway's 600 s its CONTEXT
+                                       # one): a row read longer than that after its clip ENDED is late (Entry.late)
 WITHDRAWN = "source withdrawn"         # the note on an event whose only support was a row withdrawn since (_unsupport)
 IGNORE_S = 24 * 3600.0                 # a row older than this (or max_age_min if longer) is never read at all
 # a read-back of a held call: the address and these words only ("copy, that's going to be 40 Example Place"; "the
@@ -314,9 +314,10 @@ class Entry:
     units: frozenset = frozenset()     # the units it names or its radio is ("car 3"), lower case
     dispatcher: bool = False           # the dispatcher / HQ voices every job: never a tie by talker alone
     place: object = None               # the place in its own words (model.Place), or None
-    late: bool = False                 # logged late (#747, row["late"]; older than max_age_min) or read over LATE_S
-                                       # after it aired: context and a record, never the origin of a push
+    late: bool = False                 # logged late (#747, row["late"]; older than max_age_min) or read over the
+                                       # pack's late_s after its clip ended: context and a record, never a push's origin
     read: float = 0.0                  # when it was read (the clock): kept as context a while after, whenever it aired
+    end: float = 0.0                   # when its clip ended (lateness is measured from it)
     label: str = ""                    # its radio as Settings > Radios names it (talkers.py), "" none
     town: str = ""                     # ... that department's town, one of the source's ("" not known)
 
@@ -796,7 +797,8 @@ class IntelEngine:
         if unclear or not text.strip():
             if unclear:
                 self.unclear += 1
-            return self._withdraw(row, tid) if self._read_before(tid) else []
+            with self._lock:
+                return self._withdraw(row, tid) if self._read_before(tid) else []
         if row.get("alt_text") and stt_quality.assess(str(row["alt_text"]), secs):
             row = dict(row, alt_text="")
         sig = hash((text, str(row.get("alt_text") or "")))
@@ -871,9 +873,10 @@ class IntelEngine:
                 or bool(talker and (DISPATCH_WORDS.search(talker) or talker in self._hq(row))))
         if talker and not disp and UNIT_MENTION.fullmatch(talker):
             units.add(talker.lower())
-        entry = Entry(at, hits, text, who, suppressed, talker, frozenset(units), disp,
+        end = max(at, float(row.get("end") or at))
+        entry = Entry(at, hits, text, who, suppressed, talker, frozenset(units), disp, end=end,
                       label=tk.label if tk else "", town=self._talker_town(pack, key, tk),
-                      late=bool(row.get("late")) or self.clock() - at > LATE_S, read=self.clock())
+                      late=bool(row.get("late")) or self.clock() - end > pack.late_s, read=self.clock())
         # a re-text (#901's correction, a re-ask, a catch-up): the categories its old words said
         was = ({r.category for r, w in win.entries[tid].hits if w > 0 and not r.id.startswith(("model.", "infer."))}
                if known else set())
@@ -1067,13 +1070,13 @@ class IntelEngine:
         return max([ev.last_at, *(win.entries[t].at for t in ev.traffic_ids if win is not None and t in win.entries)])
 
     def _fresh(self, pack, ev: Event) -> bool:
-        """The event may be pushed a first time: its newest row aired within LATE_S, and its rows read in time (never
-        late, Entry.late) reach the threshold of its category on their own. A late row corroborates (a place, a
+        """The event may be pushed a first time: its rows read in time (never late, Entry.late) reach the threshold of
+        its category on their own, the newest of them ended within the pack's late_s. A late row corroborates (a place, a
         read-back, the score shown), it never makes a fresh row's event push."""
-        if self.clock() - ev.last_at > LATE_S:
-            return False
         rows = {t: e for (p, _k), w in self.windows.items() if p == pack.name
                 for t, e in w.entries.items() if t in ev.traffic_ids and not e.late}
+        if not rows or self.clock() - max(e.end for e in rows.values()) > pack.late_s:
+            return False                      # (its newest row read in time ended over late_s ago)
         got = self._scores(pack, Window(rows)).get(ev.category)
         cd = pack.category(ev.category)
         thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
@@ -1157,9 +1160,12 @@ class IntelEngine:
         from sizeup.intel.place import callsigns
         return set(callsigns(str(row.get("system") or ""), str(row.get("service") or "")))
 
-    def _event_entries(self, pack, ev: Event) -> list:
+    def _event_entries(self, pack, ev: Event, at: float | None = None) -> list:
+        """The event's rows at hand; with at, only those that aired within window_s of it (a tie by unit or talker is
+        by AIR time: never to a row of the same talker a quarter of an hour away)."""
         win = self.windows.get((pack.name, ev.source_key))
-        return [win.entries[t] for t in ev.traffic_ids if win is not None and t in win.entries]
+        return [win.entries[t] for t in ev.traffic_ids if win is not None and t in win.entries
+                and (at is None or abs(win.entries[t].at - at) <= pack.window_s)]
 
     def _same_job(self, pack, ev: Event, entry, ws: list[str], mine=frozenset()) -> bool:
         """A transmission is about this event only when (#492 re-check):
@@ -1174,11 +1180,12 @@ class IntelEngine:
             return True
         if entry.place is not None and ev.precision != "none" and same_place(entry.place, ev.place()):
             return True
-        mine_entries = self._event_entries(pack, ev)
-        shared = entry.units & frozenset(u for e in mine_entries for u in e.units)
+        mine_entries = self._event_entries(pack, ev, entry.at)
+        shared = frozenset(u for u in entry.units & frozenset(u for e in mine_entries for u in e.units)
+                           if not _placeholder(u))
         if shared and not self._busy(pack, ev, shared, entry.at):
             return True                       # (a unit on two or more open jobs: only words or the place tie it)
-        if (entry.talker and not entry.dispatcher
+        if (entry.talker and not entry.dispatcher and not _placeholder(entry.talker)
                 and entry.talker in {e.talker for e in mine_entries if e.talker and not e.dispatcher}):
             return True
         # "now at", "last seen at": the one moving incident open on this source
@@ -1191,7 +1198,7 @@ class IntelEngine:
     def _busy(self, pack, ev: Event, units, at: float | None = None) -> bool:
         """These units are on another open job too, around the row's air time (then they tie by words or place only)."""
         for e in self._open_for(pack, None, ev.source_key, self.clock() if at is None else at, self._merge_span(pack)):
-            if e.id != ev.id and units & frozenset(u for x in self._event_entries(pack, e) for u in x.units):
+            if e.id != ev.id and units & frozenset(u for x in self._event_entries(pack, e, at) for u in x.units):
                 return True
         return False
 
@@ -1601,6 +1608,8 @@ class IntelEngine:
                 reopened, ev.note = True, "re-opened"                                               # never "in custody")
         if ev is None and not speaks:
             return None                       # a cue alone (another job's "respond to ...") never makes an event
+        if ev is None and hasattr(self.events, "bound") and self.events.bound(tid, pack.name, cat):
+            return None                       # already an event's (one expired, a re-feed after a restart): never two
         # its traffic: the rows that say this category (and this one when it ties), never another job's cue
         tids = list(dict.fromkeys([*(t for t, r, _w in contrib if r.category == cat and _w > 0),
                                    *([tid] if speaks or (ev is not None and self._same_job(
@@ -1650,6 +1659,8 @@ class IntelEngine:
         ev.mode = mode if change == "raised" else max(ev.mode, mode, key=mode_rank)
         ev.priority = max(int(cd.get("priority", 3)), ev.priority if change == "updated" else 0)
         ev.until = max(ev.until, ev.last_at + float(cd.get("ttl_min", 45)) * 60)
+        if entry.late:
+            ev.until = max(ev.until, now + pack.window_s)    # its air-time neighbours, read just after, join it
         if place is not None and (moved or ev.precision == "none" or place.confirmed or place.where_score > ev.where_score):
             ev.set_place(place)
             if moved:
@@ -1795,9 +1806,11 @@ class IntelEngine:
         """ "Disregard" / "cancel" ends only the events of the current window's transmissions, or those it ties to by
         unit, place or category words (#492 re-check: never every event on the channel)."""
         out = []
-        current = set(win.entries) - {tid} if win is not None else set()
+        # by AIR time: only the rows that aired before it, and never an event that began after it (a call read
+        # before a disregard that aired earlier)
+        current = {t for t, e in win.entries.items() if t != tid and e.at <= at} if win is not None else set()
         entry = win.entries.get(tid) if win is not None else None
-        open_ = self._open_for(pack, None, key, at, self._merge_span(pack))
+        open_ = [e for e in self._open_for(pack, None, key, at, self._merge_span(pack)) if e.first_at <= at]
         named = [ev for ev in open_ if entry is not None and self._same_job(pack, ev, entry, list(ws))]
         # what it names (a unit, a place, the category's words); naming nothing, the current window's own events, but
         # never a safety call (shots, a barricade, a fire, a water rescue): that one is only "possibly cancelled"
@@ -1819,7 +1832,7 @@ class IntelEngine:
             self.events.save(ev)
             self.sink.event(ev, "ended")
             out.append(ev)
-        self._consume(pack.name, key)
+        self._consume(pack.name, key, at)
         return out
 
     def _deescalate(self, pack, row: dict, key: str, at: float, tid: str, text: str, ws: list[str], entry) -> list[Event]:
@@ -1906,14 +1919,15 @@ class IntelEngine:
         """The row speaks of another job ("at the other call"), or names units and none of the event's own."""
         if OTHER_JOB.search(entry.text or ""):
             return True
-        mine = frozenset(u for e in self._event_entries(pack, ev) for u in e.units)
+        mine = frozenset(u for e in self._event_entries(pack, ev, entry.at) for u in e.units)
         return bool(entry.units) and not entry.units & mine
 
-    def _consume(self, pack_name: str, key: str) -> None:
-        """What the window held is spent: a routine cue after "disregard" never adds it up again (#492 review, H2)."""
+    def _consume(self, pack_name: str, key: str, at: float | None = None) -> None:
+        """What the window held is spent: a routine cue after "disregard" never adds it up again (#492 review, H2).
+        at: a disregard's air time: only the rows that aired up to it (one aired after it is the next call's)."""
         win = self.windows.get((pack_name, key))
         if win is not None:
-            win.entries = {t: e for t, e in win.entries.items() if e.suppressed}
+            win.entries = {t: e for t, e in win.entries.items() if e.suppressed or (at is not None and e.at > at)}
 
     def dismissed(self, ev: Event) -> None:
         """A person dismissed it (sizeup/intel/admin.py): its window is spent, and mute_min keeps it from coming back."""
@@ -1929,9 +1943,9 @@ class IntelEngine:
         d = self.policy.decide(ev, change, now, before, moved)
         win = self.windows.get((pack.name, ev.source_key))
         if d.would_push and tid and win is not None and tid in win.entries and win.entries[tid].late:
-            d = Decision(d.mode, False, "late", d.priority)   # a row logged late (#747) never pushes
+            d = Decision(d.mode, False, "late", d.priority)   # a late row (read late, #747's) never pushes
         elif (d.would_push and ev.pushed_at is not None and before is not None and at is not None
-                and (tid in before.traffic_ids or now - at > LATE_S)):
+                and tid in before.traffic_ids):
             d = Decision(d.mode, False, "late", d.priority)   # a re-text of its own row, or a row read late: never a
                                                               # push again, out of air-time order
         if d.would_push:
@@ -2324,6 +2338,22 @@ def rung(evidence: list, damp: list, thr: float, cues: list = ()) -> str:
         if round(what, 4) >= thr:
             return m
     return modes[-1] if modes else "off"
+
+
+PLACEHOLDER_TALKER = re.compile(r"(unknown|unk|unidentified)\b.*|(radio|id|rid)?\s*#?\d+", re.I)
+
+
+def _placeholder(who: str) -> bool:
+    """A talker or unit that says nothing about the job: "unknown" / "unknown radio", a bare radio ID, a department's
+    placeholder (DPT239 ...: sizeup/cad/mapview.is_placeholder). Never a tie between two rows."""
+    w = str(who or "").strip()
+    if not w or PLACEHOLDER_TALKER.fullmatch(w):
+        return True
+    try:
+        from sizeup.cad.mapview import is_placeholder
+        return is_placeholder(w.upper())
+    except Exception:  # noqa: BLE001 - the lists unreadable: not one
+        return False
 
 
 def _same(a: Event, b: Event) -> bool:
