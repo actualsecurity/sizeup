@@ -84,7 +84,8 @@ window.CamOverlay = (() => {
     o.svg.setAttribute("aria-hidden", "true");
     o.layer.append(o.svg);
     o.map.getContainer().append(o.layer);
-    for (const ev of ["move", "zoom", "resize", "rotate", "pitch"]) o.map.on(ev, schedule);
+    for (const ev of ["move", "zoom", "rotate", "pitch"]) o.map.on(ev, schedule);
+    o.map.on("resize", () => { o.box = null; schedule(); });   // (the map's size, measured again)
     return true;
   }
   function schedule() {
@@ -123,6 +124,7 @@ window.CamOverlay = (() => {
         o.layer.append(m.el);
       }
       m.cam = c;
+      m.lsz = null;                                          // its label's size, measured again
       m.el.replaceChildren(E.isDown(c) ? el("span", "ml-down-badge", "!") : el("span", "co-ring-dot"));
       if (c.pin && !E.isDown(c)) m.el.append(el("span", "co-ring-lbl", E.pinText(c)));
       m.el.setAttribute("aria-label", E.isDown(c) ? `camera down: ${c.name}` : `${E.pinText(c)}: ${c.name}`);
@@ -138,6 +140,8 @@ window.CamOverlay = (() => {
   const EDGE = { x: 4, top: 44, bottom: 34 };
   const inside = (r, box) => r.x >= EDGE.x && r.y >= EDGE.top && r.x + r.w <= box.w - EDGE.x && r.y + r.h <= box.h - EDGE.bottom;
   const overlaps = (a, b) => a.x < b.x + b.w + GAP && b.x < a.x + a.w + GAP && a.y < b.y + b.h + GAP && b.y < a.y + a.h + GAP;
+  // Nothing is read from the page here but once: the map's size until it resizes, a label's until it is drawn again. A
+  // read after this frame's writes made the browser lay the page out again on every frame of a pan (the trace, 2026-11).
   function place() {
     if (!o.map || !o.layer) return;
     const z = o.map.getZoom();
@@ -145,7 +149,8 @@ window.CamOverlay = (() => {
     o.layer.classList.toggle("co-far", far);
     const W = (SIZES.find(([zz]) => z >= zz) || SIZES[SIZES.length - 1])[1];
     const H = Math.round((W * 9) / 16) + CAP;
-    const box = { w: o.map.getContainer().clientWidth, h: o.map.getContainer().clientHeight };
+    if (!o.box || !o.box.w) o.box = { w: o.map.getContainer().clientWidth, h: o.map.getContainer().clientHeight };
+    const box = o.box;
     const placed = [];
     const used = new Set();
     const labels = [];
@@ -155,7 +160,8 @@ window.CamOverlay = (() => {
       placed.push({ x: p.x - 12, y: p.y - 12, w: 24, h: 24 });
       const lbl = m.el.querySelector(".co-ring-lbl");        // two pinned cameras close together: their labels stack
       if (lbl) {
-        const w = lbl.offsetWidth || 90, h = lbl.offsetHeight || 16;
+        if (!m.lsz || !m.lsz[0]) m.lsz = [lbl.offsetWidth, lbl.offsetHeight];
+        const w = m.lsz[0] || 90, h = m.lsz[1] || 16;
         let k = 0, r;
         do { r = { x: p.x + 16, y: p.y - h / 2 + k * (h + 2), w, h }; k++; } while (k < 6 && labels.some((q) => overlaps(r, q)));
         labels.push(r);
