@@ -95,7 +95,8 @@ hub_url = "{{HUB_URL}}"
 model = "large-v3-turbo-q5_0"
 # the worker starts whisper-server itself, restarts it when it exits, and knows its pid (its GPU use isn't a game)
 whisper_server = ['whisper\Release\whisper-server.exe', '-m', 'models\ggml-large-v3-turbo-q5_0.bin',
-                  '--host', '127.0.0.1', '--port', '8179', '-t', '4']
+                  '--host', '127.0.0.1', '--port', '8179', '-t', '4',
+                  '-l', 'en', '-sns', '-et', '2.4', '-lpt', '-1.0', '-nth', '0.6']
 '@
 $TomlLlm = @'
 # the local LLM (README "The local LLM"): Qwen3-8B, the default
@@ -113,7 +114,7 @@ $TokenShape = '^sw1\.[a-z0-9][a-z0-9_-]{0,39}\.[A-Za-z0-9_-]+$'
 $CfIdShape = '^[A-Za-z0-9._-]{8,}$'
 $CfSecretShape = '^[A-Za-z0-9._~+/=-]{16,}$'
 $HubShape = '^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$'
-$WhisperArgs = '-m models\ggml-large-v3-turbo-q5_0.bin --host 127.0.0.1 --port 8179 -t 4'
+$WhisperArgs = '-m models\ggml-large-v3-turbo-q5_0.bin --host 127.0.0.1 --port 8179 -t 4 -l en -sns -et 2.4 -lpt -1.0 -nth 0.6'
 $LlamaArgs = '-m models\Qwen3-8B-Q4_K_M.gguf --host 127.0.0.1 --port 8180 -c 4096 -ngl 99 -np 1 --jinja --no-webui --no-slots --reasoning off'
 
 $Pins = $PinsJson | ConvertFrom-Json

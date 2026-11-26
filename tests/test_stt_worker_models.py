@@ -121,6 +121,11 @@ def test_every_catalog_model_is_told_english(tmp_path):
                    llama_bin="llama-server")
     m = W.Models(cfg, popen=None, clock=lambda: 0.0, run=lambda argv: "")
     assert W.STT_LANGUAGE == "en"
+    # today's whisper_server: the same setting (whisper_command, Whisper.call)
+    assert W.whisper_command(["w", "-m", "m.bin"])[-2:] == W.language_setting("whisper-ggml")["argv"] == ["-l", "en"]
+    today = W.Whisper("http://127.0.0.1:8179/inference").call(tone_wav(0.2))
+    assert b'name="language"\r\n\r\nen\r\n' in today.body
+    today.conn.close()
     for mid, e in cat.items():
         assert "en" in e["langs"], mid
         argv = m.argv(e, 18181)
@@ -129,6 +134,8 @@ def test_every_catalog_model_is_told_english(tmp_path):
         if e["kind"] == "whisper-ggml":
             assert argv[argv.index("-l") + 1] == "en", mid
             assert b'name="language"\r\n\r\nen\r\n' in call.body, mid
+            for k, v in W.WHISPER_FIELDS:                # (today's decode fields too: one Whisper.call for both)
+                assert f'name="{k}"\r\n\r\n{v}\r\n'.encode() in call.body, (mid, k)
         else:
             assert e["kind"] == "llama-asr" and "-l" not in argv
             body = json.loads(call.body)
