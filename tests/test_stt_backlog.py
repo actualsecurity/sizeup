@@ -116,6 +116,8 @@ def test_the_greedy_pass_asks_whisper_server_for_no_temperature_fallback(monkeyp
     c.transcribe(np.zeros(1600, np.float32))
     c.transcribe(np.zeros(1600, np.float32), fast=True)
     assert b'name="temperature_inc"' not in sent[0] and b'name="temperature_inc"\r\n\r\n0.0' in sent[1]
+    # English only, on every request (no language detection: a short noisy clip once came out Icelandic on the GPU)
+    assert all(b'name="language"\r\n\r\nen\r\n' in body for body in sent)
 
 
 # -- the classes, from the channel -----------------------------------------------------------------------------
