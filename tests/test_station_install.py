@@ -289,6 +289,7 @@ def test_start_whisper_runs_what_sizeup_would_have(tmp_path):
     c = load(conf)
     want = WhisperService(c.stt_server, c.stt_model, c.stt_port, c.stt_threads, c.stt_beam_size).argv
     assert [x for x in got if x] == [os.path.realpath(want[0]), want[1], os.path.realpath(want[2]), *want[3:]]
+    assert got[got.index("-l") + 1] == "en" and want[want.index("-l") + 1] == "en"     # English only, both ways
 
 
 def test_cli_has_the_update_commands():

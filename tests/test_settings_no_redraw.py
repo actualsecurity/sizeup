@@ -188,8 +188,11 @@ def test_a_running_call_moves_the_rev_but_not_what_settings_shows(site):
     assert set(owner) <= set(after) and owner["audio_retention"] == owner["camera_wall"] == "system" and owner["tones"] == "radios"
     assert owner["feed_types"] == "lists"                    # the feeds' codes redraw Lists only, never another section
     load = fn("sLoad")
-    assert "const same = !!S.data && S.sigSec === S.section && sig === S.sig && (live === S.sigLive || !S_LIVE.has(S.section));" in load
-    assert "if (!same || opts.must) sRender(false, !opts.fresh);" in load
+    assert "const quiet = !!S.data && S.sigSec === S.section && sig === S.sig;" in load
+    assert "const same = quiet && (live === S.sigLive || !S_LIVE.has(S.section));" in load
+    # Units, only what moves with the calls changed: its status lines in place (tests/test_console_dom.py, #887)
+    assert 'const inPlace = !same && !opts.must && quiet && S.section === "units" && sUnitsLive($("#s-units"), old);' in load
+    assert "if ((!same || opts.must) && !inPlace) sRender(false, !opts.fresh);" in load
     assert "if (same || S.deferred || S.pressDeferred) sRefresh();" in load
 
 

@@ -377,6 +377,7 @@ class Cad:
         from sizeup.intel.engine import IntelEngine
         self.intel = IntelEngine(settings=lambda: {k: self.settings.section(k) for k in ("intel", "intel_packs", "intel_rules")},
                                  store=self.store, clock=clock, log=log, tz=TZ)
+        self.intel.talkers.radios = self.radios          # who keyed up: Settings > Radios > Radio IDs' labels (#844)
         from sizeup.intel.infer import Inference           # the model behind the rules: off unless Settings turn it on
         self.intel.infer = Inference(settings=lambda: self.intel.policy.cfg, store=self.store, clock=clock, log=log, tz=TZ,
                                      worker=True)            # its calls on the "infer" thread, never the engine's
@@ -2592,7 +2593,7 @@ class Cad:
                 try:
                     got = self.detail_source(m) or {}
                 except Exception as e:              # the suggestion as it was, without them
-                    self.log(f"CAD: location detail failed for {m.get('label')!r} ({type(e).__name__}: {e})")
+                    self.log(f"CAD: location detail failed ({kind}: {type(e).__name__})")     # (never the address)
                     got = {}
                 if len(self._details) > 500:
                     self._details.clear()
@@ -3048,8 +3049,8 @@ class Cad:
             return old["id"]
         via = "60 CONTROL" if "60 CONTROL" in self.lists.received_codes else ""
         iid = self.store.create_incident(**f, received_via=via, source="60 Control page", source_ref=ref, status="queued")
-        self.log(f"CAD: from 60 Control: {self.lists.type_label(f['type'], f['subtype']) or 'type not set'} at "
-                 f"{f['address'] or '(no location)'}")
+        self.log(f"CAD: from 60 Control: event {iid} queued ({'a location' if f['address'] else 'no location'})")   # (never its
+        # type or address: logs go to CloudWatch, and an EMS type is a medical detail)
         self.comms.link_pages(iid, data.get("pages") or [])   # its page plays from the event (#64)
         self._prealert_match(self.store.incident(iid))
         return iid

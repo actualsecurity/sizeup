@@ -10,8 +10,11 @@ GET  /api/stream[?since=<id>]  SSE: the whole state, then each second only the s
                                clock); each event's id resumes a reconnect (Last-Event-ID); gzip when accepted
 GET  /api/audio/<id>.wav       a page or transmission clip
 POST /api/incident/<id>/close  close an incident by hand
-POST /api/talkgroup {"source": "p25:<system>:<tg>" | "tg": 307 (the county's), "record": bool?, "main": bool?, "tier": str?}
-     per-talkgroup switches (state "talkgroups"; tier: #409); a bare number another system lists is refused
+POST /api/talkgroup {"source": "p25:<system>:<tg>" | "tg": 307 (the county's), "record": bool?, "main": bool?, "tier": str?,
+                     "transcribe": bool?, "alerts": bool?}
+     per-talkgroup switches (state "talkgroups"; tier: #409); a bare number another system lists is refused.
+     Another system's transcribe / alerts are written as its tier (sizeup/tiers.py from_switches); the county's are refused,
+     and so is a tier with them (400: one or the other)
 POST /api/talkgroup-group {"group": "County Police", "record": bool?, "main": bool?}  a whole section (the county's)
 POST /api/mode {"mode": ...}  one shared dongle: hand it to a channel or trunk-recorder (state "sdr")
 POST /api/adsb-receiver {"sdr": serial | "", "confirm": true}  admins: name (or unname) the station's ADS-B dongle
@@ -1124,6 +1127,13 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
                     body = json.loads(self.rfile.read(min(n, 1024)) or b"{}")
+                    # the switches beside the tier (only when sent: a setter from before them takes five arguments)
+                    sw = {k: body[k] for k in ("transcribe", "alerts") if body.get(k) is not None}
+                    if any(not isinstance(v, bool) for v in sw.values()):
+                        raise ValueError("transcribe / alerts: true or false")
+                    if sw and body.get("tier") is not None:     # never the tier silently over the switches
+                        from sizeup import tiers as _tiers
+                        raise ValueError(_tiers.BOTH)
                     if body.get("tier") is not None or body.get("system") or body.get("source"):
                         # another P25 system's talkgroup (#409): {"source": "p25:<system>:<tg>"} or {"tg", "system"}
                         from sizeup import sourcekeys as _sources
@@ -1135,9 +1145,10 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                         # (the county's too: its system says it is the county's even where the number is also
                         # another system's; the hub sends it bare to a station from before #409)
                         err = set_talkgroup(got[1], body.get("record"), body.get("main"),
-                                            None if tier is None else str(tier), got[0])
+                                            None if tier is None else str(tier), got[0], **sw)
                     else:
-                        err = set_talkgroup(int(body["tg"]), body.get("record"), body.get("main"))
+                        err = set_talkgroup(int(body["tg"]), body.get("record"), body.get("main"),
+                                            **(dict(tier=None, system="", **sw) if sw else {}))
                 except (ValueError, KeyError, TypeError) as e:
                     err = f"bad request: {e}"
                 if err:

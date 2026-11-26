@@ -759,7 +759,8 @@ def _prealert_at(o) -> str:
 
 
 def _toggles(b) -> str:
-    return ", ".join(f"{k} {'on' if b[k] else 'off'}" for k in ("record", "main") if b.get(k) is not None)
+    return ", ".join([f"{k} {'on' if b[k] else 'off'}" for k in ("record", "main", "transcribe", "alerts")
+                      if b.get(k) is not None] + ([f"tier {_clip(b['tier'], 12)}"] if b.get("tier") else []))
 
 
 DOES = (
@@ -830,7 +831,7 @@ DOES = (
     (re.compile(r"/api/cad/stt-workers"), lambda m, b, o, c: (
         f"STT workers: {_clip(str(b.get('action') or ''), 20)}"
         + (f" {_clip(b.get('id'), 40)}" if b.get("id") else ""), "")),
-    (re.compile(r"/api/talkgroup"), lambda m, b, o, c: (f"Talkgroup {b.get('tg')}: {_toggles(b) or 'no change'}", "")),
+    (re.compile(r"/api/talkgroup"), lambda m, b, o, c: (f"Talkgroup {_clip(b.get('source') or b.get('tg'), 40)}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/talkgroup-group"), lambda m, b, o, c: (f"Talkgroups {_clip(b.get('group'), 40)}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/mode"), lambda m, b, o, c: (f"Radio mode: {_clip(b.get('mode'), 30)}" + (f" ({_clip(b['sdr'], 30)})" if b.get("sdr") else ""), "")),
     (re.compile(r"/api/reception"), lambda m, b, o, c: (
@@ -925,8 +926,10 @@ class CadApi:
         if who is None or not who.email:
             return
         said = summarize(path, body or {}, out, self.cad)
-        if said is not None:
-            self.cad.activity.record(who.email, "action", f"POST {path}", said[0], said[1], True, *client)
+        if said is not None:                     # the summary (a note's words, a nature, a disposition, a name) stays in
+            self.cad.activity.record(who.email, "action", f"POST {path}", said[0], said[1], True, *client,  # this table:
+                                     logged="action")                                      # the server log, the route
+
 
     def refused(self, path: str, who, why: str, client: tuple[str, str] = NO_CLIENT) -> None:
         m = INCIDENT.fullmatch(path)
