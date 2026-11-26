@@ -612,7 +612,14 @@ def test_a_rollback_while_gaming_only_stops_the_servers(tmp_path, hub, whisper, 
     wv, wprocs = worker(tmp_path / "w", hub, whisper, pins, llm_server=[], llm_url="")
     wv.whisper.alive = lambda: (wv.control.set(gaming=True), False)[1]
     assert not wv.runtimes_step()
-    assert len(wprocs) == 1 and "b6000" in wprocs[0].argv[0] and not wv.proc.running()
+    # whisper-server, as always, keeps running through gaming (until gaming_stop_whisper_min): the build before
+    assert len(wprocs) == 2 and "b6000" in wprocs[0].argv[0] and wprocs[0].returncode is not None
+    assert wprocs[1].argv[0].endswith("whisper/Release/whisper-server.exe") and wv.proc.running()
+    wl, lprocs = worker(tmp_path / "wl", hub, whisper, pins, llm_server=[], llm_url="")
+    wl._gaming_since = wl.clock() - wl.cfg.gaming_stop_whisper_min * 60 - 1   # gaming long already: it stays off
+    wl.whisper.alive = lambda: (wl.control.set(gaming=True), False)[1]
+    assert not wl.runtimes_step()
+    assert len(lprocs) == 1 and not wl.proc.running()
 
 
 def test_the_llama_probe_runs_its_test_model_on_its_own_port_and_stops(tmp_path, hub, whisper, pins, monkeypatch):
@@ -642,9 +649,10 @@ def test_the_llama_probe_runs_its_test_model_on_its_own_port_and_stops(tmp_path,
 def catalog_worker(tmp_path, hub, whisper, pins, monkeypatch, **kw):
     from tests.test_stt_worker_models import two_models
     cat = tmp_path / "models.json"
+    tmp_path.mkdir(parents=True, exist_ok=True)
     cat.write_text(json.dumps(two_models()))
-    w, procs = worker(tmp_path, hub, whisper, pins, catalog_file=str(cat), models_dir=str(tmp_path / "models"),
-                      vram_budget_mb=20000, **kw)
+    kw = {"vram_budget_mb": 20000, **kw}
+    w, procs = worker(tmp_path, hub, whisper, pins, catalog_file=str(cat), models_dir=str(tmp_path / "models"), **kw)
     m = w.stt_models
     for e in m.catalog.values():
         for f in e["files"].values():
@@ -690,7 +698,8 @@ def test_a_catalog_model_failing_on_the_new_build_rolls_the_build_back_never_its
     w.runtimes_step()
     assert w.runtimes.active("whisper") == "" and not w.runtimes.on_probation("whisper")
     doc = json.loads((Path(w.cfg.state_dir) / "runtimes.json").read_text())
-    assert doc["whisper"]["fails"]["b6000"] == 1 and not m.bad(e["sha256"])   # (its pass in between reset it)
+    assert doc["whisper"]["fails"]["b6000"] == 1 and not m.bad(e["sha256"])   # (a test failure, then a pass: 0;
+                                                                           # then its probation failure: 1)
     m.failed_load(s, exited=False)                                         # off probation: the model's own failure
     assert m._fails == {e["sha256"]: 1}
 
@@ -794,3 +803,110 @@ def test_a_failing_rollback_restart_releases_the_lock(tmp_path, hub, whisper, pi
     assert not w.runtimes_step()
     assert w.runtimes.active("llama") == "" and w.switching == "" and w._switch_mx.acquire(blocking=False)
     w._switch_mx.release()
+
+
+def three_whisper_models():
+    from tests.test_stt_worker_models import entry, two_models, HF
+    cat = two_models()
+    cat["stt_models"]["atc-two"] = entry(files={"model": {"file": "ggml-atc2.bin", "url": f"{HF}/ggml-atc2.bin",
+                                                          "bytes": 4, "sha256": sha(b"atc2")}}, vram_mb=2300)
+    return cat
+
+
+def wide_worker(tmp_path, hub, whisper, pins, monkeypatch, **kw):
+    w, procs = catalog_worker(tmp_path, hub, whisper, pins, monkeypatch, **kw)
+    m = w.stt_models
+    cat = tmp_path / "models.json"
+    cat.write_text(json.dumps(three_whisper_models()))
+    m._load_local(str(cat))
+    f = m.catalog["atc-two"]["files"]["model"]
+    m.path_of(f).write_bytes(b"atc2")
+    m.want = ["atc-test", "atc-two"]
+    return w, procs
+
+
+def test_every_wanted_model_of_its_kind_is_probed(tmp_path, hub, whisper, pins, monkeypatch):
+    w, procs = wide_worker(tmp_path, hub, whisper, pins, monkeypatch, llm_server=[], llm_url="")
+    tested = []
+
+    def test(self):
+        tested.append(self.id)
+        if self.id == "atc-two":
+            raise W.WhisperError("whisper-server said 500")
+    monkeypatch.setattr(W.ModelServer, "alive", lambda self: self.proc is not None and self.proc.running())
+    monkeypatch.setattr(W.ModelServer, "test", test)
+    assert not w.runtimes_step()
+    assert "atc-test" in tested and "atc-two" in tested                    # not the first one only
+    assert w.runtimes.status["whisper"].startswith("rolled back: atc-two")
+
+
+def test_a_probe_out_of_vram_or_without_room_leaves_the_build_untested_never_a_loop(tmp_path, hub, whisper, pins,
+                                                                                    monkeypatch):
+    """Out of VRAM isn't the build's fault: never a rollback (and so never a switch every 30 min). A model that
+    doesn't fit beside what is loaded isn't probed at all (the LLM is never stopped for it): its probation covers it."""
+    w, procs = catalog_worker(tmp_path, hub, whisper, pins, monkeypatch, llm_server=[], llm_url="")
+
+    def oom(argv, **kw):
+        p = FakeProc(argv)
+        if "-m" in argv and "ggml-atc.bin" in argv[argv.index("-m") + 1]:
+            p.returncode = 1                                               # the probe's server: out of VRAM
+            Path(w.cfg.state_dir, "model-atc-test.log").write_text("cudaMalloc failed: out of memory\n")
+        procs.append(p)
+        return p
+    w.stt_models.popen = oom
+    assert w.runtimes_step()                                               # kept: untested, on probation
+    assert w.runtimes.active("whisper") == "b6000" and w.runtimes.on_probation("whisper")
+    w2, procs2 = catalog_worker(tmp_path / "small", hub, whisper, pins, monkeypatch, llm_server=[], llm_url="",
+                                vram_budget_mb=2000)                       # 1000 (primary) + 2300 > 2000
+    assert w2.runtimes_step() and w2.runtimes.active("whisper") == "b6000"
+    assert not [p for p in procs2 if "ggml-atc.bin" in " ".join(p.argv)]   # never started
+
+
+def test_probation_failures_add_up_across_passing_tests(tmp_path, hub, whisper, pins, monkeypatch):
+    """A model that fails only after the switch (probation): each revert counts, a passing test between them doesn't
+    reset it: 30, then 60 min, then bad. No endless switch, revert, switch."""
+    w, procs = catalog_worker(tmp_path, hub, whisper, pins, monkeypatch, llm_server=[], llm_url="")
+    monkeypatch.setattr(W.ModelServer, "alive", lambda self: self.proc is not None and self.proc.running())
+    monkeypatch.setattr(W.ModelServer, "test", lambda self: None)
+    m = w.stt_models
+    e = m.catalog["atc-test"]
+    s = W.ModelServer(e, m.paths(e), 18399, None, 5)
+    now = [2_000_000.0]
+    w.runtimes.wall = lambda: now[0]
+    notes = []
+    for n in range(1, W.RUNTIME_BAD_TRIES + 1):
+        assert w.runtimes_step(), n                                        # its test passes ...
+        m.failed_load(s, exited=False)                                     # ... then a model of its kind fails
+        w.runtimes_step()
+        notes.append(w.runtimes.status["whisper"])
+        now[0] += 7 * 3600
+    assert notes[0].endswith("(again in 30 min)") and notes[1].endswith("(again in 60 min)")
+    assert notes[2].startswith("bad: ") and w.runtimes.bad("whisper", "b6000")
+    assert not m.bad(e["sha256"]) and not m._fails
+
+
+def test_a_probation_passed_whole_forgets_its_failures(tmp_path, pins):
+    cfg = rt_cfg(tmp_path, llm_server=[], llm_url="")
+    clock = [100.0]
+    r = W.Runtimes(cfg, run=version_of, download=fake_download(pins), windows=True, clock=lambda: clock[0])
+    r.disk = lambda p: Disk(10 ** 13, 0, 10 ** 13)
+    r.step(stop=lambda: False)
+    r.begin("whisper")
+    r.finish("whisper", "")
+    r.revert("whisper", "a model failed")
+    r._change("whisper", lambda x: x.pop("next", None))
+    r.begin("whisper")
+    r.finish("whisper", "")
+    assert r._rec("whisper")["fails"] == {"b6000": 1}                     # kept through the passing test
+    clock[0] += W.RUNTIME_PROBATION_S + 1
+    r.step(stop=lambda: False)
+    rec = r._rec("whisper")
+    assert rec["fails"] == {} and rec["probation_failed"] == []
+
+
+def test_the_llm_test_checks_its_own_process_on_its_port(tmp_path, hub, whisper, pins, monkeypatch):
+    w, procs = worker(tmp_path, hub, whisper, pins, whisper_server=[])
+    w.proc = None
+    monkeypatch.setattr(W, "port_owner", lambda port, run=None: 31337 if port == w.llm.port else 0)
+    assert not w.runtimes_step()
+    assert w.runtimes.status["llama"].startswith("rolled back: another program answers on llama")

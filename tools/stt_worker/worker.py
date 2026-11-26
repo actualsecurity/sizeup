@@ -3405,6 +3405,14 @@ class Models:
     def _exit_cause(self, s: ModelServer) -> str:
         return log_cause(getattr(s.proc, "log_path", None), s.log_from)
 
+    def probe_fits(self, e: dict, gpu: dict | None, llm_running: bool) -> bool:
+        """A runtime test's probe of this model fits the VRAM left beside the primary, the LLM while it runs and the
+        catalog servers still loaded (the budget: total_mb). No GPU reading: no (no catalog model runs then)."""
+        total = self.total_mb(gpu)
+        used = self.primary_mb() + (self.llm_mb() if llm_running else 0.0) + \
+            sum(s.vram_mb for s in list(self.servers.values()))
+        return total > 0 and used + e["vram_mb"] <= total
+
     def probe(self, e: dict, until: float, stop: Callable[[], bool], wait: Callable[[float], object]) -> tuple:
         """A runtime switch's test of one catalog model: its server started from the active build outside the plan
         (none of its kind runs during the switch), its test decode, then stopped. ("" passed, else why; excused: out
@@ -3905,6 +3913,16 @@ class Runtimes:
             want = pin["build"]
             if self.built[rt] == want:
                 self.status[rt] = "ok"
+                if rt in self.probation and self.clock() >= self.probation[rt]:
+                    self.probation.pop(rt, None)   # (a probation passed whole: its probation failures forgotten)
+
+                    def passed(r, b=want):
+                        pf = r.get("probation_failed") if isinstance(r.get("probation_failed"), list) else []
+                        if b in pf:
+                            r["probation_failed"] = [x for x in pf if x != b]
+                            if isinstance(r.get("fails"), dict):
+                                r["fails"].pop(b, None)
+                    self._change(rt, passed)
                 continue
             bad = self.bad(rt, want)
             if bad:
@@ -4100,7 +4118,9 @@ class Runtimes:
                 r.pop("interrupted", None)
                 r.pop("next", None)
                 fails = r.get("fails") if isinstance(r.get("fails"), dict) else {}
-                fails.pop(to, None)
+                pf = r.get("probation_failed") if isinstance(r.get("probation_failed"), list) else []
+                if to not in pf:                   # (failed in a probation before: its count stands until one
+                    fails.pop(to, None)            # passes whole, Runtimes.step; its backoff grows, bad at the 3rd)
                 r["fails"] = fails
                 return
             r["active"] = frm
@@ -4153,7 +4173,12 @@ class Runtimes:
         if not to:
             return False
         frm = str(self._rec(rt).get("prev") or "")
-        self._change(rt, lambda r: r.update(pending={"to": to, "from": frm, "at": self.wall()}), strict=True)
+
+        def f(r):
+            r["pending"] = {"to": to, "from": frm, "at": self.wall()}
+            pf = r.get("probation_failed") if isinstance(r.get("probation_failed"), list) else []
+            r["probation_failed"] = (pf + [to])[-5:] if to not in pf else pf
+        self._change(rt, f, strict=True)
         self.probation.pop(rt, None)
         self.finish(rt, why, counted=True)
         return True
@@ -4966,8 +4991,16 @@ class Worker:
         """After a rollback (the build before active again): its servers restarted from it and checked, or, while
         gaming or paused, only stopped (the monitors start them once the PC is free). Inside idle_switch."""
         try:
-            started = self._restart_runtime(rt, start=self.held() is None)
-            again = self._test_primary(rt, started, [False], self.clock() + RUNTIME_TEST_S) if started else ""
+            held = self.held() is not None
+            # whisper-server keeps running through gaming until gaming_stop_whisper_min, as it always did; the rest
+            # (llama-server, the catalog models' servers) waits for the PC to be free
+            long = self._gaming_since is not None and self.cfg.gaming_stop_whisper_min > 0 and \
+                self.clock() - self._gaming_since >= self.cfg.gaming_stop_whisper_min * 60
+            paused = held and (self.held() or ("", ""))[0] == "paused"
+            start = not held or (rt == "whisper" and not long and not paused)
+            started = self._restart_runtime(rt, start=start)
+            again = self._test_primary(rt, started, [False], self.clock() + RUNTIME_TEST_S) \
+                if started and not held else ""
         except Exception as e:  # noqa: BLE001 - the switch's lock is released whatever happens
             log.exception("runtimes: %s: restarting the build before", rt)
             again = f"error: {type(e).__name__}"
@@ -5031,7 +5064,8 @@ class Worker:
           (_llama_probe: whatever the LLM and the speech models do); worker.toml's LLM, when it was started, answers
           its 1-token constrained answer (_test_primary);
         - whisper.cpp: worker.toml's whisper_server, started from it, decodes a second of silence (_test_primary);
-        - then one wanted catalog model of its kind, files ready, decodes a second of silence (Models.probe)."""
+        - then every wanted catalog model of its kind (files ready, room beside what is loaded) decodes a second of
+          silence (_probe_catalog); one that can't be tested now (no room, out of VRAM) is left to the probation."""
         build = self.runtimes.active(rt)
         if rt == "llama":
             n = self.runtimes.version(rt)
@@ -5075,8 +5109,8 @@ class Worker:
         if not started:
             return ""
         if rt == "llama":
-            why = self._wait_server(lambda: self.llm.status() == 200, self.llm_proc, "llama-server", end, held) \
-                or self.llm_answer()
+            why = self._wait_server(lambda: self.llm.status() == 200, self.llm_proc, "llama-server", end, held,
+                                    self.llm.port) or self.llm_answer()
             self._llm_checked = -1e9               # (the LLM's own check next: jobs again)
             return why
         why = self._wait_server(self.whisper.alive, self.proc, "whisper-server", end, held, self.whisper.port)
@@ -5123,15 +5157,31 @@ class Worker:
             proc.stop()
 
     def _probe_catalog(self, rt: str, end: float) -> tuple:
-        """One wanted catalog model of this runtime's kinds (not worker.toml's own, not marked bad, able to run on the
-        new build, its files ready): Models.probe. ("", False) when there is none."""
+        """Every wanted catalog model of this runtime's kinds (not worker.toml's own, not marked bad, able to run on the
+        new build, its files ready), one at a time: Models.probe, each within RUNTIME_TEST_S. Only one that fits the
+        VRAM left beside what is loaded (the LLM is never stopped for a probe); one that doesn't fit, or whose probe
+        failed through no fault of the build (out of VRAM, a taken port), stays untested: the build's probation
+        covers it (a failure to load later rolls the build back). Gaming or paused: (why, True). ("", False) when
+        every model that could be tested passed."""
         m = self.stt_models
+        llm_running = self.llm_proc is not None and self.llm_proc.running()
         for mid in list(m.want):
             e = m.effective(mid)
             if e is None or e["kind"] not in RUNTIMES[rt]["kinds"] or mid == self.cfg.model or m.bad(e["sha256"]) \
                     or m.blocked(e) or not m.ready_files(e):
                 continue
-            return m.probe(e, end, stop=lambda: self.stopped or self.held() is not None, wait=self._stop.wait)
+            if not m.probe_fits(e, self.gpu.info, llm_running):
+                log.info("runtimes: %s: %s untested (no room beside what is loaded): its probation covers it", rt, mid)
+                continue
+            why, excused = m.probe(e, max(end, self.clock() + RUNTIME_TEST_S),
+                                   stop=lambda: self.stopped or self.held() is not None, wait=self._stop.wait)
+            if why and self.held() is not None:
+                return why, True
+            if why and excused:
+                log.info("runtimes: %s: %s untested (%s): its probation covers it", rt, mid, why)
+                continue
+            if why:
+                return why, False
         return "", False
 
     # -- the jobs loop
