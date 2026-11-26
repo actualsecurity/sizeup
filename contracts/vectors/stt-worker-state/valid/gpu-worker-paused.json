@@ -10,6 +10,6 @@
     "state": "starting",
     "bad": []
   },
-  "caps": ["challenger"],
+  "caps": ["challenger", "challenger_same_model"],
   "reason": "whisper-server: checking"
 }

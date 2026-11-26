@@ -400,6 +400,9 @@ def test_yield_with_the_4b_keeps_the_llms_room_and_with_the_8b_it_gives_way(tmp_
     m.hub_llm = Q4B
     assert m.make_plan(GPU_12GB) == [ASR, ATC] and not m.llm_room_ok      # its file not downloaded yet: worker.toml's 8B
     m._llm_ready[m.llm_catalog[Q4B]["sha256"]] = True
+    assert m.llm_mb() > 6000                                               # (L2) worker.toml's 8B holds its VRAM
+    assert m.make_plan(GPU_12GB) == [ASR, ATC] and not m.llm_room_ok      # until the switch has happened
+    m.llm_use = m.llm_catalog[Q4B]                                         # (the Worker switched llama-server)
     assert m.llm_mb() == 3522
     assert m.make_plan(GPU_12GB) == [ASR, ATC] and m.llm_room_ok
     step_ = dict(idle=lambda: True, held=False, gpu=GPU_12GB, llm_running=True, stop=lambda: False)
@@ -474,3 +477,44 @@ def test_the_llms_model_switch_takes_the_one_idle_switch_lock(tmp_path, monkeypa
     r.tick(2)
     assert seen and seen[0] == ("the LLM's model", "") and model_of(r.procs[-1].argv).endswith("small.gguf")
     assert w.llm_switching == "" and w._switch_mx.acquire(blocking=False)
+
+
+def test_a_failed_switch_falls_back_to_the_last_good_named_llm_not_worker_tomls(tmp_path, monkeypatch):
+    """The 4B answered here once; then the hub names another that never answers: the 4B runs again (kept in state:
+    a restart too), never worker.toml's 8B quietly back with its VRAM. worker.toml's only when none ever answered."""
+    r = Rig(tmp_path, monkeypatch)
+    w, m = r.w, r.m
+    w.verify_llm()
+    r.name("small-llm")
+    r.models_step()
+    r.tick(2)
+    r.code[0] = 200
+    r.tick(2)
+    assert w.llm_ok and w.models()["llm"] == "small-llm"
+    assert m.llm_good["id"] == "small-llm" and W.Models(w.cfg).llm_good["id"] == "small-llm"   # (kept)
+    cat = json.loads((tmp_path / "models.json").read_text())
+    big = b"big-gguf"
+    cat["llm_models"]["big-llm"] = {"files": {"model": {"file": "big.gguf", "url": f"{HF}/big.gguf", "bytes": len(big),
+                                                        "sha256": sha(big)}}, "vram_mb": 5000, "reasoning_off": False}
+    (tmp_path / "models.json").write_text(json.dumps(cat))
+    m._load_local(str(tmp_path / "models.json"))
+    data = {f"{HF}/big.gguf": big, f"{HF}/small.gguf": b"small-gguf"}
+
+    def download(url, dest, size, sha_, stop):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data[url])
+    m.download = download
+    r.name("big-llm")
+    r.models_step()
+    r.code[0] = 0
+    r.tick(2)
+    assert model_of(r.procs[-1].argv).endswith("big.gguf")
+    assert w.llm_proc.argv and m.llm_mb() == 5000                          # (the big one holds its share now)
+    r.clock[0] += W.MODEL_CHECK_S
+    r.tick()                                                               # it never answered: back ...
+    r.tick(2)
+    assert model_of(r.procs[-1].argv).endswith("small.gguf")              # ... to the last good one, not toml.gguf
+    assert all(model_of(p.argv) != str(r.toml_gguf) for p in r.procs[1:])
+    assert w.models()["llm_state"].startswith("failed: llama-server didn't answer")
+    m.llm_good = {}                                                        # none ever answered: worker.toml's
+    assert m.llm_fallback() is None

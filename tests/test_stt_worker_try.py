@@ -14,7 +14,7 @@ import time
 import pytest
 
 from tests.stt_worker_module import W
-from tests.test_stt_worker import (API, FakeHub, make_cfg, no_smi, running, tone_wav, wait_for,  # noqa: F401
+from tests.test_stt_worker import (API, FakeHub, FakeWhisper, make_cfg, no_smi, running, tone_wav, wait_for,  # noqa: F401
                                    hub, no_secrets_in_logs, whisper)
 from tests.test_stt_worker_models import _claim_extra, entry, ready_models, sha, two_models, HF
 
@@ -79,6 +79,36 @@ def test_a_try_model_loads_only_after_the_plan_and_beside_the_llm(tmp_path, monk
     assert "try-test" in m.report()["stt_loaded"]
     m.make_plan(None)
     assert m.llm_room_ok                                            # never flipped by the try model
+
+
+def test_a_live_served_try_id_loads_a_separate_instance_into_spare_room_only(tmp_path, monkeypatch):
+    """A try id the worker also serves live (here the planned atc-test, 2300) loads a separate instance of the same
+    files on its own port (atc-test@try), never its live server: into spare room only (beside the plan and the LLM,
+    never stopping either), never in the plan nor stt_loaded, its state never the live model's; unloaded like any try
+    model when unused."""
+    m, procs, clock = rig(tmp_path, monkeypatch, llm_mb=1000)        # 1000 + 6100 + 1000: 2652 left
+    m.try_ = ["atc-test"]
+    champions(m)
+    live = m.servers["atc-test"]
+    go(m)
+    slot = "atc-test" + W.TRY_SLOT
+    assert m.trial == slot and m.servers["atc-test"] is live and not live.trial
+    t = m.servers[slot]
+    assert t.trial and t.id == "atc-test" and t.port != live.port and not m.status["atc-test"].startswith("try:")
+    assert procs[-1][0][procs[-1][0].index("-m") + 1].endswith("ggml-atc.bin")        # the same files
+    answer(m, slot)
+    go(m)
+    assert m.try_ready() == ["atc-test"] and m.ready() == ["asr-test", "atc-test"]   # (the live one, once)
+    assert m.report()["stt_try"] == ["atc-test"] and m.plan == ["asr-test", "atc-test"] and m.llm_room_ok
+    clock[0] += W.TRY_IDLE_S + 1
+    go(m)
+    assert slot not in m.servers and m.servers["atc-test"] is live and not m.status["atc-test"].startswith("try:")
+    (tmp_path / "tight").mkdir()
+    m2, procs2, _ = rig(tmp_path / "tight", monkeypatch, llm_mb=2500)    # 1000 + 6100 + 2500: 1152 left (2300 no)
+    m2.try_ = ["atc-test"]
+    champions(m2)
+    go(m2, llm_running=True)
+    assert not m2.trial and not m2.status["atc-test"].startswith("try:")   # no room: the live state untouched
 
 
 def test_no_room_beside_the_llm_no_try_model(tmp_path, monkeypatch):
@@ -192,9 +222,10 @@ def test_a_try_id_the_hub_now_wants_is_a_planned_model(tmp_path, monkeypatch):
     answer(m, "try-test")
     s = m.servers["try-test"]
     m.offer({"stt_models": {"want": ["asr-test", "atc-test", "try-test"], "try": ["try-test"]}})
-    assert m.try_ == []                                             # (want wins)
+    assert m.try_ == ["try-test"]                                   # (kept: a separate instance later, when it fits)
     go(m)
-    assert m.servers["try-test"] is s and not s.trial and not m.trial and "try-test" in m.plan
+    assert m.servers["try-test"] is s and not s.trial and m.trial in ("", "try-test" + W.TRY_SLOT)
+    assert "try-test" in m.plan
     assert m.status["try-test"] == "ready"
 
 
@@ -266,25 +297,81 @@ def worker(tmp_path, hub, whisper, **kw):
     return W.Worker(make_cfg(tmp_path, hub, whisper, **kw), run=no_smi)
 
 
+def live_try(w, whisper, mid="atc-test"):
+    """A try model's server (made up) on the fake whisper-server's port: what a challenger runs on."""
+    e = W.check_catalog(two_models())[mid]
+    port = int(whisper.url.split(":")[2].split("/")[0])
+    s = W.ModelServer(e, {}, port, proc=None, timeout_s=10)
+    s.ok, s.trial = True, True
+    w.stt_models.servers[mid] = s
+    return s
+
+
 def released(hub) -> list:
     return [r[3]["why"] for r in hub.calls("/release")]
 
 
-def test_a_challenger_decodes_greedily_on_the_primary_and_watches(tmp_path, whub, whisper):
+def test_a_challenger_decodes_greedily_on_its_try_model_and_watches(tmp_path, whub, whisper):
     w = worker(tmp_path, whub, whisper)
-    challenger(whub, model=w.cfg.model)
+    live_try(w, whisper)
+    challenger(whub, model="atc-test")
     with running(w):
         wait_for(lambda: whub.accepted(), what="the result")
     (req,) = whisper.jobs()
     assert req["fields"]["temperature_inc"] == b"0.0" and req["fields"]["temperature"] == b"0.0"
-    assert whub.accepted()[0]["model"] == w.cfg.model
+    assert whub.accepted()[0]["model"] == "atc-test"
+
+
+def test_a_challenger_never_runs_on_a_live_server(tmp_path, whub, whisper):
+    """Whatever the hub says (L1): never on a server that serves live traffic, worker.toml's whisper_server or a
+    planned model's, since whisper-server can't cut a decode short. A model served live here runs a challenger only on
+    its separate try instance: none loaded, "model not loaded". No model named: "model serves live traffic"."""
+    w = worker(tmp_path, whub, whisper)
+    w.stt_models.want = ["atc-test"]
+    w.stt_models.offer = w.stt_models.forget_offer = lambda ans: None   # (this fake hub names no models)
+    live = live_try(w, whisper)
+    live.trial = False                                                   # atc-test's live (planned) server
+    challenger(whub, clip="CH-1", model=w.cfg.model)
+    challenger(whub, clip="CH-2", model="atc-test")
+    challenger(whub, clip="CH-3")
+    with running(w):
+        wait_for(lambda: len(whub.calls("/release")) == 3, what="three handed back")
+    assert released(whub) == ["model not loaded", "model not loaded", "model serves live traffic"]
+    assert whisper.jobs() == [] and not whub.calls("/audio") and live.inuse == 0
+
+
+def test_a_challenger_for_the_primarys_model_runs_on_its_separate_instance(tmp_path, whub, whisper):
+    """The primary's model as a try id: a separate try instance of the same files on its own port (<id>@try); the
+    challenger decodes there, and the live clip after it on worker.toml's whisper-server, never held up by it."""
+    other = FakeWhisper()                                                # (the separate instance's server)
+    try:
+        w = worker(tmp_path, whub, whisper)
+        w.stt_models.try_ = [w.cfg.model]
+        w.stt_models.offer = w.stt_models.forget_offer = lambda ans: None
+        e = dict(W.check_catalog(two_models())["atc-test"], id=w.cfg.model)
+        s = W.ModelServer(e, {}, int(other.url.split(":")[2].split("/")[0]), proc=None, timeout_s=10)
+        s.ok, s.trial, s.slot = True, True, w.cfg.model + W.TRY_SLOT
+        w.stt_models.servers[s.slot] = s
+        assert w.stt_models.try_slot(w.cfg.model) == s.slot and w.stt_models.try_ready() == [w.cfg.model]
+        assert w.stt_models.ready() == []                                  # (a slot is never offered as a live model)
+        challenger(whub, clip="CH-1", model=w.cfg.model)
+        whub.add_job("LIVE-1", tone_wav(1.5), cls="URGENT", lease_s=4.0, fast=True)
+        with running(w):
+            wait_for(lambda: len(whub.accepted()) == 2, what="both results")
+        assert len(other.jobs()) == 1 and len(whisper.jobs()) == 1         # each on its own server
+        assert other.jobs()[0]["fields"]["temperature_inc"] == b"0.0"      # (the challenger: greedy, there)
+        claims = whub.calls("/claim")
+        assert claims and all(r[3]["try_loaded"] == [w.cfg.model] for r in claims)
+    finally:
+        other.stop()
 
 
 def test_a_challenger_gives_way_to_the_llm_and_never_preempts_it(tmp_path, whub, whisper):
     w = worker(tmp_path, whub, whisper)
     w.llm_job = {"lease": "a" * 16}                                  # an LLM job held
     w._llm_call = type("Gen", (), {"abort": lambda self: None})()  # (a generation in flight)
-    challenger(whub, model=w.cfg.model, fast=True)                  # (even if the hub said fast)
+    live_try(w, whisper)
+    challenger(whub, model="atc-test", fast=True)                  # (even if the hub said fast)
     with running(w):
         wait_for(lambda: whub.calls("/release"), what="handed back")
     assert released(whub) == ["busy: LLM"] and not w._preempt.is_set()
@@ -295,7 +382,8 @@ def test_an_llm_job_that_comes_mid_decode_takes_the_gpu_back(tmp_path, whub, whi
     whisper.delay = 2.0
     w = worker(tmp_path, whub, whisper)
     whisper.before = lambda f: setattr(w, "llm_job", {"lease": "b" * 16}) if len(f.get("file", b"")) > 40000 else None
-    challenger(whub, model=w.cfg.model)
+    live_try(w, whisper)
+    challenger(whub, model="atc-test")
     with running(w):
         wait_for(lambda: whub.calls("/release"), what="handed back")
         wait_for(lambda: whisper.aborted == 1, what="the decode aborted")
@@ -352,7 +440,8 @@ def test_preempted_by_the_hub_it_stops_at_once_and_says_nothing_more(tmp_path, w
             t["at"] = time.monotonic()
             threading.Timer(0.2, whub.preempt_all).start()
     whisper.before = before
-    challenger(whub, model=w.cfg.model)
+    live_try(w, whisper)
+    challenger(whub, model="atc-test")
     with running(w):
         wait_for(lambda: w.counts.get("preempted") == 1, what="preempted")
         gone = time.monotonic()
@@ -371,7 +460,8 @@ def test_an_older_hub_without_the_watch_extends_every_half_second(tmp_path, whub
     whub.watch = False
     whisper.delay = 1.3
     w = worker(tmp_path, whub, whisper)
-    challenger(whub, model=w.cfg.model, lease_s=30.0)
+    live_try(w, whisper)
+    challenger(whub, model="atc-test", lease_s=30.0)
     with running(w):
         wait_for(lambda: whub.accepted(), what="the result")
     assert len(whub.calls("/watch")) == 1 and len(whub.calls("/extend")) >= 2   # (a lease of 30 s: not its half)
@@ -382,7 +472,8 @@ def test_an_older_hub_that_takes_the_lease_back_preempts_it(tmp_path, whub, whis
     whisper.delay = 3.0
     w = worker(tmp_path, whub, whisper)
     whisper.before = lambda f: threading.Timer(0.3, whub.expire_all).start() if len(f.get("file", b"")) > 40000 else None
-    challenger(whub, model=w.cfg.model, lease_s=30.0)
+    live_try(w, whisper)
+    challenger(whub, model="atc-test", lease_s=30.0)
     with running(w):
         wait_for(lambda: w.counts.get("preempted") == 1, what="preempted")
         wait_for(lambda: whisper.aborted == 1, what="the decode aborted")
@@ -394,7 +485,8 @@ def test_gaming_ends_a_challenger_at_once(tmp_path, whub, whisper):
     w = worker(tmp_path, whub, whisper)
     whisper.before = (lambda f: W.Control(w.cfg.control_path).set(gaming=True)
                       if len(f.get("file", b"")) > 40000 else None)
-    challenger(whub, model=w.cfg.model, lease_s=30.0)
+    live_try(w, whisper)
+    challenger(whub, model="atc-test", lease_s=30.0)
     with running(w):
         wait_for(lambda: whub.calls("/release"), what="handed back")
         wait_for(lambda: whisper.aborted == 1, what="the decode aborted")
@@ -411,8 +503,8 @@ def test_the_worker_says_it_takes_challenger_jobs_in_hello_state_and_claim(tmp_p
         with running(w):
             wait_for(lambda: hub.calls("/claim") and hub.calls("/state"), what="a claim and a heartbeat")
         for route in ("/hello", "/state", "/claim"):
-            assert all(r[3]["caps"] == ["challenger"] for r in hub.calls(route)), route
-        assert W.CAPS == ("challenger",)
+            assert all(r[3]["caps"] == ["challenger", "challenger_same_model"] for r in hub.calls(route)), route
+        assert W.CAPS == ("challenger", "challenger_same_model")
     finally:
         hub.stop()
         whisper.stop()

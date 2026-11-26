@@ -463,10 +463,13 @@ that folder and keeps the file's mode. The state stays in `~/.local/state/sizeup
   it no LLM job then. A hub without the infer lane answers 404: the worker asks again every 10 minutes.
 - **Models the hub names:** `stt_models {catalog, want, try, llm, llm_priority}` in every hello and state answer
   ([Speech models](#speech-models), [The hub names the LLM](#the-hub-names-the-llm)). To such a hub, `models` also
-  carries `stt_loaded`, `stt_state`, `stt_catalog` and, with an LLM, `llm_state` (`ok` or why not) and `llm_id` (the
+  carries `stt_loaded`, `stt_try` (the try ids whose try server answers now), `stt_state`, `stt_catalog` and, with an LLM, `llm_state` (`ok` or why not) and `llm_id` (the
   catalog LLM in use, `""` for `worker.toml`'s).
-- **Challenger jobs** (`challenger: true`, `greedy: true`): a clip for a try model, decoded only on the model it
-  names (`model not loaded` otherwise, never the primary instead), greedily (`temperature_inc=0`). It gives way to
+- **Challenger jobs** (`challenger: true`, `greedy: true`): a clip for a try model, decoded only on that model's try
+  server (`model not loaded` otherwise), never on a server that serves live traffic (`whisper_server`, a planned
+  model's: whisper-server can't cut a decode short), and never without a model (`model serves live traffic`). The
+  claim body says which try servers answer (`try_loaded`), and `caps` is `["challenger", "challenger_same_model"]`
+  in hello, state and claim. greedily (`temperature_inc=0`). It gives way to
   the LLM (`busy: LLM`: an LLM job held or arriving) and never preempts it. While it decodes, the worker long-polls
   `POST /api/station/stt/jobs/{lease}/watch` `{"wait": 20}` on a connection of its own: `{"live": true}` after the
   wait; `{"live": false}`, 409 or 410 once the hub has taken the lease back, and the worker stops the decode at once
@@ -636,14 +639,17 @@ and SHA-256, the VRAM it holds, its services, and whether the channel's context 
 - **Gaming:** the LLM's rule, not whisper-server's longer one: after `llm_stop_gaming_s` of gaming (unset: 60 s, 20 s
   when they hold more than 6 GB together) the worker stops them all, and starts them again when gaming ends. The
   primary whisper-server keeps `gaming_stop_whisper_min` (10 minutes).
-- **Try (challenger) models:** `stt_models` `try`, ids of the catalog apart from `want`. One at a time, loaded on
+- **Try (challenger) models:** `stt_models` `try`, ids of the catalog. One the worker also serves live (its primary, or
+  one in `want`) runs as a separate try instance of the same files on its own port, never on the live server; its
+  `stt_state` stays the live model's (`stt_try` says when the instance answers). One at a time, loaded on
   demand only while the worker is idle (no clip, not gaming or paused) with every planned model settled, and only
   into what the planned models and the LLM's share leave (the LLM's share counted whenever it may run; once it has
   given way to the planned models, what they leave). A try model never counts in the plan, never takes the LLM's
   room from it, never stops a planned model. It is unloaded, while idle and never with a clip on it, when no longer
   in `try`, unused 10 minutes, or its room is needed: a planned model to start, or the LLM coming back (llama-server
   waits until it is out). Meanwhile it takes no new clip and its challenger clip ends at once. `stt_state` says
-  `try: loading`, `try: ready`, `try: no room`, `try: unloaded (idle)`; `stt_loaded` lists it only while it answers.
+  `try: loading`, `try: ready`, `try: no room`, `try: unloaded (idle)`, `try: unloaded (preempted)`; `stt_try` (and
+  `stt_loaded`, for a try model of its own) lists it only while it answers.
 - **A clip:** the hub names the model it wants for each clip. The worker decodes it there if that model answers, else
   on the primary, and says which model wrote the text. Context: the clip's `prompt` (whisper) or `context` (a short
   list: a llama-asr model's system message), unless the hub says it is off for that model (`plain`).

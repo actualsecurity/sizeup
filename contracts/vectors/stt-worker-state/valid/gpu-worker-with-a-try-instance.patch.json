@@ -1,0 +1,10 @@
+{
+  "base": "stt-worker-state/valid/gpu-worker-online.json",
+  "patch": [
+    {
+      "op": "add",
+      "path": "/models/stt_try",
+      "value": ["large-v3-turbo-q5_0"]
+    }
+  ]
+}
