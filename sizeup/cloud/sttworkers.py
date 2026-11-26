@@ -99,6 +99,8 @@ AUDIO_WAIT_MAX_S = 3.0          # a job's audio: the station's STT input waited 
                                 # (sttpool.SRC_WAIT_S, counted from when the job was queued: a pre-alert clip 0.75 s), then
                                 # the listening clip (#678: a flat 2 s was every pre-alert job's fetch while the input came
                                 # ~2 s after its event)
+AUDIO_WAIT_OLD_S = 2.0          # ... the flat wait for a station whose STT lane is not woken by the events' ack (one from
+                                # before #678: its input comes ~2 s after its event; the hub deploys before the stations)
 STATION_PREFIX = "station:"     # a station's whisper as a pool worker: "station:<station id>" (never a token's id)
 STATION_ROUTES = (API + "hello", API + "state", API + "claim")            # what a station's identity may reach here
 STATION_LEASE_ROUTES = ("audio", "extend", "complete", "release")
@@ -576,11 +578,14 @@ class WorkerApi:
 
     def __init__(self, registry: WorkerRegistry, pool: sttpool.Pool, may_write: Callable[[], bool] = lambda: True,
                  log: Callable[[str], None] = print, station: Callable[[str], str | None] | None = None,
-                 build: dict | None = None):
+                 build: dict | None = None, src_fast: Callable[[], bool] = lambda: False):
         """station(bearer) -> the station id a station's own token proves (sizeup/cloud/stations.py), None when it
         isn't one: a station's whisper is a pool worker under its station identity ("station:<id>"), no token more.
-        build: the worker version this hub carries (worker_build(), read here once when not given)."""
+        build: the worker version this hub carries (worker_build(), read here once when not given). src_fast(): the
+        station sends each STT input at once after its event (#678: its status says stt_input.wake_on_ack), so a job's
+        audio waits only its class's budget (sttpool.SRC_WAIT_S); else the old flat AUDIO_WAIT_OLD_S."""
         self.reg, self.pool, self.may_write, self.log, self.station = registry, pool, may_write, log, station
+        self.src_fast = src_fast
         self._said: dict[tuple[str, str], float] = {}
         self.build = worker_build() if build is None else build
 
@@ -723,7 +728,13 @@ class WorkerApi:
         try:
             # (waiting for the station's own STT input, #671: its class's budget from when it was queued, half of what
             # is left of the lease at most, so the clip is still transcribed in time; else the listening clip, #678)
-            wait = min(AUDIO_WAIT_MAX_S, sttpool.src_wait_s(job, self.pool.clock()))
+            now = self.pool.clock()
+            try:
+                fast = self.src_fast() is True
+            except Exception:  # noqa: BLE001 - not known: the old wait
+                fast = False
+            wait = (min(AUDIO_WAIT_MAX_S, sttpool.src_wait_s(job, now)) if fast
+                    else max(0.0, min(AUDIO_WAIT_OLD_S, (job.expires - now) / 2.0)))
             wav = job.audio(wait) if job.audio_wait else job.audio()
         except Exception as e:  # noqa: BLE001 - a store that can't be read now: the next engine takes it
             wav = None

@@ -506,6 +506,8 @@ the worker token and its Cloudflare service token, the same Access application (
   redacted on the PC, and the hub scrubs every line again before it writes it.
 - **Where:** log group `/sizeup/stt-worker`, one stream per worker id. Kept as long as the stations' logs
   (Settings > Station > Logs, 30 days by default). The hub makes the group the first time a worker sends logs.
+- **Reading:** `/sizeup/stt-worker` is an Infrequent Access log group: read it with CloudWatch Logs Insights only
+  (`aws logs start-query`, then `aws logs get-query-results`), never `aws logs tail` (not supported on that class).
 - **How:** a gzipped batch every minute, through its own thread and connection, so a clip never waits for it. A batch
   is deleted on the PC only once the hub has taken it; until then it waits in `state\logspool` (5 MB at most) and is
   sent again, after a restart too. `worker.py status` shows the last shipment; so does Health (the Logs column).

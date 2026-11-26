@@ -22,7 +22,9 @@ Station (StationLink):
                               highest first (PRE / FIRE: fresh before stale); under pressure both drop the lowest first
                               (the oldest within it): the airband never costs a fireground clip
     StationLink._stt_forward  POST /api/station/stt, gzipped, only while no event waits in the outbox and only to a
-                              hub that says it takes them ("stt_input" in its caps)
+                              hub that says it takes them ("stt_input" in its caps). FIFO (#678): an input enters the
+                              lane only after its own traffic / page event is queued (StationLink._stt_made holds one
+                              made first), and the lane is woken when the events are acked: it follows its event at once
 
 Wire (POST /api/station/stt, Content-Encoding: gzip):
     {"v": 1, "station": <id>, "items": [{"n": <outbox row>, "id": <clip id>, "kind": "traffic" | "page",

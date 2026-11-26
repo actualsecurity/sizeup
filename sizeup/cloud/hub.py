@@ -1100,7 +1100,8 @@ class HubApp(App):
             reg.stations_on(wid.removeprefix(STATION_PREFIX)) if wid.startswith(STATION_PREFIX) else reg.active(wid)))
         # a station's whisper is a pool worker under its own station identity (#639 phase 2): no token more to issue,
         # rotate or revoke; revoking the station ends its worker too
-        self.stt_api = WorkerApi(reg, self.sttpool, self._may_write_audio, log, station=self.hub.station_of)
+        self.stt_api = WorkerApi(reg, self.sttpool, self._may_write_audio, log, station=self.hub.station_of,
+                                 src_fast=self._station_stt_fast)
         from sizeup.cloud.metricsbackup import S3Copies
         self.stt_runs = sttruns.Runs(state / "stt.sqlite" if state else ":memory:", may_write=self._may_write_audio,
                                      backup=S3Copies.from_env("stt") if state else None, exists=self._clips_logged,
@@ -1759,6 +1760,14 @@ class HubApp(App):
             self._pool_to_aws(job, "the GPU pool couldn't take it")
         self.sync()
         return True
+
+    def _station_stt_fast(self) -> bool:
+        """The station's STT lane is woken by the events' ack (#678: its last status says stt_input.wake_on_ack), so each
+        STT input follows its event at once and a pool job's audio waits only its class's budget (sttpool.SRC_WAIT_S).
+        A station from before it (the hub deploys first) sends the input ~2 s after its event: the old wait for it."""
+        st = self.hub.status
+        si = st.get("stt_input") if isinstance(st, dict) else None
+        return isinstance(si, dict) and si.get("wake_on_ack") is True
 
     def _pool_audio_of(self, cid: str, page, pcm):
         """A pool job's audio, read when its worker asks (on that request's thread, never the events'): the station's

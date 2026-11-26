@@ -704,10 +704,11 @@
             "sent": {"type": "integer", "minimum": 0, "description": "Inputs the hub stored."},
             "dropped": {
               "type": "object",
-              "description": "Inputs dropped, by reason: `queue`, `too_big`, `failed` (the encoder's), `outbox` (over its budget), `refused` (by the hub, for good). Each a count.",
+              "description": "Inputs dropped, by reason: `queue`, `too_big`, `failed` (the encoder's), `outbox` (over its budget), `refused` (by the hub, for good), `no_event` (made before its own traffic / page event was queued, and that event never came: #678). Each a count.",
               "additionalProperties": {"type": "integer", "minimum": 0}
             },
             "hub_takes": {"type": "boolean", "description": "The hub's last `caps` had `stt_input`."},
+            "wake_on_ack": {"type": "boolean", "description": "The lane is woken by the events' ack, so each input follows its own event at once (#678). The hub then waits for a pool job's input only its class's budget (sttpool.SRC_WAIT_S); a station without it gets the old 2 s wait."},
             "dropped_pre": {"type": "integer", "minimum": 0, "description": "Of the dropped, those of pre-alert channels."},
             "dropped_fire": {"type": "integer", "minimum": 0, "description": "Of the dropped, those of fire channels."},
             "encoder": {"type": "string", "description": "Where inputs are encoded: \"\" before the first, else `scope`, `process` or `thread (<why>)`."},
