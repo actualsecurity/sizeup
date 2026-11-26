@@ -327,29 +327,6 @@ class Choices:
 WORD = re.compile(r"[a-z0-9']+")
 
 
-# TODO: use the shared repetition-loop check (sizeup/stt_quality.py, another pull request) once it is on main, and drop
-# this one
-def is_loop(text: str) -> bool:
-    """A repetition loop (a model stuck on a phrase: every one here does it on silence or noise): a run of one to eight
-    words said again and again in a row (a word 6 times, a short phrase 4, a longer one 3) that is 40% or more of a
-    text of 8 words or more. Real traffic repeats ("units responding, units responding") but not like that."""
-    w = WORD.findall(str(text or "").lower())[:2000]
-    if len(w) < 8:
-        return False
-    for n in range(1, 9):
-        need = 6 if n == 1 else 4 if n <= 3 else 3
-        i = 0
-        while i + n * need <= len(w):
-            g = w[i:i + n]
-            k = 1
-            while w[i + k * n:i + (k + 1) * n] == g:
-                k += 1
-            if k >= need and k * n >= 0.4 * len(w):
-                return True
-            i += max(1, (k - 1) * n) if k > 1 else 1
-    return False
-
-
 def _items(text: str) -> list[str]:
     return [" ".join(WORD.findall(x.lower())) for x in re.split(r"[,.;:!?]+", str(text or "")) if WORD.findall(x.lower())]
 

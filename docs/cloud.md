@@ -1637,7 +1637,7 @@ Each channel has its own speech-to-text model on the GPU workers (`sizeup/sttmod
   vocabulary filter) by name per stream, made ahead of time (minutes to build, a few per account). sizeup already gives
   each channel its own (sizeup-pcfd, sizeup-pd, sizeup-atc and the term lists'). Per-clip names, call signs and
   aircraft can't reach it.
-- **Discarded:** a repetition loop, or a llama-asr model's context read back as the text, is kept as a run (role
+- **Discarded:** a repetition loop (`sizeup/stt_quality.py`, `repeated`), or a llama-asr model's context read back as the text, is kept as a run (role
   `discarded`) and the clip goes to the next engine (a catch-up clip: a failed try). Never an urgent clip's text (a
   page, the firegrounds: a "mayday" said again and again is real). A clip the worker finds near-silent isn't decoded
   (no speech).

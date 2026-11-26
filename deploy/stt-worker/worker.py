@@ -58,6 +58,18 @@ MAX_CLAIM_WAIT_S = 25
 HEARTBEAT_TIMEOUT_S = 4.0                 # a slow answer mustn't hold the next heartbeat past the hub's 12 s
 MAX_HEARTBEAT_S = 5                       # the hub takes back a silent worker's leases after 12 s
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
+# every speech model is told English, never left to detect a language (a short noisy clip came out in another one):
+# language_setting below is the one place that says how, for today's whisper_server and every catalog model alike
+STT_LANGUAGE = "en"
+ASR_LANGUAGE_NAMES = {"en": "English"}     # Qwen3-ASR's own names for a forced language
+# whisper-server's decode, sent with every /inference besides the language: whisper.cpp b5454 takes each as a request
+# field (server.cpp get_req_parameters), so they hold whatever an install's whisper_server line says. Non-speech tokens
+# suppressed, and the temperature fallback's thresholds (a looping or unsure decode is tried again warmer; no speech:
+# nothing)
+WHISPER_FIELDS = (("suppress_nst", "true"), ("entropy_thold", "2.4"), ("logprob_thold", "-1.0"),
+                  ("no_speech_thold", "0.6"))
+TEMPERATURE_INC = "0.2"                    # a full decode: fallback at 0.2, 0.4 ... 1.0 (up to 5 more passes)
+FAST_TEMPERATURE_INC = "0.4"               # a pre-alert (fast) one: at 0.4 and 0.8 only (up to 2 more, its lease short)
 LONG_CLASSES = {"RERUN", "LOW", "CATCHUP"}  # long leases: gaming hands these back at once
 ENV = {"hub_url": "SIZEUP_STT_HUB_URL", "token": "SIZEUP_STT_WORKER_TOKEN",
        "cf_client_id": "SIZEUP_STT_CF_CLIENT_ID", "cf_client_secret": "SIZEUP_STT_CF_CLIENT_SECRET"}
@@ -260,6 +272,8 @@ def validate(cfg: Config) -> None:
     if _bad_host(cfg.whisper_server):
         # whisper-server answers any web page (CORS *): on the network, any site could use the GPU
         raise ConfigError("whisper_server: --host must be 127.0.0.1 (whisper-server must not listen on the network)")
+    if cfg.whisper_server:
+        check_whisper_argv(cfg.whisper_server)
     if cfg.llm_url or cfg.llm_server:
         u = urlsplit(cfg.llm_url)
         if u.scheme != "http" or u.hostname not in LOOPBACK or not u.port:
@@ -294,20 +308,7 @@ def check_llm_argv(argv: list) -> None:
     argv = [str(a) for a in argv]
     if not argv:
         raise ConfigError("llm_server: llama-server's command line")
-    models, i = 0, 1
-    while i < len(argv):
-        name, eq, _value = argv[i].partition("=")
-        if name not in LLM_ARGS:
-            raise ConfigError(f"llm_server: {argv[i][:40]} not allowed (allowed: {', '.join(sorted(LLM_ARGS))})")
-        if LLM_ARGS[name] and not eq:
-            if i + 1 >= len(argv):
-                raise ConfigError(f"llm_server: {name} needs a value")
-            i += 1
-        elif eq and not LLM_ARGS[name]:
-            raise ConfigError(f"llm_server: {name} takes no value")
-        models += name in ("-m", "--model")
-        i += 1
-    if models != 1:
+    if _check_argv("llm_server", argv, LLM_ARGS) != 1:
         raise ConfigError("llm_server: exactly one -m <the GGUF file>")
     if _bad_host(argv):
         raise ConfigError("llm_server: --host must be 127.0.0.1 (llama-server must not listen on the network)")
@@ -322,6 +323,65 @@ def llm_command(argv: list) -> list:
     for flag in ("--no-slots", "--no-webui"):
         if flag not in names:
             argv.append(flag)
+    return argv
+
+
+# whisper-server's options the worker lets through in whisper_server (name: takes a value), and nothing else: one local
+# model, loopback only, English only, the decode's thresholds, VAD with a local model; no -nf (no temperature fallback:
+# a weak clip's loops kept), no -dl / translate / diarize, no public path, no ffmpeg converter, no other request path
+WHISPER_ARGS = {"-m": True, "--model": True, "--host": True, "--port": True, "-t": True, "--threads": True,
+                "-l": True, "--language": True, "-sns": False, "--suppress-nst": False, "-et": True,
+                "--entropy-thold": True, "-lpt": True, "--logprob-thold": True, "-nth": True, "--no-speech-thold": True,
+                "-mc": True, "--max-context": True, "--vad": False, "-vm": True, "--vad-model": True, "-vt": True,
+                "--vad-threshold": True}
+
+
+def _check_argv(what: str, argv: list, allowed: dict) -> int:
+    """argv: a program, then only `allowed` options (as "-x v" or "--x=v"). The number of -m / --model; ConfigError
+    otherwise."""
+    models, i = 0, 1
+    while i < len(argv):
+        name, eq, _value = argv[i].partition("=")
+        if name not in allowed:
+            raise ConfigError(f"{what}: {argv[i][:40]} not allowed (allowed: {', '.join(sorted(allowed))})")
+        if allowed[name] and not eq:
+            if i + 1 >= len(argv):
+                raise ConfigError(f"{what}: {name} needs a value")
+            i += 1
+        elif eq and not allowed[name]:
+            raise ConfigError(f"{what}: {name} takes no value")
+        models += name in ("-m", "--model")
+        i += 1
+    return models
+
+
+def check_whisper_argv(argv: list) -> None:
+    """whisper_server: a program, then only WHISPER_ARGS, at most one -m, and a language only if it is en. ConfigError
+    otherwise (--host loopback only: validate's _bad_host)."""
+    argv = [str(a) for a in argv]
+    if _check_argv("whisper_server", argv, WHISPER_ARGS) > 1:
+        raise ConfigError("whisper_server: one -m <the model file>")
+    lang = _arg(argv, ("-l", "--language"))
+    if lang is not None and lang != STT_LANGUAGE:
+        raise ConfigError(f"whisper_server: -l {lang[:20]}: English only (-l {STT_LANGUAGE})")
+
+
+def language_setting(kind: str, lang: str = STT_LANGUAGE) -> dict:
+    """How a speech model of this kind is told its language (the one place; today's whisper_server is a whisper-ggml):
+    whisper-server gets `-l en` (whisper_command) and every /inference request language=en (Whisper.call); a llama-asr
+    model (Qwen3-ASR) gets its answer begun as "language English<asr_text>", the way Qwen3-ASR's own toolkit forces a
+    language (an assistant prefill)."""
+    if kind == "whisper-ggml":
+        return {"argv": ["-l", lang], "request": lang, "prefill": ""}
+    return {"argv": [], "request": "", "prefill": f"language {ASR_LANGUAGE_NAMES[lang]}<asr_text>"}
+
+
+def whisper_command(argv: list) -> list:
+    """A whisper-server command line as the worker runs it (whisper_server, and a catalog model's): language_setting's
+    -l en when it names no language (each request says language=en too)."""
+    argv = [str(a) for a in argv]
+    if _arg(argv, ("-l", "--language")) is None:
+        argv += language_setting("whisper-ggml")["argv"]
     return argv
 
 
@@ -734,26 +794,26 @@ class WhisperCall:
 
 
 class Whisper:
-    """whisper.cpp's whisper-server, called exactly as the station's WhisperClient does (sizeup/stt.py): a multipart
-    POST to /inference with response_format=verbose_json, temperature=0.0, the prompt, temperature_inc=0.0 for a
-    fast (greedy, no fallback) job, and the WAV as file=tx.wav. The hub's WAV is already padded and processed: it goes
-    as it is."""
+    """whisper.cpp's whisper-server, called as the station's WhisperClient does (sizeup/stt.py): a multipart POST to
+    /inference with response_format=verbose_json, temperature=0.0, language=en (language_setting), WHISPER_FIELDS, the
+    prompt (the hub sends none for the airband), temperature_inc TEMPERATURE_INC, or FAST_TEMPERATURE_INC for a fast
+    (pre-alert) job: a capped fallback, never none (a greedy pass alone kept a weak clip's loops), and the WAV as
+    file=tx.wav. The same for today's whisper_server and a catalog model's. The hub's WAV is already padded and
+    processed: it goes as it is."""
 
-    def __init__(self, url: str, timeout_s: float = 60.0, language: str = ""):
-        self.url, self.timeout_s, self.language = url, timeout_s, language     # language: sent with every request
+    def __init__(self, url: str, timeout_s: float = 60.0):
+        self.url, self.timeout_s = url, timeout_s
         u = urlsplit(url)
         self.host, self.port = u.hostname or "127.0.0.1", u.port or 80
         self.path = u.path or "/inference"
 
     def call(self, wav: bytes, prompt: str = "", fast: bool = False, timeout: float | None = None) -> WhisperCall:
         boundary = uuid.uuid4().hex
-        fields = [("response_format", "verbose_json"), ("temperature", "0.0")]
-        if self.language:
-            fields.append(("language", self.language))
+        fields = [("response_format", "verbose_json"), ("temperature", "0.0"),
+                  ("language", language_setting("whisper-ggml")["request"]), *WHISPER_FIELDS,
+                  ("temperature_inc", FAST_TEMPERATURE_INC if fast else TEMPERATURE_INC)]
         if prompt:
             fields.append(("prompt", prompt))
-        if fast:
-            fields.append(("temperature_inc", "0.0"))
         parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
                  for name, value in fields]
         parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="tx.wav"\r\n'
@@ -2209,9 +2269,6 @@ MODEL_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}\.(?:bin|gguf)")
 MODEL_SERVICES = ("fire", "ems", "police", "air", "transit", "other")
 MODEL_MAX_BYTES = 8_000_000_000
 VRAM_MIN_MB, VRAM_MAX_MB = 100, 48_000
-# every catalog model is told English, never left to detect a language (language_setting, the one place)
-STT_LANGUAGE = "en"
-ASR_LANGUAGE_NAMES = {"en": "English"}     # Qwen3-ASR's own names for a forced language
 CONTEXT_MAX_ITEMS = 12                     # a llama-asr model's context list (Qwen3-ASR: short declarative lists help)
 # Where a model file may come from (nothing else, whatever a catalog says): Hugging Face at a pinned revision (a
 # 40-digit commit, never a branch name), a ggml-org release asset, or a release asset of this repo (a model built
@@ -2515,13 +2572,6 @@ class AsrCall:
         WhisperCall.abort(self)          # (the same: shut the socket, close the connection)
 
 
-def language_setting(kind: str, lang: str = STT_LANGUAGE) -> dict:
-    """How a catalog model of this kind is told its language (the one place): whisper-server gets `-l en` and every
-    /inference request language=en; a llama-asr model (Qwen3-ASR) gets its answer begun as "language English<asr_text>",
-    the way Qwen3-ASR's own toolkit forces a language (an assistant prefill)."""
-    if kind == "whisper-ggml":
-        return {"argv": ["-l", lang], "request": lang, "prefill": ""}
-    return {"argv": [], "request": "", "prefill": f"language {ASR_LANGUAGE_NAMES[lang]}<asr_text>"}
 
 
 def plan_models(want: list, catalog: dict, budget_mb: float, primary: str = "", primary_mb: float = 0.0) -> list:
@@ -2548,8 +2598,7 @@ class ModelServer:
         self.vram_mb = entry["vram_mb"]
         self.entry = entry
         self.inuse = 0                     # clips being decoded on it now (Models.acquire): never stopped meanwhile
-        self.whisper = Whisper(f"http://127.0.0.1:{port}/inference", timeout_s,
-                               language=language_setting(self.kind)["request"])
+        self.whisper = Whisper(f"http://127.0.0.1:{port}/inference", timeout_s)     # (language=en: Whisper.call)
         self.timeout_s = timeout_s
         self.key = secrets.token_urlsafe(24) if self.kind == "llama-asr" else ""
         self.ok = False                    # it answered a test decode
@@ -2905,8 +2954,8 @@ class Models:
         if e["kind"] == "whisper-ggml":
             prog = self.cfg.whisper_bin or (str(self.cfg.whisper_server[0]) if self.cfg.whisper_server else "")
             t = _arg(self.cfg.whisper_server, ("-t", "--threads")) or "4"
-            return [prog, "-m", str(p["model"]), "--host", "127.0.0.1", "--port", str(port), "-t", str(t),
-                    *language_setting(e["kind"])["argv"]] if prog else None
+            return whisper_command([prog, "-m", str(p["model"]), "--host", "127.0.0.1", "--port", str(port), "-t",
+                                    str(t)]) if prog else None
         prog = self.cfg.llama_bin or (str(self.cfg.llm_server[0]) if self.cfg.llm_server else "")
         return [prog, "-m", str(p["model"]), "--mmproj", str(p["mmproj"]), "--host", "127.0.0.1", "--port", str(port),
                 "-c", "4096", "-ngl", "99", "-np", "1", "--no-webui", "--no-slots",
@@ -3107,7 +3156,7 @@ class Worker:
         self.control = Control(cfg.control_path)
         self.whisper = Whisper(cfg.whisper_url, cfg.whisper_timeout_s)
         self.proc = WhisperProcess(cfg.whisper_server, Path(cfg.state_dir) / "whisper-server.log", popen, clock,
-                                   cfg.base_dir) if cfg.whisper_server else None
+                                   cfg.base_dir, command=whisper_command) if cfg.whisper_server else None
         self.gpu = GpuMonitor(cfg, run, clock, busy=self._busy, ours=self._our_pids, fullscreen=fullscreen)
         self.hub = Hub(cfg.hub_url, cfg.token, cfg.cf_client_id, cfg.cf_client_secret)
         self.hb_hub = Hub(cfg.hub_url, cfg.token, cfg.cf_client_id, cfg.cf_client_secret)

@@ -56,9 +56,9 @@ $PinsJson = @'
     },
     "worker_py": {
       "what": "worker.py (first install; it updates itself afterwards)",
-      "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/5970779576db905750b4549be28087a2ab9f206a/deploy/stt-worker/worker.py",
-      "bytes": 220801,
-      "sha256": "6E4A16025F5FD70C6170A5A5232EAA388BFAFEFA8A92AE6CA7E934447F44F5DF"
+      "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/a605ce400d2a705a870eca5984c9e1870101819c/deploy/stt-worker/worker.py",
+      "bytes": 224049,
+      "sha256": "CE03FE00066544A74CD4D5AD50DC3234DE5CC4ECEA121F8A2FB946EF8FEE9C16"
     },
     "llama_zip": {
       "what": "llama.cpp b12359, CUDA 12.4 (llama-server.exe)",
@@ -95,7 +95,8 @@ hub_url = "{{HUB_URL}}"
 model = "large-v3-turbo-q5_0"
 # the worker starts whisper-server itself, restarts it when it exits, and knows its pid (its GPU use isn't a game)
 whisper_server = ['whisper\Release\whisper-server.exe', '-m', 'models\ggml-large-v3-turbo-q5_0.bin',
-                  '--host', '127.0.0.1', '--port', '8179', '-t', '4']
+                  '--host', '127.0.0.1', '--port', '8179', '-t', '4',
+                  '-l', 'en', '-sns', '-et', '2.4', '-lpt', '-1.0', '-nth', '0.6']
 '@
 $TomlLlm = @'
 # the local LLM (README "The local LLM"): Qwen3-8B, the default
@@ -113,7 +114,7 @@ $TokenShape = '^sw1\.[a-z0-9][a-z0-9_-]{0,39}\.[A-Za-z0-9_-]+$'
 $CfIdShape = '^[A-Za-z0-9._-]{8,}$'
 $CfSecretShape = '^[A-Za-z0-9._~+/=-]{16,}$'
 $HubShape = '^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$'
-$WhisperArgs = '-m models\ggml-large-v3-turbo-q5_0.bin --host 127.0.0.1 --port 8179 -t 4'
+$WhisperArgs = '-m models\ggml-large-v3-turbo-q5_0.bin --host 127.0.0.1 --port 8179 -t 4 -l en -sns -et 2.4 -lpt -1.0 -nth 0.6'
 $LlamaArgs = '-m models\Qwen3-8B-Q4_K_M.gguf --host 127.0.0.1 --port 8180 -c 4096 -ngl 99 -np 1 --jinja --no-webui --no-slots --reasoning off'
 
 $Pins = $PinsJson | ConvertFrom-Json
