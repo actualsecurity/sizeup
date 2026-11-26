@@ -360,6 +360,8 @@ def test_the_shadow_path_against_aws(tmp_path, logs, monkeypatch):
             if path.endswith(("/claim", "/hello", "/state")):
                 body = dict(body, models=["large-v3-turbo-q5_0", qwen] if path.endswith("/claim")
                             else body.get("models"), caps=["challenger"])
+                if path.endswith("/claim"):
+                    body["try_loaded"] = [qwen]                     # (its try server for the candidate)
             elif path.endswith("/complete") and self.jobs:
                 body = dict(body, model=self.jobs[-1].get("model") or "large-v3-turbo-q5_0")
             return call(self.url + path, "POST", body, token=self.token)
