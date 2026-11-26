@@ -205,16 +205,20 @@ def test_an_old_airband_clip_gets_no_aircraft():
 
 # -- loops, and what a run keeps about its context ----------------------------------------------------------------
 
-@pytest.mark.parametrize("text, loop", [
-    ("Engine 60 Engine 60 Engine 60 Engine 60", True),
-    ("copy copy copy copy copy copy copy copy", True),
-    ("Thank you. Thank you. Thank you. Thank you. Thank you.", True),
-    ("units responding, units responding, Engine 60 on scene at Main Street", False),
-    ("Engine 60 to 60 Control, Engine 60 on location, nothing showing", False),
-    ("ok", False),
+@pytest.mark.parametrize("text, seconds, loop", [
+    ("Engine 60 Engine 60 Engine 60 Engine 60", 1.0, True),          # (faster than anyone repeats a call)
+    ("copy " * 12, 3.0, True),
+    ("Thank you. " * 8, 10.0, True),
+    ("mayday " * 6, 1.0, False),                                     # a safety word said again and again is real
+    ("units responding, units responding, Engine 60 on scene at Main Street", 4.0, False),
+    ("Engine 60 to 60 Control, Engine 60 on location, nothing showing", 4.0, False),
+    ("ok", 1.0, False),
 ])
-def test_repetition_loops(text, loop):
-    assert sttmodels.is_loop(text) is loop
+def test_repetition_loops(text, seconds, loop):
+    """The hub discards a GPU worker's loop by the one shared rule (sizeup/stt_quality.py), the clip's length known."""
+    from sizeup import stt_quality
+    assert (stt_quality.assess(text, seconds) == "repeated") is loop
+    assert not hasattr(sttmodels, "is_loop")
 
 
 def test_a_run_keeps_the_contexts_hash_and_length_never_its_content():
@@ -297,7 +301,7 @@ def test_a_hub_names_the_model_and_context_and_a_loop_goes_to_aws(tmp_path, fake
     hub.app.stt_choices.set("FG1", {"callsigns": ["Command"], "model": QWEN})
     hub.app._pool_class = lambda item, key: LIVE          # (an urgent clip's words are never discarded: a live one's)
     token = hub.app.hub.workers.add("gpu-1", "Test box")
-    w = ModelWorker(hub.url, token, text="Engine 60 Engine 60 Engine 60 Engine 60 Engine 60").start()
+    w = ModelWorker(hub.url, token, text=" ".join(["Engine 60"] * 8)).start()      # (a loop: sizeup/stt_quality.py)
     try:
         assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)
         send(hub, pending_event("FG1-7"))
