@@ -253,6 +253,7 @@ class Cad:
         self.fm_main_over: dict[str, bool] = {}              # an FM / airband channel's Main switch, where not its default
         self._retag_lock = threading.Lock()                  # one re-tag at a time (retag_services)
         self.retag_thread: threading.Thread | None = None    # the last one started
+        self._retags: list[threading.Thread] = []            # every one started and not yet joined (shutdown, #740)
         self.retag_waiting: set[str] = set()                 # sources whose re-tag waits for the station's talkgroups
         self._clears: tuple[int, dict] | None = None         # (rev, Store.recent_clears): returning rigs
         self.settings = settings_mod.Editor(self)           # the Settings page's edits over the data file
@@ -1667,12 +1668,13 @@ class Cad:
 
     def shutdown(self, wait_s: float = 5.0) -> None:
         """Done with this CAD (a test's teardown, --init-state, a tool): the workers that write to the store stopped and
-        joined (each up to wait_s), then the store's connection closed, so no thread is left using it as it closes.
+        joined (each step up to wait_s), then the store's connection closed, so no thread is left using it as it closes.
         Again: nothing. (Not close(): that one closes an incident.)"""
         if self._shut:
             return
         self._shut = True
-        steps = (("incident sources", lambda: self.sources.stop(wait_s)),
+        steps = (("service re-tags", lambda: self._join_retags(wait_s)),     # (they write: before the rest, #740)
+                 ("incident sources", lambda: self.sources.stop(wait_s)),
                  ("radio log", lambda: self.radiolog.stop(wait_s, closing=True)),
                  ("address history", self.addrs.stop),
                  ("dispatch voice", lambda: (self.voice.stop(0.0), self.voice.join(wait_s))))   # a render ends by itself
@@ -1684,6 +1686,15 @@ class Cad:
                     self.log(f"CAD: shutdown: {name}: {type(e).__name__}: {e}")
         finally:
             self.store.shutdown()
+
+    def _join_retags(self, wait_s: float) -> None:
+        """The service re-tags under way (retag_services): each stops before its next batch once _shut says so (its
+        source's mark kept, for the next start) and is joined, up to wait_s in all: none is left writing as the store
+        closes (#740)."""
+        end = time.monotonic() + max(wait_s, 0.0)
+        for t in list(self._retags):
+            t.join(max(end - time.monotonic(), 0.0))
+        self._retags = [t for t in self._retags if t.is_alive()]
 
     def preview(self, iid: int, body: dict) -> dict:
         """The dispatch as it would go out now. Nothing is assigned or logged. An event that already had a
@@ -2384,6 +2395,8 @@ class Cad:
         task that takes over. keys, operator: (older callers; the marks say both). wait: in this thread (tests)."""
         def run() -> None:
             with self._retag_lock:
+                if self._shut:
+                    return
                 try:
                     todo = self.store.q("SELECT key, at, operator FROM radio_retag_pending ORDER BY at, key")
                 except Exception as e:  # noqa: BLE001
@@ -2391,7 +2404,7 @@ class Cad:
                     return
                 for p in todo:
                     key = p["key"]
-                    if not self.may_write():
+                    if self._shut or not self.may_write():
                         return
                     try:
                         chosen = self.radio_services.get(key)
@@ -2406,7 +2419,9 @@ class Cad:
                         want = chosen or auto
                         since = self.clock() - RETAG_DAYS * 86400
                         self.log(f"CAD: {key} is {want}: re-tagging its transmissions of the last {RETAG_DAYS} days")
-                        n = self.comms.retag(key, want, since, pause=RETAG_PAUSE_S)
+                        n = self.comms.retag(key, want, since, pause=RETAG_PAUSE_S, stop=lambda: self._shut)
+                        if self._shut:
+                            return                          # (cut short by shutdown(): its mark kept for the next start)
                         with self.store.tx() as db:
                             self.settings._audit(db, self.clock(), p["operator"], "radios",
                                                  f"{settings_mod.SVC_SECTION}/{key}/retag", None,
@@ -2417,10 +2432,13 @@ class Cad:
                         self.log(f"CAD: {key} is {want}: {n} transmission(s) re-tagged")
                     except Exception as e:  # noqa: BLE001 - the setting is saved; its mark stays for the next start
                         self.log(f"CAD: {key}: rows not re-tagged ({type(e).__name__}: {e})")
+        if self._shut:
+            return None
         if wait:
             run()
             return None
         t = self.retag_thread = threading.Thread(target=run, name="cad-retag", daemon=True)
+        self._retags = [x for x in self._retags if x.is_alive()] + [t]
         t.start()
         return t
 

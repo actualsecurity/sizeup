@@ -501,6 +501,7 @@ class Store:
         if self.path != ":memory:":
             self.db.execute("PRAGMA journal_mode = WAL")
         self.lock = threading.RLock()
+        self.db.close_lock = self.lock       # any close of it (shutdown(), a test's db.close()) waits for the lock (#740)
         self._closed = False
         # state_rev: what the console's state is built from (Cad.state): it moves with rev (and with every `rev += 1`
         # anywhere), except for a transaction that said its write is no part of that state (quiet_for_state(): a

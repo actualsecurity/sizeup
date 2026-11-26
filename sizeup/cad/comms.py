@@ -71,6 +71,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from sizeup import sourcekeys as sources
 from sizeup.cad import airport
@@ -489,18 +490,21 @@ class Comms:
                               f"ours = 0 WHERE talkgroup IS NULL AND system != 'airband' AND channel IN "
                               f"({','.join('?' * len(labels))})", labels).rowcount
 
-    def retag(self, source: str, service: str, since: float, batch: int = RETAG_BATCH, pause: float = 0.0) -> int:
+    def retag(self, source: str, service: str, since: float, batch: int = RETAG_BATCH, pause: float = 0.0,
+              stop: Callable[[], bool] | None = None) -> int:
         """A source's rows since `since` given `service` (an admin chose it, or put it back to automatic): only the rows
         that differ, walked along radio_traffic_source_start `batch` at a time (each batch its own transaction, carrying
         on after the last (start, rowid): the store's lock is let go between them). Once done, the Radio page's readers
         who may know of that source ask afresh, once (another P25 system's: only those who may see it). The number
-        changed."""
+        changed. stop: asked before each batch; True ends the walk there (the CAD shutting down, #740)."""
         if not source or service not in sources.SERVICES:
             return 0
         got = sources.parse(source)
         system = got[0] if got else "airband" if source.startswith("air:") else "analog"
         total, after = 0, (float(since), -1)
         while True:
+            if stop is not None and stop():
+                break
             with self.store.tx() as db:
                 rows = db.execute("SELECT rowid, start FROM radio_traffic WHERE source = ? AND start >= ? "
                                   "AND (start, rowid) > (?, ?) ORDER BY start, rowid LIMIT ?",
