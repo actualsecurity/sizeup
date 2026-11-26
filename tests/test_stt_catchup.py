@@ -966,6 +966,87 @@ def test_our_late_row_on_another_source_losing_its_words_reaches_only_the_late_h
         app.stop()
 
 
+@pytest.fixture
+def real_intel(tmp_path, monkeypatch):
+    """An all-in-one app whose CAD runs the REAL intel engine (drained here, not on its thread): the police pack over
+    the PD dispatch talkgroup, a fake notifier and gazetteer; only the push-source gate is set (PD is one)."""
+    from sizeup import intel
+    from sizeup.app import App
+    from tests.test_intel import FakeNotifier, example_locate
+    monkeypatch.setattr(intel, "is_push_source", lambda key, kind="": key == PD)
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    n = FakeNotifier()
+    app.cad.intel.notifier, app.cad.intel.locate = n, example_locate
+    yield app, n
+    app.stop()
+
+
+SHOTS_AT = "respond to 100 Example Ave, shots fired, male with a gun"   # invented: a weapons push alone
+
+
+def pd_row(app, tid, start, **kw):
+    """A PD dispatch row (the police pack's scope: MRRS 9211, police), skipped while busy unless kw says otherwise."""
+    record(app, tid, start, tg=9211, system="mrrs", tier="alert", service="police", **kw)
+
+
+def test_end_to_end_a_fresh_catch_up_on_a_push_source_is_scored_and_pushed(real_intel):
+    """A shed PD dispatch clip caught up (quiet) within the pack's late_s of its clip's end: the real engine scores it
+    at its air time and pushes it once; no on_text consumer hears it."""
+    app, n = real_intel
+    now = time.time()
+    pd_row(app, "pd-fresh", now - 30)                       # skipped while busy, 30 s ago (its clip ended 28 s ago)
+    app.cad.intel.drain()
+    heard = []
+    app.cad.comms.on_text = heard.append
+    app._retext("pd-fresh", SHOTS_AT, "done", 0.9, "m.bin", why="catch-up", quiet=True)
+    assert app.cad.intel.drain() == 1 and heard == []
+    [ev] = app.cad.intel.events.open_events()
+    assert ev.category == "weapons" and ev.traffic_ids == ["pd-fresh"] and ev.first_at == now - 30
+    assert len(n.sent) == 1
+
+
+def test_end_to_end_a_stale_catch_up_is_recorded_at_air_time_never_pushed(real_intel):
+    """The same clip caught up after the police pack's late_s (300 s from its clip's END): recorded at log ("late"),
+    at its air time, never pushed."""
+    app, n = real_intel
+    now = time.time()
+    pd_row(app, "pd-stale", now - 400)                      # its clip ended 398 s ago
+    app._retext("pd-stale", SHOTS_AT, "done", 0.9, "m.bin", why="catch-up", quiet=True)
+    assert app.cad.intel.drain() == 1
+    [ev] = app.cad.intel.events.open_events()
+    assert (ev.suppressed, ev.mode, ev.first_at) == ("late", "log", now - 400) and n.sent == []
+
+
+def test_end_to_end_a_747_late_row_is_recorded_late_and_never_pushed(real_intel):
+    """A P25 call from while sizeup was down (#747) recorded with its words seconds after its air time: late = 1 on
+    the row, intel reads it from the column and records the event at log, never pushes it."""
+    app, n = real_intel
+    now = time.time()
+    pd_row(app, "pd-747", now - 20, status="done", model="m.bin", text=SHOTS_AT, late=True)
+    assert app.cad.store.one("SELECT late FROM radio_traffic WHERE id = 'pd-747'")["late"] == 1
+    assert app.cad.intel.drain() == 1
+    [ev] = app.cad.intel.events.open_events()
+    assert (ev.suppressed, ev.mode) == ("late", "log") and ev.traffic_ids == ["pd-747"] and n.sent == []
+
+
+def test_end_to_end_an_unclear_catch_up_of_a_scored_row_is_withdrawn(real_intel, monkeypatch):
+    """A PD row intel scored (and pushed), caught up again as unclear (sizeup/stt_quality.py): the real engine
+    withdraws its words from the event."""
+    from sizeup import stt_quality
+    from sizeup.intel.engine import WITHDRAWN
+    app, n = real_intel
+    now = time.time()
+    pd_row(app, "pd-1", now - 30, status="done", model="m.bin", text=SHOTS_AT)
+    assert app.cad.intel.drain() == 1 and len(n.sent) == 1
+    [ev] = app.cad.intel.events.open_events()
+    monkeypatch.setattr(stt_quality, "assess", lambda *a, **k: "loop")
+    app._retext("pd-1", "thank you thank you thank you", "done", 0.9, "m.bin", why="catch-up", quiet=True)
+    assert app.cad.store.one("SELECT status FROM radio_traffic WHERE id = 'pd-1'")["status"] == stt_quality.UNCLEAR
+    assert app.cad.intel.drain() == 1
+    got = app.cad.intel.events.get(ev.id)
+    assert got.note == WITHDRAWN and len(n.sent) == 1
+
+
 def test_the_late_column_is_added_to_an_old_database(tmp_path):
     from tests.test_cad import make_cad
     cad, now = make_cad(tmp_path), time.time()

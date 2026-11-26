@@ -342,20 +342,26 @@ def test_a_late_flagged_row_with_a_strong_hit_is_recorded_at_log_and_never_pushe
 def test_a_late_column_is_read_where_the_database_has_one(live, tmp_path):
     from tests.test_cad import make_cad
     cad, n = live
-    assert ", late" not in cad.intel._row_sql()                       # main today: no column, nothing late
-    cad2 = make_cad(tmp_path / "late")
+    # the store's migration adds radio_traffic.late (#917): the row query reads it
+    assert cad.intel._row_sql().endswith("alt_text, model, status, late FROM radio_traffic WHERE id = ?")
+    cad.comms.record(ctx_row("c3-t0", "caller reports a loud noise at 100 Example Ave", cad.clock()))
+    cad.intel.drain()
+    with cad.store.lock:
+        cad.store.db.execute("UPDATE radio_traffic SET late = 1, text = ? WHERE id = 'c3-t0'", (SHOTS,))
+    cad.comms.on_context_text("c3-t0")
+    cad.intel.drain()
+    [ev] = cad.intel.events.open_events()
+    assert ev.suppressed == "late" and ev.mode == "log" and n.sent == []
+    # a database without the column (PRAGMA-guarded): nothing late, read as before
+    cad2 = make_cad(tmp_path / "old")
     cad2.intel.notifier, cad2.intel.locate = n, example_locate
     with cad2.store.lock:
-        cad2.store.db.execute("ALTER TABLE radio_traffic ADD COLUMN late INTEGER NOT NULL DEFAULT 0")
-    cad2.comms.record(ctx_row("c3-t0", "caller reports a loud noise at 100 Example Ave", cad2.clock()))
+        cad2.store.db.execute("ALTER TABLE radio_traffic DROP COLUMN late")
+    cad2.intel._row_q = None
+    assert ", late" not in cad2.intel._row_sql()
+    cad2.comms.record(ctx_row("c4-t0", SHOTS, cad2.clock()))
     cad2.intel.drain()
-    with cad2.store.lock:
-        cad2.store.db.execute("UPDATE radio_traffic SET late = 1, text = ? WHERE id = 'c3-t0'", (SHOTS,))
-    assert cad2.intel._row_sql().endswith("alt_text, model, status, late FROM radio_traffic WHERE id = ?")
-    cad2.comms.on_context_text("c3-t0")
-    cad2.intel.drain()
-    [ev] = cad2.intel.events.open_events()
-    assert ev.suppressed == "late" and ev.mode == "log" and n.sent == []
+    assert len(n.sent) == 1
 
 
 # -- review: a late row is context, never a push's origin; the model is never asked about one --------------------------
