@@ -44,7 +44,7 @@ CONTEXT_MAX = 12
 CALLSIGNS_MAX = 8
 CALLSIGN = re.compile(r"[A-Za-z0-9][A-Za-z0-9 .'/-]{0,39}")
 WANT_MAX = 8
-FIELDS = ("model", "context", "callsigns", "challenger", "pct", "promoted", "rolled_back")
+FIELDS = ("model", "context", "callsigns", "challenger", "pct", "promoted", "rolled_back", "shadow")
 PCT_DEFAULT = 10.0           # a challenger's share of its channel's clips
 # the GPU worker's local LLM (the intel lane's, sizeup/cloud/infer.py): models.json "llm_models" (the worker checks
 # it, downloads the GGUF and swaps llama-server; README "The local LLM"). The hub names one (Settings > Station >
@@ -209,6 +209,20 @@ class Choices:
         pct = v.get("pct")
         return m, float(pct) if isinstance(pct, (int, float)) and not isinstance(pct, bool) else PCT_DEFAULT
 
+    def shadow_on(self, key: str) -> bool:
+        """An AWS channel's GPU candidates decode a share of its clips in shadow against AWS (#878): on unless an
+        admin turned it off."""
+        return (self.settings().get(key) or {}).get("shadow") != "off"
+
+    def candidates(self, key: str, service: str = "") -> list[str]:
+        """An AWS channel's GPU candidates (#878): the model it would run on a GPU (its choice, else today's), and its
+        challenger when it has one."""
+        out = [self.model_for(key, service)]
+        c = self.challenger_for(key)
+        if c is not None and c[0] not in out:
+            out.append(c[0])
+        return out
+
     def promoted(self, key: str) -> dict:
         v = (self.settings().get(key) or {}).get("promoted")
         return dict(v) if isinstance(v, dict) else {}
@@ -340,6 +354,14 @@ class Choices:
                     raise ValueError(f"challenger: one of {', '.join(self.catalog)}")
                 else:
                     new["challenger"] = c
+            if "shadow" in body:
+                v = body.get("shadow")
+                if v in (None, "", "on", "default"):
+                    new.pop("shadow", None)
+                elif v != "off":
+                    raise ValueError("shadow: on or off")
+                else:
+                    new["shadow"] = "off"
             if "pct" in body:
                 v = body.get("pct")
                 if v in (None, ""):

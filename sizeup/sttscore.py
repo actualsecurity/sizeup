@@ -266,6 +266,58 @@ def drop_context(refs: dict, context=(), prompt: str = "") -> dict:
     return out
 
 
+# -- shadow evidence against AWS (#878): a channel on Amazon Transcribe has AWS as its champion, so a challenger's
+# evidence can't come from a GPU champion; its GPU candidates decode sampled clips in shadow and are scored with AWS's
+# text as the reference: identifier recall (AWS's identifiers the candidate has), agreement (1 - word error against
+# AWS), the dispatcher's trailing time (each side's match, fire dispatch), and edit-WER once a person corrected the
+# clip (each side against the correction). A recommendation only: only an admin moves a channel off AWS.
+SHADOW_PCT = 10.0             # a channel's clips sampled for its GPU candidates (on by default; the admin's off)
+MIN_N_SHADOW = 40             # samples before "matches or beats AWS"
+SHADOW_IDS_MIN = 0.9          # ... identifier recall against AWS at least this
+SHADOW_AGREE_MIN = 0.8        # ... agreement at least this
+SHADOW_MARGIN = 0.02          # ... and no worse than AWS on the time and the edits (each with 10 samples or more)
+
+
+def vs_reference(domain: str, ref: str, cand: str, checks: tuple = (None, None), context=(), prompt: str = "") -> dict:
+    """One shadow sample (numbers only): {norm, domain, ref: "aws", agree, ids (None: AWS said none), time: [aws,
+    cand] (fire dispatch, None when not read)}. An identifier that was in the context sent to the model (context,
+    prompt) never counts for it."""
+    domain = DOMAINS.get(domain, domain if domain in METRICS else "other")
+    ids = identifiers(ref) - identifiers(", ".join(str(c) for c in context or ()) + ". " + str(prompt or ""))
+    times = [time_score(c) for c in checks] if domain == "fire" else [None, None]
+    if any(t is not None for t in times):
+        times = [t if t is not None else 0.0 if getattr(checks[i], "result", "") == "no_time" else None
+                 for i, t in enumerate(times)]
+    return {"norm": NORM, "domain": domain, "ref": "aws", "agree": agreement(ref, cand),
+            "ids": round(len(ids & identifiers(cand)) / len(ids), 4) if ids else None, "time": times}
+
+
+def shadow_summary(samples: list[dict], edits: list[tuple] = ()) -> dict:
+    """A channel's shadow samples of one model: n, agreement and identifier recall (each its mean and n), the time
+    match of each side (n), edit-WER of each side against people's corrections (edits: [(aws word error, the model's)],
+    n), and the recommendation: "matches or beats AWS on N clips" or "not yet"."""
+    def mean(xs):
+        xs = [x for x in xs if isinstance(x, (int, float))]
+        return (round(sum(xs) / len(xs), 4) if xs else None), len(xs)
+    agree, n_agree = mean(s.get("agree") for s in samples)
+    ids, n_ids = mean(s.get("ids") for s in samples)
+    tpairs = [s["time"] for s in samples if isinstance(s.get("time"), list) and len(s["time"]) == 2
+              and all(isinstance(x, (int, float)) for x in s["time"])]
+    t_aws = round(sum(p[0] for p in tpairs) / len(tpairs), 4) if tpairs else None
+    t_cand = round(sum(p[1] for p in tpairs) / len(tpairs), 4) if tpairs else None
+    e_aws = round(sum(1 - e[0] for e in edits) / len(edits), 4) if edits else None
+    e_cand = round(sum(1 - e[1] for e in edits) / len(edits), 4) if edits else None
+    n = len(samples)
+    ok = (n >= MIN_N_SHADOW and ids is not None and ids >= SHADOW_IDS_MIN and agree is not None
+          and agree >= SHADOW_AGREE_MIN
+          and (len(tpairs) < 10 or t_cand >= t_aws - SHADOW_MARGIN)
+          and (len(edits) < 10 or e_cand >= e_aws - SHADOW_MARGIN))
+    return {"n": n, "agree": agree, "agree_n": n_agree, "ids": ids, "ids_n": n_ids,
+            "time": {"aws": t_aws, "model": t_cand, "n": len(tpairs)},
+            "edit": {"aws": e_aws, "model": e_cand, "n": len(edits)},
+            "verdict": f"matches or beats AWS on {n} clips" if ok else "not yet", "ok": ok}
+
+
 def sampled(clip_id: str, model: str, pct: float) -> bool:
     """This clip is one of the challenger's pct% (the same answer every time it is asked: a clip id's hash)."""
     import hashlib
