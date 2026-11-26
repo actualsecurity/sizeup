@@ -264,7 +264,7 @@ window.IntelPage = (() => {
     if (town) pl.title = "No place heard: the town of who said it (Settings > Radios)";
     else if (e.place && !e.confirmed) pl.title = "Unconfirmed";
     const said = (e.talkers || {}).line;
-    if (said) pl.append(el("div", "dim small il-said", said));
+    if (said) pl.append(el("div", "dim small", said));
     // the score and its parts
     const sc = cell("il-score", el("span", `il-sl ${e.score_level}`, `${e.score_level} ${pct(e.what)}`));
     sc.title = `${DECIDED[e.decided] || "—"}`;
