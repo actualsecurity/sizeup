@@ -91,11 +91,12 @@ window.IntelPage = (() => {
       const was = pref;
       keepPref(v && v.range);
       // open on the person's range (no date, none in the hash): read again on theirs
-      if (st.open && pref !== was && !st.hashRange && !st.q.from && !st.q.to) { st.q.range = pref; picks(); run(); timer(); }
+      // (the first page, and Refresh shown or not for it: submit())
+      if (st.open && pref !== was && !st.hashRange && !st.q.from && !st.q.to) { st.q.range = pref; submit(0, pref); }
     } });
   }
-  // the range a query reads: none with a from date (the dates are the range) or the notes' filters (the hub's own)
-  const rangeOf = (q) => (q.from || q.q || q.tag || q.review ? "" : okRange(q.range) || "24h");
+  // the range a query reads: none with a date (the dates are the range) or the notes' filters (the hub's own)
+  const rangeOf = (q) => (q.from || q.to || q.q || q.tag || q.review ? "" : okRange(q.range) || "24h");
 
   // ---- open / close (cad.js route) -------------------------------------------------------------------------------
   function open(qs) {
@@ -253,7 +254,7 @@ window.IntelPage = (() => {
 
   // ---- the rows ----------------------------------------------------------------------------------------------------
   function render(d) {
-    const sig = JSON.stringify([d.events, d.total, d.page, d.size, d.older]);
+    const sig = JSON.stringify([d.events, d.total, d.page, d.size, d.older, d.older_more]);
     st.data = d;
     if (d.upto != null && (!d.page || st.uptoQs !== mapQs())) { st.upto = d.upto; st.uptoQs = mapQs(); }
     facets(d);
@@ -277,7 +278,7 @@ window.IntelPage = (() => {
     if (st.sel != null) selLink();
     const pages = Math.max(1, Math.ceil(d.total / d.size));
     if (!trs.length) trs.push(row0("No intel events"));
-    if (d.older > 0 && d.page + 1 >= pages) trs.push(olderRow(d.older));      // the list's end: what a longer range adds
+    if (d.older > 0 && d.page + 1 >= pages) trs.push(olderRow(d.older_more ? `${d.older}+` : d.older));      // the list's end: what a longer range adds
     if (trs.length !== body.children.length || trs.some((tr, i) => body.children[i] !== tr)) body.replaceChildren(...trs);
     setText($("#il-page"), d.total > d.size ? `Page ${d.page + 1} of ${pages}` : "");
     $("#il-prev").disabled = d.page <= 0;
@@ -286,14 +287,20 @@ window.IntelPage = (() => {
   }
 
   // the range chip: what the list covers (the pick's words, or the dates), its exact span on hover
-  const day = (unix) => new Intl.DateTimeFormat("en-US", { timeZone: tz(), month: "2-digit", day: "2-digit" }).format(new Date(unix * 1000));
+  // a day (and its year, yr: a span over a new year or a long one, the notes' year)
+  const day = (unix, yr) => new Intl.DateTimeFormat("en-US", { timeZone: tz(), month: "2-digit", day: "2-digit",
+    ...(yr ? { year: "numeric" } : {}) }).format(new Date(unix * 1000));
+  const whenY = (unix, yr) => (yr ? `${day(unix, true)} ${when(unix).split(" ")[1] || ""}`.trim() : when(unix));
+  const yearOf = (unix) => new Intl.DateTimeFormat("en-US", { timeZone: tz(), year: "numeric" }).format(new Date(unix * 1000));
+  const LONG_S = 300 * 86400;
   function chip(d) {
     const c = $("#il-range");
     const r = okRange(d.range);
     const end = Math.min(d.until, d.now || d.until);
-    const text = r ? RANGES[r][1] : st.q.review === "1" ? "Every date" : `${day(d.since)} – ${day(end - 1)}`;
+    const yr = end - d.since > LONG_S || yearOf(d.since) !== yearOf(end - 1);
+    const text = r ? RANGES[r][1] : st.q.review === "1" ? "Every date" : `${day(d.since, yr)} – ${day(end - 1, yr)}`;
     setText(c, text);
-    c.title = `${when(d.since)} – ${when(end)}` + (r === "all" ? " (every event kept)" : "");
+    c.title = `${whenY(d.since, yr)} – ${whenY(end, yr)}` + (r === "all" ? " (every event kept)" : "");
   }
   function olderRow(n) {
     const tr = el("tr", "il-older");

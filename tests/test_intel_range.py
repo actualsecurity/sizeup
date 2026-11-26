@@ -94,6 +94,74 @@ def test_paging_returns_every_row_exactly_once_while_events_arrive(site):
     assert get(CadApi(cad), "/api/cad/intel/list", VAL, "upto=abc")[0] == 400
 
 
+def test_an_event_saved_during_the_first_pages_read_never_skips_a_row(site, monkeypatch):
+    """#957 review: the first page's snapshot (the newest id) is read before its count and rows, and they are of the
+    events up to it: an event saved between the snapshot and the rows is on no page of this paging, and no row of the
+    first page is pushed off it (it used to be: then skipped by the next page's snapshot)."""
+    cad, clock = site
+    clock.t = T0
+    made = [save(cad, first_at=T0 - i * 3600, last_at=T0 - i * 3600).id for i in range(70)]
+    store = cad.store
+    real = store.one
+    hooked = {"n": 0}
+
+    def one(sql, args=()):
+        r = real(sql, args)
+        if "MAX(id)" in sql and not hooked["n"]:                    # right after the snapshot: a new, newest event
+            hooked["n"] += 1
+            save(cad, first_at=T0 + 5, last_at=T0 + 5)
+        return r
+    monkeypatch.setattr(store, "one", one)
+    p0 = listing(cad, range="7d")
+    assert hooked["n"] == 1 and p0["upto"] == max(made) and p0["total"] == 70
+    got = ids_of(p0) + ids_of(listing(cad, range="7d", page=1, upto=p0["upto"]))
+    assert got == made                                              # every row exactly once, none skipped
+
+
+def test_the_older_count_is_for_the_last_page_capped_and_kept_until_the_events_change(site, monkeypatch):
+    """#957 review: the older count (a scan back to what is kept) only where the page shows it, the last page; a LIMIT
+    under its COUNT (OLDER_MAX: "1000+"); read again only when the events change or the range moves."""
+    cad, clock = site
+    clock.t = T0
+    monkeypatch.setattr(eventlog, "OLDER_MAX", 3)
+    for i in range(3):
+        save(cad, first_at=T0 - 60 * (i + 1), last_at=T0 - 60 * (i + 1))
+    for i in range(5):
+        save(cad, first_at=T0 - (2 + i) * DAY, last_at=T0 - (2 + i) * DAY)
+    reads = []
+    real = cad.store.one
+
+    def one(sql, args=()):
+        if "LIMIT 4" in sql:
+            reads.append(1)
+        return real(sql, args)
+    monkeypatch.setattr(cad.store, "one", one)
+    first = listing(cad, size=2)                                    # two pages: the first doesn't count it
+    assert first["older"] is None and not reads
+    last = listing(cad, size=2, page=1)
+    assert (last["older"], last["older_more"]) == (3, True) and len(reads) == 1      # 5 older: "3+"
+    assert listing(cad, size=2, page=1)["older"] == 3 and len(reads) == 1           # the same events: kept
+    save(cad, first_at=T0 - 9 * DAY, last_at=T0 - 9 * DAY)
+    assert listing(cad, size=2, page=1)["older_more"] is True and len(reads) == 2   # they changed: counted again
+    assert listing(cad, review=1)["older"] == 0 and len(reads) == 2                  # the review queue: never
+
+
+def test_a_to_date_alone_is_a_range_of_dates_and_upto_is_bounded(site):
+    from sizeup.cad.api import CadApi
+    from tests.test_intel_page import get
+    from tests.test_roles import VAL
+    cad, clock = site
+    clock.t = T0
+    ten = save(cad, first_at=T0 - 10 * DAY, last_at=T0 - 10 * DAY).id
+    day = __import__("datetime").datetime.fromtimestamp(T0 - 10 * DAY, __import__("sizeup.cad.store", fromlist=["TZ"]).TZ)
+    d = listing(cad, to=day.strftime("%Y-%m-%d"), range="7d")
+    assert d["range"] == "" and ten in ids_of(d)                    # the dates are the range: the chip shows them
+    api = CadApi(cad)
+    for bad in ("1" * 20, "-1", str(2 ** 63)):
+        assert get(api, "/api/cad/intel/list", VAL, f"upto={bad}")[0] == 400, bad
+    assert get(api, "/api/cad/intel/list", VAL, f"upto={2 ** 63 - 1}")[0] == 200
+
+
 def test_a_from_date_before_what_is_kept_reads_every_event_kept_across_pages(site):
     cad, clock = site
     clock.t = T0
@@ -357,6 +425,19 @@ def test_in_a_browser_the_map_is_resized_by_its_edge_and_its_pins_at_one_point_b
                                ".every((p) => b.contains([p.lon, p.lat])); }")
             assert pg.evaluate("() => IntelPage._mp.m.queryRenderedFeatures({ layers: ['il-n'] }).length") == 1
             assert pg.locator("#il-range").text_content() == "Last 24 h"
+            # a click on the point with two: one, then the other, then the first again (real MapLibre's features)
+            box = pg.locator("#il-map").bounding_box()
+            pt = pg.evaluate("() => IntelPage._mp.m.project([-73.68, 40.985])")
+            sel = []
+            for _ in range(3):
+                n = len(sel)
+                pg.mouse.click(box["x"] + pt["x"], box["y"] + pt["y"])
+                pg.wait_for_function("() => document.querySelectorAll('#il-rows tr.il-sel').length === 1")
+                pg.wait_for_timeout(350)                                        # (a double-click apart)
+                sel.append(pg.eval_on_selector("#il-rows tr.il-sel", "r => Number(r.dataset.id)"))
+                assert len(sel) == n + 1
+            stacked = {p["id"] for p in pg.evaluate("() => IntelPage._mp.data.pins") if p["lat"] == 40.985}
+            assert set(sel[:2]) == stacked and sel[2] == sel[0] and sel[0] != sel[1]
             hd = pg.locator("#il-map-h")
             h0 = pg.evaluate("() => document.getElementById('il-mapbox-in').getBoundingClientRect().height")
             assert hd.get_attribute("role") == "separator" and hd.get_attribute("aria-orientation") == "horizontal"
@@ -399,3 +480,77 @@ def test_the_map_handle_is_the_consoles_separator():
     page = (STATIC / "intel-page.js").read_text()
     assert "Panels.separator(" in page and 'orient: "horizontal"' in page
     assert "var(--il-map-h," in (STATIC / "cad.css").read_text()
+
+
+@needs_node
+def test_the_chip_shows_the_dates_for_a_to_date_and_the_year_for_a_long_span(site):
+    """#957 review: a To date alone is the dates (never "Last 24 h", no pick pressed); the notes' year-long span shows
+    its years, in the chip and its hover."""
+    cad, clock = site
+    clock.t = T0
+    save(cad, first_at=T0 - 10 * DAY, last_at=T0 - 10 * DAY)
+    day = __import__("datetime").datetime.fromtimestamp(T0 - 10 * DAY, __import__("sizeup.cad.store", fromlist=["TZ"]).TZ)
+    to = day.strftime("%Y-%m-%d")
+    d_to, d_q = listing(cad, to=to), listing(cad, q="sample")
+    script = f"""
+{MAPSTUB}
+{PAGE}
+{(STATIC / "intel-page.js").read_text()}
+let ANS = IN.to;
+global.api = () => Promise.resolve(JSON.parse(JSON.stringify(ANS)));
+const pressed = () => $("#il-picks").children.filter((b) => b.attrs["aria-pressed"] === "true").map((b) => b.dataset.range);
+(async () => {{
+  IntelPage._mp.on = false;
+  IntelPage.open("to={to}");
+  await flush();
+  const to = {{ chip: $("#il-range").textContent, picks: pressed() }};
+  ANS = IN.q;
+  IntelPage.open("q=sample");
+  await flush();
+  console.log(JSON.stringify({{ to, q: {{ chip: $("#il-range").textContent, title: $("#il-range").title, picks: pressed() }} }}));
+}})();
+"""
+    out = run_node(script, {"to": d_to, "q": d_q})
+    md = day.strftime("%m/%d")
+    assert out["to"]["chip"].endswith(md) and "Last" not in out["to"]["chip"] and out["to"]["picks"] == []
+    years = {str(day.year - 1), str(day.year)}                              # T0's 367 days back: two years
+    assert all(y in out["q"]["chip"] for y in years) and all(y in out["q"]["title"] for y in years)
+    assert out["q"]["picks"] == []
+
+
+@needs_node
+def test_the_persons_range_from_the_hub_reads_the_first_page_with_refresh_as_it_should_be(site):
+    """#957 review: the person's pick arriving from the hub (me-prefs.js) after the page opened: the first page of
+    that range, and Refresh shown when the range isn't polled (30 d)."""
+    cad, clock = site
+    clock.t = T0
+    save(cad, first_at=T0 - 60, last_at=T0 - 60)
+    d = listing(cad)
+    script = f"""
+{MAPSTUB}
+const REG = {{}};
+global.MePrefs = {{ register: (ns, o) => {{ REG[ns] = o; }}, changed() {{}} }};
+{PAGE}
+{(STATIC / "intel-page.js").read_text()}
+const reqs = [];
+global.api = (m, path) => {{ reqs.push(path); return Promise.resolve(JSON.parse(JSON.stringify(IN))); }};
+(async () => {{
+  IntelPage._mp.on = false;
+  location.hash = "#intel";
+  IntelPage.open("");
+  await flush();
+  const before = $("#il-refresh").hidden;
+  REG.intel.apply({{ range: "30d" }});
+  await flush();
+  const same = {{ refresh: $("#il-refresh").hidden, req: reqs[reqs.length - 1], hash: location.hash }};
+  location.hash = "#intel?page=2";                     // on a later page: back to the first
+  IntelPage.open("page=2");
+  await flush();
+  REG.intel.apply({{ range: "24h" }});
+  console.log(JSON.stringify({{ before, same, paged: location.hash }}));
+}})();
+"""
+    out = run_node(script, d)
+    assert out["before"] is True                                            # 24 h: polled, no Refresh
+    assert out["same"]["refresh"] is False and "range=30d" in out["same"]["req"] and "page" not in out["same"]["req"]
+    assert out["paged"] == "#intel"
