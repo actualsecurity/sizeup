@@ -18,8 +18,9 @@ scope. These say which. In memory, by the clock hour, per pack and overall ("" b
                    once per event, when it was first held (one pushed later is in both)
     late           a push source's text read late (over its pack's late_s after the clip ended, or #747's flag), once per
                    row; late_<cause> by what made it (engine.late_cause: aws, gpu, station_pool, station, catchup,
-                   outage, other); late_lost: its words reached a category at push (a pre-alert lost). Overall:
-                   engine.late_row, Settings > Station > Health
+                   outage, other); late_lost: on time it would have raised a new pre-alert. Overall only (never
+                   per pack): engine.late_row, Settings > Station > Health. The rows counted: late_state() /
+                   restore_late(), short digests under their own meta key (engine.LATE_META)
 
 These are counted as things happen; the Intel card's "24 h: events · pushed · held" line is read from the events kept
 (sizeup/intel/events.py counts()), per event as it is now, so the two can differ.
@@ -29,7 +30,7 @@ each pack last had a transcript in scope: when the engine was handed it, not whe
 row is in scope now). watching(now, names) says which packs are on and counted here; a pack is "watched since" the
 later of that and its last transcript in scope, and row() warns once that is NOTHING_S ago.
 
-state() / restore() carry the hours, the last-in-scope times, the watched-since times and the rows counted late (late_ids) across a restart or a
+state() / restore() carry the hours, the last-in-scope times and the watched-since times across a restart or a
 handover (the engine keeps them in the store's meta, written with its hourly log line: never at startup); "since
 start" begins again with each process. Only the packs named and the hours of the window are kept or taken back, and a
 kept state over STATE_MAX characters is refused (the engine starts fresh).
@@ -37,6 +38,7 @@ kept state over STATE_MAX characters is refused (the engine starts fresh).
 
 from __future__ import annotations
 
+import hashlib
 import threading
 
 from sizeup import tz
@@ -50,8 +52,9 @@ NOTHING_S = HOURS * HOUR_S             # a pack that is on with nothing in scope
 ALL = ""                               # the overall counts' name
 STATE_MAX = 64_000                     # the kept state, serialised: larger is not ours (refused)
 COUNT_MAX = 10 ** 9                    # no hour's count is larger
-LATE_IDS_MAX = 800                     # rows counted late (first_late), kept with the hours: a re-text or a re-record,
-                                       # after a restart too, never counts again (newest kept; ~25 characters each)
+LATE_IDS_MAX = 800                     # rows counted late (first_late), kept apart from the hours (late_state): a
+                                       # re-text or a re-record, after a restart too, never counts again (newest kept)
+LATE_STATE_MAX = 32_000                # late_state(), serialised: ~20 characters an entry (a 10-hex digest, a time)
 WORDS = (("considered", "considered"), ("in_scope", "in scope"), ("out_of_scope", "out of scope"), ("too_old", "too old"),
          ("repeat", "same text again"), ("quiet", "in quiet hours"), ("matched", "matched a rule"),
          ("below", "below threshold"), ("events", "events"), ("pushed", "pushed"), ("held", "held"))
@@ -70,7 +73,7 @@ class Counters:
         self.hours: dict[str, dict[int, dict[str, int]]] = {}      # name -> {clock hour: {key: n}}
         self.last_in_scope: dict[str, float] = {}                  # pack -> when the engine last had one in scope
         self.on_since: dict[str, float] = {}                       # pack -> on and counted here since (watching())
-        self.late_ids: dict[str, float] = {}                       # "pack tid" -> when it was counted late
+        self.late_ids: dict[str, int] = {}                         # late_key(pack, tid) -> when it was counted late
 
     def add(self, now: float, key: str, names=(), overall: bool = True, n: int = 1) -> None:
         """key, n more: for each pack named, and overall."""
@@ -84,11 +87,11 @@ class Counters:
 
     def first_late(self, tid: str, pack: str, now: float) -> bool:
         """This row of this pack is counted late for the first time (then remembered: never twice, within the day)."""
-        k = f"{pack} {tid}"
+        k = late_key(pack, tid)
         with self._lock:
             if k in self.late_ids:
                 return False
-            self.late_ids[k] = now
+            self.late_ids[k] = int(now)
             self._trim_late(now)
             return True
 
@@ -152,7 +155,6 @@ class Counters:
             self._trim(now)
             return {"last_in_scope": {n: at for n, at in self.last_in_scope.items() if n in keep},
                     "on_since": {n: at for n, at in self.on_since.items() if n in keep},
-                    "late_ids": dict(self.late_ids),
                     "hours": {n: {str(h): dict(b) for h, b in hs.items()} for n, hs in self.hours.items() if n in keep}}
 
     def restore(self, d, now: float, names) -> None:
@@ -174,11 +176,7 @@ class Counters:
             for n, at in times("on_since"):
                 if n in self.on_since:
                     self.on_since[n] = min(self.on_since[n], at)
-            got = d.get("late_ids")
-            for k, at in sorted(got.items(), key=lambda x: x[1] if _num(x[1]) else 0) if isinstance(got, dict) else []:
-                if isinstance(k, str) and len(k) <= 200 and _num(at) and 0 < at <= now:
-                    self.late_ids.setdefault(k, float(at))
-            self._trim_late(now)
+
             for n, hs in (d.get("hours") or {}).items() if isinstance(d.get("hours"), dict) else []:
                 if n not in keep or not isinstance(hs, dict):
                     continue
@@ -194,6 +192,30 @@ class Counters:
                         if k in KEYS and isinstance(v, int) and not isinstance(v, bool) and 0 < v <= COUNT_MAX:
                             mine[k] = max(mine.get(k, 0), v)
             self._trim(now)
+
+
+def late_key(pack: str, tid: str) -> str:
+    """A row of a pack in late_ids: a short digest (never the traffic id itself; a few characters kept a row)."""
+    return hashlib.sha1(f"{pack}|{tid}".encode()).hexdigest()[:10]
+
+
+def late_state(c: Counters, now: float) -> dict:
+    """The rows counted late, kept under their own meta key (engine.LATE_META), apart from the hours."""
+    with c._lock:
+        c._trim_late(now)
+        return {"ids": dict(c.late_ids)}
+
+
+def restore_late(c: Counters, d, now: float) -> None:
+    """What late_state() kept (only well-formed digests and times within the day), under what is here."""
+    got = d.get("ids") if isinstance(d, dict) else None
+    if not isinstance(got, dict):
+        return
+    with c._lock:
+        for k, at in sorted(got.items(), key=lambda x: x[1] if _num(x[1]) else 0):
+            if isinstance(k, str) and len(k) == 10 and _num(at) and now - HOURS * HOUR_S < at <= now:
+                c.late_ids.setdefault(k, int(at))
+        c._trim_late(now)
 
 
 def _when(at: float | None, now: float) -> str:

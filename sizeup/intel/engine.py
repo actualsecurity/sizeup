@@ -301,6 +301,7 @@ def text_sql(columns) -> str:
 SECTIONS = ("intel", "intel_packs", "intel_rules")
 SUMMARY_S = 3600.0                     # one "intel: considered N, in scope M, matched K, events E" line this often
 COUNTERS_META = "intel_counters"       # the counters' hours, kept with that line (never written at startup)
+LATE_META = "intel_late_ids"           # ... and the rows counted late (counters.late_state), under their own key
 PUSH_REFRESH_S = 60.0                  # push_sources(): recomputed at least this often (sources nothing tells us of)
 PUSH_REV_BITS = 53                     # push_rev(): exact as a JSON number in JavaScript too (2^53)
 
@@ -441,6 +442,8 @@ class IntelEngine:
         self._row_q: str | None = None        # ROW_SQL for this database (_row_sql)
         self._late_now: tuple | None = None   # feed(): the row read late, its cause (late_row)
         self._lost_now = False                # _feed_pack/_raise: the late row would have raised a pre-alert on time
+        self._again = False                   # feed(): this row was read before (a re-text): never counted late again
+        self._unkept: set[str] = set()        # _summary: the meta keys a save skipped for their size (said once)
         self._as_fresh = False                # _on_time_push: _fresh says yes
         self.unclear = 0                      # unclear transcripts (a loop, noise: sizeup/stt_quality.py): skipped
         self._seen: dict[str, int] = {}
@@ -740,6 +743,9 @@ class IntelEngine:
                 self.log(f"intel: the kept counters are {len(raw)} characters: not read, starting fresh")
                 return
             self.counters.restore(json.loads(raw), now, [p.name for p in self.packs])
+            late = self.store.meta_get(LATE_META) or "{}"
+            if len(late) <= counters_mod.LATE_STATE_MAX:
+                counters_mod.restore_late(self.counters, json.loads(late), now)
         except Exception:  # noqa: BLE001 - counters are a convenience
             self.count_errors += 1
 
@@ -751,9 +757,15 @@ class IntelEngine:
             line, self._summed_at = self.counters.hour_line(self._summed_at)
             self.log(line)
             if self.store is not None:
-                raw = json.dumps(self.counters.state(now, [p.name for p in self.packs]))
-                if len(raw) <= counters_mod.STATE_MAX:
-                    self.store.meta_put(COUNTERS_META, raw)
+                raw = json.dumps(self.counters.state(now, [p.name for p in self.packs]), separators=(",", ":"))
+                late = json.dumps(counters_mod.late_state(self.counters, now), separators=(",", ":"))
+                for key, val, cap in ((COUNTERS_META, raw, counters_mod.STATE_MAX),
+                                      (LATE_META, late, counters_mod.LATE_STATE_MAX)):
+                    if len(val) <= cap:
+                        self.store.meta_put(key, val)
+                    elif key not in self._unkept:          # never silent; one line a kind (type and size only)
+                        self._unkept.add(key)
+                        self.log(f"intel: {key} not kept: {len(val)} characters over {cap}")
         except Exception:  # noqa: BLE001 - counters are a convenience
             self.count_errors += 1
 
@@ -830,6 +842,7 @@ class IntelEngine:
             row = dict(row, aged=True)        # (never "late": that is radio_traffic.late, an outage's, late_cause)
         if scoped and policy_mod.quiet(self.policy.cfg, now, self.tz):
             self._count(now, "quiet", scoped)
+        self._again = tid in self._seen       # read before, on time or late (a re-text after the window let it go)
         self._seen[tid] = sig
         if len(self._seen) > SEEN_MAX:
             for k in list(self._seen)[: SEEN_MAX // 2]:
@@ -946,11 +959,9 @@ class IntelEngine:
                       + self._deescalate(pack, row, key, at, tid, text, ws, win.entries[tid])):
                 if not any(x is c for c in changed):
                     changed.append(x)
-        if entry.late and can_push(pack) and self.counters.first_late(tid, pack.name, self.clock()):
-            cause, lost = late_cause(row), self._lost_now     # a push source's text read late: by cause (late_row)
-            for k in ("late", f"late_{cause}", *(["late_lost"] if lost else [])):
-                self._count(self.clock(), k, [pack.name], overall=False)
-            self._late_now = (cause, lost or bool(self._late_now and self._late_now[1]))
+        if entry.late and not self._again and can_push(pack) and self.counters.first_late(tid, pack.name, self.clock()):
+            cause, lost = late_cause(row), self._lost_now     # a push source's text read late: by cause (late_row),
+            self._late_now = (cause, lost or bool(self._late_now and self._late_now[1]))      # overall only (feed)
         if hits and pack.mode != "off":
             self._count(self.clock(), "matched", [pack.name])
             if not over:
