@@ -273,7 +273,9 @@ def test_in_a_browser_it_fits_at_every_width_quiet_or_busy(header, width):
         if c["chip"]:
             assert m["chip"] and m["chip"]["r"] <= m["vw"] and m["chipText"].split()[:2] == ["9", "min"], m["chipText"]
         if width == 1920 and name == "quiet":
-            assert m["steps"] == [], m["steps"]                      # a wide screen: nothing folded
+            # a wide screen: nothing folded but, signed in, the tool buttons' labels (Run cards, Monitor: their icons,
+            # as at 1440): the Intel tab (#904) takes their room; the tabs keep their words
+            assert m["steps"] in ([], ["tools"]), m["steps"]
         shot(pg, f"header-{width}-{name}", width)
         assert pg.errors == []
         pg.context.close()

@@ -15,7 +15,8 @@
 //
 // Views (the header's tabs): Dispatch (the selected incident), Overview (every open call, cadmap.js),
 // Radio (/cad#radio?..., radio-view.js: every transmission, which replaced the Comms page), Search (/cad#search?...,
-// search-view.js: past calls and address notes, #403) and Settings.
+// search-view.js: past calls and address notes, #403), Intel (/cad#intel?..., intel-page.js: every radio intel event,
+// pushed or not, and why) and Settings.
 // /monitor is this same page as a read-only wall board (BOARD, board.js): the Overview only, larger type,
 // nothing to press but Sound and Full screen, so it never disagrees with the console.
 //
@@ -47,6 +48,7 @@ const cad = {
   radio: false,              // the Radio view is open (#radio)
   search: false,             // the Search view is open (#search, search-view.js, #403)
   pinfo: false,              // a pre-alert's More info is open (#prealert/<kind>/<id>, prealert-info.js)
+  intelv: false,             // the Intel page is open (#intel, intel-page.js)
   extra: new Map(),          // incidents opened from Records that aren't in the live state
   rec: null,                 // {iid, units, unfilled, already, card, note, checked:Set, extra:[], error}
   hand: null,                // the Dispatch card shown at the last render (PCFD dispatching: handDispatch); null: not yet
@@ -526,7 +528,7 @@ function renderClock() {              // the same clock on the console and the b
 
 function leaveView() {               // an incident or the form opens: out of Radio and Settings
   if (location.hash) history.pushState(null, "", location.pathname);
-  if (cad.radio || cad.search || cad.pinfo || !$("#settings").hidden || !$("#styleguide").hidden) window.dispatchEvent(new HashChangeEvent("hashchange"));
+  if (cad.radio || cad.search || cad.pinfo || cad.intelv || !$("#settings").hidden || !$("#styleguide").hidden) window.dispatchEvent(new HashChangeEvent("hashchange"));
 }
 function route() {                    // #radio?filters: the Radio view; #search?filters: Search; anything else: the console's own
   // #peek/<id>: a past call read-only over whatever is on screen (addr-history.js; History here's ⌘-click), the board too
@@ -541,6 +543,14 @@ function route() {                    // #radio?filters: the Radio view; #search
     cad.pinfo = pinfo;
     show($("#prealert-view"), pinfo);
     if (window.PrealertInfo) { if (pinfo) PrealertInfo.open(location.hash.slice("#prealert/".length)); else PrealertInfo.close(); }
+    if (cad.state) render();
+  }
+  // #intel?filters: every radio intel event (intel-page.js)
+  const intelv = !BOARD && /^#intel(\?|$)/.test(location.hash);
+  if (intelv !== cad.intelv || intelv) {
+    cad.intelv = intelv;
+    show($("#intel-view"), intelv);
+    if (window.IntelPage) { if (intelv) IntelPage.open(location.hash.slice("#intel".length).replace(/^\?/, "")); else IntelPage.close(); }
     if (cad.state) render();
   }
   const search = !BOARD && location.hash.startsWith("#search");
@@ -562,13 +572,14 @@ function route() {                    // #radio?filters: the Radio view; #search
 }
 function viewTab() {                 // the view on screen: overview | dispatch (the Incident tab) | radio | settings
   const settings = !$("#settings").hidden || !$("#styleguide").hidden;
-  return settings ? "settings" : cad.radio ? "radio" : cad.search ? "search" : cad.pinfo ? "prealert" : cad.mode === "none" ? "overview" : "dispatch";
+  return settings ? "settings" : cad.radio ? "radio" : cad.search ? "search" : cad.intelv ? "intel" : cad.pinfo ? "prealert"
+    : cad.mode === "none" ? "overview" : "dispatch";
 }
 function renderTabs() {
   const tab = viewTab();
   // body[data-view]: Dispatch drops the 60 Control feed and shows the rigs big (#205); the board has no tabs
   if (!BOARD && document.body.dataset.view !== tab) document.body.dataset.view = tab;
-  for (const [id, k] of [["#overview-open", "overview"], ["#dispatch-open", "dispatch"], ["#radio-open", "radio"], ["#search-open", "search"], ["#settings-open", "settings"]]) {
+  for (const [id, k] of [["#overview-open", "overview"], ["#dispatch-open", "dispatch"], ["#radio-open", "radio"], ["#search-open", "search"], ["#intel-open", "intel"], ["#settings-open", "settings"]]) {
     const b = $(id);
     b.classList.toggle("on", tab === k);
     if (tab === k) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
@@ -739,6 +750,9 @@ function renderPrealert() {
   show($("#csv-airport-alerts"), !!aa);
   // radio pre-alerts (intel.js, sizeup/intel #411): signed-in viewers only (the state carries none otherwise)
   if (window.IntelCard && !BOARD) IntelCard.column($("#q-intel"), cad.state && cad.state.intel, { ...deps, readonly: false, more: true });
+  const intelOk = !BOARD && !!(cad.state && cad.state.intel);       // the Intel page: whoever the state gives intel to
+  show($("#intel-open"), intelOk);
+  show($("#q-intel-all"), intelOk);
 }
 function queueExtra(i) {              // what the queue card shows from the call's summary (#217), for its signature
   const o = isOpen(i) ? callSummary(i.id) : null;
@@ -839,7 +853,7 @@ function selectIncident(id) {
 
 function renderDetail() {
   renderTabs();
-  if (cad.radio || cad.search || cad.pinfo) {      // Radio (radio-view.js), Search, a pre-alert's More info: the middle column
+  if (cad.radio || cad.search || cad.pinfo || cad.intelv) {      // Radio (radio-view.js), Search, More info, Intel: the middle column
     for (const id of ["#new-form", "#d-empty", "#d-body"]) show($(id), false);
     return;
   }

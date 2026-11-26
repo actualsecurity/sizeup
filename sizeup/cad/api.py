@@ -393,13 +393,17 @@ GET  /api/cad/intel/events?since=&bbox=w,s,e,n&mode=map,push&status=open|all&lim
                                           what, level, where, precision, confirmed, lat, lon, radius_m, place, town, alts,
                                           mode, status, first_at, last_at, until, traffic_ids ...}], now}. Both: anyone
                                           signed in (sourcekeys.may_see_context), 403 otherwise
+GET  /api/cad/intel/list?from=&to=&level=&category=&source=&system=&decided=&held=&status=&page=&size=
+                                          the Intel page (sizeup/intel/eventlog.py): every event at every level and
+                                          status, newest first, 50 a page, and why each didn't push; anyone signed in
 POST /api/cad/intel/<id>/dismiss          {verdict?}  a pre-alert that is nothing (dispatchers and admins)
 GET  /api/cad/prealerts/<kind>/<id>       a pre-alert's More info (kind airport | intel; /cad#prealert/<kind>/<id>): its
                                           context bundle (sizeup/context_bundle.py: why, the transmissions and their
                                           audio, before / after, the place, site history, now, the outcome). Anyone
-                                          signed in (403 otherwise, as the radio pre-alerts); 404 when there is none
-                                          (or it is a shadow / log one and the reader no admin)
-POST /api/cad/intel/<id>/feedback         {verdict: useful | noise | wrong_place | wrong_type | late | missed, category?}
+                                          signed in (403 otherwise, as the radio pre-alerts), every level (the Intel
+                                          page's rows open it); 404 when there is none
+POST /api/cad/intel/<id>/feedback         {verdict: useful | noise | wrong_place | wrong_type | late | missed | should_push,
+                                          category?}
                                           anyone signed in
 POST /api/cad/settings/intel              {action: set | pack | category | rule | local | reset, ...}: Settings > System >
                                           Intel; admins; audited
@@ -1180,6 +1184,15 @@ class CadApi:
             return _json(404, {"error": str(e)})
         return 200, json.dumps(out, separators=(",", ":"), default=str).encode(), JSON, {"Cache-Control": "no-store"}
 
+    def _operator(self, who) -> str:
+        """The signed-in reader's operator name (what their POSTs are recorded as), "" for none."""
+        if who is None or not who.email:
+            return ""
+        try:
+            return str(self.cad.settings.standing(who.email)["operator"] or "")
+        except CadError:
+            return ""
+
     def _admin(self, who) -> bool:
         """A verified admin (with nobody verified: no, the shadow and log pre-alerts stay hidden)."""
         if who is None or not who.email:
@@ -1377,10 +1390,12 @@ class CadApi:
                     hours = 24.0
                 return _json(200, {"rows": self.cad.comms.activity_rows(self.cad.clock() - hours * 3600,
                                                                         (q.get("source") or [""])[0][:80])})
-            if path in ("/api/cad/intel", "/api/cad/intel/events"):    # radio pre-alerts: a signed-in person only
+            if path in ("/api/cad/intel", "/api/cad/intel/events", "/api/cad/intel/list"):    # radio pre-alerts: signed in
                 if not sourcekeys.may_see_context(self.cad.comms.context_broadcast):
                     return _json(403, {"error": "radio pre-alerts need a sign-in (Cloudflare Access)"})
                 ia = self.cad.intel_admin
+                if path == "/api/cad/intel/list":       # the Intel page (sizeup/intel/eventlog.py)
+                    return _json(200, ia.listing(parse_qs(query), self._operator(who)))
                 return _json(200, ia.page() if path == "/api/cad/intel" else ia.events(parse_qs(query), self._admin(who)))
             if m := PREALERT_INFO.fullmatch(path):
                 return self._prealert_info(m.group(1), int(m.group(2)), who)
