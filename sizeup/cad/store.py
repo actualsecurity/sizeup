@@ -632,6 +632,8 @@ class Store:
         for col in ("quality", "unclear_text"):           # status "unclear": why, and the engine's words kept apart from the
             if tcols and col not in tcols:                # text (sizeup/stt_quality.py: a loop, noise), 2026-11-25
                 self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+        if tcols and "late" not in tcols:                 # a P25 call from while sizeup was down (#747): 1, kept on later
+            self.db.execute("ALTER TABLE radio_traffic ADD COLUMN late INTEGER NOT NULL DEFAULT 0")   # writes, 2026-11-25
         for col in ("corr_text", "corr_rules", "corr_v"):  # the text of record's vocabulary correction beside the raw
             if tcols and col not in tcols:                 # text (#879, sizeup/stt_correct.py), 2026-11-25: old rows ''
                 self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")

@@ -11,8 +11,11 @@
 //
 // A pin: the level's colour (the Intel page's level chips, its tokens), the category's glyph (KIND: fire, EMS, crash,
 // hazmat, water, rescue, alarm, police, mayday); an unconfirmed place hollow, with its radius as a ring (metres, drawn
-// by MapLibre from the zoom: no work here when the map moves). The selected pin ringed. A corrected place: a diamond in
-// FIX (never a level's colour), a dashed line from the engine's pin when it has one; a click picks its event.
+// by MapLibre from the zoom: no work here when the map moves). The selected pin ringed.
+// Pins at the same point (a street's or a corner's one point, read for several events): a pin each, one over the
+// other, the top one with a count badge (2-9, "9+"); a click there steps through them (the next one each click).
+// A corrected place: a diamond in FIX (never a level's colour), a dashed line from the engine's pin when it has one;
+// a click picks its event.
 "use strict";
 
 window.IntelMap = (() => {
@@ -84,13 +87,41 @@ window.IntelMap = (() => {
     return g.getImageData(0, 0, s, s);
   }
 
-  // a pin's feature: c its level's colour, k its glyph, h hollow (unconfirmed), r its radius (m) when hollow
-  function feature(p) {
+  // the count badge (a pin with others under it), drawn once per map: 2-9, then "9+" (BADGE_MAX)
+  const BADGE_MAX = 10;
+  function badge(n) {
+    const s = 32, c = document.createElement("canvas");
+    c.width = c.height = s;
+    const g = c.getContext("2d");
+    g.beginPath(); g.arc(s / 2, s / 2, s / 2 - 2, 0, 2 * Math.PI);
+    g.fillStyle = EDGE; g.fill();
+    g.lineWidth = 2.5; g.strokeStyle = LIGHT; g.stroke();
+    g.fillStyle = LIGHT; g.font = `700 ${n >= BADGE_MAX ? 15 : 19}px system-ui, sans-serif`;
+    g.textAlign = "center"; g.textBaseline = "middle";
+    g.fillText(n >= BADGE_MAX ? "9+" : String(n), s / 2, s / 2 + 1);
+    return g.getImageData(0, 0, s, s);
+  }
+
+  // a pin's feature: c its level's colour, k its glyph, h hollow (unconfirmed), r its radius (m) when hollow; n the
+  // pins at its point, b its badge when it is the top one of them (drawn last: the last of its point in the list)
+  function feature(p, n = 1, top = true) {
     const col = levelColors();
     const h = p.confirmed ? 0 : 1;
     return { type: "Feature", geometry: { type: "Point", coordinates: [p.lon, p.lat] },
              properties: { id: p.id, c: col[p.level] || col.map, k: `im-${kind(p.category)}${h ? "" : "-d"}`, h,
-                           r: h ? Math.max(0, Math.round(p.radius_m || 0)) : 0 } };
+                           r: h ? Math.max(0, Math.round(p.radius_m || 0)) : 0, n,
+                           b: n > 1 && top ? `im-n${Math.min(n, BADGE_MAX)}` : "" } };
+  }
+  // the pins as features, each knowing how many share its point
+  function features(pins) {
+    const at = new Map(), seen = new Map();
+    const key = (p) => `${p.lat},${p.lon}`;
+    for (const p of pins) at.set(key(p), (at.get(key(p)) || 0) + 1);
+    return pins.map((p) => {
+      const k = key(p), i = (seen.get(k) || 0) + 1;
+      seen.set(k, i);
+      return feature(p, at.get(k), i === at.get(k));
+    });
   }
   const sigOf = (pins, fixes = []) => JSON.stringify([pins.map((p) => [p.id, p.lat, p.lon, p.confirmed ? 1 : 0, p.radius_m || 0, p.level, p.category]),
     fixes.map((f) => [f.id, f.lat, f.lon])]);
@@ -132,6 +163,7 @@ window.IntelMap = (() => {
       if (!map.hasImage(`im-${k}-d`)) map.addImage(`im-${k}-d`, glyph(k, EDGE), { pixelRatio: 2 });
     }
     if (!map.hasImage("im-fix")) map.addImage("im-fix", diamond(), { pixelRatio: 2 });
+    for (let n = 2; n <= BADGE_MAX; n++) if (!map.hasImage(`im-n${n}`)) map.addImage(`im-n${n}`, badge(n), { pixelRatio: 2 });
     map.addSource(src, { type: "geojson", data: { type: "FeatureCollection", features: [] } });
     const fsrc = `${prefix}-fixes`;
     map.addSource(fsrc, { type: "geojson", data: { type: "FeatureCollection", features: [] } });
@@ -148,13 +180,23 @@ window.IntelMap = (() => {
       paint: { "icon-opacity": ["case", ["==", ["get", "h"], 1], 0.85, 1] } });
     map.addLayer({ id: `${prefix}-sel`, type: "circle", source: src, filter: ["==", ["get", "id"], -1], paint: {
       "circle-radius": 13, "circle-color": "rgba(0,0,0,0)", "circle-stroke-width": 2.5, "circle-stroke-color": LIGHT } });
+    map.addLayer({ id: `${prefix}-n`, type: "symbol", source: src, filter: ["!=", ["get", "b"], ""], layout: {
+      "icon-image": ["get", "b"], "icon-offset": [10, -10], "icon-allow-overlap": true, "icon-ignore-placement": true } });
     map.addLayer({ id: `${prefix}-fix-line`, type: "line", source: fsrc, filter: ["==", ["geometry-type"], "LineString"],
       paint: { "line-color": FIX, "line-width": 2, "line-dasharray": [2, 2], "line-opacity": 0.9 } });
     map.addLayer({ id: `${prefix}-fix`, type: "symbol", source: fsrc, filter: ["==", ["geometry-type"], "Point"], layout: {
       "icon-image": "im-fix", "icon-allow-overlap": true, "icon-ignore-placement": true } });
     const pin = `${prefix}-pin`, fix = `${prefix}-fix`;
+    let selected = null;
+    // the pins under the click, top first: the first, or the one after the selected one (a point's pins in turn);
+    // a corrected place's diamond: its event
     for (const layer of [pin, fix]) {
-      map.on("click", layer, (e) => { const f = e.features && e.features[0]; if (f && opts.pick) opts.pick(Number(f.properties.id)); });
+      map.on("click", layer, (e) => {
+        const ids = [...new Set((e.features || []).map((f) => Number(f.properties.id)))];
+        if (!ids.length || !opts.pick) return;
+        const i = ids.indexOf(selected);
+        opts.pick(ids[i < 0 ? 0 : (i + 1) % ids.length]);
+      });
       map.on("mouseenter", layer, () => { map.getCanvas().style.cursor = "pointer"; });
       map.on("mouseleave", layer, () => { map.getCanvas().style.cursor = ""; });
     }
@@ -166,11 +208,14 @@ window.IntelMap = (() => {
         sig = s;
         pts = pins || [];
         fxs = fixes || [];
-        map.getSource(src).setData({ type: "FeatureCollection", features: pts.map(feature) });
+        map.getSource(src).setData({ type: "FeatureCollection", features: features(pts) });
         map.getSource(fsrc).setData({ type: "FeatureCollection", features: fixFeatures(fxs, pts) });
         return true;
       },
-      select(id) { map.setFilter(`${prefix}-sel`, ["==", ["get", "id"], id == null ? -1 : Number(id)]); },
+      select(id) {
+        selected = id == null ? null : Number(id);
+        map.setFilter(`${prefix}-sel`, ["==", ["get", "id"], id == null ? -1 : Number(id)]);
+      },
       center(la, lo) {
         if (la == null || lo == null) return;
         map.easeTo({ center: [lo, la], zoom: Math.max(map.getZoom(), 15), duration: 400 });
@@ -184,5 +229,5 @@ window.IntelMap = (() => {
     };
   }
 
-  return { attach, kind, feature, sigOf, fixFeatures, KIND, KINDS, FIX };
+  return { attach, kind, feature, features, sigOf, fixFeatures, KIND, KINDS, BADGE_MAX, FIX };
 })();

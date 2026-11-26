@@ -16,9 +16,9 @@
     },
     "worker_py": {
       "what": "worker.py (first install; it updates itself afterwards)",
-      "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/00c2b564a06a069be05c10e0cfd854356a9a504c/deploy/stt-worker/worker.py",
-      "bytes": 176983,
-      "sha256": "DABE1646C7EA8F2FA6C2E9C7D7BE69B697B5865AAB4F090B68616015E1369F9C"
+      "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/b1a190cc27dd0777404f58d71ecd9f9afcc0c2b2/deploy/stt-worker/worker.py",
+      "bytes": 245409,
+      "sha256": "30240EDAECBF54CD0AD6BC86A582D9C41492506189752E1A56F841CB909CA3E8"
     },
     "llama_zip": {
       "what": "llama.cpp b12359, CUDA 12.4 (llama-server.exe)",
@@ -43,6 +43,12 @@
       "url": "https://huggingface.co/bartowski/google_gemma-3-12b-it-GGUF/resolve/648e3a36a77c8a9f12d86e741f9dcb9089c769c4/google_gemma-3-12b-it-Q4_K_M.gguf",
       "bytes": 7300575264,
       "sha256": "FC57F67EFA46D711C346E587CBEF7D049E95F3DF8DB2EB2271153343EF0ACC7B"
+    },
+    "qwen3_4b": {
+      "what": "Qwen3-4B-Instruct-2507 Q4_K_M GGUF (the small choice: beside every speech model on 12 GB; install.ps1 doesn't fetch it)",
+      "url": "https://huggingface.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/resolve/ae44f08e1392f39c0e474af10c3ff8355c8b6688/Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+      "bytes": 2497280736,
+      "sha256": "2FDE00CE69DD4899C70D020845E2638353015BBA0FDF161B3EB965F2BCA4464E"
     }
   }
 }

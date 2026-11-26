@@ -458,7 +458,9 @@ def test_the_page_is_in_the_nav_and_linked_from_the_60_control_column():
     assert 'show($("#intel-open"), intelOk)' in js                    # only for a viewer the state gives intel to
     page = (STATIC / "intel-page.js").read_text()
     assert int(re.search(r"POLL_MS = (\d+)", page).group(1)) >= 30000   # nothing per second
-    assert page.count("setInterval(") == 1 and "requestAnimationFrame" not in page
+    assert page.count("setInterval(") == 1
+    # a frame only while the map's edge is dragged (MapLibre's resize, as Search's map): never otherwise
+    assert page.count("requestAnimationFrame") == 1 and "else if (!sz.frame) sz.frame = requestAnimationFrame(" in page
     # polled only for the default view's newest page over a short span; else a Refresh; hidden, no timer
     assert "POLL_SPAN_S = 7 * 86400" in page and '"visibilitychange"' in page and 'p.set("poll", "1")' in page
     assert '$("#il-refresh").addEventListener' in page

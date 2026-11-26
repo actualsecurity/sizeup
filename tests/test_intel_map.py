@@ -131,8 +131,9 @@ def test_the_map_is_on_the_page_with_its_toggle_and_searchs_map():
     for m in re.finditer(r"localStorage\.\w+Item", page):
         before = page[:m.start()]
         assert before.rfind("try {") > before.rfind("} catch"), m.group(0)
-    for src in (page, (STATIC / "intel-map.js").read_text()):         # nothing per frame, no timer of its own
-        assert "requestAnimationFrame" not in src
+    # nothing per frame, no timer of its own (the page: a frame only while its map's edge is dragged)
+    assert "requestAnimationFrame" not in (STATIC / "intel-map.js").read_text()
+    assert page.count("requestAnimationFrame") == 1
     assert page.count("setInterval(") == 1                            # (the list's poll, #906)
     assert "setInterval" not in (STATIC / "intel-map.js").read_text()
 
@@ -262,7 +263,7 @@ const maps = () => calls.get.filter((p) => p.includes("map=1")).length;
     out = run_node(script, {"list": d, "map": m, "voted": voted, "more": more, "filtered": filtered, "mapf": mapf})
     ids = out["ids"]
     assert out["before"] == {"maps": 1, "made": True}
-    assert out["images"] == 2 * 10 + 1                                 # each glyph, light and dark, once; the fix's diamond
+    assert out["images"] == 2 * 10 + 9 + 1                             # each glyph, light and dark, each badge; the fix's diamond
     f = {p["id"]: p for p in out["feats"]}
     assert set(f) == {ids[0], ids[1], 999999}                          # placed only
     assert (f[ids[0]]["h"], f[ids[0]]["r"], f[ids[0]]["k"]) == (0, 0, "im-police-d")         # confirmed: filled

@@ -782,6 +782,27 @@ def test_a_stations_saves_are_coalesced(tmp_path):
     assert store.writes == 2
 
 
+def test_a_write_is_counted_only_once_its_file_is_in_place(tmp_path, monkeypatch):
+    """#967: the count is what a reader waits on before it opens the file (the test above, on the timer's thread)."""
+    import sizeup.incidents as inc_mod
+    store = inc_mod.IncidentStore(set(), path=tmp_path / "incidents.json")
+    seen, real = [], inc_mod.os
+
+    def replace(src, dst):
+        seen.append(store.writes)                                   # (the file isn't there yet)
+        real.replace(src, dst)
+
+    def refused(src, dst):
+        raise OSError("disk full")
+    # (the module's own os only: other threads in this worker keep the real os.replace)
+    monkeypatch.setattr(inc_mod, "os", types.SimpleNamespace(**{**vars(real), "replace": replace}))
+    store.save()
+    assert seen == [0] and store.writes == 1 and (tmp_path / "incidents.json").exists()
+    monkeypatch.setattr(inc_mod, "os", types.SimpleNamespace(**{**vars(real), "replace": refused}))
+    store.save()                                                    # (disk trouble: quiet, and nothing counted)
+    assert store.writes == 1
+
+
 def test_a_station_restart_keeps_what_is_on_the_hub_a_fill(tmp_path, monkeypatch, made):
     st = made({3: SAID})
     tid = fm(st, time.time() - 30)
