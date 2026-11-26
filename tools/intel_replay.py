@@ -23,6 +23,9 @@ of source_reports and incidents; no request reaches the county's application). M
 classes: {"types": {"fire": ["STRU", ...]}, "categories": {"fire_report": "fire"}}.
 --feeds: the county feeds' source ids (default: the feeds that made incidents of their own; labels.county_feeds).
 --rules: a pack file for the intel engine's loader (else data/intel/*.json); the copy's intel Settings apply to either.
+--talkers: the copy's Settings > Radios > Radio IDs name the talkers (sizeup/intel/replay.py CopyRadios: read once, in
+memory, never printed), as the live engine has them: the town prior, the console cue, who said it and its talker town
+(one more line, counts only: stated, answered, talker town, town only, the wrong-town rate against heard addresses).
 --no-place: no gazetteer (else place.Locator over data/gazetteer.sqlite, read only, as the live engine).
 --stt-delay: the lead time is printed two ways: from the start of the row that raised the event (optimistic), and
 once transcribed: that row's end + the clip's length + the rows' median speech-to-text latency (as stored), or with
@@ -217,6 +220,7 @@ def main(argv=None) -> int:
     ap.add_argument("--labels", nargs="?", const=True, default=None, metavar="MAP.json")
     ap.add_argument("--feeds", default="", help="the county feeds' source ids (default: the feeds that made incidents)")
     ap.add_argument("--no-place", action="store_true", help="no gazetteer: events without a place")
+    ap.add_argument("--talkers", action="store_true", help="the copy's Radio IDs name the talkers (counts only)")
     ap.add_argument("--stt-delay", type=float, default=None, metavar="SECONDS",
                     help="the lead once transcribed: this long after a row's end (default: the clip's length + the rows' "
                          "median speech-to-text latency)")
@@ -232,7 +236,7 @@ def main(argv=None) -> int:
         return 2
 
 
-def model_factory(kind: str | None, settings: dict, locate):
+def model_factory(kind: str | None, settings: dict, locate, radios=None):
     """The replay's engine with the local model behind it (None: the rules alone, as before)."""
     if not kind:
         return None
@@ -243,7 +247,7 @@ def model_factory(kind: str | None, settings: dict, locate):
             raise SystemExit("--model pc: no PC worker available (sizeup.cloud.infer): nothing run")
 
     def factory(sink, r, clock):
-        e = rp.core_pipeline(sink, r, clock, settings, locate)
+        e = rp.core_pipeline(sink, r, clock, settings, locate, radios)
         pack = e.pack(str(bk.defaults()["infer_pd_pack"]))
         cats = {k: v.get("label") or k for k, v in (pack.categories if pack else {}).items()}
         backend = bk.FakeBackend(bk.keyword_answer(cats)) if kind == "fake" else bk.PCWorkerBackend()
@@ -277,6 +281,7 @@ def run(a) -> int:
         try:
             rows = rp.load_rows(con, when(a.since), when(a.until), [x.strip() for x in a.services.split(",")])
             settings = rp.read_settings(con)
+            radios = rp.CopyRadios(con) if getattr(a, "talkers", False) else None
             incidents = None
             if a.labels or a.capture:
                 lo = rows[0]["start"] if rows else 0.0
@@ -286,6 +291,7 @@ def run(a) -> int:
             con.close()
     else:
         s, rows, incidents, settings = load_set(a.set)
+        radios = None
         if not a.labels:
             incidents = None
     locate = None if a.no_place or a.capture else rp.gazetteer_locator()
@@ -293,10 +299,10 @@ def run(a) -> int:
         d = capture(rows, incidents or [], a.capture, settings)
         print(f"captured {len(rows)} rows, {len(incidents or [])} labels: {d} (local only)")
         return 0
-    factory = model_factory(getattr(a, "model", None), settings, locate)
+    factory = model_factory(getattr(a, "model", None), settings, locate, radios)
     if a.diff:
-        ra = rp.replay(rows, factory, rules=a.diff[0], settings=settings, locate=locate)
-        rb = rp.replay(rows, factory, rules=a.diff[1], settings=settings, locate=locate)
+        ra = rp.replay(rows, factory, rules=a.diff[0], settings=settings, locate=locate, radios=radios)
+        rb = rp.replay(rows, factory, rules=a.diff[1], settings=settings, locate=locate, radios=radios)
         ma, mb = rp.metrics(ra, incidents, cats, a.stt_delay), rp.metrics(rb, incidents, cats, a.stt_delay)
         out = rp.diff(ra, rb, ma, mb)
         print(f"B against A over {len(rows)} rows: events +{out['events_gained']} -{out['events_lost']} · pushes "
@@ -304,9 +310,14 @@ def run(a) -> int:
         for k in out["a"]:
             print(f"  {k}: {out['a'][k]} -> {out['b'][k]}")
     else:
-        ran = rp.replay(rows, factory, rules=a.rules, settings=settings, locate=locate)
+        ran = rp.replay(rows, factory, rules=a.rules, settings=settings, locate=locate, radios=radios)
         out = rp.metrics(ran, incidents, cats, a.stt_delay)
         show(out)
+        if radios is not None:
+            t = out["talkers"] = rp.talker_metrics(ran)
+            print(f"talkers: stated {t['stated']} · answered {t['answered']} · talker town {t['town']} (town only "
+                  f"{t['town_only']}) · heard town {t['heard_town']}, talker town differs {t['wrong_town']} "
+                  f"({pct(t['wrong_rate'])})")
         if (m := show_model(ran)) is not None:
             out["model"] = m
         if a.pin and s is not None:

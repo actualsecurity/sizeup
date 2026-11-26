@@ -53,7 +53,7 @@ window.IntelCard = (() => {
   }
   function where(e) {
     if (!e.place || e.precision === "none") return "Location not heard";
-    return e.confirmed ? e.place : `${e.place} ?`;
+    return e.confirmed || e.precision === "town" ? e.place : `${e.place} ?`;     // (town: "<Town> (talker)")
   }
   function card(e, deps, list) {
     const li = el("li", `aa aa-${e.level}`);
@@ -65,8 +65,10 @@ window.IntelCard = (() => {
     head.append(el("b", "aa-title", [e.pack_label, e.label, e.town].filter(Boolean).join(" · ")), conf);
     li.append(head);
     const loc = el("div", "aa-loc" + (e.confirmed ? "" : " approx"), where(e));
-    if (!e.confirmed && e.place) loc.title = ["Unconfirmed", e.basis, ...(e.alts || []).map((a) => `or ${a.label}`)].filter(Boolean).join("\n");
+    if (e.precision === "town") loc.title = "No place heard: the town of who said it (Settings > Radios)";
+    else if (!e.confirmed && e.place) loc.title = ["Unconfirmed", e.basis, ...(e.alts || []).map((a) => `or ${a.label}`)].filter(Boolean).join("\n");
     li.append(loc);
+    if (e.talkers && e.talkers.line) li.append(el("div", "aa-src", e.talkers.line));    // who said it, who answered
     if (e.suggested) {
       const sug = el("div", "aa-loc approx", `model: ${e.suggested}?`);
       sug.title = "The model's reading, not the rules': on the map only, never pushed";

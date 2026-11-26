@@ -1210,11 +1210,13 @@ class HubApp(App):
         # police rules (sizeup/intel/backing.py): PC worker ok / rules only
         lk = lambda: getattr(self.cad.intel, "listen", None)      # noqa: E731
         bk = lambda: getattr(self.cad.intel, "backing", None)     # noqa: E731
-        # (then the push sources' text read late, by cause: engine.late_row)
+        # (then the push sources' text read late, by cause: engine.late_row; the radio IDs heard in two towns:
+        # engine.talker_row)
 
         def intel_rows():
             c = self.cad.intel.counts()
-            return ([r for r in (self.pushes.intel_health(), lk() and lk().health()) if r] + c["packs"] + ([c["late"]] if c["late"] else [])
+            return ([r for r in (self.pushes.intel_health(), lk() and lk().health()) if r] + c["packs"]
+                    + [r for r in (c["late"], c.get("talkers")) if r]
                     + ([bk().health_row()] if bk() is not None else []))
         self.health.intel = intel_rows
         # MTA TrainTime or its fallback (#362); Tapout's phone pre-alert (not configured until an admin sets the topic)

@@ -155,6 +155,7 @@ window.PrealertInfo = (() => {
           : w.matched_from ? `Phrases found again with the ${w.matched_from}` + (w.rules_changed ? `; the rules changed since it fired (rule set ${w.ruleset_hash})` : "")
           : "Words heard that the rules matched"],
       ["Score", score, d.event.kind === "intel" ? "WHAT: how sure it is this kind of call; WHERE: how sure the place is" : "The pre-alert's own confidence (not the aircraft match's)"],
+      ["Talkers", (w.talkers || {}).line || "", "Who said it and the dispatch that answered (Settings > Radios labels); their town is the place when none was heard"],
       ["Mode", s.mode || "", "off · shadow (counted only) · log · map · push"],
       ["Model", s.suggested ? `${s.suggested}?` : "", "The model's reading, not the rules': never pushed"],
       ["Local model", localModel(w.model), w.model ? `${w.model.backend}: ${w.model.model || "?"} ${w.model.model_version || ""}`.trim()

@@ -61,7 +61,7 @@ from datetime import datetime, timedelta
 from sizeup.cad.store import TZ, CadError
 from sizeup.geo.normalize import EXPAND, STREET_TYPES
 from sizeup.intel.events import MODEL_PREFIXES, VOTE_ROWS, decided_of
-from sizeup.intel.model import lowest, mode_rank
+from sizeup.intel.model import lowest, mode_rank, shown_place, talkers_of
 
 PAGE_SIZE = 50
 PAGE_MAX = 100
@@ -157,7 +157,7 @@ LEVEL_SQL = {"push": "pushed_at IS NOT NULL", "held": "pushed_at IS NULL AND mod
              "shadow": "pushed_at IS NULL AND mode = 'shadow'"}
 COLS = ("id, pack, category, source_key, system, first_at, last_at, status, what_score, level, rules, precision, "
         "label_full, town, confirmed, mode, pushed_at, suppressed, near_incident, incident_id, traffic_ids, lat, lon, "
-        "radius_m")
+        "radius_m, stated_by, stated_town, answered_by, answered_town, talker_town")
 PLACED = "COALESCE(precision, 'none') != 'none' AND lat IS NOT NULL AND lon IS NOT NULL"   # (the listing's columns; row()'s placed)
 
 
@@ -651,7 +651,10 @@ class IntelLog:
                 "lat": r["lat"] if placed else None, "lon": r["lon"] if placed else None,
                 "radius_m": (r["radius_m"] or 0) if placed else 0, "held": held,
                 "pushed_at": r["pushed_at"], "n": n, "votes": votes, "mine": mine,
-                "near_incident": r["near_incident"], "incident_id": r["incident_id"]}
+                "near_incident": r["near_incident"], "incident_id": r["incident_id"],
+                # no place heard: the town of who said it ("Port Chester (talker)", precision town; model.py), and
+                # who said it and who answered (engine.py _talkers)
+                **{k: v for k, v in shown_place(r).items() if k != "basis"}, "talkers": talkers_of(r)}
 
     @staticmethod
     def _detail(key: str, r: dict) -> str:

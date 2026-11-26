@@ -17,6 +17,9 @@ long as its notes (a year: KEEP_NOTES_S), so the notes stay usable for tuning.
 intel_events.decided: rules | model | both | "" (decided_of: who raised it, the Intel page's filter), written by save();
 added by ALTER TABLE at start, and a row without it (an older release's) filled in then.
 
+intel_events.stated_by, stated_town, answered_by, answered_town, talker_town: who said it and its town (model.py,
+engine.py _talkers), added by ALTER TABLE at start to an older table.
+
 intel_events.delivery: the last push's outcome at ntfy, JSON {ok, at, status, id} or {ok: false, at, status, error} ("":
 none yet), written by delivered() from the notify thread (sizeup/notify.py Notifier.send's done). Not an Event field:
 the engine's save() never touches it, so a save racing the notify thread can't undo it. Added to an older table by
@@ -78,6 +81,9 @@ CREATE TABLE IF NOT EXISTS intel_events (
   note TEXT NOT NULL DEFAULT '',
   near_incident INTEGER, incident_id INTEGER,
   fd TEXT NOT NULL DEFAULT '',                       -- the FD at a fire-related event's place: on_scene | dispatched | there | cleared
+  stated_by TEXT NOT NULL DEFAULT '', stated_town TEXT NOT NULL DEFAULT '',     -- who said it (engine.py _talkers)
+  answered_by TEXT NOT NULL DEFAULT '', answered_town TEXT NOT NULL DEFAULT '',
+  talker_town TEXT NOT NULL DEFAULT '',
   updated_at REAL NOT NULL,
   dismissed_by TEXT NOT NULL DEFAULT '',
   delivery TEXT NOT NULL DEFAULT ''                  -- the last push's outcome at ntfy (JSON; the module doc)
@@ -126,6 +132,7 @@ CREATE INDEX IF NOT EXISTS intel_note_audit_note ON intel_note_audit(note_id);
 """
 
 JSON_COLS = ("rules", "alts", "traffic_ids")
+TALKER_COLS = ("stated_by", "stated_town", "answered_by", "answered_town", "talker_town")     # added to an older table
 EVENT_COLS = tuple(f.name for f in fields(Event) if f.name != "id")
 
 
@@ -206,6 +213,9 @@ class SqlEvents:
                 store.db.execute("ALTER TABLE intel_events ADD COLUMN delivery TEXT NOT NULL DEFAULT ''")
             if "fd" not in cols:                    # a table from before the FD check (engine._fire)
                 store.db.execute("ALTER TABLE intel_events ADD COLUMN fd TEXT NOT NULL DEFAULT ''")
+            for c in TALKER_COLS:                   # ... and from before who said it (engine._talkers)
+                if c not in cols:
+                    store.db.execute(f"ALTER TABLE intel_events ADD COLUMN {c} TEXT NOT NULL DEFAULT ''")
             fcols = {r[1] for r in store.db.execute("PRAGMA table_info(intel_feedback)")}
             if "note_id" not in fcols:              # a note's tags as verdicts (sizeup/intel/notes.py)
                 store.db.execute("ALTER TABLE intel_feedback ADD COLUMN note_id INTEGER")
