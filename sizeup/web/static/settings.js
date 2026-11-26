@@ -429,7 +429,8 @@ function sRoute() {
     if (S_RADIO_TABS.some(([k]) => k === m[2])) S.rtab = m[2];
     if (!S_RADIO_TABS.some(([k]) => k === S.rtab)) S.rtab = "receivers";
     store("sizeup.cad.settings.radios", S.rtab);
-    const q = S.rtab === "signal" ? (location.hash.match(/\?[^#]*$/) || [""])[0] : "";   // a Health hint's ?s=FG1&at=
+    // a Health hint's ?s=FG1&at= (Signal); an "SDR gone" alert's ?sdr=<serial> (Receivers: that dongle's row)
+    const q = S.rtab === "signal" || S.rtab === "receivers" ? (location.hash.match(/\?[^#]*$/) || [""])[0] : "";
     if (location.hash !== `#settings/radios/${S.rtab}${q}`) history.replaceState(null, "", `#settings/radios/${S.rtab}${q}`);
   }
   if (!S_SECTIONS.some(([k]) => k === sec)) {
@@ -529,6 +530,24 @@ function sRadios() {
   if (em && S.rtab === "emergencies" && S.data.radio_emergencies) em.replaceChildren(sEmergencies(S.data.radio_emergencies));
   const th = $("#settings-signal-thresholds");
   if (th && S.rtab === "signal" && S.data.signal_metrics && sIsHub()) th.replaceChildren(sSignalThresholds(S.data.signal_metrics));
+  const sw = $("#settings-dongle-swap");
+  if (sw && S.rtab === "receivers" && S.data.dongle_swap && sIsHub()) sw.replaceChildren(sDongleSwap(S.data.dongle_swap));
+}
+
+// A gone dongle's jobs to a new one (sizeup/radio/replace.py): offered on Health and the console, moved by a person's
+// "Use it". This switch (off by default) lets Fire/EMS 15 and paging move by themselves (sizeup/cloud/dongleswap.py).
+function sDongleSwap(d) {
+  const v = d.auto_critical;
+  const card = sCard(sCardHead("New dongles", v.value ? "auto" : "ask", sHelp("A dongle gone 60 s whose jobs a new, free "
+    + "dongle can run (tuner, range, sample rate): Health and the console ask \"Use it?\". Auto: Fire/EMS 15 and paging "
+    + "move by themselves when exactly one new dongle fits; a push says what moved. Audited.")));
+  card.id = "s-dongle-swap";
+  const [lab, cb] = sCheck(v.label, v.value, "Off: always asked");
+  cb.disabled = !canDo("admin");
+  cb.addEventListener("change", () => sPost("dongle_swap", { action: "set", key: "auto_critical", value: cb.checked },
+    `${v.label}: ${cb.checked ? "on" : "off"}`));
+  card.append(lab);
+  return card;
 }
 
 // Settings > Radios > Signal (#606, sizeup/cloud/metricsinsight.py): the suggested squelch's margin and the shift

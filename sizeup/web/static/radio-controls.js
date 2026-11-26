@@ -385,6 +385,16 @@ window.RadioControls = (() => {
         ad.disabled = st.adsbBusy;
       }
     }
+    // an "SDR gone" alert's link (#settings/radios/receivers?sdr=<serial>): that dongle's row, marked, once per link
+    const want = (location.hash.match(/[?&]sdr=([^&#]*)/) || [])[1];
+    if (want && st.sdrFocus !== want) {
+      const r = [...box.children].find((x) => x.dataset.sdr === decodeURIComponent(want));
+      if (r) {
+        st.sdrFocus = want;
+        r.classList.add("focus");
+        r.scrollIntoView({ block: "center" });
+      }
+    }
   }
 
   // ---- the reception test (#410, #436) ------------------------------------------------------------------------------

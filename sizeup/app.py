@@ -95,6 +95,7 @@ from sizeup.radio import reception
 from sizeup.radio import systems as p25_systems
 from sizeup.radio import groups as antenna
 from sizeup.radio import usbreset
+from sizeup.radio import replace as swap
 from sizeup.radio.page import Page, PageHold, assemble, decode_tones, page_from_dict, recording_note
 from sizeup.radio.tap import LiveTap
 from sizeup.cad import tonelist
@@ -153,6 +154,7 @@ OFF_MODE = "Off"           # the shared dongle released for other programs (size
 SWITCH_PAUSE_S = 1.0       # between stopping one program on the shared dongle and starting the next
 SDR_WATCH_S = 3.0          # [radio] auto_assign: how often the plugged-in dongles are looked at
 SDR_FAILING_RESTARTS = 3   # an auto job that has restarted this often and is down: logged once, left as is
+SEEN_WRITE_S = 600.0       # sdr_seen.json (each dongle's last sight): written this often when nothing else changed
 SDR_SETTLE_S = 60.0        # after startup, Off dongles wait this long for the ones that had jobs (USB attach order)
 GROUP_HOLD_S = 10.0        # antenna groups: a dongle gone (or back) this long before its job moves (or comes back)
 GROUP_RETRY_S = 60.0       # ... a stand-in that didn't start: that dongle isn't tried again for this long
@@ -596,6 +598,16 @@ class App:
         self._products_file = self._mode_file.with_name("sdr_products.json") if self._mode_file else None
         self._products: dict[str, str] = self._load_products()
         self._ambiguous: dict[str, str] = {}  # serials two or more plugged-in dongles share now -> why (logged once)
+        # A dongle swapped for a new one (sizeup/radio/replace.py): each serial's last sight (sdr_seen.json: when, its
+        # USB port, the tuner rtl_fm reported), the dongles with jobs gone in this run (monotonic, since), the offers
+        # put off ("Not now": until, monotonic), and the offers made at the last look
+        self._seen_file = self._mode_file.with_name("sdr_seen.json") if self._mode_file else None
+        self._last_seen: dict[str, dict] = self._load_seen()
+        self._seen_flushed = 0.0
+        self._absent: dict[str, float] = {}
+        self._swap_later: dict[str, float] = {}
+        self.swap_offers: list[dict] = []
+        self._swap_said: set[tuple[str, str]] = set()
         if self.recorder is not None:         # a config.json source naming a shared serial is left out (recorder.py)
             self.recorder.ambiguous_fn = lambda serial: self._ambiguity(serial, sdr_lookup.devices(cfg.rtl_fm, fresh=True))
         if not self.shared:                   # one dongle per channel: its serial is checked before each start too
@@ -618,6 +630,7 @@ class App:
                     if cfg.p25_dir else None)
         # PCFD's own dispatch console: incidents, units, run cards (state/cad.sqlite).
         self.cad = Cad.from_config(cfg, geocoder=self._geocode_text if self.gaz is not None else None, log=log)
+        self.cad.dongle_swaps_source = lambda: self.swap_offers     # a gone dongle's jobs offered to a new one
         if getattr(cfg, "streetview_key_bad", False):   # never the value (static/streetview.js: off)
             log("street view off: SIZEUP_GOOGLE_MAPS_KEY / [streetview] google_key is not a Google API key")
         _mark("cad")
@@ -5092,6 +5105,254 @@ class App:
                         "unowned": [j for j in g.jobs if j not in owns and j not in g.parked], "conflicts": conf})
         return out
 
+    # -- a dongle swapped for a new one (sizeup/radio/replace.py) ----------------------------------------------------
+
+    def _load_seen(self) -> dict[str, dict]:
+        try:
+            d = json.loads(self._seen_file.read_text()) if self._seen_file else {}
+        except (OSError, ValueError):
+            d = {}
+        return {str(k): v for k, v in d.items() if isinstance(v, dict)} if isinstance(d, dict) else {}
+
+    def _note_seen(self, devs: list[tuple[int, str, str]]) -> None:
+        """Each dongle plugged in now (its serial on one dongle): seen now, on its USB port, with the tuner rtl_fm
+        reported on it. sdr_seen.json is written when one of those changes, else every SEEN_WRITE_S."""
+        now = time.time()
+        tuners = {sd: r.tuner for r in self.receivers
+                  if (sd := getattr(r.device, "serial", None)) and getattr(r, "tuner", "")}
+        ports = usbreset.ports()
+        dup = sdr_lookup.duplicates(devs)
+        changed = False
+        for _i, p, sd in devs:
+            if not sd or sd in dup:
+                continue
+            was = self._last_seen.get(sd) or {}
+            row = dict(was, at=round(now, 1))
+            if p:
+                row["product"] = p
+            if ports.get(sd):
+                row["port"] = ports[sd]
+            if t := swap.tuner_name(tuners.get(sd, "")):
+                row["tuner"] = t
+            changed = changed or {k: v for k, v in row.items() if k != "at"} != {k: v for k, v in was.items() if k != "at"}
+            self._last_seen[sd] = row
+        if self._seen_file is None or not (changed or now - self._seen_flushed >= SEEN_WRITE_S):
+            return
+        self._seen_flushed = now
+        try:
+            tmp = self._seen_file.with_name(f".{self._seen_file.name}.{os.getpid()}.{threading.get_ident()}")
+            tmp.write_text(json.dumps(self._last_seen, indent=1, sort_keys=True))
+            os.replace(tmp, self._seen_file)
+        except OSError:
+            pass
+
+    def _swap_caps(self, sd: str, product: str = "") -> dict:
+        """A dongle's {"caps", "port", "bus"} for the pairing, from what is known of it now or at its last sight."""
+        was = self._last_seen.get(sd) or {}
+        port = str(was.get("port") or "")
+        return {"serial": sd, "caps": swap.caps(product or self._products.get(sd) or str(was.get("product") or ""),
+                                                str(was.get("tuner") or "")),
+                "port": port, "bus": port.split("-", 1)[0] if port else ""}
+
+    def _job_needs(self, job: str) -> dict:
+        """What a job needs of a dongle (swap.needs): its frequencies and the sample rate it takes."""
+        if job in self._sys_jobs:
+            rt, k = self._sys_jobs[job]
+            src = next((x for x in rt.system.sources if x.index == k), None)
+            return swap.needs([src.center / 1e6] if src else [], src.rate if src else 0.0)
+        if job == P25_MODE:
+            try:
+                srcs = json.loads((Path(self.cfg.p25_recorder_dir) / "config.json").read_text()).get("sources") or []
+                x = srcs[0] if srcs and isinstance(srcs[0], dict) else {}
+                return swap.needs([float(x["center"]) / 1e6] if x.get("center") else [], float(x.get("rate") or 0.0))
+            except (OSError, ValueError, TypeError, KeyError):
+                return swap.needs()
+        c = next((c for c in self.cfg.channels if c.label == job), None)
+        if c is None:
+            return swap.needs()
+        fs = [c.mhz] + [a[0] for a in c.also]
+        span = (max(fs) - min(fs)) * 1e6 if len(fs) > 1 and self.cfg.airband_multichannel else 0.0
+        return swap.needs(fs, span * 1.25 if span else 0.0)
+
+    def _critical_job(self, job: str) -> bool:
+        """Auto-replace's jobs (Settings, off by default): the county's trunk-recorder and paging, nothing else."""
+        return job == P25_MODE or self._kind.get(job) == "paging"
+
+    def _gone_jobs(self) -> dict[str, tuple[str, str]]:
+        """The dongles that have a job of their own or are in an antenna group: {serial: (own job, group name)}."""
+        out = {sd: (self._own_of(sd), "") for sd in set(self.assign) | set(self._own)
+               if self._own_of(sd) != OFF_MODE}
+        for g in self.groups:
+            for sd in g.sdrs:
+                out[sd] = (self._own_of(sd), g.name)
+        return {sd: v for sd, v in out.items() if not self._sdr_ignored(sd)}
+
+    def missing_rows(self) -> list[dict]:
+        """sdr()["missing"]: every dongle with a job or in a group that isn't plugged in, as replace_offers() last
+        looked: {serial, name, jobs, group, absent_s (this run), last_seen (wall clock, None: never seen)}."""
+        mono = time.monotonic()
+        rows = []
+        for sd, (job, g) in sorted(self._gone_jobs().items()):
+            since = self._absent.get(sd)
+            if since is None:
+                continue
+            at = (self._last_seen.get(sd) or {}).get("at")
+            rows.append({"serial": sd, "name": self.sdr_name(sd), "jobs": [job] if job != OFF_MODE else [], "group": g,
+                         "absent_s": round(mono - since),
+                         "last_seen": at if isinstance(at, (int, float)) and not isinstance(at, bool) else None})
+        return rows
+
+    def _new_free(self, sd: str, devs, lent) -> bool:
+        """A dongle plugged in that a gone one's jobs may be offered to: no job, in no group, not switched Off by a
+        person (handed to another app, or parked), not another app's, not out for no audio, not lent, one serial."""
+        return (self.assign.get(sd, OFF_MODE) == OFF_MODE and sd not in self._own
+                and antenna.of_sdr(self.groups, sd) is None and self.set_by.get(sd) != "person"
+                and not claims.other(sd) and sd not in self._noaudio and not self.reception.holds(sd)
+                and not (lent and lent[0] == sd) and not self._ambiguity(sd, devs))
+
+    def replace_offers(self, devs=None) -> list[dict]:
+        """sdr()["replace"]: each dongle with a job (or in an antenna group) gone swap.MISSING_S, with the new dongles
+        that fit its jobs (swap.pair): {missing, name, jobs, group, absent_s, pick (the new one the pairing decided, or
+        "": ask), choices: [{serial, name, product, tuner}], only (exactly one fits: what auto-replace may take),
+        critical (the county's or paging), why: {new serial: why it doesn't fit}}. Never one put off with Not now."""
+        if not self.shared:
+            return []
+        devs = sdr_lookup.devices(self.cfg.rtl_fm) if devs is None else devs
+        self._note_seen(devs)
+        mono = time.monotonic()
+        here = {s for _i, _p, s in devs if s}
+        gone = self._gone_jobs()
+        for sd in [s for s in self._absent if s in here or s not in gone]:
+            del self._absent[sd]
+        for sd in gone:
+            if sd not in here:
+                self._absent.setdefault(sd, mono)
+        products = {s: p for _i, p, s in devs if s}
+        lent = self.reception.lent()
+        new = [self._swap_caps(s, products.get(s, "")) for s in self._plugged()
+               if self._new_free(s, devs, lent)]
+        missing = []
+        for sd, (job, g) in sorted(gone.items()):
+            if mono - self._absent.get(sd, mono) < swap.MISSING_S or self._swap_later.get(sd, 0.0) > mono:
+                continue
+            if job == OFF_MODE and not g:
+                continue
+            missing.append(dict(self._swap_caps(sd), job=job, group=g,
+                                needs=[self._job_needs(job)] if job != OFF_MODE else []))
+        offers = swap.pair(missing, new) if missing and new else []
+        by = {m["serial"]: m for m in missing}
+        names = {n["serial"]: n for n in new}
+        out = []
+        for o in offers:
+            m = by[o["missing"]]
+            out.append({"missing": m["serial"], "name": self.sdr_name(m["serial"]),
+                        "jobs": [m["job"]] if m["job"] != OFF_MODE else [], "group": m["group"],
+                        "absent_s": round(mono - self._absent.get(m["serial"], mono)), "pick": o["pick"], "only": o["only"],
+                        "critical": m["job"] != OFF_MODE and self._critical_job(m["job"]),
+                        "choices": [{"serial": n, "name": self.sdr_name(n), "product": names[n]["caps"]["product"],
+                                     "tuner": names[n]["caps"]["tuner"]} for n in o["choices"]],
+                        "why": o["why"]})
+            for n in o["choices"]:
+                if (m["serial"], n) not in self._swap_said:
+                    self._swap_said.add((m["serial"], n))
+                    log(f"sdr: new SDR {self._sdr_tag(n)} fits {self._sdr_tag(m['serial'])}'s "
+                        f"{m['job'] if m['job'] != OFF_MODE else 'place in ' + m['group']} (gone "
+                        f"{mono - self._absent.get(m['serial'], mono):.0f} s): offered, never moved by itself")
+        self.swap_offers = out
+        return out
+
+    def replace_sdr(self, missing: str, new: str = "", action: str = "use", by: str = "person") -> str | None:
+        """POST /api/sdr-replace {missing, new?, action} (admins; the hub sends it here as a job, and its auto-replace
+        with by "auto"): action "use": the gone dongle's job (and its place in its antenna group) goes to the new one,
+        which must be one replace_offers() offers it now; "not_now": its offer isn't made again for swap.NOT_NOW_S;
+        "drop": a gone dongle taken out of its antenna group. None, or why not."""
+        if not self.shared:
+            return "each channel has its own dongle: nothing to replace"
+        missing, new, action = str(missing or "").strip(), str(new or "").strip(), str(action or "use")
+        by = "auto" if by == "auto" else "person"
+        if action == "not_now":
+            self._swap_later[missing] = time.monotonic() + swap.NOT_NOW_S
+            log(f"sdr: SDR {self._sdr_tag(missing)}'s new dongle: not now (asked again in "
+                f"{swap.NOT_NOW_S / 3600:.0f} h)")
+            return None
+        if action == "drop":
+            return self._drop_gone(missing)
+        if action != "use":
+            return "action: use, not_now or drop"
+        with self._mode_lock:
+            offer = next((o for o in self.replace_offers() if o["missing"] == missing), None)
+            if offer is None:
+                return f"SDR {self.sdr_name(missing)}: no new dongle offered for it now"
+            if new not in [c["serial"] for c in offer["choices"]]:
+                return f"SDR {self.sdr_name(new)} doesn't fit SDR {self.sdr_name(missing)}'s jobs (or isn't free)"
+            job = self._own_of(missing)
+            g = antenna.of_sdr(self.groups, missing)
+            if g is not None:
+                gs = [dataclasses.replace(x, sdrs=tuple(new if s == missing else s for s in x.sdrs)) if x is g else x
+                      for x in self.groups]
+                if self._groups_file is not None:
+                    try:
+                        antenna.save(self._groups_file, gs)
+                    except OSError as e:
+                        return f"couldn't keep the groups: {e}"
+                self.groups = gs
+                self._forget_gone(missing)
+                err = (self._set_group_mode(antenna.of_sdr(gs, new), job, new, by) if job != OFF_MODE else None)
+                if job == OFF_MODE:
+                    self._save_modes()
+                    self._groups_reconcile()
+            else:
+                err = self.set_mode(job, new, by=by, confirm=True)
+                if err is None:
+                    self._forget_gone(missing)
+                    self._save_modes()
+            self._absent.pop(missing, None)
+        log(f"sdr: SDR {self._sdr_tag(missing)} replaced by SDR {self._sdr_tag(new)} ({by}): "
+            + (job if job != OFF_MODE else "no job") + (f", group {g.name}" if g is not None else "")
+            + (f": {err}" if err else ""))
+        return err
+
+    def _forget_gone(self, sd: str) -> None:
+        """A gone dongle replaced or taken out of its group: no job, no stand-in, nothing of the group's left on it."""
+        cur = self.assign.get(sd, OFF_MODE)
+        if cur != OFF_MODE and self._program_on(cur) == sd:
+            self._stop_mode(cur, f"SDR {self.sdr_name(sd)} replaced", sd)
+        self._own.pop(sd, None)
+        if sd in self._listed:
+            self.assign[sd] = OFF_MODE          # (listed in [radio] sdrs: its row stays, Off)
+        else:
+            self.assign.pop(sd, None)
+        self.set_by.pop(sd, None)
+        for d in (self._gseen, self._gusable, self._gflap, self._gfail):
+            d.pop(sd, None)
+        self._swap_said = {x for x in self._swap_said if x[0] != sd}
+
+    def _drop_gone(self, sd: str) -> str | None:
+        """Health's "missing 1 d: remove from group?": a gone dongle out of its antenna group (its job with it)."""
+        with self._mode_lock:
+            g = antenna.of_sdr(self.groups, sd)
+            if g is None:
+                return f"SDR {self.sdr_name(sd)} is in no antenna group"
+            if sd in {s for _i, _p, s in sdr_lookup.devices(self.cfg.rtl_fm)}:
+                return f"SDR {self.sdr_name(sd)} is plugged in: change its group in Receivers"
+            if len(g.sdrs) == 1:
+                return f"SDR {self.sdr_name(sd)} is {g.name}'s only dongle: delete the group in Receivers"
+            gs = [dataclasses.replace(x, sdrs=tuple(s for s in x.sdrs if s != sd)) if x is g else x for x in self.groups]
+            if self._groups_file is not None:
+                try:
+                    antenna.save(self._groups_file, gs)
+                except OSError as e:
+                    return f"couldn't keep the groups: {e}"
+            job = self._own_of(sd)
+            self.groups = gs
+            self._forget_gone(sd)
+            self._absent.pop(sd, None)
+            self._save_modes()
+            self._groups_reconcile()
+        log(f"sdr: SDR {self._sdr_tag(sd)} taken out of antenna group {g.name} (gone)"
+            + (f": {job} has no dongle of its own there now" if job != OFF_MODE else ""))
+        return None
+
     def _start_watch(self) -> None:
         """The sdr-watch thread, once: auto-assign's, and the antenna groups' (also with auto_assign off)."""
         if not self._watching:
@@ -5431,6 +5692,8 @@ class App:
                           **self._group_row(sd)}
                          for sd in rows],
                 "groups": self.groups_state(),       # antenna groups: [] when there are none
+                # a dongle swapped for a new one: the new dongles that fit a gone one's jobs, and every gone dongle
+                "replace": self.replace_offers(devs), "missing": self.missing_rows(),
                 "no_park": [m for m in self.modes if m != OFF_MODE and not self._parkable(m)],   # (#637) the editor
                 "groups_problem": self._groups_problem}   # the groups file dropped (unreadable): "" when fine
 
@@ -6070,7 +6333,7 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
                        role=cfg.cloud_role, roads=app.roads, gis=app.gis,
                        trains=app.trains, weather=app.weather, station_health=getattr(app, "health", None),
                        aircraft=app.aircraft, roadwork=app.roadwork, set_adsb=app.set_adsb_receiver,
-                       set_groups=app.set_antenna_groups,
+                       set_groups=app.set_antenna_groups, replace_sdr=app.replace_sdr,
                        vessels=app.vessels,
                        airband_ab=app.airband_ab if cfg.cloud_role != "hub" else None,
                        reception=(app.reception_post, app.reception_sample, app.reception_state),

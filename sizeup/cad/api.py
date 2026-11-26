@@ -339,6 +339,9 @@ POST /api/cad/settings/atc                {action: set {key: identify | map | vo
                                           talking on HPN Tower (#252, sizeup/atc_talkers.py) on the rows / the map; admins
 POST /api/cad/settings/hydrant_display    {action: set {key: assume_c, value: true | false} | reset {key}}: untested hydrants
                                           drawn as an assumed Class C, marked "C*" (#840, sizeup/cad/hydrants.py); admins
+POST /api/cad/settings/dongle_swap        {action: set {key: auto_critical, value: true | false} | reset {key}}: a gone
+                                          dongle's Fire/EMS 15 or paging job moved by itself to the one new dongle that
+                                          fits (sizeup/cloud/dongleswap.py; off by default); admins
 POST /api/cad/settings/hub_errors         {action: set {key: on | per_signature | total, value} | reset {key}}: the hub's own
                                           error spikes to the status topic (#285, sizeup/errwatch.py); admins
 POST /api/cad/settings/department_units  {action: set {key: a feed's department entry code, value: the department,
@@ -519,7 +522,7 @@ WRITES = (
     (DVR_PIN, "dispatch"),                                                  # keep recording a camera (#277)
     (DVR_CLIP, "dispatch"),                                                 # save a camera clip on an event (#323)
     (ATTACHMENT, "admin"),                                                  # delete an event's attachment (#323)
-    (re.compile(r"/api/(?:talkgroup|talkgroup-group|mode|retranscribe|adsb-receiver|antenna-groups)"), "admin"),   # the station's radios (server.py)
+    (re.compile(r"/api/(?:talkgroup|talkgroup-group|mode|retranscribe|adsb-receiver|antenna-groups|sdr-replace)"), "admin"),   # the station's radios (server.py)
 )
 READ_ACTIONS = {("/api/cad/settings/dispatch", "preview")}                  # the wording on a sample event
 MAY = {"admin": ("read", "dispatch", "admin"), "dispatcher": ("read", "dispatch"), "viewer": ("read",)}
@@ -842,6 +845,13 @@ DOES = (
            else "") + ")"
         for g in b.get("groups") or [] if isinstance(g, dict)), 300) or "none")
         + (f" · confirmed: {_clip(b.get('confirm'), 300)}" if isinstance(b.get("confirm"), str) and b.get("confirm") else ""), "")),
+    (re.compile(r"/api/sdr-replace"), lambda m, b, o, c: (
+        (f"Used new SDR {_clip(b.get('new'), 32)} for gone SDR {_clip(b.get('missing'), 32)}"
+         + (f" ({_clip(', '.join(map(str, o.get('jobs') or [])), 60)})" if isinstance(o, dict) and o.get("jobs") else "")
+         + (f", group {_clip(o.get('group'), 24)}" if isinstance(o, dict) and o.get("group") else ""))
+        if b.get("action", "use") == "use"
+        else f"Took gone SDR {_clip(b.get('missing'), 32)} out of its antenna group" if b.get("action") == "drop"
+        else f"New dongle for gone SDR {_clip(b.get('missing'), 32)}: not now", "")),
     (re.compile(r"/api/retranscribe"), lambda m, b, o, c: ("Retranscribe: every recording" if b.get("all")
                                                            else f"Retranscribe: {len(b.get('ids') or [])} recordings", "")),
 )
