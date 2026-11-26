@@ -197,26 +197,22 @@ def console_calls(txs: list[dict], event_tids: set, talker_of, gap_s: float, spa
     """The calls on a source that are no intel event (the admin's "other calls in the window", #961): its labelled
     dispatch consoles' transmissions (talkers.py: talker_of(row) -> Talker | None) in none of the events, grouped while
     each is within gap_s of the one before, a group never longer than span_s (CALL_SPAN_S), never more than two
-    consoles' (one pair talking), never across an event's own row. Left out: the answer to an event's row (the very
-    next transmission, no other radio between, within gap_s, from a console of the row's own department, or any console
-    when the row is a unit's: that event's conversation), and a group none of whose transmissions says CALL_WORDS words
-    (a "yeah", a stray "therefore"). An event's own later console traffic may show (the lesser error: the hover says
-    "console tx"). txs: [{id, start, system, radio_id, words?}] by air time. [{at, n, consoles: [labels]}], oldest
-    first. No labels: none (as before)."""
+    consoles' (one pair talking), never across an event's own row. Left out: an event row's own conversation (_own:
+    its console's transmissions just before and after it with only units' between, its answer), and a group none of
+    whose transmissions says CALL_WORDS words (a "yeah", a stray "therefore"). An event's own later console traffic
+    may show (the lesser error: the hover says "console tx"). txs: [{id, start, system, radio_id, words?}] by air
+    time. [{at, n, consoles: [labels]}], oldest first. No labels: none (as before)."""
     span = CALL_SPAN_S if span_s is None else float(span_s)
+    tks = [talker_of(t) for t in txs]
+    own = _own(txs, tks, event_tids, gap_s)
     groups: list[dict] = []
     g = None
-    prev = None                                   # (air time, its talker, an event's row)
-    for t in txs:
-        at, tk = float(t["start"]), talker_of(t)
-        console = tk is not None and tk.console
+    for i, t in enumerate(txs):
+        at, tk = float(t["start"]), tks[i]
         if str(t["id"]) in event_tids:
-            g, prev = None, (at, tk, True)
+            g = None
             continue
-        answer = (console and prev is not None and prev[2] and at - prev[0] <= gap_s
-                  and (prev[1] is None or not prev[1].console or _dept(prev[1]) == _dept(tk)))
-        prev = (at, tk, False)
-        if not console or answer:
+        if tk is None or not tk.console or i in own:
             continue
         dept = _dept(tk)
         if (g is None or at - g["end"] > gap_s or at - g["at"] > span
@@ -230,6 +226,31 @@ def console_calls(txs: list[dict], event_tids: set, talker_of, gap_s: float, spa
         if tk.label not in g["consoles"]:
             g["consoles"].append(tk.label)
     return [{"at": g["at"], "n": g["n"], "consoles": g["consoles"]} for g in groups if g["words"] >= CALL_WORDS]
+
+
+def _own(txs: list[dict], tks: list, event_tids: set, gap_s: float) -> set[int]:
+    """The indexes of the event rows' own console traffic: for a console's event row, the same department's console
+    transmissions within gap_s before and after it with only units (no other console) between; for a unit's row, the
+    first console after it within gap_s with only units between (its answer)."""
+    out: set[int] = set()
+    for i, t in enumerate(txs):
+        if str(t["id"]) not in event_tids:
+            continue
+        at, mine = float(t["start"]), tks[i]
+        dept = _dept(mine) if mine is not None and mine.console else None
+        for step in ((-1, 1) if dept else (1,)):
+            j = i + step
+            while 0 <= j < len(txs) and abs(float(txs[j]["start"]) - at) <= gap_s and str(txs[j]["id"]) not in event_tids:
+                tk = tks[j]
+                if tk is not None and tk.console:
+                    if dept is None:
+                        out.add(j)
+                        break
+                    if _dept(tk) != dept:
+                        break
+                    out.add(j)
+                j += step
+    return out
 
 
 def _dept(tk) -> str:
