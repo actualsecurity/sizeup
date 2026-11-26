@@ -83,7 +83,8 @@ GET  /api/cad/aircraft         aircraft near HPN, shortfinal's PCFD-focused pict
                                the page only while the layer is on; ETag (304), never in the state push
 GET  /api/cad/perf             the hub only: where its CPU goes (sizeup/perf.py, #425): by thread group over the last
                                minute, 5 min, 1 h and since the start, memory, threads, open files, the collector,
-                               path families, the hourly trend; admins only (ADMIN_READS)
+                               path families, the hourly trend, the clips' lag from their air start by source kind
+                               (lag, #986); admins only (ADMIN_READS)
 POST /api/cad/perf/profile {"seconds": 30, "hz": 25}  admins: sample every thread's stack for seconds (1-120), weighted
                                by the CPU each used; the answer is the summary and the folded stacks. One at a time
                                (409), a rest after each (429). Over PROFILE_WAIT_S (or "wait": false): 202 at once
@@ -1006,6 +1007,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 with sourcekeys.request_context(self.who):
                     hidden = clip_context is not None and not sourcekeys.may_see_context() and clip_context(cid)
                 wav = None if hidden else clip(cid)     # another system's audio: a signed-in person only (#419)
+                if wav and perf is not None:            # (#986: its first fetch, from its air start)
+                    perf.lag.fetched(cid)
                 return self._send(200, wav, "audio/wav") if wav else self._send(404, b"no such clip\n", "text/plain")
             if path == "/healthz":
                 if health_fn is not None:
