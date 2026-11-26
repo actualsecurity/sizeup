@@ -3,15 +3,19 @@
 and after, against the admins' corrections (#491).
 
     python tools/stt_correct_eval.py --jsonl stt-corrections.jsonl --terms DIR [--channels all|307,tg:303,...]
-                                     [--towns "Town A,Town B"] [--all] [--json OUT]
+                                     [--towns "Town A,Town B"] [--config HUB.toml] [--all] [--json OUT]
     python tools/stt_correct_eval.py --db RESTORED.sqlite --terms DIR ...
     python tools/stt_correct_eval.py --db RESTORED.sqlite --terms DIR --unlabelled 100000     (no references: below)
 
 --terms: a folder of the private term lists (<name>.txt or terms/<name>.txt, as [stt] terms_dir; never in the repo).
 The references: #428's JSONL (the admin export, Settings > Radios) or a locally restored cad.sqlite opened read-only;
-only the corrections an admin marked "reference" unless --all. Each clip's channel picks its list (stt_terms.own_for;
-a county talkgroup or an FM channel the fire list) and its switch (--channels; default the corrector's own,
-stt_correct.DEFAULT_CHANNELS). Like tools/stt_eval.py it prints aggregates only (counts and rates): never a transcript,
+only the corrections an admin marked "reference" unless --all. Each clip's channel picks its list by the hub's own rule
+(stt_terms.own_for_channel, as App._own_for_key: a county talkgroup by its group's service, a county incident talkgroup
+with none known fire; another system's talkgroup by its service; an FM channel by its kind): --config, the hub's config
+(its channels' kinds, the talkgroups file's groups, the incident talkgroups), else the row's own group and service (the
+radio log keeps both; #428's JSONL has no group: the service the hub tagged) and an FM channel as a fire traffic channel
+(an airband row: airband). Its switch: --channels
+(default the corrector's own, stt_correct.DEFAULT_CHANNELS). Like tools/stt_eval.py it prints aggregates only (counts and rates): never a transcript,
 a term or an id, and --json refuses a path inside the repo.
 
 Metrics, per engine family (aws, whisper) and all together, before -> after:
@@ -40,7 +44,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from sizeup import stt_correct, stt_terms, stt_time  # noqa: E402
+from sizeup import sourcekeys, stt_correct, stt_terms, stt_time  # noqa: E402
+from sizeup.config import Config  # noqa: E402
 
 WORD = re.compile(r"[a-z0-9]+")
 MAX_ID_WORDS = 8
@@ -110,7 +115,8 @@ def from_jsonl(path: Path, all_rows: bool, every: bool = False) -> list[dict]:
             if not every and (not c or not c.get("text") or (not all_rows and not c.get("checked"))):
                 continue
             out.append({"ref": (c or {}).get("text"), "end": d.get("end"), "asr": d.get("asr") or {},
-                        "key": stt_correct.row_key(d)})
+                        "key": stt_correct.row_key(d), "group": d.get("group"), "service": d.get("service") or "",
+                        "air": str(d.get("system") or "") == "airband"})
     return out
 
 
@@ -118,8 +124,8 @@ def from_db_unlabelled(path: Path, limit: int) -> list[dict]:
     from sizeup.intel.replay import open_ro
     con = open_ro(path)
     try:
-        rows = con.execute("SELECT channel, talkgroup, system, end, text, model, alt_text, alt_model FROM radio_traffic "
-                           "WHERE text != '' ORDER BY start DESC LIMIT ?", (int(limit),)).fetchall()
+        rows = con.execute('SELECT channel, talkgroup, system, "group", service, end, text, model, alt_text, alt_model '
+                           "FROM radio_traffic WHERE text != '' ORDER BY start DESC LIMIT ?", (int(limit),)).fetchall()
     finally:
         con.close()
     out = []
@@ -127,7 +133,7 @@ def from_db_unlabelled(path: Path, limit: int) -> list[dict]:
         asr = {r["model"] or "unknown": r["text"]}
         if r["alt_text"]:
             asr[r["alt_model"] or "alt"] = r["alt_text"]
-        out.append({"ref": None, "end": r["end"], "asr": asr, "key": stt_correct.row_key(dict(r))})
+        out.append({"ref": None, "end": r["end"], "asr": asr, **_where(dict(r))})
     return out
 
 
@@ -135,7 +141,8 @@ def from_db(path: Path, all_rows: bool) -> list[dict]:
     from sizeup.intel.replay import open_ro
     con = open_ro(path)                            # never the live database; never written
     try:
-        rows = con.execute("SELECT t.channel, t.talkgroup, t.system, t.end, t.text, t.model, t.alt_text, t.alt_model, "
+        rows = con.execute('SELECT t.channel, t.talkgroup, t.system, t."group", t.service, t.end, t.text, t.model, '
+                           "t.alt_text, t.alt_model, "
                            "c.corrected FROM stt_corrections c JOIN radio_traffic t ON t.id = c.traffic_id"
                            + ("" if all_rows else " WHERE c.reference = 1") + " ORDER BY t.start").fetchall()
     finally:
@@ -147,8 +154,52 @@ def from_db(path: Path, all_rows: bool) -> list[dict]:
             asr[r["model"] or "unknown"] = r["text"] or ""
         if r["alt_text"] or r["alt_model"]:
             asr[r["alt_model"] or "alt"] = r["alt_text"] or ""
-        out.append({"ref": r["corrected"], "end": r["end"], "asr": asr, "key": stt_correct.row_key(dict(r))})
+        out.append({"ref": r["corrected"], "end": r["end"], "asr": asr, **_where(dict(r))})
     return out
+
+
+def _where(r: dict) -> dict:
+    """A radio log row's channel key and what picks its list (its group, its service, airband or not)."""
+    return {"key": stt_correct.row_key(r), "group": r.get("group"), "service": r.get("service") or "",
+            "air": str(r.get("system") or "") == "airband"}
+
+
+class Channels:
+    """Which list a clip's channel takes, by the hub's rule (stt_terms.own_for_channel, as App._own_for_key). cfg: the
+    hub's Config (its channels' kinds, the talkgroups file's groups, the incident talkgroups), else each row's own."""
+
+    def __init__(self, cfg=None):
+        self.cfg = cfg
+        self.kinds = {c.label: c.kind for c in cfg.channels} if cfg is not None else {}
+        self.incident = cfg.p25_incident_talkgroups if cfg is not None else Config.p25_incident_talkgroups
+        self.owns: dict[str, str | None] = {}
+
+    def own_of(self, r: dict) -> str | None:
+        key = str(r.get("key") or "")
+        if key in self.owns:
+            return self.owns[key]
+        group, listed, kind = None, "", ""
+        got = sourcekeys.parse(key) if key.startswith(("tg:", "p25:")) else None
+        if got is not None:
+            system, tg = got
+            if system == sourcekeys.COUNTY:
+                group = ((self.cfg.p25_tg_info.get(tg) or {}).get("group") or "") if self.cfg is not None \
+                    else r.get("group")
+                if group is None and r.get("service"):  # (#428's JSONL has no group: the service the hub tagged)
+                    own = self.owns[key] = stt_terms.own_for(sourcekeys.p25(system, tg), str(r["service"]))
+                    return own
+            else:
+                listed = str(r.get("service") or "")
+        elif self.cfg is not None:
+            kind = self.kinds.get(key, "")
+        else:
+            kind = "airband" if r.get("air") else "traffic"
+        own = self.owns[key] = stt_terms.own_for_channel(key, kind, group, listed, self.incident)
+        return own
+
+    def own_for_key(self, key: str) -> str | None:
+        """The Corrector's: what own_of() found for the key."""
+        return self.owns.get(key)
 
 
 # -- scoring -----------------------------------------------------------------------------------------------------------------
@@ -170,6 +221,7 @@ def _pct(a: int, b: int) -> float | None:
 def evaluate(refs: list[dict], corrector: stt_correct.Corrector, ids_of) -> dict:
     from tools.stt_eval import wer as norm_wer
     acc: dict[str, dict] = {}
+    corrector.warm({r["key"] for r in refs})         # (the matchers built first: correct() never builds one)
     for r in refs:
         ids = ids_of(r["key"])
         if ids is None:
@@ -245,6 +297,8 @@ def main(argv=None) -> int:
     ap.add_argument("--channels", default="", help="all, or channel keys / county talkgroups, comma-separated "
                                                    "(default: the corrector's own)")
     ap.add_argument("--towns", default="", help="the towns whose streets it may correct into, comma-separated")
+    ap.add_argument("--config", type=Path, help="the hub's config (its channels' kinds, talkgroup groups): each "
+                                                "channel's list as the hub picks it")
     ap.add_argument("--all", action="store_true", help="every correction, not only the references")
     ap.add_argument("--json", type=Path, help="also write the aggregates here (outside the repo)")
     ap.add_argument("--unlabelled", type=int, default=0, metavar="N",
@@ -260,12 +314,13 @@ def main(argv=None) -> int:
     chans = stt_correct.DEFAULT_CHANNELS if not a.channels.strip() or every else stt_correct.channels_of(
         [int(c) if c.strip().isdigit() else c.strip() for c in a.channels.split(",") if c.strip()])
 
-    def own(key: str) -> str | None:
-        got = stt_terms.own_for(key)
-        if got is None and (key.startswith("tg:") or not key.startswith("p25:")):
-            got = "county_fire"                     # (a county talkgroup or an FM channel: the fire list)
-        return got
-
+    if a.config:
+        from sizeup.config import load
+        cfg = load(a.config)
+    else:
+        cfg = None
+    where = Channels(cfg)
+    own = where.own_for_key
     towns = tuple(t.strip() for t in a.towns.split(",") if t.strip()) or stt_correct.DEFAULT_TOWNS
     corrector = stt_correct.Corrector(lambda: store, own, chans, towns, log=lambda m: None)
     if every:
@@ -288,6 +343,8 @@ def main(argv=None) -> int:
             {**r, "ref": None} for r in from_jsonl(a.jsonl, True, every=True)]
     else:
         refs = from_db(a.db, a.all) if a.db else from_jsonl(a.jsonl, a.all)
+    for r in refs:
+        where.own_of(r)
     out = evaluate(refs, corrector, ids_of)
     show(out)
     if out_path:

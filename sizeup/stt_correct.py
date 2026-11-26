@@ -3,10 +3,12 @@ whisper's text, matched against the channel's own private term list (sizeup/stt_
 
     correct(text)   Vocab.correct: the corrected text and each correction (heard -> to, rule, score). Three rules:
         unit        spoken numbers in a unit ID or call sign folded to its digits, only into a term of the list:
-                    "engine ninety seven" -> "Engine 97", "ninety control" -> "90 Control" (made-up units). The
-                    number words must be the whole run ("engine ninety seven one" is never "Engine 97 one"), or what is
+                    "Engine ninety seven" -> "Engine 97", "ninety Control" -> "90 Control" (made-up units). The
+                    number words must be the whole run ("Engine ninety seven one" is never "Engine 97 one"), or what is
                     left of it the trailing time. The prefix is one of UNIT_PREFIX ("Fire N" and "Battalion N" are
-                    never folded, as transcribe.NO_RESPELL)
+                    never folded, as transcribe.NO_RESPELL), capitalised by the engine (a call sign: its word after the
+                    number) unless another unit ID or call sign of the list is in the same text; never with a
+                    measure after it ("a ladder thirty one feet up", MEASURE)
         ten         a ten-code of the list said in words, at a clause end: "ten four." -> "10-4."
         spell /     1-4 words matched to a name of the shared places list (a street, a town, a landmark: a term in
         sound       Title Case with no digit), by spelling (edit distance of the letters, spaces and doubled letters folded)
@@ -18,8 +20,13 @@ whisper's text, matched against the channel's own private term list (sizeup/stt_
                       and sound >= SOUND_FLOOR, on at least MIN_CHARS letters;
                     - word for word alike when as many words were heard as the name has (WORD_FLOOR, WORD_SOUND_FLOOR:
                       "coming" is never "Common"), the same first letter unless spelled FIRST_FLOOR alike, and never a
-                      word the name has that wasn't heard; one heard word only as the engine capitalised it, never a
-                      sentence's first; no one-letter word; a possessive kept as heard;
+                      word the name has that wasn't heard; a heard word ending in an "s" the name's word hasn't is no
+                      match ("Brenlows Park" is never "Brenlow Park");
+                    - a word of the span capitalised by the engine, never only a sentence's first word ("brenlow park
+                      is closed." is left alone); one heard word: never a unit's prefix, a STOP word or a COMMON word,
+                      nor one followed by a number ("Marine 1", "a Marine veteran" are never "Marina");
+                    - no one-letter word; a possessive kept as heard (the last word's put back after the name; one
+                      anywhere else in the span: no correction);
                     - no other term of the whole list (any town's street, any phrase) scores within MARGIN of it (a
                       close rival: ambiguous, left alone);
                     - its term is in scope: a street listed under "streets: <town>, ..." only for the towns in
@@ -29,10 +36,17 @@ whisper's text, matched against the channel's own private term list (sizeup/stt_
                     - the words are not already a term of the list (exact, ignoring case and punctuation).
                     The channel's own list only (stt_terms.own_for: never another channel's).
 
-Kept: the raw transcript is never changed. Each run records the corrected text beside it (sizeup/sttruns.py: corr_text,
-corr_n, corr_rules [[heard, to, rule, score], ...], corr_v RULE@<list@version>). The Radio rows show the corrected text
-(with the status words put back after it, sizeup/cad/statushints.py) and the heard words on hover ("fixed_text" /
-"fixes"), computed when read like the status repair, so a stored row is never rewritten.
+Kept: the raw transcript is never changed. The text of record is corrected as it lands, before its radio log row is
+written (App._transcribed_one, App._retext): radio_traffic.corr_text / corr_rules / corr_v beside the raw text, so the
+status parser, the Radio rows (with the status words put back after it, sizeup/cad/statushints.py; the heard words on
+hover: "fixed_text" / "fixes"), the search index and the context bundle all read COALESCE(NULLIF(corr_text, ''), text),
+and a row shows the correction it was stored with (a later list never rewrites it). Each engine's run records its own
+beside it too (sizeup/sttruns.py: corr_text, corr_n, corr_rules [[heard, to, rule, score], ...], corr_v).
+corr_v: RULE@<list>@<version>@<sections and towns>; PENDING ("pending"): on there, but the list's matcher was not built
+yet (the raw text kept as it is); "": off there (or no list).
+
+The matchers (Corrector.warm): built only on the term store's thread after a read, one at a time behind a lock, never on
+a transcript's or a reader's thread; the one before is used until the new one is ready.
 
 Which channels (Corrector.applies): Config.stt_correct_channels ([stt] correct_channels), by default the county's Fire/EMS
 dispatch talkgroups (stt_time.DEFAULT_CHANNELS): off elsewhere until measured (tools/stt_correct_eval.py). Never logs a
@@ -66,7 +80,7 @@ FIRST_FLOOR = 0.9              # a name whose first letter differs from what was
 MARGIN = 0.08                  # a rival this close: ambiguous (sizeup/cad/fuzzy.py SNAP_MARGIN)
 W_SPELL = 0.6
 MAX_RUN = 6                    # number words in a unit ID's run at most
-CACHE = 4096                   # corrected texts kept per channel list (the Radio rows' reads)
+CACHE = 4096                   # corrected texts kept (the text of record and each engine's run: the same text)
 
 TOKEN = re.compile(r"[A-Za-z][A-Za-z']*|\d+(?:[-:.,]\d+)*")
 WORD = re.compile(r"[A-Za-z][A-Za-z']*")
@@ -103,7 +117,29 @@ STOP = {"a", "an", "the", "and", "or", "but", "of", "on", "in", "at", "to", "for
         "left", "right", "street", "avenue", "road", "lane", "drive", "place",
         "unit", "units", "engine", "ladder", "control", "command", "responding", "location", "scene", "route",
         "bound", "northbound", "southbound", "eastbound", "westbound", "inbound", "outbound"}
+# One heard word that is an everyday word the engines capitalise (a rank, a service, a title, a place word, a day, a
+# month): never a one-word name ("a Marine veteran" is never "a Marina veteran").
+COMMON = {"marine", "marines", "navy", "army", "corps", "guard", "veteran", "veterans", "police", "sheriff", "trooper",
+          "troopers", "state", "county", "village", "town", "city", "federal", "national", "captain", "lieutenant",
+          "sergeant", "officer", "deputy", "chief", "doctor", "mister", "miss", "sister", "father", "mother", "hospital",
+          "medical", "center", "central", "station", "school", "church", "park", "parkway", "mall", "plaza", "market",
+          "bridge", "river", "harbor", "harbour", "beach", "lake", "hill", "hills", "island", "point", "port", "manor",
+          "heights", "gardens", "garden", "court", "main", "north", "south", "east", "west", "northern", "southern",
+          "eastern", "western", "upper", "lower", "general", "memorial", "union", "liberty", "freedom", "victory",
+          "american", "english", "spanish", "christmas", "easter", "monday", "tuesday", "wednesday", "thursday",
+          "friday", "saturday", "sunday", "january", "february", "march", "april", "june", "july", "august",
+          "september", "october", "november", "december", "fireground", "mayday", "medevac", "copy", "roger",
+          "affirmative", "negative", "headquarters", "company", "battalion", "division", "sector", "tower"}
+# A measure after a number run: never a unit's ("a ladder thirty one feet up", "Engine two car accident")
+MEASURE = {"feet", "foot", "ft", "inch", "inches", "yard", "yards", "mile", "miles", "meter", "meters", "metres",
+           "years", "year", "yrs", "months", "month", "weeks", "week", "days", "hours", "hour", "hrs", "minutes",
+           "minute", "mins", "seconds", "degrees", "percent", "pounds", "lbs", "gallons", "gallon", "psi", "story",
+           "stories", "floors", "times", "dollars", "am", "pm", "o'clock", "oclock", "people", "patients", "kids",
+           "victims", "vehicles", "cars"}
+MEASURE_PAIRS = {("car", "accident"), ("car", "crash"), ("car", "fire"), ("vehicle", "accident"), ("vehicle", "fire")}
 SENTENCE_END = re.compile(r"[.!?]\s*$")
+PENDING = "pending"            # corr_v: on there, the list's matcher not built yet (the raw text kept as it is)
+RULES_MAX = 20000              # corr_rules (JSON) at most: whole corrections dropped from the end, never cut mid-string
 
 
 @dataclass(frozen=True)
@@ -119,16 +155,63 @@ class Fix:
 class Result:
     text: str                  # the corrected text ("" when nothing changed)
     fixes: tuple[Fix, ...]
-    v: str                     # RULE@<list>@<version>
+    v: str                     # RULE@<list>@<version>@<sections and towns>, or PENDING
 
     @property
     def n(self) -> int:
         return len(self.fixes)
 
-    def rules_json(self) -> str:
-        """stt_runs.corr_rules: [[heard, to, rule, score], ...] ("" for none)."""
-        return json.dumps([[f.heard, f.to, f.rule, f.score] for f in self.fixes], separators=(",", ":"),
-                          ensure_ascii=False) if self.fixes else ""
+    @property
+    def pending(self) -> bool:
+        return self.v == PENDING
+
+    def rules_json(self, limit: int = RULES_MAX) -> str:
+        """corr_rules: [[heard, to, rule, score], ...] ("" for none), at most limit characters: whole corrections
+        dropped from the end, so it is always valid JSON."""
+        items = [[f.heard, f.to, f.rule, f.score] for f in self.fixes]
+        while items:
+            out = json.dumps(items, separators=(",", ":"), ensure_ascii=False)
+            if len(out) <= limit:
+                return out
+            items = items[:max(0, min(len(items) - 1, len(items) * limit // len(out)))]
+        return ""
+
+    def columns(self) -> dict:
+        """radio_traffic's corr_text, corr_rules and corr_v (sizeup/cad/comms.py)."""
+        return {"corr_text": self.text, "corr_rules": self.rules_json(), "corr_v": self.v}
+
+
+NO_CORR = {"corr_text": "", "corr_rules": "", "corr_v": ""}      # off there (or no list)
+
+
+def columns(res: "Result | None") -> dict:
+    """A correction's radio_traffic columns, NO_CORR for none."""
+    return res.columns() if res is not None else dict(NO_CORR)
+
+
+def shown_text(r) -> str:
+    """A radio log row's text as shown and as read: COALESCE(NULLIF(corr_text, ''), text) (a row from before #879, or
+    a dict without the column: its text)."""
+    try:
+        corr = r["corr_text"]
+    except (KeyError, IndexError):
+        corr = ""
+    return corr or r["text"] or ""
+
+
+def stored_fixes(r) -> list[dict]:
+    """A radio log row's stored corrections, as the hover shows them: [{heard, to, rule}] ([] none, or unreadable)."""
+    try:
+        raw = r["corr_rules"]
+    except (KeyError, IndexError):
+        return []
+    if not raw:
+        return []
+    try:
+        return [{"heard": str(x[0]), "to": str(x[1]), "rule": str(x[2])} for x in json.loads(raw)
+                if isinstance(x, list) and len(x) >= 3]
+    except (ValueError, TypeError):
+        return []
 
 
 @dataclass(frozen=True)
@@ -191,6 +274,15 @@ def _word_ok(a: str, b: str) -> bool:
     WORD_SOUND_FLOOR alike ("coming" is never "common", "Harmon" never "Harrison")."""
     sp = _sim(a, b)
     return sp >= WORD_FLOOR or (sp >= WORD_SOUND_FLOOR and _dm(a)[0] == _dm(b)[0])
+
+
+def _plural_off(heard: list[str], name: list[str]) -> bool:
+    """A heard word ending in an "s" (no apostrophe) where its name's word has none: a plural or another name, never
+    the singular one ("Brenlows Park" is not "Brenlow Park"). Word for word when as many; else the last words."""
+    if not heard or not name:
+        return False
+    pairs = zip(heard, name) if len(heard) == len(name) else [(heard[-1], name[-1])]
+    return any(a.endswith("s") and not b.endswith("s") for a, b in pairs)
 
 
 def _spaced(words) -> str:
@@ -331,6 +423,7 @@ class Vocab:
         gf = fold("".join(name))
         spaced = _spaced(name)
         parts = [fold(x) for x in name]
+        heard_words = spaced.split()
         codes = _codes(name)
         if not gf or not codes:
             return None
@@ -349,6 +442,8 @@ class Vocab:
             if spell < SPELL_FLOOR or (gf[0] != e.fold[0] and spell < FIRST_FLOOR):
                 continue
             if e.words == len(name) and not all(_word_ok(a, b) for a, b in zip(parts, e.parts)):
+                continue
+            if _plural_off(heard_words, e.spaced.split()):
                 continue
             sound = max(_sim(a, b) for a in codes for b in e.codes)
             score = round(W_SPELL * spell + (1 - W_SPELL) * sound, 3)
@@ -382,6 +477,8 @@ class Vocab:
             return text, []
         joined = [bool(JOIN.fullmatch(text[toks[i].end:toks[i + 1].start])) for i in range(len(toks) - 1)]
         guard = [(r.start, r.end) for r in stt_time.readings(text)]      # the trailing time: stt_time's
+        # a sentence's first word (its capital is the sentence's, not the engine's word that it is a name)
+        first = [i == 0 or bool(SENTENCE_END.search(text[toks[i - 1].end:toks[i].start])) for i in range(len(toks))]
 
         def guarded(i: int, j: int) -> bool:
             s, e = toks[i].start, toks[j - 1].end
@@ -389,6 +486,10 @@ class Vocab:
 
         def run_ok(i: int, j: int) -> bool:
             return all(joined[i:j - 1])
+
+        def capital(i: int, j: int) -> bool:
+            """A word of toks[i:j] the engine capitalised, other than a sentence's first."""
+            return any(toks[k].text[0].isupper() and not first[k] for k in range(i, j))
 
         keys = [stt_terms.term_key(t.text) for t in toks]
         exact: list[tuple[int, int]] = []
@@ -409,8 +510,13 @@ class Vocab:
                     continue
                 if any(len(t.low) < 2 for t in span):
                     continue
-                if n == 1 and (not span[0].text[0].isupper() or i == 0 or SENTENCE_END.search(text[:span[0].start])):
-                    continue                             # one word: only a name as the engine wrote one
+                if not capital(i, j):                    # only a name as the engine wrote one
+                    continue
+                if any(t.low.endswith("'s") for t in span[:-1]):
+                    continue                             # a possessive inside the span: kept as heard
+                if n == 1 and (span[0].low in UNIT_PREFIX or span[0].low in COMMON
+                               or (j < len(toks) and (toks[j].digit or toks[j].low in NUMWORDS))):
+                    continue                             # "Marine 1", "a Marine veteran": never a one-word name
                 if (i, j) in exact:
                     continue
                 said = [t.low for t in span]
@@ -453,7 +559,9 @@ class Vocab:
         return "".join(out), fixes
 
     def _fold(self, text: str, toks: list[_Tok], joined: list[bool], guarded, cands: list) -> None:
-        """Spoken numbers in a unit ID, a call sign or a ten-code, folded to the list's own term."""
+        """Spoken numbers in a unit ID, a call sign or a ten-code, folded to the list's own term. A unit ID's prefix (a
+        call sign's word after the number) as the engine capitalised it, or another unit ID or call sign of the list in
+        the same text (in digits already, or folded here too); never with a measure after the number."""
         n = len(toks)
 
         def num_run(j: int) -> int:
@@ -466,6 +574,14 @@ class Vocab:
         def rest_ok(a: int, b: int) -> bool:            # what is left of the run: nothing, or the trailing time
             return a >= b or guarded(a, b)
 
+        def measured(end: int) -> bool:                  # "thirty one feet", "two car accident"
+            if end >= n:
+                return False
+            nxt = toks[end].low
+            return nxt in MEASURE or (end + 1 < n and (nxt, toks[end + 1].low) in MEASURE_PAIRS)
+
+        found: list[tuple[int, int, str, bool]] = []     # (i, end, term, the engine capitalised it)
+        written = 0                                      # the list's unit IDs and call signs already in digits
         for i in range(n):
             for p in (3, 2, 1):                          # "Engine sixty", "Tower Ladder two"
                 if i + p >= n or not all(joined[i:i + p]):
@@ -475,16 +591,26 @@ class Vocab:
                 if not units:
                     continue
                 j = i + p
+                if toks[j].digit:
+                    written += toks[j].text in units
+                    break
                 if toks[j].low in ("oh", "o"):
                     continue
                 k = num_run(j)
                 for end in range(k, j, -1):
                     digits = stt_terms._digits([t.low for t in toks[j:end]])
                     if digits in units and rest_ok(end, k) and not guarded(i, end):
-                        cands.append((1.0, i, end, units[digits], "unit"))
+                        if not measured(k):
+                            found.append((i, end, units[digits], toks[i].text[0].isupper()))
                         break
                 break
-            # a run of number words: a call sign after it ("sixty control"), or a ten-code ("ten four.")
+            if toks[i].digit:                            # a call sign in digits already ("90 Control")
+                for post, signs in self.signs.items():
+                    m = len(post)
+                    if toks[i].text in signs and i + 1 + m <= n and all(joined[i:i + m]) \
+                            and tuple(t.low for t in toks[i + 1:i + 1 + m]) == post:
+                        written += 1
+            # a run of number words: a call sign after it ("sixty Control"), or a ten-code ("ten four.")
             if toks[i].low in NUMWORDS and (i == 0 or not joined[i - 1] or toks[i - 1].low not in NUMWORDS) \
                     and toks[i].low not in ("oh", "o"):
                 k = num_run(i)
@@ -497,67 +623,111 @@ class Vocab:
                     if k + m <= n and all(joined[k - 1:k + m - 1]) and tuple(t.low for t in toks[k:k + m]) == post:
                         digits = stt_terms._digits([t.low for t in toks[i:k]])
                         if digits in signs and not guarded(i, k + m):
-                            cands.append((1.0, i, k + m, signs[digits], "unit"))
+                            found.append((i, k + m, signs[digits], toks[k].text[0].isupper()))
+        for i, end, term, sure in found:
+            if sure or written or len(found) > 1:        # (another of the list's unit IDs in the text: its context)
+                cands.append((1.0, i, end, term, "unit"))
 
 
 class Corrector:
     """The hub's: each channel's Vocab from the term lists in use (terms() -> a stt_terms.TermStore, or None), which list
-    a channel takes (own_for_key), the channels it is on and the towns whose streets it may correct into."""
+    a channel takes (own_for_key), the channels it is on and the towns whose streets it may correct into.
+
+    Built only by warm() (the term store's thread, after each read), one build at a time behind a lock; correct() never
+    builds: it uses the list's matcher there is (the one before while a new one is built) and, before the first, says
+    PENDING."""
 
     def __init__(self, terms: Callable[[], object], own_for_key: Callable[[str], str | None],
                  channels=DEFAULT_CHANNELS, towns=DEFAULT_TOWNS, log: Callable[[str], None] = print):
         self.terms, self.own_for_key, self.log = terms, own_for_key, log
         self.channels = frozenset(channels)
         self.towns = tuple(towns)
-        self._vocab: dict[str, Vocab] = {}
+        self._vocab: dict[str, Vocab] = {}               # list -> its matcher in use
         self._cache: OrderedDict[tuple, Result] = OrderedDict()
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()                    # the two dicts above
+        self._build = threading.Lock()                   # one build at a time
         self._failed = ""
+        self.builds = 0
 
     def applies(self, key: str) -> bool:
         return bool(key) and key in self.channels
 
     def warm(self, keys=()) -> None:
-        """Each list's matcher built ahead (after a read of the lists, on its thread), for the channels it is on."""
-        for key in dict.fromkeys(keys):
-            try:
-                self.vocab(key)
-            except Exception as e:  # noqa: BLE001 - built when first asked instead
-                self.log(f"stt correct: {type(e).__name__}")
+        """Each list's matcher built for its version now (on the caller's thread: the term store's, after a read), for
+        the channels it is on; one build at a time (a second caller waits, then finds it built). Nothing is built when
+        the version is the same."""
+        with self._build:
+            for own in dict.fromkeys(o for o in (self._own(k) for k in dict.fromkeys(keys)) if o):
+                try:
+                    self._build_one(own)
+                except Exception as e:  # noqa: BLE001 - the one before stays in use; tried again after the next read
+                    self.log(f"stt correct: {own}: not built: {type(e).__name__}")
 
-    def vocab(self, key: str) -> Vocab | None:
-        """The channel's Vocab (its own list, places woven in), None for none."""
+    def _own(self, key: str) -> str | None:
+        try:
+            return self.own_for_key(key) if self.applies(key) else None
+        except Exception:  # noqa: BLE001 - no list for it then
+            return None
+
+    def version(self, own: str) -> tuple[object, dict, set, str] | None:
+        """(its TermSet, the sections of its terms, the places' keys, its version): the set's version, the sections'
+        and the towns' (a header changed alone is a new version too); None: no list."""
         store = self.terms()
         if store is None or not hasattr(store, "get"):
             return None
-        own = self.own_for_key(key)
-        ts = store.get(own) if own else None
+        ts = store.get(own)
         if ts is None or not ts.terms:
             return None
-        v = ts.vocab_v
-        got = self._vocab.get(own)
-        if got is not None and got.v == v:
-            return got
-        secs: dict[str, str] = {}
         allsecs = store.sections() if hasattr(store, "sections") else {}
+        secs: dict[str, str] = {}
         for name in (stt_terms.SHARED, own):
             secs.update(allsecs.get(name) or {})
         names = set(allsecs[stt_terms.SHARED]) if stt_terms.SHARED in allsecs else set()   # (places only)
-        vb = Vocab(ts.terms, secs, self.towns, v, names)
+        h = stt_terms.version([f"{k}\t{v}" for k, v in sorted(secs.items())] + ["@towns"]
+                              + sorted(t.casefold() for t in self.towns))[:8]
+        return ts, secs, names, f"{ts.vocab_v}@{h}"
+
+    def _build_one(self, own: str) -> None:
+        got = self.version(own)
+        if got is None:
+            return
+        ts, secs, names, v = got
+        old = self._vocab.get(own)
+        if old is not None and old.v == v:
+            return
+        vb = Vocab(ts.terms, secs, self.towns, v, names)  # (seconds, on this thread: the old one serves meanwhile)
         with self._lock:
             self._vocab[own] = vb
+        self.builds += 1
         self.log(f"stt correct: {own}: {len(vb.entries)} names, {sum(len(u) for u in vb.units.values())} unit IDs, "
                  f"{len(vb.tens)} ten-codes ({v})")
-        return vb
+
+    def vocab(self, key: str) -> Vocab | None:
+        """The channel's matcher in use (its own list, places woven in), None for none built: never builds."""
+        own = self._own(key)
+        if not own:
+            return None
+        with self._lock:
+            return self._vocab.get(own)
 
     def correct(self, text: str, key: str) -> Result | None:
-        """The correction of one transcript on its channel; None: not on (the channel's switch off, no list, no text)."""
+        """The correction of one transcript on its channel; None: not on (the channel's switch off, no list, no text);
+        a Result with v PENDING and no correction: on, but its list's matcher not built yet."""
         if not text or not self.applies(key):
             return None
         try:
-            vb = self.vocab(key)
-            if vb is None:
+            own = self._own(key)
+            if not own:
                 return None
+            with self._lock:
+                vb = self._vocab.get(own)
+            if vb is None:                               # none built yet: the list there, or the lists not read yet
+                store = self.terms()
+                if store is None or not hasattr(store, "get"):
+                    return None
+                ts = store.get(own)
+                return Result("", (), PENDING) if (ts is not None and ts.terms) or not getattr(store, "loaded", True) \
+                    else None
             ck = (vb.v, text)
             with self._lock:
                 hit = self._cache.get(ck)
@@ -577,16 +747,6 @@ class Corrector:
                 self._failed = why
                 self.log(f"stt correct: {why}")
             return None
-
-    def row(self, r: dict) -> tuple[str, list[dict]]:
-        """A Radio row's text as shown and its corrections ([{heard, to, rule}], the hover's), for
-        sizeup/cad/statushints.py: (r["text"], []) when nothing applies."""
-        text = r.get("text") or ""
-        key = row_key(r)
-        res = self.correct(text, key) if text else None
-        if res is None or not res.fixes:
-            return text, []
-        return res.text, [{"heard": f.heard, "to": f.to, "rule": f.rule} for f in res.fixes]
 
 
 def row_key(r: dict) -> str:

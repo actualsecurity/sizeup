@@ -2042,10 +2042,10 @@ class HubApp(App):
             if cls is None and item is not None:
                 cls = self._pool_class(item, key)
             check = self._time_check(key, item, text, clip_end, engine, prompted)
-            corr = self._vocab_fix(key, text)
             now = time.time()
             if not self._may_write_audio():      # a standby (or a lease running out) writes nothing (#501)
                 return
+            corr = self._vocab_fix(key, text)
             if vocab_v is None:                  # (the item's own: whisper's prompt or AWS's stream, sizeup/stt_terms.py)
                 vocab_v = str(getattr(item, "vocab_v", "") or "")
             self.stt_runs.add(cid, engine, text=text, status=status, model=model, worker=worker, prompt_v=prompt_v,
@@ -2082,11 +2082,11 @@ class HubApp(App):
 
     def _vocab_fix(self, key: str, text: str):
         """The post-ASR vocabulary correction of an engine's raw text on its channel (#879, sizeup/stt_correct.py):
-        kept with the run, the raw text never changed. None: not on there (or no list)."""
-        corrector = getattr(self, "stt_correct", None)
-        if corrector is None or not text:
+        kept with the run, the raw text never changed (the text of record's is on its radio log row: App._corr_put).
+        None: not on there (or no list); v PENDING: its list's matcher not built yet. Never on a standby."""
+        if not self._may_write_audio():
             return None
-        return corrector.correct(text, key)
+        return self._corr_of(key, text)
 
     def _prompt_time(self, cid: str, d: dict) -> None:
         """The station's retext says whether whisper's prompt carried the clip's own time: kept on the transmission

@@ -24,7 +24,8 @@ works as before; this is next to it, keyed by the same clip id.
                             sizeup/stt_correct.py; "" / None where it isn't on): corr_text (the text with the channel's
                             terms put back: only when it changes it; the raw text is never changed), corr_n (how many
                             corrections: 0 when it ran and found none), corr_rules (JSON [[heard, to, rule, score], ...])
-                            and corr_v (the rule and the term list's version, "vcorr/1@county_fire@0123456789ab"). Pruned by the hub's
+                            and corr_v (the rule, the term list's version and its sections' and towns',
+                            "vcorr/1@county_fire@0123456789ab@01234567"; "pending": on there, its matcher not built yet). Pruned by the hub's
                             janitor: older than KEEP_DAYS, and a run whose radio log row is gone (its channel's transcript
                             retention: never longer than the transcript), batch after batch for up to PRUNE_BUDGET_S
     LatencyBook             transmission end -> text on the hub, per channel, over WINDOW_S in memory: p50 / p95 and
@@ -121,7 +122,9 @@ def _corr_row(c) -> tuple:
     """A vocabulary correction's columns (CORR_COLUMNS, a sizeup.stt_correct.Result), "" / None for none."""
     if c is None:
         return ("", None, "", "")
-    return (str(c.text or "")[:20000], int(c.n), c.rules_json()[:20000], str(c.v or "")[:80])
+    if getattr(c, "pending", False):          # on there, its list's matcher not built yet: not run (corr_n None)
+        return ("", None, "", str(c.v)[:80])
+    return (str(c.text or "")[:20000], int(c.n), c.rules_json(20000), str(c.v or "")[:80])
 
 
 def _rate(match: int, said: int) -> float | None:
