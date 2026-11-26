@@ -215,12 +215,12 @@
   /* ---- highway layers (maplayers.js, #73): the Layers box, an event / sign box, the camera viewer -------- */
   .ml-panel, .ml-info {
     position: absolute; inset-block-start: calc(var(--ctl-sm) + var(--s-4)); inset-inline-start: var(--s-2); z-index: 6;
-    inline-size: min(20rem, calc(100% - var(--s-4))); max-block-size: min(70vh, calc(100% - var(--ctl-sm) - var(--s-6))); overflow: auto;
-    display: flex; flex-direction: column; gap: var(--s-1);
+    inline-size: min(20rem, calc(100% - var(--s-4))); max-block-size: calc(100% - var(--ctl-sm) - var(--s-6)); overflow: auto;
+    overscroll-behavior: contain; display: flex; flex-direction: column; gap: var(--s-1);
   }
   .ml-info { inline-size: min(24rem, calc(100% - var(--s-4))); }
   .ml-head { display: flex; align-items: center; gap: var(--s-2); }
-  /* the box scrolls inside itself (tall with County GIS, #111): its title and X stay put */
+  /* the box is never taller than its map (it scrolls, as one, only when the map is too short for it): its title and X stay put */
   .ml-panel > .ml-head { position: sticky; inset-block-start: calc(-1 * var(--s-2)); z-index: 1; background: var(--raised);
     margin-block: calc(-1 * var(--s-2)) 0; padding-block: var(--s-2) var(--s-1); }
   .ml-head > .ico { color: var(--c, var(--text-2)); }
@@ -263,6 +263,17 @@
   .ml-fold[open] > .ml-sub::before { content: "▾"; }
   .ml-sub .ml-count { margin-inline-start: auto; text-transform: none; letter-spacing: 0; font-weight: 400; }
   .ml-note { color: var(--dim); font-size: var(--fs-2xs); line-height: var(--lh-2xs); }
+  /* another script's group folded to one line (maplayers.js foldGroup): its name and how many of its layers are on; the
+     Sources fold at the foot: every source's link and time, their names on hover */
+  .ml-gfold { border-block-start: var(--bw) solid var(--line); }
+  .ml-panel > .ml-gfold + .ml-gfold { margin-block-start: calc(-1 * var(--s-1)); }      /* one under the other: no gap */
+  .ml-gfold > .ml-group { border-block-start: 0; margin-block-start: 0; padding-block: 0 var(--s-1); }
+  .ml-gsum { display: flex; align-items: center; gap: var(--s-2); min-block-size: var(--ctl-sm); cursor: pointer; list-style: none; }
+  .ml-gsum::-webkit-details-marker { display: none; }
+  .ml-gsum::before { content: "▸"; color: var(--dim); font-size: var(--fs-2xs); }
+  .ml-gfold[open] > .ml-gsum::before { content: "▾"; }
+  .ml-gsum .ml-count { margin-inline-start: auto; }
+  .ml-sources > .ml-source { overflow-wrap: anywhere; padding-block-end: var(--s-0); }
   /* Road projects & closures (roadprojects.js, #185): the Today / This week / All filter, the key, the unplaced notices */
   .rw-filter { margin-block: var(--s-1); }
   .rw-legend { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1); }
@@ -575,6 +586,15 @@
     .ov-grid:is([data-layout="side"], [data-layout="stacked"]) .ov-view { block-size: 80vh; }
     .ov-grid[data-layout="cameras"] .ov-view { block-size: auto; }
     .ov-grid[data-layout="cameras"] .cw-wall { flex: 0 0 auto; overflow: visible; }
+  }
+  /* the console on a desk (admin, 2026-11-26: "that sub area needs to fit in the window"): the Overview is its column's
+     height, whatever is above and below it (the alert banners, the live player's strip): the map, or the map and the
+     cameras, fill what is left under its head, so the column never scrolls; only the camera list scrolls, inside itself */
+  @media (min-width: 1101px) {
+    html:not(.board) .overview { flex: 1 1 auto; min-block-size: 0; }
+    html:not(.board) .ov-grid { flex: 1 1 auto; min-block-size: 0; grid-template-rows: minmax(0, 1fr); align-items: stretch; }
+    html:not(.board) .ov-grid[data-layout] .ov-view { position: relative; block-size: auto; min-block-size: var(--map-h-min); }
+    html:not(.board) .ov-grid[data-layout="cameras"] .cw-wall { flex: 1 1 0; overflow-y: auto; }
   }
   /* a phone: Map and Cameras only (camwall.js shows the map for the others) */
   @media (max-width: 640px) { .ov-layout button:is([data-layout="side"], [data-layout="stacked"]) { display: none; } }
