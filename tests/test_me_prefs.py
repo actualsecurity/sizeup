@@ -505,3 +505,51 @@ def test_the_page_loads_it_before_the_map_scripts():
         'src="/static/preplan.js"')
     js = (STATIC / "me-prefs.js").read_text()
     assert '"/api/me/prefs"' in js and "localStorage" in js
+
+
+# ---- listen: what the console's live player plays (static/live-player.js) -------------------------------------------
+
+LISTEN = {"rules": {"ours": "priority", "svc:police": "normal", "sys:metro": "off", "src:p25:westchester:2222": "priority",
+                    "src:fm:FG1": "normal", "src:air:Tower": "off", "src:tg:3456": "normal", "mhz:118.6": "normal"},
+          "mode": "duck", "max_age": 90, "ours_only": False, "mute_police": True}
+
+
+def test_listen_choices_in_their_known_shape():
+    assert json.loads(prefs_mod.validate("listen", LISTEN)) == LISTEN
+    assert json.loads(prefs_mod.validate("listen", {})) == {}
+    for bad in ([], "on", {"rules": []}, {"rules": {"ours": "loud"}}, {"rules": {"ours": True}},
+                {"rules": {"svc:cops": "off"}}, {"rules": {"svc:": "off"}}, {"rules": {"sys:Metro": "off"}},
+                {"rules": {"sys:": "off"}}, {"rules": {"src:": "off"}}, {"rules": {"src:p25:x:abc": "off"}},
+                {"rules": {"src:nope:FG1": "off"}}, {"rules": {"src: fm:FG1": "off"}}, {"rules": {"src:fm:FG\n1": "off"}},
+                {"rules": {"src:fm:" + "x" * 130: "off"}}, {"rules": {"mhz:abc": "off"}}, {"rules": {"mhz:1": "off"}},
+                {"rules": {"everything": "priority"}}, {"mode": "loud"}, {"mode": None}, {"max_age": 5}, {"max_age": 601},
+                {"max_age": 60.5}, {"max_age": "60"}, {"max_age": True}, {"ours_only": 1}, {"mute_police": "true"},
+                {"volume": 0.5}, {"rules": {"ours": "priority"}, "email": "someone@example.org"}):
+        with pytest.raises(prefs_mod.PrefsError) as e:
+            prefs_mod.validate("listen", bad)
+        assert e.value.code == 400, bad
+    with pytest.raises(prefs_mod.PrefsError) as e:
+        prefs_mod.validate("listen", {"rules": {f"src:fm:Ch{i}": "normal" for i in range(prefs_mod.MAX_KEYS + 1)}})
+    assert e.value.code == 413
+
+
+def test_listen_choices_are_each_persons_own(keys, hub):  # noqa: F811
+    cad = hub.app.cad
+    ids = people(cad)
+    casey, jordan, val = (as_(keys[0], e) for e in (CASEY, JORDAN, VAL))
+    code, out = put(hub.url + URL + "/listen", LISTEN, {**casey, "X-Sizeup-Person": str(ids["Casey"])})
+    assert code == 200 and out == {"ok": True, "prefs": {"listen": LISTEN}}
+    assert req(hub.url + URL, headers=casey)[1]["prefs"] == {"listen": LISTEN}
+    assert req(hub.url + URL, headers=jordan)[1]["prefs"] == {}                     # never another person's
+    assert put(hub.url + URL + "/listen", {"mode": "queue"}, val)[0] == 200           # a viewer: their own screen
+    assert put(hub.url + URL + "/listen", {"rules": {"ours": "always"}}, jordan)[0] == 400
+    assert cad.prefs.all(ids["Jordan"]) == {}
+    assert cad.prefs.all(ids["Val"]) == {"listen": {"mode": "queue"}}
+    assert cad.prefs.all(ids["Casey"]) == {"listen": LISTEN}
+
+
+def test_the_page_registers_listen_with_me_prefs():
+    js = (STATIC / "live-player.js").read_text()
+    assert 'const NS = "listen";' in js and "MePrefs.register(NS," in js and "MePrefs.changed(NS)" in js
+    # the device's own (on, volume, mute) never go to the hub
+    assert 'write(DKEY, { on: st.on, volume: st.volume, muted: st.muted })' in js

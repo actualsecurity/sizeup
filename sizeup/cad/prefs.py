@@ -56,6 +56,7 @@ LISTEN_MODES = ("interrupt", "duck", "queue")
 LISTEN_AGE = (10, 600)         # max_age: a Normal transmission older than this (s) is dropped, never played late
 LISTEN_TARGET = re.compile(r"ours|svc:[a-z]{2,12}|sys:[a-z][a-z0-9_-]{0,23}|mhz:\d{2,4}(?:\.\d{1,4})?")
 LISTEN_SRC_MAX = 120           # a source key's length (radiofolders.KEY_MAX)
+LISTEN_CHANNEL = re.compile(r"(?:fm|air):[^\x00-\x1f\x7f]{1,100}")      # an FM / airband channel (radiofolders.ITEM)
 
 
 class PrefsError(ValueError):
@@ -124,8 +125,9 @@ def _listen_target(k) -> bool:
         return False
     if k.startswith("src:"):
         key = k[4:]
+        # (a source key's own shape, as sizeup/cad/radiofolders.py is_key: not imported, the store imports this)
         return 0 < len(key) <= LISTEN_SRC_MAX and key.isprintable() and key == key.strip() and (
-            key.startswith(("fm:", "air:")) or sourcekeys.parse(key) is not None)
+            bool(LISTEN_CHANNEL.fullmatch(key)) or sourcekeys.parse(key) is not None)
     if k.startswith("svc:"):
         return k[4:] in sourcekeys.SERVICES
     return bool(LISTEN_TARGET.fullmatch(k))

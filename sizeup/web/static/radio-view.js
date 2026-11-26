@@ -503,7 +503,7 @@ window.RadioView = (() => {
     pickOption(f("event"), b.dataset.event);
     changed();
   });
-  RadioLive.button($("#rv-live"), "Live");
+  // (#rv-live: the console's live player, live-player.js: it plays on every view, not only here)
   let drawnRev = -1;
   cad.hooks.push(() => { if (st.open && drawnRev !== cad.txRev) { drawnRev = cad.txRev; render(); } });   // a row's own state
   cad.hooks.push(() => { if (st.open) renderPaging(); });          // each tone pair as it decodes (the state push)
