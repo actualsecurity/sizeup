@@ -236,6 +236,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <select id="sv-disp" aria-label="Disposition"><option value="">Any disposition</option></select>
         <label id="sv-from-l" class="inline"><span class="dim">From</span> <input id="sv-from" type="date"></label>
         <label id="sv-to-l" class="inline"><span class="dim">To</span> <input id="sv-to" type="date"></label>
+        <button id="sv-intel" type="button" aria-pressed="false" hidden title="Intel events: radio pre-alerts in the results and on the map (time, area and words apply)">Intel</button>
         <button id="sv-go" type="submit" class="primary">Search</button>
         <button id="sv-clear" type="button">Clear</button>
       </form>
@@ -246,6 +247,11 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
           <div class="tscroll"><table class="evtable db sv-table"><thead><tr><th>Received</th><th>Number</th><th>Type</th><th>Location</th><th>Disposition</th><th>Units</th></tr></thead>
             <tbody id="sv-rows"></tbody></table></div>
           <div class="sv-pager row"><button id="sv-prev" type="button" class="sm">Newer</button><span id="sv-page" class="dim small"></span><button id="sv-next" type="button" class="sm">Older</button></div>
+          <div id="sv-intel-box" class="sv-intel" hidden>
+            <div class="sv-intel-head"><span class="chip sv-ichip" title="Radio pre-alerts (the Intel page's events)">Intel</span><span id="sv-intel-n" class="dim small" aria-live="polite"></span></div>
+            <div class="tscroll"><table class="evtable db sv-table"><thead><tr><th>Heard</th><th>Category</th><th>Level</th><th>Place</th><th>Not pushed</th></tr></thead>
+              <tbody id="sv-intel-rows"></tbody></table></div>
+          </div>
         </div>
       </div>
       <div id="sv-notes" class="sv-notes" hidden>
@@ -921,10 +927,10 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/radio-nav.js"></script>
 <script src="/static/live-player.js"></script>
 <script src="/static/addr-history.js"></script>
+<script src="/static/intel-map.js"></script>
 <script src="/static/search-view.js"></script>
 <script src="/static/prealert-info.js"></script>
 <script src="/static/intel-notes.js"></script>
-<script src="/static/intel-map.js"></script>
 <script src="/static/intel-page.js"></script>
 <script src="/static/preplan.js"></script>
 <script src="/static/bldg-highlight.js"></script>

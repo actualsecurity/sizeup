@@ -1,5 +1,5 @@
-// Intel events as map pins (#937): the Intel page's map (intel-page.js). On Search's own map (map-style.js plainMap:
-// the same base layers, view and controls).
+// Intel events as map pins (#937): the Intel page's map (intel-page.js) and Search's opt-in Intel events
+// (search-view.js, on its own map). On Search's map (map-style.js plainMap: the same base layers, view and controls).
 //
 //   IntelMap.attach(map, prefix, {pick(id)})   once the map has loaded: its source, layers and glyphs; a click on a
 //                                              pin calls pick(id). Returns {set(pins), select(id), center(lat, lon),
