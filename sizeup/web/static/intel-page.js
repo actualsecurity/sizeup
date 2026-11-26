@@ -18,7 +18,8 @@
 // render() draws only what changed (a row is rebuilt only when its own data changed; the same answer touches nothing).
 // The map (#937, intel-map.js on Search's map, map-style.js plainMap): every placed event of the filters, all pages
 // (GET /api/cad/intel/list?map=1, the newest 2,000), the unplaced counted. Read only when the list's answer changed
-// (render()'s signature) and its filters, the events' revision (rev) or the total moved; the pins redrawn only when
+// (render()'s signature) and its filters, the events' map revision (map_rev: saved or dismissed, never a vote) or the
+// total moved, and on Refresh; the pins redrawn only when
 // they differ. A pin's click selects its row (scrolled to); a placed row's click selects and centres its pin, a
 // second click (or Enter) its More info. The Map button hides it (and reads nothing); a phone starts with it hidden;
 // remembered per viewer (localStorage "sizeup.intelMap", in try/catch).
@@ -35,7 +36,7 @@ window.IntelPage = (() => {
   const st = { q: {}, page: 0, seq: 0, data: null, sig: "", rows: new Map(), facetSig: "", timer: null, busy: new Set(),
                open: false, sel: null };
   // the map: m its MapLibre map, pins its IntelMap layer, key what it last read for, fit the filters it last fitted
-  const mp = { on: null, m: null, pins: null, ready: false, key: "", seq: 0, fit: null, data: null, qs: "" };
+  const mp = { on: null, m: null, pins: null, ready: false, key: "", seq: 0, fit: null, data: null, qs: "", pending: false };
   const MAP_KEY = "sizeup.intelMap";
   const LEVELS = { push: "pushed", held: "at push, not pushed", map: "on the card and the map", log: "logged only",
                    shadow: "counted only" };
@@ -59,7 +60,10 @@ window.IntelPage = (() => {
   // ---- open / close (cad.js route) -------------------------------------------------------------------------------
   function open(qs) {
     const p = new URLSearchParams(qs || "");
+    const was = mapQs();
     st.q = Object.fromEntries(KEYS.map((k) => [k, p.get(k) || ""]));
+    if (mapQs() !== was && st.sel != null) select(null);       // other filters: nothing selected
+    st.sig = "";                                 // render() reaches the map with the answer to these filters
     st.page = Math.max(0, Number(p.get("page")) || 0);
     for (const k of ["level", "decided", "held", "status", "q", "tag", "from", "to"]) {
       const n = $(`#il-${k}`);
@@ -74,13 +78,13 @@ window.IntelPage = (() => {
     c.value = st.q.category;
     st.open = true;
     show($("#il-refresh"), !live());
-    mapShow(mapOn());
+    mapShow(mapOn(), false);
     run();
     timer();
   }
   function close() {
     st.seq++;
-    mp.seq++;
+    if (mp.pending) { mp.seq++; mp.pending = false; mp.key = ""; }    // a read cut short: back on the page, again
     st.open = false;
     if (st.timer) { clearInterval(st.timer); st.timer = null; }
   }
@@ -227,9 +231,9 @@ window.IntelPage = (() => {
     tr.tabIndex = 0;
     const go = () => { location.hash = window.PrealertInfo ? PrealertInfo.href("intel", e.id) : `#prealert/intel/${e.id}`; };
     if (e.id === st.sel) tr.classList.add("il-sel");
-    if (e.lat != null) tr.title = "Click: its pin · again: More info";
-    tr.addEventListener("click", () => {        // on the map first (when it shows and the event is placed)
-      if (st.sel !== e.id && e.lat != null && mapShown()) { select(e.id); if (mp.pins) mp.pins.center(e.lat, e.lon); } else go();
+    if (e.lat != null) tr.title = "Click: More info (its pin first, while the map shows)";
+    tr.addEventListener("click", () => {        // on the map first (when it shows and the event has a pin)
+      if (st.sel !== e.id && mapShown() && pinned(e.id)) { select(e.id); mp.pins.center(e.lat, e.lon); } else go();
     });
     tr.addEventListener("keydown", (ev) => { if (ev.key === "Enter" && ev.target === tr) go(); });
     // time (and the status, when it is no longer open)
@@ -329,13 +333,14 @@ window.IntelPage = (() => {
     return mp.on;
   }
   const mapShown = () => !!(mp.on && mp.ready);
-  function mapShow(on) {
+  const pinned = (id) => !!(mp.data && mp.data.pins.some((p) => p.id === id));
+  function mapShow(on, read = true) {
     mp.on = on;
     const b = $("#il-map-btn");
     b.setAttribute("aria-pressed", String(on));
     show($("#il-mapbox"), on);
-    if (!on) { mp.seq++; mp.key = ""; return; }           // hidden: nothing read (shown again: read once)
-    if (st.data) mapRead(st.data);
+    if (!on) { mp.seq++; mp.pending = false; mp.key = ""; return; }   // hidden: nothing read (shown again: once)
+    if (read && st.data) mapRead(st.data);
   }
   function mapToggle() {
     mapShow(!mapOn());
@@ -347,19 +352,24 @@ window.IntelPage = (() => {
   async function mapRead(d) {
     if (!mapOn() || !st.open) return;
     const qs = mapQs();
-    const key = JSON.stringify([qs, d.rev, d.total]);
+    const key = JSON.stringify([qs, d.map_rev, d.total]);
     if (key === mp.key) return;                // the same filters, events and total: the pins as they are
     mp.key = key;
     const seq = ++mp.seq;
+    mp.pending = true;
     try {
       const m = await api("GET", `/api/cad/intel/list?map=1${qs ? `&${qs}` : ""}`);
       if (seq !== mp.seq) return;
+      mp.pending = false;
       mp.data = m;
       mp.qs = qs;
       mapDraw();
     } catch (e) {
       if (seq !== mp.seq) return;
-      mp.key = "";
+      mp.pending = false;
+      mp.key = "";                             // (Refresh reads it again)
+      mp.data = null;
+      if (mp.pins) mp.pins.set([]);            // never the last filters' pins under the error
       setText($("#il-map-n"), `Map: ${e.message}`);
     }
   }
@@ -386,9 +396,8 @@ window.IntelPage = (() => {
     mp.pins.set(m.pins);
     mp.pins.select(st.sel);
     if (mp.qs !== mp.fit) {                    // new filters: fitted to them; the same filters read again keep the view
-      mp.fit = mp.qs;
       const b = mp.pins.bounds();
-      if (b) mp.m.fitBounds(b, { padding: 40, maxZoom: 16, duration: 0 });
+      if (b) { mp.fit = mp.qs; mp.m.fitBounds(b, { padding: 40, maxZoom: 16, duration: 0 }); }
     }
   }
   // a pin's click: its row selected and scrolled to (on this page), else its More info a click away
@@ -427,7 +436,7 @@ window.IntelPage = (() => {
     $("#il-clear").addEventListener("click", () => { location.hash = "#intel"; });
     $("#il-prev").addEventListener("click", () => submit(Math.max(0, st.page - 1)));
     $("#il-next").addEventListener("click", () => submit(st.page + 1));
-    $("#il-refresh").addEventListener("click", () => run());
+    $("#il-refresh").addEventListener("click", () => { mp.key = ""; st.sig = ""; run(); });     // the map too
     document.addEventListener("visibilitychange", visibility);
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", wire); else wire();

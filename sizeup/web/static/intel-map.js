@@ -24,7 +24,7 @@ window.IntelMap = (() => {
   const kind = (category) => KIND[category] || "other";
   // the level chips' tokens (cad.css .il-lv-*), read once; fallbacks: style.css's values
   const TOKENS = { push: ["--accent-text", "#EE6475"], held: ["--warn", "#E0A030"], map: ["--text", "#E6E8EB"],
-                   log: ["--dim", "#9AA3AD"], shadow: ["--dim", "#9AA3AD"] };
+                   log: ["--text-2", "#C9CED4"], shadow: ["--text-2", "#C9CED4"] };
   let colors = null;
   function levelColors() {
     if (colors) return colors;
