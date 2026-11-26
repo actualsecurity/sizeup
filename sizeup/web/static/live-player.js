@@ -51,7 +51,7 @@ window.ListenCore = (() => {
   function sourceOf(t) {
     if (t.source) return String(t.source);
     if (t.talkgroup !== undefined && t.talkgroup !== null) return `p25:${t.system || "westchester"}:${t.talkgroup}`;
-    return `${t.service === "air" || t.system === "airband" ? "air" : "fm"}:${t.channel || ""}`;
+    return (t.service === "air" || t.system === "airband" ? "air:" : "fm:") + String(t.channel || "");   // a key, not a label
   }
   const isOurs = (t) => !!(t.ours || t.main);
   const mhzKey = (t) => (+t.mhz > 0 ? `mhz:${+t.mhz}` : "");
