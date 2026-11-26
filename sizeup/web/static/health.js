@@ -422,6 +422,20 @@ const StationHealth = (() => {
           k, t.n, ms(t.p50_s), ms(t.p95_s), t.tokens_in === null ? "—" : `${t.tokens_in}/${t.tokens_out}`,
           [Object.entries(t.why || {}).map(([w, n]) => `${n} ${w.replace("_", " ")}`).join(" · ") || "0", Object.keys(t.why || {}).length ? "hl-warn" : ""]]), ""));
       }
+      const bg = sp.bg;                     // Auto · background (#896): where its hand-overs went, the stations' waits
+      if (bg && (Object.keys(bg.h || {}).length || Object.keys(bg.stations || {}).length)) {
+        const h = bg.h || {}, n = Object.values(h).reduce((a, b) => a + b, 0);
+        const over = (h.gpu || 0) + (h.aws || 0);
+        const bh = el("h3", "hl-sub", "Background overflow");
+        bh.title = `Auto · background clips a station couldn't start within ${bg.budget_s} s, last hour: to another station, `
+          + "a GPU (overflow), AWS, or back to its station. Overflow often: more stations needed";
+        kids.push(bh, dl([
+          ["Handed over 1 h", n ? `${h.station || 0} station · ${h.gpu || 0} GPU · ${h.aws || 0} AWS · ${h.back || 0} back` : "none",
+            n && over / n > 0.5 ? "hl-warn" : ""],
+          ...Object.entries(bg.stations || {}).map(([sid, s]) => [`${sid} wait`, `${Math.round(s)} s`,
+            s > bg.budget_s ? "hl-warn" : ""]),
+        ]));
+      }
       const lat = sp.latency || [];
       if (lat.length) {
         const lh = el("h3", "hl-sub", "Speech-to-text latency");

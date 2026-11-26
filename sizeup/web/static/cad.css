@@ -924,6 +924,13 @@
   .il-view { display: flex; flex-direction: column; gap: var(--gutter); min-inline-size: 0; }
   .il-filters select { flex: 0 1 auto; max-inline-size: 14rem; }
   .il-table tr.il-row { cursor: pointer; }
+  .il-table tr.il-sel { background: var(--hover); box-shadow: inset calc(var(--bw) * 2) 0 0 var(--accent-text); }
+  /* the map (#937, intel-page.js): above the list, as Search's; hidden by its Map button (a phone starts hidden) */
+  .il-mapwrap { display: flex; flex-direction: column; gap: var(--s-1); min-inline-size: 0; }
+  .il-mapbox { position: relative; block-size: calc(var(--map-h) * 0.75); border-radius: var(--radius); border: var(--bw) solid var(--line); }
+  .il-mapbox > :is(.il-map, .nomap) { border-radius: calc(var(--radius) - var(--bw)); overflow: hidden; }
+  .il-map { position: absolute; inset: 0; }
+  .il-map-foot { display: flex; align-items: center; gap: var(--s-2); min-block-size: var(--ctl-sm); }
   .il-table td { vertical-align: top; }
   .il-table :is(td, th) { padding-inline: var(--s-1); }        /* eight columns in the middle one at 1280 px */
   .il-table td.t { white-space: nowrap; font-variant-numeric: tabular-nums; }

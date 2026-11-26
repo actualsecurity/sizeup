@@ -71,6 +71,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from sizeup import sourcekeys as sources
 from sizeup.cad import airport
@@ -505,18 +506,21 @@ class Comms:
                               f"ours = 0 WHERE talkgroup IS NULL AND system != 'airband' AND channel IN "
                               f"({','.join('?' * len(labels))})", labels).rowcount
 
-    def retag(self, source: str, service: str, since: float, batch: int = RETAG_BATCH, pause: float = 0.0) -> int:
+    def retag(self, source: str, service: str, since: float, batch: int = RETAG_BATCH, pause: float = 0.0,
+              stop: Callable[[], bool] | None = None) -> int:
         """A source's rows since `since` given `service` (an admin chose it, or put it back to automatic): only the rows
         that differ, walked along radio_traffic_source_start `batch` at a time (each batch its own transaction, carrying
         on after the last (start, rowid): the store's lock is let go between them). Once done, the Radio page's readers
         who may know of that source ask afresh, once (another P25 system's: only those who may see it). The number
-        changed."""
+        changed. stop: asked before each batch; True ends the walk there (the CAD shutting down, #740)."""
         if not source or service not in sources.SERVICES:
             return 0
         got = sources.parse(source)
         system = got[0] if got else "airband" if source.startswith("air:") else "analog"
         total, after = 0, (float(since), -1)
         while True:
+            if stop is not None and stop():
+                break
             with self.store.tx() as db:
                 rows = db.execute("SELECT rowid, start FROM radio_traffic WHERE source = ? AND start >= ? "
                                   "AND (start, rowid) > (?, ?) ORDER BY start, rowid LIMIT ?",
@@ -844,6 +848,7 @@ class Comms:
                            (str(alt.get("text") or ""), str(alt.get("model") or ""), tid))
             n = db.execute("UPDATE radio_traffic SET text = ?, status = ?, model = ?, vocab_v = ?, updated_at = ?, "
                            "quality = ?, unclear_text = ?, corr_text = ?, corr_rules = ?, corr_v = ?, "
+                           "stt_route = '', "      # (#875: a new text's route, if it has one, follows: set_route)
                            "text_at = CASE WHEN text_at IS NULL AND ? IN ('done', 'no_speech', 'unclear') THEN ? "
                            "ELSE text_at END "
                            "WHERE id = ?", (text, status, model, str(vocab_v or "")[:80], self.clock(),
@@ -876,6 +881,16 @@ class Comms:
             if n:
                 self.rev += 1
                 self._quiet_unless_shown(db, tid)
+        return bool(n)
+
+    def set_route(self, tid: str, route: str) -> bool:
+        """The way its text of record went (#875, sizeup/sttroute.py: "auto·priority: gpu-pc → AWS (gpu-pc: gaming)"),
+        shown in the transcript's hover. Nothing else on the row changes (no change-log entry: not the words)."""
+        with self.store.tx() as db:
+            self.touch(tid)
+            n = db.execute("UPDATE radio_traffic SET stt_route = ? WHERE id = ?", (str(route or "")[:300], tid)).rowcount
+            if n:
+                self.rev += 1
         return bool(n)
 
     # -- shed clips caught up (sizeup/sttcatchup.py): read only; the re-run path writes ---------------------------

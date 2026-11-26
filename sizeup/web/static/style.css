@@ -855,3 +855,7 @@
   .trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
   .sr-only { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 }
+
+/* the engine selector (#875, radio-controls.js): an engine not available now is greyed, still selectable */
+.tg-eng option.off, .tg-eng.off { color: var(--dim); }
+.tg-geng { margin-right: 6px; }

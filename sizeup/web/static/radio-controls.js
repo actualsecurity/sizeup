@@ -34,18 +34,21 @@ window.RadioControls = (() => {
                stt: null, sttTimer: 0, vocabMsg: "", vocabBusy: false, vocabDirty: false,
                names: null, shorts: {}, namesRev: null, namesBusy: false, renaming: "", namePending: new Map(), shortPending: new Map(),
                services: null, servicesRev: null, servicesBusy: false, svcPending: new Map(), svcWaiting: new Set() };
-  const ENGINES = [["local", "Local"], ["aws", "AWS"], ["both", "Both"]];
+  // the engine selector (#875, sizeup/sttroute.py): the hub sends each option with its live state (channels.engines);
+  // this list without one (a station's own page, all-in-one). "aws" is never stored since #896: shown as pinned AWS
+  const ENGINES = [["auto", "Auto · priority"], ["auto_bg", "Auto · background"], ["local", "Local"], ["pin:aws", "AWS"],
+                   ["both", "Compare"]];
+  const LEGACY_ENGINES = new Set();
   // Another P25 system's talkgroup has a tier instead of Record / Main / Transcribe (#409, sizeup/tiers.py)
   const TIERS = [["alert", "Alert"], ["text", "Transcribe"], ["record", "Record only"], ["off", "Off"], ["activity", "Activity only"]];
   const TIER_HELP = "Alert: recorded, transcribed, may raise a pre-alert.\nTranscribe: recorded and transcribed.\n"
     + "Record only: audio kept, no speech-to-text.\nOff: dropped.\nActivity only: encrypted, never decoded; "
     + "only when it was active and which radios.";
-  const ENGINE_HELP = "Local: whisper.cpp large-v3 on the station (whisper-server, port 8179).\n"
-    + "AWS: Amazon Transcribe streaming, called from the hub (its task role): $0.01 a minute, billed per second; "
-    + "the station skips whisper and sends the clip.\nBoth: whisper on the station and AWS on the hub; AWS's text is "
-    + "shown, whisper's kept to compare (Radio view: \u21c4).\nWithout AWS (not set up, no credentials, the monthly "
-    + "limit reached) AWS channels use Local until it's back.\nPolice (another P25 system): its own monthly AWS limit, "
-    + "never the fire one; reached: Local.";
+  const ENGINE_HELP = "Auto · priority: idle GPU worker → AWS → station whisper.\n"
+    + "Auto · background: stations → GPU overflow → AWS (its budget).\n"
+    + "Pinned (a station, a GPU worker, AWS): that engine first, then Auto · priority's order.\n"
+    + "Compare: station whisper and AWS on every clip (\u21c4).\n"
+    + "Grey: not available now (its fallback runs). Police: its own AWS limit.";
   const ro = () => typeof canDo === "function" && !canDo("admin");
   // Another P25 system's talkgroup: a tier, never Record / Main / Transcribe (#409). The hub has the station's
   // TalkgroupPrefs.state() rows, tier_set added on the way in (sizeup/cloud/hub.py); a row without it: by its tier
@@ -1260,16 +1263,30 @@ window.RadioControls = (() => {
   }
   // Channel choices (sizeup/channels.py): the default (AWS for [stt] aws_channels, no text for [stt] record_only),
   // what is saved, what was just clicked.
+  // A channel's default engine (sizeup/channels.py defaults, #896): the [stt] aws_channels pinned AWS, a context or
+  // neighbour talkgroup (another system's, or a county one not Main) Auto · background, the rest its own station
+  function dfltEngine(key) {
+    const c = (st.state && st.state.channels) || {};
+    if ((c.aws_channels || []).includes(key)) return "pin:aws";
+    if (key.startsWith("p25:")) return "auto_bg";
+    if (key.startsWith("tg:")) {
+      const r = ((st.state && st.state.talkgroups) || []).find((x) => (x.key || `tg:${x.tg}`) === key);
+      if (r && !r.main) return "auto_bg";
+    }
+    return "local";
+  }
   function chan(key) {
     const c = (st.state && st.state.channels) || {};
     const p = { record: true, transcribe: !(c.record_only || []).includes(key),
-                engine: (c.aws_channels || []).includes(key) ? "aws" : "local",
+                engine: dfltEngine(key),
                 ...((c.prefs || {})[key] || {}) };
     const q = st.cpending.get(key);
     if (q) Object.assign(p, q.vals, { cpending: true });
+    if (p.engine === "aws") p.engine = "pin:aws";              // (#896: an "aws" not migrated yet is pinned AWS)
     // past the limit: the reserve channels keep AWS; police past its own limit: Local (radio-intel PR 3)
     const aws = (c.aws_ok || (c.aws_reserve || []).includes(key)) && !(c.aws_deny || []).includes(key);
-    p.effective = !p.transcribe ? "off" : p.engine === "local" || aws ? p.engine : "local";
+    const own = !["local", "aws", "both"].includes(p.engine);    // the selector's: their own fallbacks
+    p.effective = !p.transcribe ? "off" : p.engine === "local" || own || aws ? p.engine : "local";
     return p;
   }
   function fmRows() {
@@ -1288,8 +1305,9 @@ window.RadioControls = (() => {
     const c = (st.state && st.state.channels) || {};
     for (const [key, p] of st.cpending) {
       const saved = { record: true, transcribe: !(c.record_only || []).includes(key),
-                      engine: (c.aws_channels || []).includes(key) ? "aws" : "local",
+                      engine: dfltEngine(key),
                       ...((c.prefs || {})[key] || {}) };
+      if (saved.engine === "aws") saved.engine = "pin:aws";     // (#896, as chan() shows it)
       if (now > p.until || Object.entries(p.vals).every(([k, v]) => saved[k] === v)) st.cpending.delete(key);
     }
   }
@@ -1372,7 +1390,34 @@ window.RadioControls = (() => {
     }
     renderTalkgroups();
   }
+  async function setEngineMany(keys, engine, label) {
+    for (const key of keys) {
+      const q = st.cpending.get(key) || { vals: {} };
+      q.vals.engine = engine;
+      q.until = Date.now() + PENDING_MS;
+      st.cpending.set(key, q);
+    }
+    st.error = "";
+    renderTalkgroups();
+    try {
+      await api("POST", "/api/cad/settings/channels", { action: "set_many", keys, engine,
+                                                        operator: typeof operator === "function" ? operator() : "" });
+      poll();
+    } catch (err) {
+      for (const key of keys) st.cpending.delete(key);
+      st.error = `Couldn't change Engine for ${label}: ${err.message}`;
+    }
+    renderTalkgroups();
+  }
   function onEngine(e) {
+    const g = e.target.closest("select.tg-geng");
+    if (g) {
+      if (!g.value || g.disabled || ro()) return;
+      const keys = JSON.parse(g.dataset.keys || "[]");
+      if (keys.length) setEngineMany(keys, g.value, g.dataset.group || "the group");
+      g.value = "";
+      return;
+    }
     const s = e.target.closest("select.tg-eng");
     if (!s || s.disabled || ro()) return;
     const li = s.closest(".tg-row"), key = li.dataset.ckey;
@@ -1478,15 +1523,51 @@ window.RadioControls = (() => {
 
   function engineSelect() {
     const sel = el("select", "tg-eng sm");
-    for (const [v, label] of ENGINES) sel.append(new Option(label, v));
     sel.setAttribute("aria-label", "Speech-to-text engine");
     return sel;
+  }
+  // The options: the hub's, each with its live state ("gpu-pc · gaming", "AWS · $12 left"), else the static list.
+  function engineOptions() {
+    const e = ((st.state && st.state.channels) || {}).engines;
+    return e && Array.isArray(e.options) && e.options.length ? e.options
+      : ENGINES.map(([value, label]) => ({ value, label, state: "", ok: true, title: "", legacy: LEGACY_ENGINES.has(value) }));
+  }
+  // The Auto suggested for a channel (#875): priority for pages, firegrounds, the airband, Fire/EMS main talkgroups and
+  // police alert talkgroups; background for the rest (context, neighbours)
+  function suggestedAuto(r) {
+    if (r.fm) return "auto";
+    if (r.tier_set) return r.tier === "alert" ? "auto" : "auto_bg";
+    const svc = chosenService(r) || autoService(r);
+    return r.main || svc === "fire" || svc === "ems" ? "auto" : "auto_bg";
+  }
+  // One row's select: the options (legacy only on a row set to it; a pinned engine gone: kept, said so), greyed when
+  // not available now (still selectable), the suggested Auto marked
+  function fillEngines(sel, r) {
+    const opts = engineOptions().filter((o) => !o.legacy || o.value === r.engine);
+    if (!opts.some((o) => o.value === r.engine)) opts.push({ value: r.engine, label: r.engine.replace(/^pin:(station:)?/, ""), state: "gone", ok: false, title: "Not connected to the hub now" });
+    const sug = suggestedAuto(r);
+    const sig = JSON.stringify([opts, sug]);
+    if (sel.dataset.sig !== sig) {
+      sel.replaceChildren(...opts.map((o) => {
+        const op = new Option(`${o.label}${o.state ? ` · ${o.state}` : ""}${o.value === sug ? " ★" : ""}`, o.value);
+        op.className = o.ok === false ? "off" : "";
+        op.title = (o.title || "") + (o.value === sug ? `${o.title ? "\n" : ""}Suggested for this channel` : "");
+        return op;
+      }));
+      sel.dataset.sig = sig;
+    }
+    if (sel.value !== r.engine) sel.value = r.engine;
+    const cur = opts.find((o) => o.value === r.engine);
+    sel.classList.toggle("off", !!cur && cur.ok === false);
+    return cur;
   }
   function channelNote(r) {
     const c = (st.state && st.state.channels) || {};
     if (!r.record) return "";
     if (!r.transcribe) return "not transcribed";
-    if (r.engine !== "local" && r.effective === "local") return `AWS off: local${c.aws_why ? ` (${c.aws_why})` : ""}`;
+    if (["aws", "both"].includes(r.engine) && r.effective === "local") return `AWS off: local${c.aws_why ? ` (${c.aws_why})` : ""}`;
+    const o = engineOptions().find((x) => x.value === r.engine);
+    if (o && o.ok === false && r.engine !== "local") return `${o.label} ${o.state}: next in order`;
     return "";
   }
 
@@ -1708,7 +1789,7 @@ window.RadioControls = (() => {
     const shown = rows.filter(match);
     const fm = fmRows().filter(match);
     const count = (p) => rows.filter(p).length;
-    const aws = rows.concat(fmRows()).filter((r) => r.record && r.transcribe && r.engine !== "local").length;
+    const aws = rows.concat(fmRows()).filter((r) => r.record && r.transcribe && ["aws", "pin:aws", "both"].includes(r.engine)).length;
     setText(n.tgSum, (rows.length || fm.length) ? `${fmRows().length} FM, ${rows.length} TGs, ${count((r) => r.main)} main, `
       + `${count((r) => r.record)} recording, ${aws} on AWS, ${count((r) => r.count)} heard, ${count((r) => r.encrypted)} encrypted`
       + (shown.length !== rows.length ? `, ${shown.length} shown` : "") : "");
@@ -1728,7 +1809,7 @@ window.RadioControls = (() => {
                                          st.confirm === r.src, lock, r.transcribe, r.engine, r.effective, !!r.cpending, channelNote(r), r.tier,
                                          r.tier_set, (((st.state && st.state.channels) || {}).sync || {}).state,
                                          nameable, st.renaming === nameKey(r), servable, chosenService(r), autoService(r),
-                                         st.svcWaiting.has(nameKey(r))]);
+                                         st.svcWaiting.has(nameKey(r)), engineOptions()]);
     syncList(n.groups, items, {
       key: (x) => (x.head ? `s:${x.id}` : `g:${x.g}`),
       sig: (x) => (x.head ? JSON.stringify([x.label, x.n, x.heard])
@@ -1741,7 +1822,9 @@ window.RadioControls = (() => {
         }
         const sec = el("section", "tg-group");
         const h = el("h3", "tg-ghead");
-        h.append(el("span", "chip tg-gchip"), el("span", "dim tg-gcount"), el("span", "tg-gspacer"), switchButton(""));
+        const gEng = el("select", "tg-geng sm");
+        gEng.setAttribute("aria-label", "Engine for the whole group");
+        h.append(el("span", "chip tg-gchip"), el("span", "dim tg-gcount"), el("span", "tg-gspacer"), gEng, switchButton(""));
         h.lastChild.classList.add("gsw");
         sec.append(h, el("ol", "tg-rows"));
         return sec;
@@ -1754,13 +1837,24 @@ window.RadioControls = (() => {
           return;
         }
         const [h, ol] = sec.children;
-        const [gchip, gcount, , gsw] = h.children;
+        const [gchip, gcount, , gEng, gsw] = h.children;
         show(h, !x.fm);                                      // an FM system's heading says it all
         if (!x.fm) {
           show(gsw, !x.other);                               // another P25 system's: tiers, row by row
           const dec = x.list.filter((r) => !r.encrypted), on = dec.filter((r) => r.record).length;
           const all = dec.length > 0 && on === dec.length, mixed = on > 0 && !all;
           gsw.dataset.group = x.group;
+          // the whole group's engine at once (a service group: #875), set_many on its talkgroups
+          const gopts = engineOptions().filter((o) => !o.legacy), gsig = JSON.stringify(gopts.map((o) => [o.value, o.label]));
+          if (gEng.dataset.sig !== gsig) {
+            gEng.replaceChildren(new Option("Engine: all…", ""), ...gopts.map((o) => new Option(o.label, o.value)));
+            gEng.dataset.sig = gsig;
+          }
+          gEng.value = "";
+          gEng.dataset.keys = JSON.stringify(x.list.filter((r) => r.record).map((r) => r.ckey));
+          gEng.dataset.group = groupName(x.group);
+          gEng.disabled = lock || (((st.state && st.state.channels) || {}).sync || {}).state === "hub";
+          gEng.title = `Set the engine of every recorded talkgroup in ${groupName(x.group)}`;
           setSwitch(gsw, all, mixed ? "Record: some" : all ? "Record: all" : "Record: none");
           gsw.classList.toggle("mixed", mixed);
           gsw.disabled = !dec.length || lock;
@@ -1868,8 +1962,10 @@ window.RadioControls = (() => {
             show(actB, sealed);
             setSwitch(sttB, !!r.transcribe, "Transcribe");
             sttB.title = r.transcribe ? "Speech-to-text on" : "Kept without a transcript";
-            if (engS.value !== r.engine) engS.value = r.engine;
-            engS.title = `Speech-to-text engine: ${r.engine}${r.effective !== r.engine && r.transcribe ? ` (running: ${r.effective})` : ""}\n${ENGINE_HELP}`;
+            const eo = fillEngines(engS, r);
+            engS.title = `Speech-to-text engine: ${eo ? `${eo.label}${eo.state ? ` · ${eo.state}` : ""}` : r.engine}`
+              + `${r.effective !== r.engine && r.transcribe ? ` (running: ${r.effective})` : ""}`
+              + (eo && eo.title ? `\n${eo.title}` : "") + `\n\n${ENGINE_HELP}`;
             const onHub = (((st.state && st.state.channels) || {}).sync || {}).state === "hub";   // set on the hub, not here
             recB.disabled = mainB.disabled = sttB.disabled = engS.disabled = lock;
             if (r.fm) recB.disabled = recB.disabled || onHub;

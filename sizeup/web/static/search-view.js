@@ -187,11 +187,9 @@ window.SearchView = (() => {
   function pins(rows) {
     const pts = rows.filter((r) => r.lat != null && r.lon != null);
     show($("#sv-nomap"), !pts.length);
-    if (!window.maplibregl || typeof buildMapStyle !== "function" || !cad.scene || !cad.scene.home) return;
+    if (!window.maplibregl || typeof plainMap !== "function" || !cad.scene || !cad.scene.home) return;
     if (!st.map) {
-      st.map = new maplibregl.Map({ container: $("#sv-map"), style: buildMapStyle(cad.scene), center: cad.scene.home.center,
-                                    zoom: cad.scene.home.zoom, attributionControl: { compact: true }, maxPitch: 0, dragRotate: false });
-      st.map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+      st.map = plainMap($("#sv-map"), cad.scene);
       st.map.on("load", () => {
         st.map.addSource("sv-calls", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
         st.map.addLayer({ id: "sv-calls", type: "circle", source: "sv-calls", paint: {

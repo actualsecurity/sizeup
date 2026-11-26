@@ -107,6 +107,8 @@ def writers(c):
          lambda: row(c, "fg-2")["text"] == "its transcript"),
         ("set_alt", lambda: c.comms.set_alt("fg-2", {"text": "a third reading", "model": "m"}), "fg-2",
          lambda: row(c, "fg-2")["alt_text"] == "a third reading"),
+        ("set_route", lambda: c.comms.set_route("fg-2", "auto·priority: gpu-pc → AWS (gpu-pc: went gaming)"), "fg-2",
+         lambda: row(c, "fg-2")["stt_route"].startswith("auto·priority: gpu-pc")),
         ("rerun_done", lambda: c.comms.rerun_done("fg-2", "same"), "fg-2", lambda: row(c, "fg-2")["rerun_result"] == "same"),
         ("link", lambda: c.comms.link("fg-2", iid, "Lt. Sample"), "fg-2", lambda: iid in links("fg-2")),
         ("keep", lambda: c.comms.link("pd-1", iid, "Lt. Sample") and None, "pd-1", lambda: iid in links("pd-1")),
@@ -137,7 +139,7 @@ def writers(c):
     ]
 
 
-WRITERS = {"record", "retext", "set_alt", "set_stt", "rerun_done", "link", "unlink", "link_pages", "relink", "retag_pages", "fix_air",
+WRITERS = {"record", "retext", "set_alt", "set_stt", "set_route", "rerun_done", "link", "unlink", "link_pages", "relink", "retag_pages", "fix_air",
            "retag", "prune"}
 # Public methods of Comms that write nothing a row of the Radio page shows (activity: the per-minute counts)
 READERS = {"activity", "activity_rows", "audio_per_day", "context_clips", "corrections_kept", "noted_kept", "emergencies", "events_of", "facets", "for_incidents",

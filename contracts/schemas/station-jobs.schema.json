@@ -872,11 +872,13 @@
               },
               "engine": {
                 "type": "string",
-                "description": "Which engine reads it.",
+                "description": "Which engine reads it. Also `pin:<engine id>` (a GPU worker, `station:<id>`, `aws`): sizeup/sttroute.py. A station without `engine_select_ok` is sent only `local`, `aws` or `both`.",
                 "x-known": [
                   "local",
                   "aws",
-                  "both"
+                  "both",
+                  "auto",
+                  "auto_bg"
                 ]
               }
             }
