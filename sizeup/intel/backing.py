@@ -790,7 +790,7 @@ class ModelBacking:
                                   str(c["infer_pd_mode"]), True, {})
             place = entry.place or job["place"] or self._model_place(engine, pack, row, key, ans, job)
             text = str(row.get("text") or "")
-            there, near = self._open_there(engine, pack, key, cat, at, tid, place, text)
+            there, near = self._open_there(engine, pack, key, cat, at, tid, place, text, entry)
             if there is not None:              # this call's event (the rules' or an earlier answer's): evidence only
                 engine.sink.hit(Hit(tid, rule.id, rule.v, rule.w, cat, pack.name, at, there.id))
                 rec.update(event_id=there.id, used="evidence")
@@ -891,21 +891,23 @@ class ModelBacking:
         return place is not None and place.precision != "none" and bool(place.confirmed)
 
     @staticmethod
-    def _open_there(engine, pack, key: str, cat: str, at: float, tid: str, place, text: str):
+    def _open_there(engine, pack, key: str, cat: str, at: float, tid: str, place, text: str, entry=None):
         """(the open event this answer belongs to, or None; "same" / "other" / "" for the source's other open events).
 
         Belongs to (the newest): one with the row in it; one of this category, or of one deferring to it, on the
-        source within the merge span, unless the row says it is a new call or both places are known and differ
-        (engine._raise would not merge them either); one of this category at the same place (any source).
+        source within the merge span, unless the row says it is a new call, both places are known and differ, or
+        the engine's new-call judgement sets the row apart (entry: engine._split; engine._raise would not merge
+        them either); one of this category at the same place (any source).
         Else, an open event of the source within the pack's window_s of the row (any category): "same" when it is
         plausibly this call (no new-call words, no two known places that differ), "other" when it is another call."""
-        from sizeup.intel.engine import NEW_CALL, same_place
+        from sizeup.intel.engine import NEW_CALL, SPLITS, same_place
         span = engine._merge_span(pack)
         fresh = bool(NEW_CALL.search(text or ""))
         known = place is not None and place.precision != "none"
 
         def apart(e) -> bool:
-            return known and e.precision != "none" and not same_place(place, e.place())
+            return ((known and e.precision != "none" and not same_place(place, e.place()))
+                    or (entry is not None and tid not in e.traffic_ids and engine._split(pack, e, entry) in SPLITS))
         found, near = [], ""
         for e in engine.events.open_events():
             if e.pack != pack.name:

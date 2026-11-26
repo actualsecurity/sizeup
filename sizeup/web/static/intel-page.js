@@ -11,7 +11,7 @@
 // Paging holds the first page's newest id (upto): an event saved while paging never pushes a row onto the next page
 // twice.
 //
-// A row: time · category · level (→ the level it would have had if not held) · source · place + precision ·
+// A row: time (with "N other calls" in its window, each a link) · category · level (→ the level it would have had if not held) · source · place + precision ·
 // score and its parts (rule weights; the model's as "model 95%") · why it didn't push · Useful / Noise / Should
 // have pushed (POST /api/cad/intel/<id>/feedback: intel_feedback, what tuning reads). A click opens its More info
 // (/cad#prealert/intel/<id>, prealert-info.js). Terse: what a label means is in its hover.
@@ -337,6 +337,8 @@ window.IntelPage = (() => {
     const t = cell("t", when(e.at));
     t.title = e.last_at && e.last_at !== e.at ? `Last heard ${when(e.last_at)} · ${e.n} tx` : `${e.n} tx`;
     if (e.status !== "open") t.append(el("div", "dim small", STATUS[e.status] || e.status));
+    const sib = siblings(e);
+    if (sib) t.append(sib);
     // category
     const c = cell("il-cat", e.label || e.category);
     c.title = `${e.pack_label} · ${e.category}`;
@@ -378,6 +380,26 @@ window.IntelPage = (() => {
     const nc = window.IntelNotes ? IntelNotes.chip(e.notes) : null;
     tr.append(t, c, lvc, s, pl, sc, why, cell("act il-acts", nc, ...votes(e)));
     return tr;
+  }
+
+  // the other calls on its source in its window (eventlog.py siblings, calls): "3 other calls #12 #15", each event
+  // a link to its More info; the calls that are no event counted (a dispatch console's: the hover names them)
+  function siblings(e) {
+    const xs = e.siblings || [], calls = e.calls || [];
+    const n = xs.length + calls.length;
+    if (!n) return null;
+    const d = el("div", "dim small il-sibs", `${n}${e.truncated ? "+" : ""} other call${n === 1 ? "" : "s"} `);
+    d.title = ["Other calls on this channel within ±10 min",
+      ...calls.map((c) => `${when(c.at)} ${c.consoles.join(" · ")} · ${c.n} console tx, no event`)].join("\n");
+    xs.forEach((x, i) => {
+      if (i) d.append(" ");
+      const a = el("a", "il-sib", `#${x.id}`);
+      a.href = window.PrealertInfo ? PrealertInfo.href("intel", x.id) : `#prealert/intel/${x.id}`;
+      a.title = `${x.label || x.category} · ${when(x.at)}`;
+      a.addEventListener("click", (ev) => ev.stopPropagation());     // (the row's own click opens this one's)
+      d.append(a);
+    });
+    return d;
   }
 
   // Useful / Noise / Should have pushed: the intel feedback store (what the rules' and the model's tuning read)

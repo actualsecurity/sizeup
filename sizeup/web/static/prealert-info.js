@@ -174,7 +174,28 @@ window.PrealertInfo = (() => {
       + ((b.related_channels || []).length ? ` + ${b.related_channels.join(", ")}` : "")
       + (b.capped && (b.capped.before || b.capped.after) ? " · nearest 30 each side" : "");
     return [head("Timeline", span, "Everything on the same channels (and their talkgroup group) around it; the ones that raised it marked"),
-      b.items.length ? txList(b.items, "pi-around") : none(b.empty)];
+      ...others(d.siblings), b.items.length ? txList(b.items, "pi-around") : none(b.empty)];
+  }
+  // the other calls on its source in its window (intel: context_bundle siblings): its events, each a link to its own
+  // More info, and the calls that are no event (a dispatch console's, in the Timeline below)
+  function others(sb) {
+    const items = (sb && sb.items) || [], calls = (sb && sb.calls) || [];
+    const n = items.length + calls.length;
+    if (!n) return [];
+    const line = el("div", "pi-sibs small", `${n}${sb.truncated ? "+" : ""} other call${n === 1 ? "" : "s"} in this window: `);
+    line.title = `Other calls on this channel within ±${Math.round((sb.window_s || 0) / 60)} min of this one`;
+    const parts = [...items.map((x) => [x.at, () => {
+      const a = el("a", "pi-sib", `${x.label || x.category} ${tm(x.at)}`);
+      a.href = href("intel", x.id);
+      a.title = `#${x.id}: its More info`;
+      return a;
+    }]), ...calls.map((c) => [c.at, () => {
+      const t = el("span", "pi-sib", `${c.consoles.join(" · ")} ${tm(c.at)}`);
+      t.title = `${c.n} console tx, no event (in the Timeline)`;
+      return t;
+    }])].sort((a, b) => a[0] - b[0]);
+    parts.forEach(([, make], i) => { if (i) line.append(" · "); line.append(make()); });
+    return [line];
   }
   function place(d) {
     const p = d.place;
@@ -269,6 +290,8 @@ window.PrealertInfo = (() => {
       ["Ack", o.acknowledged ? `${o.acknowledged.by || ""} · ${tm(o.acknowledged.at)}` : ""],
       ["Event", o.incident ? incLink(o.incident) : ""],
       ["Near", o.near_incident ? incLink(o.near_incident, "Our call at its place (linked, never a radio link)") : ""],
+      ["Handoff", (o.handoff || []).length >= 2 ? `${o.handoff[0]} → ${o.handoff[1]}${o.handoff[2] ? ` · ${o.handoff[2]}` : ""}` : "",
+        "One call another department's console took over: its town is the one that took it"],
       ["FD", o.fd || "", o.fd_state === "cleared" ? `${(o.fd || "").split(" · ")[0]} (cleared): pre-alert`
         : "The FD was already there: no pre-alert (an FYI only when the words added something)"],
       ["Push", o.pushed_at ? tm(o.pushed_at) : o.held && o.held.key ? `held: ${o.held.label}` : o.suppressed ? `held: ${o.suppressed}`
@@ -286,7 +309,7 @@ window.PrealertInfo = (() => {
   }
   const BUILD = { "pi-why": why, "pi-trigger": trigger, "pi-around": around, "pi-site": site, "pi-place": place,
                   "pi-now": now, "pi-outcome": outcome };
-  const DATA = { "pi-why": (d) => [d.why, d.summary], "pi-trigger": (d) => d.trigger, "pi-around": (d) => d.before_after,
+  const DATA = { "pi-why": (d) => [d.why, d.summary], "pi-trigger": (d) => d.trigger, "pi-around": (d) => [d.before_after, d.siblings],
                  "pi-site": (d) => d.site_history, "pi-place": (d) => d.place,
                  "pi-now": (d) => ({ ...d.now, as_of: 0 }), "pi-outcome": (d) => d.outcome };
 
