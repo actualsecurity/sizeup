@@ -196,8 +196,11 @@ def test_the_area_gate_reads_the_talker_town_when_nothing_else_says_where():
     assert not e._outside(pack, ev)
     ev.talker_town = area[0]
     assert not e._outside(pack, ev)
-    ev.talker_town = "Elsewhere Town"
+    ev.talker_town = next(t for t in ("Yonkers", "White Plains") if t not in area)     # a county town, not ours
     assert e._outside(pack, ev)
+    ev.talker_town = "Elsewhere Town"                    # not a known town at all: no town, so not outside
+    assert not e._outside(pack, ev)
+    ev.talker_town = next(t for t in ("Yonkers", "White Plains") if t not in area)
     ev.precision, ev.town = "address", area[0]          # a heard place wins
     assert not e._outside(pack, ev)
 
@@ -335,13 +338,15 @@ def test_a_handoff_town_wins_over_the_talker_town_everywhere():
     ev = Event(pack="police", category="weapons", source_key="p25:mrrs:9211", town="Rye Brook", talker_town=PC,
                first_at=1000.0, level="high")
     assert resolved_town(ev) == "Rye Brook"
-    assert shown_place(ev)["place"] == "Rye Brook (talker)"
+    assert shown_place(ev) == {"place": "Rye Brook (handoff)", "precision": "town", "town": "Rye Brook",
+                               "basis": "handoff"}
     msg = push_mod.compose(ev, pack.label, pack.category("weapons"))
-    assert msg["title"].endswith("· Rye Brook") and msg["body"].splitlines()[0] == "Rye Brook (talker)"
+    assert msg["title"].endswith("· Rye Brook") and msg["body"].splitlines()[0] == "Rye Brook (handoff)"
     area_pack = next(p for p in e.packs if p.area)
+    outside = next(t for t in ("Greenwich", "White Plains", "Yonkers") if t not in area_pack.area)    # (public towns)
     gated = Event(pack=area_pack.name, category=next(c for c, d in area_pack.categories.items() if not d.get("safety")),
-                  source_key="p25:mrrs:9999", town="Elsewhere Town", talker_town=list(area_pack.area)[0])
-    assert e._outside(area_pack, gated)                        # the handoff's town, not the talker town
+                  source_key="p25:mrrs:9999", town=outside, talker_town=list(area_pack.area)[0])
+    assert resolved_town(gated) == outside and e._outside(area_pack, gated)     # the handoff's town, not the talker's
 
 
 def test_search_shows_a_town_only_event_as_its_town(site):  # noqa: F811
@@ -357,5 +362,40 @@ def test_search_shows_a_town_only_event_as_its_town(site):  # noqa: F811
 def test_a_handoffs_to_town_wins_over_the_talker_town(handoff):
     """#961's handoff record (its shape to be settled when it lands): the town of the console that took the call."""
     r = {"precision": "none", "town": "", "talker_town": PC, "handoff": handoff}
-    assert resolved_town(r) == "Rye Brook" and shown_place(r)["place"] == "Rye Brook (talker)"
+    assert resolved_town(r) == "Rye Brook" and shown_place(r)["place"] == "Rye Brook (handoff)"
     assert resolved_town({**r, "precision": "address", "town": RYE}) == RYE      # a heard place still wins
+
+
+def test_a_label_where_a_handoffs_town_should_be_is_no_town_and_holds_nothing():
+    e, _sink = labelled()
+    r = {"precision": "none", "town": "", "talker_town": PC, "handoff": ["A dispatch", "B dispatch", "B PD dispatch"]}
+    assert resolved_town(r) == "" and shown_place(r) == {}     # never the label, never the stater's town instead
+    area_pack = next(p for p in e.packs if p.area)
+    ev = Event(pack=area_pack.name, category=next(c for c, d in area_pack.categories.items() if not d.get("safety")),
+               source_key="p25:mrrs:9999", town="Elsewhere Town", talker_town=PC)
+    assert resolved_town(ev) == PC and not e._outside(area_pack, ev)      # an unknown town: not one at all
+    ev.handoff = ["A dispatch", "B dispatch", "B PD dispatch"]
+    assert not e._outside(area_pack, ev)                       # a non-safety unplaced call is never held for it
+
+
+def test_a_console_naming_a_unit_the_stater_never_named_is_no_answer():
+    """A Rye officer states a call naming no unit; the PC console then calls car 5: not the answer."""
+    e, _sink = labelled()
+    e.feed(row("t1", "a male with a knife behind the deli", 1000, radio_id=RYE_OFFICER))
+    e.feed(row("t2", "car 5 go ahead", 1004, radio_id=PC_DISPATCH))
+    ev = the_event(e)
+    assert (ev.answered_by, ev.talker_town) == ("", RYE)
+    assert e.talker_flags() == []
+
+
+def test_a_withdrawn_row_judges_the_area_gate_again():
+    e, _sink = labelled()
+    calls = []
+    real = e._hold
+    e._hold = lambda pack, ev, mode=None: (calls.append(ev.id), real(pack, ev, mode))[1]
+    e.policy.cfg["push"] = False                               # held (pushes off): never pushed, so judged again
+    e.feed(row("t1", NO_PLACE, 1000, radio_id=OFFICER))
+    e.feed(row("t2", "copy, male with a knife behind the deli", 1010, radio_id=BLANK))
+    calls.clear()
+    e.feed(row("t1", "", 1000, radio_id=OFFICER))              # the stater's row withdrawn: its town goes
+    assert the_event(e).talker_town == "" and calls

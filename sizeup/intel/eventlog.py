@@ -548,8 +548,8 @@ class IntelLog:
                         "confirmed": bool(r["confirmed"]), "town": r["town"],
                         "lat": round(r["lat"], 6) if placed else None, "lon": round(r["lon"], 6) if placed else None,
                         "radius_m": round(r["radius_m"] or 0), "matched": sorted(matched.get(r["id"], ())),
-                        # no place heard: "<Town> (talker)" (model.py shown_place), never "unplaced"
-                        **{k: v for k, v in shown_place(r).items() if k != "basis"}})
+                        # no place heard: "<Town> (handoff)" / "(talker)" (model.py shown_place), never "unplaced"
+                        **shown_place(r)})
         return {"events": out, "total": len(rows), "more": more, "limit": SEARCH_MAX,
                 "scanned": scanned, "capped": capped, "since": since,
                 "until": until}
@@ -654,9 +654,9 @@ class IntelLog:
                 "radius_m": (r["radius_m"] or 0) if placed else 0, "held": held,
                 "pushed_at": r["pushed_at"], "n": n, "votes": votes, "mine": mine,
                 "near_incident": r["near_incident"], "incident_id": r["incident_id"],
-                # no place heard: the town of who said it ("Port Chester (talker)", precision town; model.py), and
+                # no place heard: the town ("<Town> (handoff)" / "(talker)", precision town, basis which; model.py), and
                 # who said it and who answered (engine.py _talkers)
-                **{k: v for k, v in shown_place(r).items() if k != "basis"}, "talkers": talkers_of(r)}
+                **shown_place(r), "talkers": talkers_of(r)}
 
     @staticmethod
     def _detail(key: str, r: dict) -> str:

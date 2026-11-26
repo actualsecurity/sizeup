@@ -256,12 +256,12 @@ window.IntelPage = (() => {
     // source
     const s = cell("il-src", e.source || "—");
     s.title = [e.source_key, e.system].filter(Boolean).join(" · ");
-    // place + precision ("<Town> (talker)" · town: no place heard, the town of who said it), or unplaced; who said it
+    // place + precision ("<Town> (talker)" / "(handoff)" · town: no place heard, the town of who said it or of the console that took the call), or unplaced; who said it
     const town = e.precision === "town";
     const pl = e.place
       ? cell("loc", e.confirmed || town ? e.place : `${e.place} ?`, el("span", "dim small", ` · ${PREC[e.precision] || e.precision}`))
       : cell("loc dim", "unplaced");
-    if (town) pl.title = "No place heard: the town of who said it (Settings > Radios)";
+    if (town) pl.title = e.basis === "handoff" ? "The town of the console that took the call" : "No place heard: the town of who said it (Settings > Radios)";
     else if (e.place && !e.confirmed) pl.title = "Unconfirmed";
     const said = (e.talkers || {}).line;
     if (said) pl.append(el("div", "dim small", said));

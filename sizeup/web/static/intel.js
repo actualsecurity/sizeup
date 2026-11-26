@@ -53,7 +53,7 @@ window.IntelCard = (() => {
   }
   function where(e) {
     if (!e.place || e.precision === "none") return "Location not heard";
-    return e.confirmed || e.precision === "town" ? e.place : `${e.place} ?`;     // (town: "<Town> (talker)")
+    return e.confirmed || e.precision === "town" ? e.place : `${e.place} ?`;     // (town: "<Town> (talker)" or "(handoff)")
   }
   function card(e, deps, list) {
     const li = el("li", `aa aa-${e.level}`);
@@ -65,7 +65,7 @@ window.IntelCard = (() => {
     head.append(el("b", "aa-title", [e.pack_label, e.label, e.town].filter(Boolean).join(" · ")), conf);
     li.append(head);
     const loc = el("div", "aa-loc" + (e.confirmed || e.precision === "town" ? "" : " approx"), where(e));     // (a town: no "?")
-    if (e.precision === "town") loc.title = "No place heard: the town of who said it (Settings > Radios)";
+    if (e.precision === "town") loc.title = e.basis === "handoff" ? "The town of the console that took the call" : "No place heard: the town of who said it (Settings > Radios)";
     else if (!e.confirmed && e.place) loc.title = ["Unconfirmed", e.basis, ...(e.alts || []).map((a) => `or ${a.label}`)].filter(Boolean).join("\n");
     li.append(loc);
     if (e.talkers && e.talkers.line) li.append(el("div", "aa-src", e.talkers.line));    // who said it, who answered

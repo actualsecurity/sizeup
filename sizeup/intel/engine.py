@@ -1208,11 +1208,14 @@ class IntelEngine:
         thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
         if drop:
             ev.traffic_ids = rest
+        town = ev.talker_town
         if drop and not rest:
             for f in TALKER_FIELDS:           # it rested on this row alone: nobody said it any more
                 setattr(ev, f, "")
         else:
             self._talkers(pack, ev)           # who said it, without a withdrawn row (a re-text: its new words)
+        if ev.talker_town != town and ev.precision == "none" and ev.pushed_at is None and ev.status == "open":
+            self._hold(pack, ev, self._rules_mode(pack, ev))     # the area gate reads the talker town: judged again
         if got is not None and got[0] >= thr:
             ev.what_score, ev.level = got[0], level(got[0])
             ev.rules = [list(x) for x in sorted({(r.id, r.v, round(float(w), 4)) for _t, r, w in got[1]})]
@@ -1373,7 +1376,8 @@ class IntelEngine:
         named = towns_said(self._texts(pack, ev.source_key, ev.traffic_ids))
         if named:
             return not (named & area)
-        town = resolved_town(ev)              # (a town said beats who said it): a handoff's, else the talker town
+        # (a town said beats who said it): a handoff's, else the talker town; a known town only (never a label)
+        town = resolved_town(ev, [*pack.area, *(pack.towns_for(ev.source_key) or ())])
         return bool(town) and town.lower() not in area
 
     def _talkers(self, pack, ev: Event) -> None:
@@ -1418,8 +1422,9 @@ class IntelEngine:
             if any(r.category != cat and r.category in pack.categories and w > 0 for r, w in e.hits):
                 return None, False            # the console's next words are another job's
             named = frozenset(u for u in e.units if not _unit_placeholder(u))
-            if st.units and named - st.units:
-                return None, False            # it names another unit: another exchange
+            if named - st.units:
+                return None, False            # it names a unit the stater didn't (or the stater named none): not this
+                                              # exchange's answer, or not one we can tell
             backed = (bool(named & st.units) or bool(street_names(e.text) & street_names(st.text))
                       or (e.place is not None and st.place is not None and same_place(e.place, st.place))
                       or not between)

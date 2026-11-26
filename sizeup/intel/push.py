@@ -9,7 +9,7 @@
                                                                (house numbers under 100: never "0 blk"); a number the
                                                                transcript says after a plate / ID / unit / DOB word:
                                                                the street alone (fail closed); none heard: the
-                                                               coarse place ("Port Chester (talker)", model.py
+                                                               coarse place ("Port Chester (talker)" / "(handoff)", model.py
                                                                shown_place; the title's town: resolved_town),
                                                                else "location not heard"
            "14:32 · high · <Agency> PD dispatch"               line 2: the time, the level, who it was heard
