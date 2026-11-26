@@ -300,7 +300,8 @@ def test_a_row_with_a_corrected_text_scores_it_and_a_database_without_the_column
     cad2.intel.drain()
     assert cad2.intel._row_sql() == (                                  # the shape #901 writes for
         "SELECT id, start, end, source, system, service, dept, tier, talkgroup, channel, talker, rig, radio_id, "
-        "COALESCE(NULLIF(corr_text, ''), text) AS text, alt_text, model, status FROM radio_traffic WHERE id = ?")
+        "COALESCE(NULLIF(corr_text, ''), text) AS text, alt_text, model, status, rerun_result FROM radio_traffic "
+        "WHERE id = ?")                                                # (+ what made the text: the late rows' causes)
     cad2.comms.on_context_text("c2-t0")
     cad2.intel.drain()
     [ev] = cad2.intel.events.open_events()
@@ -351,7 +352,7 @@ def test_a_late_column_is_read_where_the_database_has_one(live, tmp_path):
     cad2.intel.drain()
     with cad2.store.lock:
         cad2.store.db.execute("UPDATE radio_traffic SET late = 1, text = ? WHERE id = 'c3-t0'", (SHOTS,))
-    assert cad2.intel._row_sql().endswith("alt_text, model, status, late FROM radio_traffic WHERE id = ?")
+    assert cad2.intel._row_sql().endswith("alt_text, model, status, late, rerun_result FROM radio_traffic WHERE id = ?")
     cad2.comms.on_context_text("c3-t0")
     cad2.intel.drain()
     [ev] = cad2.intel.events.open_events()

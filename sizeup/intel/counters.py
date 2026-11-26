@@ -16,6 +16,10 @@ scope. These say which. In memory, by the clock hour, per pack and overall ("" b
     pushed         pushes sent (a push again of the same event counts again)
     held           events not pushed for a reason (shadow, pushes off, quiet hours, a cap, merged, the scrub, unsent),
                    once per event, when it was first held (one pushed later is in both)
+    late           a push source's text read late (over engine.LATE_S after it aired, or #747's late flag), once per
+                   row; late_<cause> by what made it (engine.late_cause: aws, gpu, station_pool, station, catchup,
+                   outage, other); late_lost: its words reached a category at push (a pre-alert lost). Overall:
+                   engine.late_row, Settings > Station > Health
 
 These are counted as things happen; the Intel card's "24 h: events · pushed · held" line is read from the events kept
 (sizeup/intel/events.py counts()), per event as it is now, so the two can differ.
@@ -38,7 +42,8 @@ import threading
 from sizeup import tz
 
 KEYS = ("considered", "in_scope", "out_of_scope", "too_old", "repeat", "quiet", "matched", "below", "events", "pushed",
-        "held")
+        "held", "late", "late_aws", "late_gpu", "late_station_pool", "late_station", "late_catchup", "late_outage",
+        "late_other", "late_lost")
 HOUR_S = 3600.0
 HOURS = 24
 NOTHING_S = HOURS * HOUR_S             # a pack that is on with nothing in scope this long: a warning

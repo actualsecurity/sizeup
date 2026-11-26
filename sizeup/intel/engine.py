@@ -242,10 +242,54 @@ QUEUE_MAX = 5000
 WHO_MAX = 500                          # unplaced events whose talkers and units are kept past the window
 SEEN_MAX = 20000                       # traffic ids remembered with their text (the same text again: skipped)
 ROW_SQL = ("SELECT id, start, end, source, system, service, dept, tier, talkgroup, channel, talker, rig, radio_id, {text}, "
-           "alt_text, model, status{late} FROM radio_traffic WHERE id = ?")
+           "alt_text, model, status{extra} FROM radio_traffic WHERE id = ?")
 # the post-ASR correction (#901: radio_traffic.corr_text, made before the row commits) is the text intel scores, never
 # the raw one beside it; a database without the column (before #901) reads the text as transcribed
 CORR_TEXT = "COALESCE(NULLIF(corr_text, ''), text) AS text"
+
+
+# read where the database has them (PRAGMA, _row_sql): the #747 late flag (#917), and what made the text for the late
+# rows' causes (late_cause: the engine #925 records, its catch-up flag, the catch-up's re-run note)
+EXTRA_COLUMNS = ("late", "rerun_result", "stt_engine", "stt_catchup")
+LATE_CAUSES = (("aws", "AWS"), ("gpu", "GPU"), ("station_pool", "station pool"), ("station", "station"),
+               ("catchup", "catch-up"), ("outage", "outage"), ("other", "other"))
+
+
+def late_cause(row: dict) -> str:
+    """Why a push source's text reached intel late: "outage" (#747: a call from while sizeup was down), "catchup"
+    (a shed clip caught up: #925's stt_catchup, else the re-run note), else the engine that made it (#925's
+    stt_engine, else from the model label: "aws-transcribe" AWS, "(GPU " the GPU worker, "(station " the station's
+    pool, any other the station's whisper; a late AWS answer kept as alt_model is never this row's text)."""
+    if row.get("late"):
+        return "outage"
+    if row.get("stt_catchup") or ("stt_catchup" not in row and "catch-up" in str(row.get("rerun_result") or "")):
+        return "catchup"
+    eng = str(row.get("stt_engine") or "")
+    if eng in {c for c, _w in LATE_CAUSES}:
+        return eng
+    m = str(row.get("model") or "")
+    if m == "aws-transcribe":
+        return "aws"
+    if "(GPU " in m:
+        return "gpu"
+    if "(station " in m:
+        return "station_pool"
+    return "station" if m and m != "gpu-worker" else "other"
+
+
+def late_row(snap: dict, now: float) -> dict:
+    """Settings > Station > Health's Intel line for the push sources' late text (counters' late_* over 24 h)."""
+    h = snap["h24"]
+    n, lost = h.get("late", 0), h.get("late_lost", 0)
+    by = ", ".join(f"{w} {h.get('late_' + c, 0)}" for c, w in LATE_CAUSES if h.get("late_" + c, 0))
+    text = f"Late PD text 24 h: {n}" + (f" ({by})" if by else "") + (f" · would have pushed: {lost}" if lost else "")
+    title = (f"Transcripts of the sources intel pushes from that reached it more than {LATE_S / 60:g} min after they "
+             "aired (or from an outage, #747): read as context and kept at log, never pushed. By what made the text: "
+             "the engine, a catch-up of a shed clip, an outage. Would have pushed: their words reached a category at "
+             "push, so a pre-alert was lost. To cut it: raise the police AWS budget, keep the PD channels on Auto · "
+             "priority.")
+    return {"pack": "late", "label": "Late PD text", "on": True, "level": "warn" if lost else "ok", "text": text,
+            "title": title, "late": n, "lost": lost}
 
 
 def text_sql(columns) -> str:
@@ -385,6 +429,7 @@ class IntelEngine:
         self.dropped = 0
         self.stale = 0                        # rows too old to be a pre-alert (a backfill, a late re-record): skipped
         self._row_q: str | None = None        # ROW_SQL for this database (_row_sql)
+        self._late_now: tuple | None = None   # feed(): the row read late, its cause (late_row)
         self.unclear = 0                      # unclear transcripts (a loop, noise: sizeup/stt_quality.py): skipped
         self._seen: dict[str, int] = {}
         self.errors = 0
@@ -596,7 +641,7 @@ class IntelEngine:
         columns exist)."""
         if self._row_q is None:
             cols = [r["name"] for r in self.store.q("PRAGMA table_info(radio_traffic)")]
-            self._row_q = ROW_SQL.format(text=text_sql(cols), late=", late" if "late" in cols else "")
+            self._row_q = ROW_SQL.format(text=text_sql(cols), extra="".join(f", {c}" for c in EXTRA_COLUMNS if c in cols))
         return self._row_q
 
     def _maybe_tick(self) -> None:
@@ -710,7 +755,7 @@ class IntelEngine:
             c = snap["packs"][p.name]
             rows.append({**counters_mod.row(c, self.enabled and p.mode != "off", snap["started"], now, p.label, p.name,
                                             here=here), "h24": c["h24"], "start": c["start"]})
-        return {"started": snap["started"], "all": snap["all"], "packs": rows}
+        return {"started": snap["started"], "all": snap["all"], "packs": rows, "late": late_row(snap["all"], now)}
 
     def save_policy(self) -> None:
         if self.store is not None:
@@ -774,9 +819,14 @@ class IntelEngine:
                 del self._seen[k]
         out: list[Event] = []
         with self._lock:
+            self._late_now = None             # (cause, would have pushed): this row read late, once overall
             for pack in self.packs:
                 if pack.in_scope(row):
                     out += self._feed_pack(pack, row, tid, text)
+            if self._late_now is not None:
+                cause, lost = self._late_now
+                for k in ("late", f"late_{cause}", *(["late_lost"] if lost else [])):
+                    self._count(now, k, [], overall=True)
         return out
 
     def _feed_pack(self, pack, row: dict, tid: str, text: str) -> list[Event]:
@@ -845,6 +895,7 @@ class IntelEngine:
         mine = {r.category for r, _w in hits}
         event_of: dict[str, Event] = {}
         over = False                          # a category this row speaks of reached its threshold
+        pushable = False                      # ... at push
         for cat, (what, contrib, best_mode) in cats.items():
             cd = pack.category(cat)
             thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
@@ -854,6 +905,7 @@ class IntelEngine:
                 continue                      # a candidate this row says nothing about: left as it is
             over = True
             mode = lowest(pack.mode, cd.get("mode", "push"), best_mode)
+            pushable = pushable or mode == "push"
             if mode == "off":
                 continue
             dfr = self._deferred(pack, cat, cats, key, at, win.entries[tid])
@@ -876,6 +928,11 @@ class IntelEngine:
                       + self._deescalate(pack, row, key, at, tid, text, ws, win.entries[tid])):
                 if not any(x is c for c in changed):
                     changed.append(x)
+        if entry.late and not known and can_push(pack):      # a push source's text read late: by cause (late_row)
+            cause = late_cause(row)
+            for k in ("late", f"late_{cause}", *(["late_lost"] if pushable else [])):
+                self._count(self.clock(), k, [pack.name], overall=False)
+            self._late_now = (cause, pushable or bool(self._late_now and self._late_now[1]))
         if hits and pack.mode != "off":
             self._count(self.clock(), "matched", [pack.name])
             if not over:
