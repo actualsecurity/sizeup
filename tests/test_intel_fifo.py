@@ -430,18 +430,33 @@ def test_the_same_talker_ten_minutes_later_never_moves_the_knife_call():
     assert got.label_full == "100 Example Ave, Port Chester" and got.traffic_ids == ["k"]
 
 
-def test_a_placeholder_talker_never_ties_two_rows():
+def test_a_bare_radio_id_ties_the_call_out_and_its_read_back():
     t = 5000.0
-    clock = Clock(t + 2)
+    clock = Clock(t + 12)
     e, sink = engine(clock=clock)
-    [ev] = e.feed(row("k", "respond to maybe 100 Example Ave, male with a knife", t, talker="Unknown radio"))
-    clock.t = t + 32
-    e.feed(row("r", "copy, Sample St and Test Rd", t + 30, talker="Unknown radio"))
-    assert e.events.get(ev.id).label_full == "100 Example Ave, Port Chester"
-    e2, _ = engine(clock=clock)
-    [ev2] = e2.feed(row("k", "respond to maybe 100 Example Ave, male with a knife", t, rig="DPT239"))
-    e2.feed(row("r", "copy, Sample St and Test Rd", t + 30, rig="DPT239"))
-    assert e2.events.get(ev2.id).label_full == "100 Example Ave, Port Chester"
+    [ev] = e.feed(row("k", "respond for a male with a knife", t, talker="1234567"))     # MRRS: a bare radio ID
+    assert ev.precision == "none"
+    [up] = e.feed(row("r", "copy, 100 Example Ave", t + 10, talker="1234567"))         # its read-back, 10 s later
+    assert up.id == ev.id and up.label_full == "100 Example Ave, Port Chester" and up.traffic_ids == ["k", "r"]
+
+
+def test_two_unknown_radio_rows_14_s_apart_tie():
+    t = 5000.0
+    clock = Clock(t + 16)
+    e, sink = engine(clock=clock)
+    [ev] = e.feed(row("k", "respond for a male with a knife", t, talker="Unknown radio"))
+    [up] = e.feed(row("r", "copy, 100 Example Ave", t + 14, talker="Unknown radio"))
+    assert up.id == ev.id and up.label_full == "100 Example Ave, Port Chester"
+
+
+def test_a_department_placeholder_unit_never_ties_two_rows():
+    t = 5000.0
+    clock = Clock(t + 32)
+    e, sink = engine(clock=clock)
+    [ev] = e.feed(row("k", "respond to maybe 100 Example Ave, male with a knife", t, rig="DPT239"))
+    e.feed(row("r", "copy, Sample St and Test Rd", t + 30, rig="DPT239"))
+    got = e.events.get(ev.id)
+    assert got.label_full == "100 Example Ave, Port Chester" and got.traffic_ids == ["k"]
 
 
 def test_a_disregard_ends_only_what_aired_before_it():
