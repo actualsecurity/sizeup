@@ -416,3 +416,69 @@ def test_the_worker_says_it_takes_challenger_jobs_in_hello_state_and_claim(tmp_p
     finally:
         hub.stop()
         whisper.stop()
+
+
+class StopProc:
+    """A try server's process (a fake): stop() recorded."""
+
+    def __init__(self):
+        self.stopped = 0
+
+    def running(self):
+        return not self.stopped
+
+    def stop(self):
+        self.stopped += 1
+
+
+def try_server(w, whisper, mid="atc-test"):
+    e = W.check_catalog(two_models())[mid]
+    port = int(whisper.url.split(":")[2].split("/")[0])
+    s = W.ModelServer(e, {}, port, proc=StopProc(), timeout_s=10)
+    s.ok, s.trial = True, True
+    w.stt_models.servers[mid] = s
+    w.stt_models.trial = mid
+    w.stt_models.try_ = [mid]
+    return s
+
+
+def test_a_preempted_challenger_stops_its_whisper_try_server_as_an_unload(tmp_path, whub, whisper):
+    """whisper-server never stops a decode when its client goes away: a challenger cut short on a whisper-ggml try
+    model's server stops that server at once (the GPU is the live clip's), an unload: no failure, never marked bad."""
+    whisper.delay = 3.0
+    whub.watch_max = 5.0
+    w = worker(tmp_path, whub, whisper)
+    s = try_server(w, whisper)
+    whisper.before = lambda f: threading.Timer(0.2, whub.preempt_all).start() if len(f.get("file", b"")) > 40000 \
+        else None
+    challenger(whub, model="atc-test")
+    with running(w):
+        wait_for(lambda: w.counts.get("preempted") == 1, what="preempted")
+        wait_for(lambda: s.proc.stopped == 1, what="its server stopped")
+    m = w.stt_models
+    assert "atc-test" not in m.servers and m.trial == ""
+    assert m.status.get("atc-test") in (None, "try: unloaded (preempted)")   # (this hub wants no try model after)
+    assert not m.bad(s.sha) and not m._fails and not m._sha_retry and not m._retry.get("atc-test")
+
+
+def test_a_challenger_handed_back_for_gaming_stops_its_whisper_try_server_too(tmp_path, whub, whisper):
+    whisper.delay = 3.0
+    w = worker(tmp_path, whub, whisper)
+    s = try_server(w, whisper)
+    whisper.before = lambda f: W.Control(w.cfg.control_path).set(gaming=True) if len(f.get("file", b"")) > 40000 \
+        else None
+    challenger(whub, model="atc-test")
+    with running(w):
+        wait_for(lambda: whub.calls("/release"), what="handed back")
+        wait_for(lambda: s.proc.stopped == 1, what="its server stopped")
+    assert released(whub)[0].startswith("gaming") and not w.stt_models.bad(s.sha)
+
+
+def test_a_llama_asr_try_server_is_left_running(tmp_path, whisper):
+    w = W.Worker(make_cfg(tmp_path, FakeHub(), whisper), run=no_smi)
+    s = try_server(w, whisper, "asr-test")
+    assert not w.stt_models.unload_try(s, "preempted")                  # (closing the connection stops llama-server)
+    assert s.proc.stopped == 0 and "asr-test" in w.stt_models.servers
+    p = try_server(w, whisper)
+    p.trial = False                                                     # a planned (live) model: never stopped here
+    assert not w.stt_models.unload_try(p, "preempted") and p.proc.stopped == 0

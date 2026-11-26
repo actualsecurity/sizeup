@@ -3776,6 +3776,21 @@ class Models:
             return True
         return False
 
+    def unload_try(self, s: "ModelServer | None", why: str) -> bool:
+        """A challenger cut short on a whisper-ggml try server: that server stopped at once (whisper-server never stops
+        a decode when its client goes away: the GPU must be the live clip's now). An unload, never a failure: no
+        backoff, no bad mark; the try model loads again on demand. A llama-asr one stops generating when the
+        connection closes: nothing more. True when it was stopped."""
+        if s is None or not s.trial or s.kind != "whisper-ggml" or self.servers.get(s.id) is not s:
+            return False
+        if not self.stop(s.id, f"try model: its challenger was cut short ({why})", force=True):
+            return False
+        if self.trial == s.id:
+            self.trial = ""
+        if s.id in self.try_:
+            self.status[s.id] = "try: unloaded (preempted)"
+        return True
+
     def try_in_llm_room(self) -> bool:
         """A try model holds the room the LLM gave the speech models: llama-server must not start before it is
         unloaded (the models thread does that at once, while idle)."""
@@ -5685,11 +5700,13 @@ class Worker:
                        else "model unloading" if server is not None and server.draining else "")
                 if self._preempted.is_set():
                     call.abort()
+                    self.stt_models.unload_try(server, "preempted")
                     self.counts["preempted"] = self.counts.get("preempted", 0) + 1
                     log.info("job %s: preempted", jid)
                     return None
                 if why:
                     call.abort()
+                    self.stt_models.unload_try(server, why)
                     self._release(lease, why)
                     log.info("job %s: challenger: %s: handed back", jid, why)
                     return None
@@ -5701,6 +5718,7 @@ class Worker:
                     except HubError as e:
                         if e.lease_lost:
                             call.abort()
+                            self.stt_models.unload_try(server, "preempted")
                             self.counts["preempted"] = self.counts.get("preempted", 0) + 1
                             log.info("job %s: preempted", jid)
                             return None
@@ -5712,6 +5730,7 @@ class Worker:
                     lease_s = new if new is not None and new > 0 else lease_s
                 if now >= expires - self.cfg.lease_margin_s:
                     call.abort()
+                    self.stt_models.unload_try(server, "its lease ran out")
                     self.counts["lost"] += 1
                     log.info("job %s: challenger: its lease ran out: dropped", jid)
                     return None
