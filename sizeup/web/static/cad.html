@@ -284,6 +284,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <h2 class="view-title">Intel</h2>
         <span id="il-count" class="dim small" aria-live="polite"></span>
         <button id="il-refresh" type="button" class="sm quiet" title="Read it again (a long or filtered view isn't refreshed on its own)" hidden>Refresh</button>
+        <button id="il-map-btn" type="button" class="sm quiet" aria-pressed="true" title="These filters' placed events on a map, every page">Map</button>
         <span class="spacer"></span>
         <a id="il-csv" class="nav sm" href="#" download hidden title="These events with their notes, scores, rule hits and transcripts (admins; in your activity)">CSV</a>
         <a id="il-jsonl" class="nav sm" href="#" download hidden title="The same as JSON lines (admins; in your activity)">JSONL</a>
@@ -305,6 +306,11 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <label class="inline" title="To the end of this day"><span class="dim">To</span> <input id="il-to" type="date"></label>
         <button id="il-clear" type="button">Clear</button>
       </form>
+      <div id="il-mapbox" class="il-mapwrap" hidden>
+        <div class="il-mapbox"><div id="il-map" class="il-map"></div><div id="il-nomap" class="nomap dim" hidden>No placed events</div></div>
+        <div class="il-map-foot"><span id="il-map-n" class="dim small" title="Colour: level · glyph: category · hollow: place unconfirmed, the ring how far off · unplaced: counted, not pinned"></span>
+          <a id="il-map-sel" class="nav sm" href="#" hidden title="The selected pin's event isn't on this page">More info</a></div>
+      </div>
       <div class="tscroll"><table class="evtable db il-table"><thead><tr><th>Time</th><th>Category</th><th>Level</th><th>Source</th><th>Place</th><th>Score</th><th>Not pushed</th><th><span class="sr-only">Feedback</span></th></tr></thead>
         <tbody id="il-rows"></tbody></table></div>
       <div class="sv-pager row"><button id="il-prev" type="button" class="sm">Newer</button><span id="il-page" class="dim small"></span><button id="il-next" type="button" class="sm">Older</button></div>
@@ -920,6 +926,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/search-view.js"></script>
 <script src="/static/prealert-info.js"></script>
 <script src="/static/intel-notes.js"></script>
+<script src="/static/intel-map.js"></script>
 <script src="/static/intel-page.js"></script>
 <script src="/static/preplan.js"></script>
 <script src="/static/bldg-highlight.js"></script>

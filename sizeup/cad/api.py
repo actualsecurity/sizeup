@@ -395,7 +395,10 @@ GET  /api/cad/intel/events?since=&bbox=w,s,e,n&mode=map,push&status=open|all&lim
                                           signed in (sourcekeys.may_see_context), 403 otherwise
 GET  /api/cad/intel/list?from=&to=&level=&category=&source=&system=&decided=&held=&status=&page=&size=
                                           the Intel page (sizeup/intel/eventlog.py): every event at every level and
-                                          status, newest first, 50 a page, and why each didn't push; anyone signed in
+                                          status, newest first, 50 a page, and why each didn't push; anyone signed in.
+                                          ?map=1: the page's map, every placed event of the filters (at most 2,000)
+                                          as {pins: [{id, lat, lon, precision, level, category, held ...}], placed,
+                                          unplaced}
 GET  /api/cad/intel/<id>/notes            its notes (sizeup/intel/notes.py), oldest first; the audit for an admin;
                                           anyone signed in
 POST /api/cad/intel/<id>/notes            {text?, tags?: [...], corrected_category?, corrected_place?, corrected_level?}:

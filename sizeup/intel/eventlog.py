@@ -8,14 +8,19 @@ gate); names and PII as the events have them; nothing here leaves the hub.
         review queue: every event kept). q: words in its notes; tag: a note's tag; review=1: a note tagged for a rule
         or model change (notes.REVIEW_TAGS) not yet done (sizeup/intel/notes.py).
         {events: [row], total, page, size, since, until, facets: {categories, sources, systems}, held: [{key, label,
-        tip}]}. Newest first (first_at, then id), PAGE_SIZE a page (at most PAGE_MAX), on intel_events_first.
+        tip}], rev}. Newest first (first_at, then id), PAGE_SIZE a page (at most PAGE_MAX), on intel_events_first.
+        rev: the events' revision (the page's map reads again only when it or the total moved).
+    GET /api/cad/intel/list?map=1&<the same filters>
+        the Intel page's map (#937): every placed event of the filters, all pages, newest first, at most MAP_MAX;
+        {pins: [{id, lat, lon, precision, radius_m, confirmed, level, category, label, held}], placed, unplaced,
+        limit, since, until}. held: the reason's short label ("" pushed). Unplaced events are counted, never pinned.
 
 A row (terse; the page shows it as is):
 
     id, at (first_at), last_at, status, pack, pack_label, category, label, level, would, what, score_level, parts
     ([[rule id, weight]]), decided, source_key, source (its name: source_name()), system, place, precision, confirmed,
-    town, held ({key, label, detail} | None when pushed), pushed_at, n (transmissions), votes ({verdict: n}), mine
-    (this reader's verdicts), near_incident, incident_id
+    town, lat, lon, radius_m (null / 0 when unplaced), held ({key, label, detail} | None when pushed), pushed_at, n
+    (transmissions), votes ({verdict: n}), mine (this reader's verdicts), near_incident, incident_id
 
 level      what happened: push (pushed_at set), held (at push, not pushed: the policy's or the sink's reason), else
            its mode: map, log, shadow
@@ -47,6 +52,7 @@ from sizeup.intel.model import lowest, mode_rank
 
 PAGE_SIZE = 50
 PAGE_MAX = 100
+MAP_MAX = 2000                     # the map's pins: the newest of the filters (the rest counted)
 DEFAULT_S = 24 * 3600
 FACET_S = 300                      # the filters' choices: read again when the range moved this far (or the events changed)
 SPAN_MAX_S = 92 * 86400            # events are kept 90 days (events.py KEEP_EVENTS_S)
@@ -131,7 +137,9 @@ LEVEL_SQL = {"push": "pushed_at IS NOT NULL", "held": "pushed_at IS NULL AND mod
              "map": "pushed_at IS NULL AND mode = 'map'", "log": "pushed_at IS NULL AND mode = 'log'",  # own columns)
              "shadow": "pushed_at IS NULL AND mode = 'shadow'"}
 COLS = ("id, pack, category, source_key, system, first_at, last_at, status, what_score, level, rules, precision, "
-        "label_full, town, confirmed, mode, pushed_at, suppressed, near_incident, incident_id, traffic_ids")
+        "label_full, town, confirmed, mode, pushed_at, suppressed, near_incident, incident_id, traffic_ids, lat, lon, "
+        "radius_m")
+PLACED = "precision != 'none' AND lat IS NOT NULL AND lon IS NOT NULL"     # (on the listing's own columns)
 
 
 def is_model(rule_id) -> bool:
@@ -367,7 +375,36 @@ class IntelLog:
         return {"events": out, "total": total, "page": page, "size": size, "since": f["since"], "until": f["until"],
                 "now": f["now"], "facets": self.facets(f["since"], f["until"], names), "held": held_options(),
                 "levels": list(LEVELS), "decided": list(DECIDED), "statuses": list(STATUSES), "tags": list(TAGS),
-                "review_tags": list(REVIEW_TAGS)}
+                "review_tags": list(REVIEW_TAGS), "rev": rev}
+
+    def map(self, q: dict) -> dict:
+        """GET /api/cad/intel/list?map=1 (the module doc): the filters' placed events as pins, all pages, the newest
+        MAP_MAX; the placed and unplaced counted. Two reads on intel_events_first, the same filters as list()."""
+        f = self.query(q)
+        inner, outer, args = f["inner"], f["outer"], f["args"]
+        store = self.cad.store
+        n = store.one(f"SELECT COALESCE(SUM(CASE WHEN {PLACED} THEN 1 ELSE 0 END), 0) AS placed, "
+                      f"COALESCE(SUM(CASE WHEN {PLACED} THEN 0 ELSE 1 END), 0) AS unplaced FROM ({inner}) WHERE {outer}",
+                      args)
+        rows = store.q(f"SELECT id, pack, category, lat, lon, precision, radius_m, confirmed, mode, pushed_at, held "
+                       f"FROM ({inner}) WHERE ({outer}) AND {PLACED} ORDER BY first_at DESC, id DESC LIMIT :lim",
+                       {**args, "lim": MAP_MAX})
+        from sizeup.intel.push import category_label
+        labels: dict = {}
+        pins = []
+        for r in rows:
+            lk = (r["pack"], r["category"])
+            if lk not in labels:
+                p = self.engine.pack(r["pack"]) if hasattr(self.engine, "pack") else None
+                labels[lk] = category_label(p.category(r["category"]) if p else {}, p.label if p else "", r["category"])
+            pushed = r["pushed_at"] is not None
+            pins.append({"id": r["id"], "lat": round(r["lat"], 6), "lon": round(r["lon"], 6), "precision": r["precision"],
+                         "radius_m": round(r["radius_m"] or 0), "confirmed": bool(r["confirmed"]),
+                         "level": "push" if pushed else "held" if r["mode"] == "push" else r["mode"],
+                         "category": r["category"], "label": labels[lk],
+                         "held": "" if pushed else held_label(r["held"] or "", r["mode"])[0]})
+        return {"pins": pins, "placed": n["placed"], "unplaced": n["unplaced"], "limit": MAP_MAX, "since": f["since"],
+                "until": f["until"], "rev": self._rev()}
 
     def _notes(self, ids: list[int]) -> dict:
         n = getattr(self.cad.intel_admin, "notes", None) if hasattr(self.cad, "intel_admin") else None
@@ -431,7 +468,9 @@ class IntelLog:
                 "parts": [[str(x[0]), x[2] if len(x) > 2 else None] for x in rules if x],
                 "decided": decided, "source_key": r["source_key"], "source": source_name(names, r["source_key"]),
                 "system": r["system"], "place": r["label_full"] if r["precision"] != "none" else "",
-                "precision": r["precision"], "confirmed": bool(r["confirmed"]), "town": r["town"], "held": held,
+                "precision": r["precision"], "confirmed": bool(r["confirmed"]), "town": r["town"],
+                "lat": r["lat"] if r["precision"] != "none" else None, "lon": r["lon"] if r["precision"] != "none" else None,
+                "radius_m": r["radius_m"] or 0, "held": held,
                 "pushed_at": r["pushed_at"], "n": n, "votes": votes, "mine": mine,
                 "near_incident": r["near_incident"], "incident_id": r["incident_id"]}
 
