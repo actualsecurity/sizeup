@@ -241,9 +241,8 @@ window.IntelPage = (() => {
   }
 
   function wire() {
-    const form = $("#il-filters");
-    if (!form) return;
-    form.addEventListener("submit", (ev) => { ev.preventDefault(); submit(0); });
+    if (!$("#il-filters")) return;
+    $("#il-filters").addEventListener("submit", (ev) => { ev.preventDefault(); submit(0); });
     for (const k of ["level", "category", "source", "decided", "held", "status", "from", "to"]) {
       $(`#il-${k}`).addEventListener("change", () => submit(0));
     }
