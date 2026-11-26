@@ -417,16 +417,18 @@ class Comms:
             self._trim_changes(kind)
         if late:
             self._heard_late(tid)
-            if self._late_for_intel(t, system):
+            if self._late_for_intel(t, system, had_text):
                 self._heard_intel(tid)
         else:
             self._heard(tid)
         return out
 
-    def _late_for_intel(self, t: dict, system: str) -> bool:
-        """A late row (#747) that came already transcribed (words, not unclear) on a source the pre-alerts push from
-        (intel_pushes): intel hears it too, beside on_late_text. Never under store.lock (the check may read the store)."""
-        if self.intel_pushes is None or not (t.get("text") or "").strip() or (t.get("status") or "") == "unclear":
+    def _late_for_intel(self, t: dict, system: str, had_text: bool = False) -> bool:
+        """A late row (#747) that came already transcribed (words, not unclear), or that had words and has none now
+        (had_text: empty, unclear; intel withdraws them), on a source the pre-alerts push from (intel_pushes): intel
+        hears it too, beside on_late_text. Never under store.lock (the check may read the store)."""
+        words = bool((t.get("text") or "").strip()) and (t.get("status") or "") != "unclear"
+        if self.intel_pushes is None or not (words or had_text):
             return False
         try:
             return bool(self.intel_pushes({"channel": t.get("source") or "", "talkgroup": t.get("talkgroup"),

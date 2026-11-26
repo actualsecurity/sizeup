@@ -233,9 +233,9 @@
             "model": {"type": "string", "description": "The model that wrote them."}
           }
         },
-        "catchup": {"const": true, "description": "Present (true) only for a shed clip caught up later: the words may be hours old, so on the hub nothing that alerts hears them."},
+        "catchup": {"const": true, "description": "Present (true) only for a shed clip caught up later: the words may be hours old, so on the hub no alarm, status hint or pre-alert hears them; only intel does, on a source it pushes from: it scores them at their air time and pushes only while still fresh."},
         "vocab_v": {"type": "string", "description": "The version of the term list that went into whisper's prompt. Present only when one did. The hub cuts it to 80 characters."},
-        "late": {"const": true, "description": "Present (true) only for the words of a P25 call written while sizeup was down and ingested at its next start (#747): on the hub nothing that pre-alerts hears them; an emergency still alarms, labelled late."}
+        "late": {"const": true, "description": "Present (true) only for the words of a P25 call written while sizeup was down and ingested at its next start (#747): on the hub no pre-alert hears them, except intel on a source it pushes from, which scores them at their air time and never pushes them; an emergency still alarms, labelled late."}
       }
     },
     "rerun": {
@@ -556,7 +556,7 @@
         "emergency_via": {"type": "string", "description": "FM: which signalling carried the emergency packet. Present only with an FM emergency.", "x-known": ["MDC", "FleetSync"], "x-hub": "read"},
         "alarm_key": {"type": "string", "description": "FM: the id of the alarm already raised at the key-up of this carrier (`<label without spaces>-live-<start in ms>`), which this transmission takes over. Present only when there was one.", "x-hub": "read"},
         "kept": {"type": "string", "description": "P25: why a call on a talkgroup whose Record switch is off was kept. Present only then.", "x-known": ["emergency"], "x-hub": "read"},
-        "late": {"type": "boolean", "description": "P25: true on a call written while sizeup was down and ingested at its next start (#747): it goes to the radio log and speech-to-text like any, no pre-alert hears it, and an emergency still alarms, labelled late. An emergency's alarm mark always carries it (false when live); a transmission only when true.", "x-hub": "read"},
+        "late": {"type": "boolean", "description": "P25: true on a call written while sizeup was down and ingested at its next start (#747): it goes to the radio log and speech-to-text like any, no pre-alert hears it (intel, on a source it pushes from, scores it at its air time and never pushes it), and an emergency still alarms, labelled late. An emergency's alarm mark always carries it (false when live); a transmission only when true.", "x-hub": "read"},
         "flag_stuck": {"type": "string", "description": "P25: the emergency flag on this call is one the station found stuck (a radio left in emergency mode, a talkgroup held in emergency): who or what it is stuck on, for people. Present only then; never together with `emergency` true.", "x-hub": "read"},
         "evidence": {"type": "object", "additionalProperties": true, "description": "P25 emergency: trunk-recorder's own record of the call (its JSON, in its own format, with `file` added and `srcList` / `freqList` cut to 200 entries), kept for audit. Present only with a P25 emergency whose record could be read. Not described here: it is another program's format.", "x-hub": "read"},
         "fm": {"type": "boolean", "description": "False: the clip needs no FM de-emphasis (decoded P25 voice, AM airband). Absent on an FM channel, which is taken as true. Read when the clip is transcribed again.", "x-hub": "read"},

@@ -850,14 +850,20 @@ def test_a_late_row_recorded_transcribed_on_a_push_source_reaches_intel_and_the_
     locked = []
 
     def push(key, kind=""):
-        locked.append(app.cad.store.lock.locked() if hasattr(app.cad.store.lock, "locked") else False)
+        locked.append(owned())                                  # held by this thread (locked(): by any thread)
         return key in (PD, "Chan")
 
     monkeypatch.setattr(intel, "is_push_source", push)
+    if not hasattr(threading.RLock(), "_is_owned"):
+        pytest.skip("this Python's RLock can't say whether the current thread holds it")
     app = App(base(clips_dir=str(tmp_path / "clips")))
+    lock = app.cad.store.lock
+    owned = lock._is_owned
     try:
         comms, now = app.cad.comms, time.time()
         assert comms.intel_pushes == app._intel_source
+        with lock:
+            assert owned()                                      # (the check itself works)
         heard = {"text": [], "context": [], "intel": [], "late": []}
         comms.on_text, comms.on_context_text, comms.on_intel_text, comms.on_late_text = (
             heard["text"].append, heard["context"].append, heard["intel"].append, heard["late"].append)
@@ -908,6 +914,54 @@ def test_a_context_row_re_recorded_without_its_words_reaches_intel_to_withdraw(t
         record(app, "pd-4", now - 850, status="no_speech", late=True, **pd)
         record(app, "pd-1", now - 900, status="no_speech", **pd)                              # (already empty)
         assert heard == {"text": [], "context": ["pd-1", "pd-2", "pd-1", "pd-2"], "late": []}
+    finally:
+        app.stop()
+
+
+def test_our_late_row_re_recorded_without_its_words_reaches_intel_to_withdraw(tmp_path, monkeypatch):
+    """One of our late rows (#747) recorded with words, then again with none (no_speech, unclear): on a push source,
+    on_intel_text each time beside on_late_text, so intel withdraws what it scored; on any other source, or a row that
+    never had words, on_late_text only."""
+    from sizeup import intel
+    from sizeup.app import App
+    monkeypatch.setattr(intel, "is_push_source", lambda key, kind="": key == "Chan")
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    try:
+        comms, now = app.cad.comms, time.time()
+        heard = {"text": [], "intel": [], "late": []}
+        comms.on_text, comms.on_intel_text, comms.on_late_text = (heard["text"].append, heard["intel"].append,
+                                                                  heard["late"].append)
+        words = {"status": "done", "model": "m.bin", "text": "Engine 60 responding", "late": True}
+        record(app, "fm-1", now - 900, **words)
+        record(app, "fm-2", now - 880, **words)
+        assert heard["intel"] == ["fm-1", "fm-2"]
+        record(app, "fm-1", now - 900, status="no_speech", model="m.bin", late=True)          # its words gone
+        record(app, "fm-2", now - 880, status="unclear", model="m.bin", late=True, quality="loop",
+               unclear_text="thank you thank you")
+        assert heard["intel"] == ["fm-1", "fm-2", "fm-1", "fm-2"]
+        # never had words: on_late_text only
+        record(app, "fm-3", now - 860, status="no_speech", model="m.bin", late=True)
+        record(app, "fm-3", now - 860, status="no_speech", model="m.bin", late=True)
+        assert heard["intel"] == ["fm-1", "fm-2", "fm-1", "fm-2"] and heard["text"] == []
+        assert heard["late"] == ["fm-1", "fm-2", "fm-1", "fm-2", "fm-3", "fm-3"]
+        rows = {r["id"]: r for r in app.cad.store.q("SELECT id, start, late FROM radio_traffic")}
+        assert rows["fm-1"]["start"] == now - 900 and all(r["late"] == 1 for r in rows.values())
+    finally:
+        app.stop()
+
+
+def test_our_late_row_on_another_source_losing_its_words_reaches_only_the_late_hook(tmp_path, monkeypatch):
+    from sizeup import intel
+    from sizeup.app import App
+    monkeypatch.setattr(intel, "is_push_source", lambda key, kind="": False)
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    try:
+        comms, now = app.cad.comms, time.time()
+        heard = {"intel": [], "late": []}
+        comms.on_intel_text, comms.on_late_text = heard["intel"].append, heard["late"].append
+        record(app, "fm-1", now - 900, status="done", model="m.bin", text="Engine 60 responding", late=True)
+        record(app, "fm-1", now - 900, status="no_speech", model="m.bin", late=True)
+        assert heard == {"intel": [], "late": ["fm-1", "fm-1"]}
     finally:
         app.stop()
 

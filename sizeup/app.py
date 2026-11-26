@@ -1677,7 +1677,8 @@ class App:
     def _call(self, call: Call) -> None:
         # late (#747): written while sizeup was down, ingested at this start. Its rows go to the radio log, speech-to-text
         # and the hub like any (t.late on each), and no pre-alert hears it (_atc, Comms.record / retext with "late": no
-        # intel, status hint, dispatch step, possible incoming or airport level). The one exception is an emergency: its
+        # status hint, dispatch step, possible incoming or airport level; intel only on a source it pushes from, which
+        # scores it at its air time and never pushes it, radio_traffic.late). The one exception is an emergency: its
         # button or a mayday still alarms and pushes (_alarm_now, _alarm), labelled late, at its own time
         # (alarms.late_note), and deduped with an alarm the same call or radio raised live before the restart
         late = bool(getattr(call, "late", False))
@@ -2757,7 +2758,8 @@ class App:
             if job.status != "error":
                 self._set_alt(job.id, text, model)
         elif job.status != "error":
-            # (a shed clip caught up hours later: its words are old, nothing that alerts hears them)
+            # (a shed clip caught up hours later: its words are old, nothing that alerts hears them; intel only, on a
+            # source it pushes from: scored at air time, pushed only while fresh)
             changed = self._retext(job.id, text, job.status, job.confidence, model, quiet=job.catchup,
                                    vocab_v=getattr(job, "vocab_v", ""),
                                    prompted=bool(getattr(job, "stt_prompt_time", False)))
@@ -2895,10 +2897,13 @@ class App:
         alt {text, model}: the other engine's transcript, kept to compare ("both"). quiet: a shed clip caught up
         (sizeup/sttcatchup.py): its words may be hours old, so the text, history and change log are written as ever
         but nothing that alerts hears it: no alarm, no ATC or airport pre-alert, no status hint, possible incoming or
-        dispatch step (Comms.retext notify=False), here and on the hub ("catchup" on the retext event). vocab_v: the term
+        dispatch step (Comms.retext notify=False), here and on the hub ("catchup" on the retext event); only intel, on a
+        source it pushes from (Comms.retext intel=True), which scores it at its air time and pushes only while fresh
+        (a row that had words and has none now: intel too, to withdraw them). vocab_v: the term
         list or vocabulary that biased the new text (sizeup/stt_terms.py), on the row and the event. late: a P25
         call from while sizeup was down (#747; the row's own t.late says so too): no pre-alert either (no ATC, and
-        Comms.retext late: only the per-incident radio log), but its words still go to the alarms (a mayday that only
+        Comms.retext late: the per-incident radio log, and intel as above, which never pushes a late row), but its
+        words still go to the alarms (a mayday that only
         AWS heard alarms, labelled late; the same transmission's alarm is updated, never raised twice); "late" on the
         retext event. language: the engine's detected language, when it said (sizeup/stt_quality.py)."""
         changed = False
