@@ -405,8 +405,9 @@ async function sPost(section, body, done) {
 
 // The sections sRender builds whole from S.data (panel.replaceChildren): out of sight, their nodes are let go and built
 // again when shown, as sRoute does on every visit anyway. Kept, a section once opened stayed in the page for good:
-// Units alone (a row of fields per unit) was about 70k nodes, two thirds of the console's (GitHub #887).
-const S_BUILT = new Set(["lists", "units", "dispatch", "users", "system"]);
+// Units alone (a row of fields per unit) was about 70k nodes, two thirds of the console's (GitHub #887). Not System: its
+// cards are kept from one visit to the next (sSystem kept()), with what was typed in them and not saved yet.
+const S_BUILT = new Set(["lists", "units", "dispatch", "users"]);
 function sRelease(keep) {
   for (const p of document.querySelectorAll("#settings .s-panel")) {
     if (p.dataset.s !== keep && S_BUILT.has(p.dataset.s) && p.firstChild) p.replaceChildren();

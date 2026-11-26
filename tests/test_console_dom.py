@@ -12,8 +12,9 @@ after a GC, EventTarget.addEventListener counted by its caller):
       between collections (the trace's swing). Now the rows' status lines are put right in place: 14 listeners added,
       the counters flat.
   Any section once opened stayed in the page, hidden: after a visit to every page, back on the Overview, 112k nodes
-      and 6.1k listeners, 73k of the nodes Settings > Units and 14k Settings > System. Now a section sRender builds
-      whole is let go when it is left (it was built again on every visit anyway): 24k nodes, 2.5k listeners.
+      and 6.1k listeners, 73k of the nodes Settings > Units and 14k Settings > System. Now Lists, Units, Dispatch and
+      Users are let go when left (built again on every visit anyway, typed text not kept); System is kept, its cards
+      with what was typed in them and not saved.
   prealert.js searched the whole page for [data-pa-at] every second; now it ticks the ages it made.
 
 In headless Chromium against a real WebServer and CAD (skipped where Playwright isn't installed)."""
@@ -79,12 +80,37 @@ def test_a_settings_section_left_lets_its_nodes_go_and_is_built_again_on_return(
     page.evaluate("() => { history.pushState(null, '', location.pathname); window.dispatchEvent(new HashChangeEvent('hashchange')); }")
     page.wait_for_function("document.querySelector('#settings').hidden")
     assert page.evaluate("() => [...document.querySelectorAll('#settings .s-panel')].filter((p) => "
-                         "['lists', 'units', 'dispatch', 'users', 'system'].includes(p.dataset.s)).map((p) => p.children.length)") \
-        == [0, 0, 0, 0, 0]
+                         "['lists', 'units', 'dispatch', 'users'].includes(p.dataset.s)).map((p) => p.children.length)") \
+        == [0, 0, 0, 0]
     # the units' rows were most of the page (about 290 nodes a unit): gone with the section
     assert counters(page)["nodes"] < shown - 150 * rows
     go(page, "#settings/units")                                       # back: built again, as on any visit
     page.wait_for_function(f"document.querySelectorAll('{UNITS}').length === {rows}")
+
+
+def test_system_keeps_its_typed_text_through_another_section_and_out_of_settings(site, page):
+    from tests.test_settings_no_redraw import FIELD, TYPED
+    page.goto(site.base + "/cad#settings/system")
+    page.fill("#operator", "JD")
+    page.wait_for_selector(FIELD)
+    page.wait_for_function("document.querySelector('#s-alarms textarea') && !S.loading")
+    page.fill(FIELD, TYPED)
+    words = "example words typed"
+    page.fill("#s-alarms textarea", words)
+    card = "() => document.querySelector('#s-pushes')"
+    page.evaluate(f"() => {{ window._card = ({card})(); }}")
+    go(page, "#settings/units")
+    page.wait_for_function(f"document.querySelectorAll('{UNITS}').length > 20")
+    go(page, "#settings/system")
+    page.wait_for_function("!document.querySelector('#s-system').hidden && !S.loading")
+    assert page.input_value(FIELD) == TYPED and page.input_value("#s-alarms textarea") == words
+    assert page.evaluate(f"() => ({card})() === window._card")              # the card itself: never emptied
+    page.evaluate("() => { history.pushState(null, '', location.pathname); window.dispatchEvent(new HashChangeEvent('hashchange')); }")
+    page.wait_for_function("document.querySelector('#settings').hidden")
+    go(page, "#settings/system")
+    page.wait_for_function("!document.querySelector('#s-system').hidden && !S.loading")
+    assert page.input_value(FIELD) == TYPED and page.input_value("#s-alarms textarea") == words
+    assert page.evaluate(f"() => ({card})() === window._card")
 
 
 def test_a_units_status_puts_its_line_right_without_building_the_section_again(site, page):
