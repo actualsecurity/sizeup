@@ -931,9 +931,15 @@
   .il-table tr.il-row { cursor: pointer; }
   .il-table tr.il-sel { background: var(--hover); box-shadow: inset calc(var(--bw) * 2) 0 0 var(--accent-text); }
   /* the map (#937, intel-page.js): above the list, as Search's; hidden by its Map button (a phone starts hidden) */
-  .il-mapwrap { display: flex; flex-direction: column; gap: var(--s-1); min-inline-size: 0; }
-  .il-mapbox { position: relative; block-size: calc(var(--map-h) * 0.75); border-radius: var(--radius); border: var(--bw) solid var(--line); }
+  /* the map's height: the layout's, or what the viewer dragged its bottom edge to (--il-map-h, intel-page.js; the
+     incident map's handle, .dmap-h, reaching out into the gap under it: the foot sits below the handle) */
+  .il-mapwrap { display: flex; flex-direction: column; gap: var(--s-4); min-inline-size: 0; }
+  .il-mapbox { position: relative; block-size: var(--il-map-h, calc(var(--map-h) * 0.75)); border-radius: var(--radius);
+               border: var(--bw) solid var(--line); }
   .il-mapbox > :is(.il-map, .nomap) { border-radius: calc(var(--radius) - var(--bw)); overflow: hidden; }
+  body.row-dragging .il-mapbox > :not(.dmap-handle) { pointer-events: none; }
+  .il-range { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .il-older td { text-align: center; }
   .il-map { position: absolute; inset: 0; }
   .il-map-foot { display: flex; align-items: center; gap: var(--s-2); min-block-size: var(--ctl-sm); }
   .il-table td { vertical-align: top; }
