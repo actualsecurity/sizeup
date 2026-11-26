@@ -1027,19 +1027,23 @@ class WhisperProcess:
     def __init__(self, argv: list, log_path: Path, popen: Callable = subprocess.Popen, clock: Callable = time.monotonic,
                  base_dir: str = "", name: str = "whisper-server", env: Callable[[], dict] | None = None,
                  job: KillOnClose | None = None, children: Children | None = None,
-                 command: Callable[[list], list] | None = None):
+                 command: Callable[[list], list] | None = None, program: Callable[[str], str] | None = None):
         """name: the server's (its log lines, its logger); env(): its environment at each start (default child_env);
         job: the kill-on-close job object it joins; children: where its pid is kept for the next start; command:
-        what the argv becomes (llama-server's: llm_command)."""
+        what the argv becomes (llama-server's: llm_command); program: the program to start for argv[0], looked up at
+        each start (Runtimes.program: the installer's path runs the active build's)."""
         self.argv, self.log_path, self.popen, self.clock, self.base_dir = argv, log_path, popen, clock, base_dir
         self.name, self.env, self.job, self.children = name, env or child_env, job, children
         self._command = command or (lambda a: a)
+        self.program = program
         self.proc = None
         self.started = -1e9
         self._out: logging.Logger | None = None
 
     def command(self) -> list[str]:
         argv = [os.path.expandvars(str(a)) for a in self._command(list(self.argv))]
+        if argv and self.program is not None:
+            argv[0] = self.program(argv[0])
         if argv and self.base_dir and not Path(argv[0]).is_absolute() and (Path(self.base_dir) / argv[0]).exists():
             argv[0] = str(Path(self.base_dir) / argv[0])
         return argv
@@ -2680,6 +2684,37 @@ def download_file(url: str, dest: Path, size: int, sha: str, stop: Callable[[], 
     _replace(part, dest)
 
 
+class NoSpace(DownloadError):
+    """Not enough free disk space for what is left to download (and DISK_MARGIN): nothing was fetched."""
+
+
+def fetch_pinned(url: str, dest: Path, size: int, sha: str, cache: Path, stop: Callable[[], bool] = lambda: False,
+                 download: Callable = download_file, disk: Callable = shutil.disk_usage) -> bool:
+    """The one download path for every pinned file the worker fetches (a speech model's, the LLM's GGUF, a try
+    model's, a llama.cpp / whisper.cpp zip): dest kept when it is already the pinned file (its hash from `cache`, a
+    file_sha256 cache), else a disk-space check first (what is left to download, and DISK_MARGIN: NoSpace), then
+    download (download_file: an allowed host, exact size and SHA-256, resumed from the .part a stopped download left)
+    and its hash cache written. True when it was downloaded now. DownloadError."""
+    try:
+        if dest.is_file() and dest.stat().st_size == size and file_sha256(dest, cache) == sha:
+            return False
+    except OSError:
+        pass
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    have = part.stat().st_size if part.is_file() else 0
+    need = max(size - have, 0) + DISK_MARGIN
+    if disk(dest.parent).free < need:
+        raise NoSpace(f"no disk space ({need / 1e9:.1f} GB)")
+    download(url, dest, size, sha, stop)
+    try:
+        st = dest.stat()
+        write_json(cache, {"path": str(dest), "size": st.st_size, "mtime_ns": st.st_mtime_ns, "sha256": sha})
+    except OSError:
+        pass
+    return True
+
+
 def speech_dbfs(wav: bytes) -> float | None:
     """The loudest 10% of a WAV's 20 ms blocks (16-bit mono), dBFS: the speech level, whatever silence pads it. None
     when it can't be read."""
@@ -2873,6 +2908,8 @@ class Models:
         self._final_fails: dict = {}             # file sha256 -> final download failures (marked bad at the second)
         self._dl_retry: dict = {}                # model id -> no download before (a failure that may pass later)
         self.enabled = bool(cfg.managed_models)
+        self.program: Callable[[str], str] = lambda p: p   # worker.toml's program -> the one to run (Runtimes.program)
+        self.disk = shutil.disk_usage
         if cfg.catalog_file:
             self._load_local(cfg.catalog_file)
         else:
@@ -3032,15 +3069,14 @@ class Models:
             if self.verified(f):
                 continue
             try:
-                self.dir.mkdir(parents=True, exist_ok=True)
-                if shutil.disk_usage(self.dir).free < f["bytes"] + DISK_MARGIN:
-                    self.status[mid] = "no disk space"
-                    self._dl_retry[mid] = self.clock() + MODEL_RETRY_S
-                    return False
                 self.status[mid] = f"downloading {role}"
                 log.info("models: %s: downloading %s (%.0f MB)", mid, f["file"], f["bytes"] / 1e6)
-                self.download(f["url"], self.path_of(f), f["bytes"], f["sha256"], stop)
-                self._seed(f)
+                fetch_pinned(f["url"], self.path_of(f), f["bytes"], f["sha256"], self._sha_cache(f), stop,
+                             self.download, self.disk)
+            except NoSpace:
+                self.status[mid] = "no disk space"
+                self._dl_retry[mid] = self.clock() + MODEL_RETRY_S
+                return False
             except DownloadError as x:
                 if str(x).startswith("stopped"):
                     self.status[mid] = "waiting (gaming)"
@@ -3060,15 +3096,6 @@ class Models:
                 log.warning("models: %s: %s", mid, x)
                 return False
         return self.ready_files(e)
-
-    def _seed(self, f: dict) -> None:
-        """A file just downloaded with its hash checked: its hash cache written (no 2 GB hashed again)."""
-        try:
-            st = self.path_of(f).stat()
-            write_json(self._sha_cache(f), {"path": str(self.path_of(f)), "size": st.st_size,
-                                            "mtime_ns": st.st_mtime_ns, "sha256": f["sha256"]})
-        except OSError:
-            pass
 
     def prune(self) -> None:
         """Files in models_dir/managed that no catalog model, kept previous version nor running server uses (nor their
@@ -3173,28 +3200,24 @@ class Models:
 
     def _prog(self, kind: str) -> str:
         if kind == "whisper-ggml":
-            return self.cfg.whisper_bin or (str(self.cfg.whisper_server[0]) if self.cfg.whisper_server else "")
-        return self.cfg.llama_bin or (str(self.cfg.llm_server[0]) if self.cfg.llm_server else "")
+            prog = self.cfg.whisper_bin or (str(self.cfg.whisper_server[0]) if self.cfg.whisper_server else "")
+        else:
+            prog = self.cfg.llama_bin or (str(self.cfg.llm_server[0]) if self.cfg.llm_server else "")
+        return self.program(prog) if prog else ""
 
     # -- servers
 
     def llama_build(self) -> int:
-        """llama-server's build number from `--version` (it writes it to stderr: "version: 12728 (ea722948)", or
-        "version: 1.0.0-dev (build 12728, commit ...)"); 0 when it can't be told (asked again after MODEL_RETRY_S).
-        Asked again too when llama-server's file or its folder changed (a new llama.cpp unpacked over the old one:
-        no restart needed)."""
+        """llama-server's build number (llama_version: `--version`); 0 when it can't be told (asked again after
+        MODEL_RETRY_S). Asked again too when the program changed: another file or folder (a runtime switch: the
+        active build's program, Runtimes.program), or a new llama.cpp unpacked over the old one (no restart needed)."""
         prog = self._prog("llama-asr")
         path = _resolve(prog, self.cfg.base_dir) if prog else ""
-        sig = _file_sig(path)
+        sig = (path, _file_sig(path))
         if self._llama_build is None or sig != self._llama_sig or \
                 (not self._llama_build and self.clock() >= self._llama_asked + MODEL_RETRY_S):
             self._llama_asked, self._llama_sig = self.clock(), sig
-            try:
-                out = self.run([path, "--version"]) if prog else ""
-            except (OSError, subprocess.SubprocessError):
-                out = ""
-            m = LLAMA_VERSION.search(out or "")
-            self._llama_build = int(m.group(1) or m.group(2)) if m else 0
+            self._llama_build = llama_version(path, self.run)
         return self._llama_build
 
     def _ports(self) -> list[int]:
@@ -3270,9 +3293,11 @@ class Models:
         log.info("models: %s stopped (%s)", mid, why)
         return True
 
-    def stop_all(self, why: str) -> None:
-        for mid in list(self.servers):
-            self.stop(mid, why)
+    def stop_all(self, why: str, kinds: tuple | None = None) -> None:
+        """Every server stopped (kinds: only those of these kinds: a runtime switch)."""
+        for mid, s in list(self.servers.items()):
+            if kinds is None or s.kind in kinds:
+                self.stop(mid, why)
 
     def check(self, s: ModelServer) -> bool:
         """A server's health. A new one: its test decode (a failed one is tried again until MODEL_CHECK_S, then its hash
@@ -3440,6 +3465,564 @@ class Models:
         return {"stt_loaded": self.ready(), "stt_state": {k: str(v)[:60] for k, v in list(self.status.items())[:16]},
                 "stt_catalog": self.catalog_sig[1][:12]}
 
+
+# --- the runtimes: llama.cpp's and whisper.cpp's programs, updated by the worker itself -------------------------------
+
+# The builds this worker.py runs, pinned: release tag, asset URL, size and SHA-256, the same as pins.json's whisper_zip,
+# llama_zip and llama_cudart_zip (tests/test_stt_worker_runtimes.py keeps them identical). They come with worker.py
+# itself, so the self-update's checks (main only, the hub's hash) authenticate them too: a new pin reaches the PC as a
+# new worker.py, and nothing else can name a program to run.
+RUNTIMES = {
+    "whisper": {
+        "build": "b5454", "exe": "Release/whisper-server.exe", "legacy": "whisper", "kinds": ("whisper-ggml",),
+        "pins": ("whisper_zip",),
+        "zips": ({"url": "https://github.com/ggml-org/whisper.cpp/releases/download/b5454/"
+                         "whisper-bin-win-cuda-12.4.0-x64.zip",
+                  "bytes": 684913404, "sha256": "afef0b881c500958921c3f5523b50e59ee2ec9b6f5cbd25b324c51ed308a957a"},),
+    },
+    "llama": {
+        "build": "b12728", "exe": "llama-server.exe", "legacy": "llama", "kinds": ("llama-asr",),
+        "pins": ("llama_zip", "llama_cudart_zip"),
+        "zips": ({"url": "https://github.com/ggml-org/llama.cpp/releases/download/b12728/"
+                         "llama-b12728-bin-win-cuda-12.4-x64.zip",
+                  "bytes": 358626875, "sha256": "85b6e332ed7b40fd7a240ac7f32c4f1a29e9ddf6b52853925a215fda23ef24b3"},
+                 {"url": "https://github.com/ggml-org/llama.cpp/releases/download/b12728/"
+                         "cudart-llama-bin-win-cuda-12.4-x64.zip",
+                  "bytes": 391443627, "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6"}),
+    },
+}
+RUNTIME_DIR = "runtimes"                   # <worker.toml's folder>/runtimes/<llama|whisper>/<build>/: one per build
+RUNTIME_MARK = ".sizeup-runtime"           # in a build's folder once it is unpacked whole: its pins and its program's hash
+INSTALLER_MARK = ".sizeup-pins"            # install.ps1's, in the folder it unpacked: "ZIP1,ZIP2|EXE" (upper-case hashes)
+RUNTIME_BUILD = re.compile(r"b\d{1,7}")
+RUNTIME_RETRY_S = 1800.0                   # a build that failed its test: tried again after this, doubling ...
+RUNTIME_RETRY_MAX_S = 6 * 3600.0           # ... to this at most
+RUNTIME_BAD_TRIES = 3                      # failed its test this many times in a row: marked bad ...
+RUNTIME_BAD_S = 24 * 3600.0                # ... for this long (then 3 more tries)
+RUNTIME_TEST_S = 180.0                     # a restarted server answers its test this soon
+RUNTIME_KEEP = 2                           # builds kept in runtimes/<rt>/: the one running and the one before
+RUNTIME_UNZIP_MAX = 8_000_000_000          # a zip's files together, at most
+RUNTIME_ZIP_ENTRIES = 5000
+
+
+class UnzipError(Exception):
+    pass
+
+
+def unzip_checked(zpath: Path, dest: Path, max_bytes: int = RUNTIME_UNZIP_MAX) -> None:
+    """Every file of a zip under dest, or nothing at all: a name that is absolute, has a drive, a ".." or would land
+    outside dest, a link, too many entries or too many bytes refuse the zip before a byte is written. UnzipError."""
+    import stat
+    import zipfile
+    root = dest.resolve()
+    try:
+        with zipfile.ZipFile(zpath) as z:
+            infos = z.infolist()
+            if len(infos) > RUNTIME_ZIP_ENTRIES or sum(i.file_size for i in infos) > max_bytes:
+                raise UnzipError("too large a zip")
+            plan = []
+            for i in infos:
+                name = i.filename.replace("\\", "/")
+                parts = name.split("/")
+                if name.startswith("/") or re.match(r"[A-Za-z]:", name) or ".." in parts or "\x00" in name:
+                    raise UnzipError("a zip entry outside its folder")
+                if stat.S_ISLNK(i.external_attr >> 16):
+                    raise UnzipError("a link in the zip")
+                target = (root / name).resolve()
+                if target != root and root not in target.parents:
+                    raise UnzipError("a zip entry outside its folder")
+                plan.append((i, target))
+            for i, target in plan:
+                if i.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with z.open(i) as src, open(target, "wb") as out:
+                    shutil.copyfileobj(src, out, DOWNLOAD_CHUNK)
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, NotImplementedError, EOFError) as e:
+        raise UnzipError(f"a broken zip ({type(e).__name__})") from None
+
+
+def zip_bytes(zpath: Path) -> int:
+    """The bytes a zip unpacks to (its directory's sizes), 0 when it can't be read."""
+    import zipfile
+    try:
+        with zipfile.ZipFile(zpath) as z:
+            return sum(i.file_size for i in z.infolist())
+    except (OSError, zipfile.BadZipFile):
+        return 0
+
+
+def llama_version(path: str, run: Callable[[list], str]) -> int:
+    """llama-server's build number from `--version` (it writes it to stderr: "version: 12728 (ea722948)", or
+    "version: 1.0.0-dev (build 12728, commit ...)"); 0 when it can't be told."""
+    try:
+        out = run([path, "--version"]) if path else ""
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    m = LLAMA_VERSION.search(out or "")
+    return int(m.group(1) or m.group(2)) if m else 0
+
+
+class Runtimes:
+    """llama.cpp's llama-server and whisper.cpp's whisper-server, kept at RUNTIMES' builds by the worker (no installer
+    run, no step on the PC): the runtimes thread, about every second, for each runtime the worker runs from the
+    installer's layout (worker.toml's whisper_server / whisper_bin, llm_server / llama_bin at whisper\\Release\\
+    whisper-server.exe, llama\\llama-server.exe):
+
+    1. the build running: the one state_dir/runtimes.json names active (runtimes/<rt>/<build>/), else the installer's
+       folder's (its .sizeup-pins, or llama-server --version);
+    2. not RUNTIMES': its zips downloaded (download_file: an allowed host, exact size and SHA-256, resumed where a
+       stopped download left off; a disk-space check first; never while gaming or paused), unpacked (unzip_checked)
+       beside the running build into runtimes/<rt>/.<build>.unpacking, then renamed to runtimes/<rt>/<build>/ with its
+       marker. The running build's folder is never touched;
+    3. the switch (the Worker): only while idle, its servers stopped and started from the new folder, their test
+       (whisper: a second of silence decoded; llama: --version names the build, then a 1-token constrained answer).
+       A failure rolls back at once (the old folder, restarted and tested), and the build is tried again after
+       RUNTIME_RETRY_S, doubling, marked bad for RUNTIME_BAD_S at the RUNTIME_BAD_TRIES-th failure in a row. A switch
+       cut short (the worker stopped mid-test) is rolled back at the next start;
+    4. the builds beyond the running one and the one before it: deleted (runtimes/ only: never the installer's folder).
+
+    The worker's program paths are mapped (program()): the installer's path runs the active build's program."""
+
+    def __init__(self, cfg: Config, run: Callable[[list], str] | None = None, download: Callable = download_file,
+                 clock: Callable[[], float] = time.monotonic, wall: Callable[[], float] = time.time,
+                 windows: bool | None = None):
+        self.cfg, self.run, self.download, self.clock, self.wall = cfg, run or run_out_err, download, clock, wall
+        self.windows = (os.name == "nt") if windows is None else windows
+        self.base = Path(cfg.base_dir) if cfg.base_dir else None
+        self.root = self.base / RUNTIME_DIR if self.base is not None else None
+        self.state_path = Path(cfg.state_dir) / "runtimes.json"
+        self.disk = shutil.disk_usage
+        self._lock = threading.Lock()
+        self._sig: tuple | None = None
+        self._doc: dict = {}
+        self._marks: dict = {}                     # folder -> (its marker's stat signature, its marker)
+        self._legacy: dict = {}                    # rt -> (its program's signature, its build)
+        self._final_fails: dict = {}               # zip sha256 -> final download failures
+        self.status: dict[str, str] = {}
+        self.built: dict[str, str] = {}            # rt -> the build that runs, as the runtimes thread last saw it
+
+    # -- runtimes.json: {rt: {active, prev, pending, fails, next, bad, note}}
+
+    def doc(self) -> dict:
+        try:
+            st = self.state_path.stat()
+            sig = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            sig = None
+        if sig != self._sig:
+            self._sig, self._doc = sig, (read_json(self.state_path) if sig else {})
+        return self._doc
+
+    def _rec(self, rt: str) -> dict:
+        r = self.doc().get(rt)
+        return r if isinstance(r, dict) else {}
+
+    def _change(self, rt: str, fn: Callable[[dict], object]):
+        with self._lock:
+            doc = read_json(self.state_path)
+            r = doc.get(rt) if isinstance(doc.get(rt), dict) else {}
+            out = fn(r)
+            doc[rt] = r
+            try:
+                write_json(self.state_path, doc)
+            except OSError as e:
+                log.warning("runtimes: can't write runtimes.json: %s", e.strerror or e)
+            self._sig, self._doc = None, {}
+            return out
+
+    # -- where things are
+
+    def programs(self, rt: str) -> list:
+        """worker.toml's programs of this runtime."""
+        c = self.cfg
+        if rt == "whisper":
+            return [p for p in (str(c.whisper_server[0]) if c.whisper_server else "", c.whisper_bin) if p]
+        return [p for p in (str(c.llm_server[0]) if c.llm_server else "", c.llama_bin) if p]
+
+    def legacy_exe(self, rt: str) -> Path | None:
+        return self.base / RUNTIMES[rt]["legacy"] / RUNTIMES[rt]["exe"] if self.base is not None else None
+
+    def folder(self, rt: str, build: str) -> Path:
+        return self.root / rt / build
+
+    def exe(self, rt: str, build: str) -> Path:
+        """The program of a build ("": the installer's folder)."""
+        return self.folder(rt, build) / RUNTIMES[rt]["exe"] if build else self.legacy_exe(rt)
+
+    def is_legacy(self, rt: str, prog: str) -> bool:
+        """prog is the installer's program of this runtime (relative paths from worker.toml's folder)."""
+        if self.base is None or not prog:
+            return False
+        p = Path(os.path.expandvars(str(prog)))
+        full = p if p.is_absolute() else self.base / p
+        norm = lambda x: os.path.normcase(os.path.normpath(str(x)))     # noqa: E731
+        return norm(full) == norm(self.legacy_exe(rt))
+
+    def program(self, prog: str) -> str:
+        """The program to start for worker.toml's prog: the active build's when prog is the installer's path and a
+        build is active, else prog as it is (a worker that never updated, or a program of its own)."""
+        for rt in RUNTIMES:
+            if self.is_legacy(rt, prog):
+                act = self.active(rt)
+                return str(self.exe(rt, act)) if act else prog
+        return prog
+
+    def covers(self, rt: str, prog: str) -> bool:
+        return self.is_legacy(rt, prog)
+
+    # -- which build
+
+    def mark(self, rt: str, build: str) -> dict:
+        """A build folder's marker (unpacked whole from RUNTIMES' zips), {} when it has none or a broken one."""
+        p = self.folder(rt, build) / RUNTIME_MARK if self.root is not None else None
+        try:
+            st = p.stat()
+            sig = (st.st_mtime_ns, st.st_size)
+        except (OSError, AttributeError):
+            return {}
+        held = self._marks.get(str(p))
+        if held is None or held[0] != sig:
+            doc = read_json(p)
+            held = (sig, doc if doc.get("build") == build else {})
+            self._marks[str(p)] = held
+        return held[1]
+
+    def ready(self, rt: str, build: str) -> bool:
+        """The build's folder is there, unpacked whole from exactly RUNTIMES' zips (when it is RUNTIMES' build)."""
+        m = self.mark(rt, build)
+        if not m or not self.exe(rt, build).is_file():
+            return False
+        return build != RUNTIMES[rt]["build"] or m.get("zips") == [z["sha256"] for z in RUNTIMES[rt]["zips"]]
+
+    def active(self, rt: str) -> str:
+        """The build runtimes.json names, when its folder is there ("" the installer's folder)."""
+        b = self._rec(rt).get("active")
+        return b if isinstance(b, str) and RUNTIME_BUILD.fullmatch(b) and self.mark(rt, b) \
+            and self.exe(rt, b).is_file() else ""
+
+    def build(self, rt: str) -> str:
+        """The build that runs: the active one's, else the installer's folder's ("" when it can't be told)."""
+        return self.active(rt) or self.legacy_build(rt)
+
+    def legacy_build(self, rt: str) -> str:
+        """The installer's folder's build: its .sizeup-pins naming RUNTIMES' zips (and its program unchanged), else
+        llama-server --version; "" when it can't be told (a whisper.cpp unpacked by hand)."""
+        exe = self.legacy_exe(rt)
+        sig = _file_sig(str(exe)) if exe is not None else None
+        held = self._legacy.get(rt)
+        if held is not None and held[0] == sig:
+            return held[1]
+        build = ""
+        if sig is not None:
+            try:
+                zips, _, exe_sha = (self.base / RUNTIMES[rt]["legacy"] / INSTALLER_MARK).read_text(
+                    encoding="utf-8-sig").strip().partition("|")
+                pinned = ",".join(z["sha256"].upper() for z in RUNTIMES[rt]["zips"])
+                if zips == pinned and exe_sha.lower() == file_sha256(
+                        exe, Path(self.cfg.state_dir) / f"runtime-{rt}-exe.json"):
+                    build = RUNTIMES[rt]["build"]
+            except OSError:
+                pass
+            if not build and rt == "llama":
+                n = llama_version(str(exe), self.run)
+                build = f"b{n}" if n else ""
+        self._legacy[rt] = (sig, build)
+        return build
+
+    def version(self, rt: str) -> int:
+        """llama-server's build number of the active build (asked now: never a cached answer)."""
+        return llama_version(str(self.exe(rt, self.active(rt))), self.run) if rt == "llama" else 0
+
+    def unmanaged(self, rt: str) -> str:
+        """Why the worker doesn't keep this runtime up to date ("" it does; "unused": not in worker.toml)."""
+        progs = self.programs(rt)
+        if not progs:
+            return "unused"
+        if not any(self.is_legacy(rt, p) for p in progs):
+            return "not managed (own path)"
+        if not self.windows:
+            return "not managed (not Windows)"
+        if not self.cfg.auto_update:
+            return "off (auto_update)"
+        return ""
+
+    def bad(self, rt: str, build: str) -> str:
+        b = self._rec(rt).get("bad")
+        b = b.get(build) if isinstance(b, dict) else None
+        if isinstance(b, dict) and isinstance(b.get("at"), (int, float)) and self.wall() - b["at"] < RUNTIME_BAD_S:
+            return str(b.get("why") or "bad")
+        return ""
+
+    def _later(self, rt: str, note: str, wait: float) -> None:
+        def f(r):
+            r["note"], r["next"] = note[:50], self.wall() + wait
+        self._change(rt, f)
+        self.status[rt] = self._note(rt)
+
+    def _note(self, rt: str) -> str:
+        r = self._rec(rt)
+        note, nxt = str(r.get("note") or ""), r.get("next")
+        left = nxt - self.wall() if isinstance(nxt, (int, float)) else 0.0
+        return f"{note} (again in {max(1, round(left / 60))} min)" if note and left > 0 else note
+
+    # -- the steps (the runtimes thread)
+
+    def step(self, stop: Callable[[], bool], held: str = "") -> str:
+        """One look. The runtime whose new build is unpacked and waits for the switch ("" none); the others'
+        downloads go on. held: gaming / paused (nothing downloaded then)."""
+        staged = ""
+        for rt, pin in RUNTIMES.items():
+            why = self.unmanaged(rt)
+            if why != "unused":
+                self.built[rt] = self.build(rt)
+            if why:
+                self.status[rt] = why
+                continue
+            want = pin["build"]
+            if self.built[rt] == want:
+                self.status[rt] = "ok"
+                continue
+            bad = self.bad(rt, want)
+            if bad:
+                self.status[rt] = f"bad: {bad}"
+                continue
+            nxt = self._rec(rt).get("next")
+            if isinstance(nxt, (int, float)) and self.wall() < nxt:
+                self.status[rt] = self._note(rt)
+                continue
+            if not self.ready(rt, want):
+                if held:
+                    self.status[rt] = f"{want}: waiting ({held})"
+                    continue
+                if not self.fetch(rt, stop, held):
+                    continue
+            if not staged:
+                staged = rt
+        return staged
+
+    def fetch(self, rt: str, stop: Callable[[], bool], held: str = "") -> bool:
+        """RUNTIMES' zips of this runtime downloaded and unpacked into runtimes/<rt>/<build>/. True when it is ready;
+        status says why not."""
+        pin = RUNTIMES[rt]
+        want = pin["build"]
+        dl = self.root / rt / ".download"
+        zips = []
+        for z in pin["zips"]:
+            dest = dl / f"{z['sha256'][:16]}-{z['url'].rsplit('/', 1)[1]}"
+            zips.append(dest)
+            try:
+                self.status[rt] = f"downloading {want}"
+                if fetch_pinned(z["url"], dest, z["bytes"], z["sha256"], dl / f".{dest.name}.sha.json", stop,
+                                self.download, self.disk):
+                    log.info("runtimes: %s %s: %s downloaded (%.0f MB)", rt, want, dest.name.split("-", 1)[1],
+                             z["bytes"] / 1e6)
+            except NoSpace as x:
+                self._later(rt, f"{want}: {x}", MODEL_RETRY_S)
+                return False
+            except DownloadError as x:
+                if str(x).startswith("stopped"):
+                    self.status[rt] = f"{want}: waiting ({held or 'gaming'})"
+                    return False
+                tries = self._final_fails.get(z["sha256"], 0) + 1 if x.final else 0
+                self._final_fails[z["sha256"]] = tries
+                log.warning("runtimes: %s %s: %s", rt, want, x)
+                if x.final and tries >= 2:             # (once more from scratch first: a torn part looks the same)
+                    self.mark_bad(rt, want, f"download: {x}")
+                    self.status[rt] = f"bad: download: {x}"[:60]
+                else:
+                    self._later(rt, f"{want}: download failed", 60.0 if x.final else MODEL_RETRY_S)
+                return False
+            except OSError as x:
+                self._later(rt, f"{want}: download failed ({type(x).__name__})", MODEL_RETRY_S)
+                log.warning("runtimes: %s %s: %s", rt, want, x)
+                return False
+        return self.unpack(rt, zips)
+
+    def unpack(self, rt: str, zips: list) -> bool:
+        """The checked zips into runtimes/<rt>/.<build>.unpacking, then renamed to runtimes/<rt>/<build>/ with its
+        marker; the zips deleted. A disk-space check first (what the zips unpack to)."""
+        pin = RUNTIMES[rt]
+        want = pin["build"]
+        tmp, final = self.root / rt / f".{want}.unpacking", self.folder(rt, want)
+        need = sum(zip_bytes(z) for z in zips) + DISK_MARGIN
+        try:
+            if self.disk(self.root / rt).free < need:
+                self._later(rt, f"{want}: no disk space ({need / 1e9:.1f} GB)", MODEL_RETRY_S)
+                return False
+            self.status[rt] = f"unpacking {want}"
+            for p in (tmp, final):                     # (a torn earlier try: never the running build, which is ready)
+                if p.exists():
+                    shutil.rmtree(p)
+            tmp.mkdir(parents=True)
+            for z in zips:
+                unzip_checked(z, tmp)
+            exe = tmp / pin["exe"]
+            if not exe.is_file():
+                raise UnzipError(f"no {pin['exe']} in the zip")
+            exe_sha = hashlib.sha256(exe.read_bytes()).hexdigest()
+            write_json(tmp / RUNTIME_MARK, {"build": want, "zips": [z["sha256"] for z in pin["zips"]],
+                                            "exe_sha256": exe_sha})
+            _replace(tmp, final)
+        except UnzipError as x:
+            shutil.rmtree(tmp, ignore_errors=True)
+            for z in zips:                             # (downloaded again: the pins say these are the files)
+                z.unlink(missing_ok=True)
+            self.mark_bad(rt, want, str(x))
+            self.status[rt] = f"bad: {x}"[:60]
+            return False
+        except OSError as x:
+            shutil.rmtree(tmp, ignore_errors=True)
+            self._later(rt, f"{want}: unpack failed ({type(x).__name__})", MODEL_RETRY_S)
+            log.warning("runtimes: %s %s: unpack: %s", rt, want, x)
+            return False
+        for z in zips:
+            z.unlink(missing_ok=True)
+            z.with_name(f".{z.name}.sha.json").unlink(missing_ok=True)
+        log.info("runtimes: %s %s unpacked into %s: switching when idle", rt, want, final.name)
+        return True
+
+    def mark_bad(self, rt: str, build: str, why: str) -> None:
+        def f(r):
+            bad = r.get("bad") if isinstance(r.get("bad"), dict) else {}
+            bad[build] = {"why": why[:80], "at": self.wall()}
+            r["bad"] = dict(list(bad.items())[-5:])
+            r.pop("fails", None)
+            r.pop("next", None)
+            r["note"] = ""
+        self._change(rt, f)
+        log.error("runtimes: %s %s marked bad for %.0f h: %s", rt, build, RUNTIME_BAD_S / 3600, why)
+
+    def waiting(self, rt: str, why: str) -> None:
+        self.status[rt] = f"{RUNTIMES[rt]['build']} ready, waiting: {why}"
+
+    # -- the switch (the Worker stops and starts the servers between begin and finish)
+
+    def begin(self, rt: str) -> tuple[str, str]:
+        """The new build made active, the switch written down as pending (rolled back at the next start if it never
+        finishes). (to, from). UnzipError when its folder isn't what was unpacked (it is unpacked again)."""
+        to, frm = RUNTIMES[rt]["build"], self.active(rt)
+        exe = self.exe(rt, to)
+        try:
+            ok = hashlib.sha256(exe.read_bytes()).hexdigest() == self.mark(rt, to).get("exe_sha256")
+        except OSError:
+            ok = False
+        if not ok:
+            shutil.rmtree(self.folder(rt, to), ignore_errors=True)
+            raise UnzipError(f"{exe.name} changed since it was unpacked")
+
+        def f(r):
+            r["pending"] = {"to": to, "from": frm, "at": self.wall()}
+            r["active"] = to
+        self._change(rt, f)
+        self.status[rt], self.built[rt] = f"switching to {to}", to
+        return to, frm
+
+    def finish(self, rt: str, why: str, counted: bool = True) -> None:
+        """The switch's test passed (why "") or not: kept, or rolled back to the build before (active again), the new
+        one tried again after a backoff, marked bad at the RUNTIME_BAD_TRIES-th counted failure in a row. counted
+        False: not its fault (gaming or a stop during the test)."""
+        out: dict = {}
+
+        def f(r):
+            p = r.pop("pending", None)
+            p = p if isinstance(p, dict) else {}
+            to, frm = str(p.get("to") or RUNTIMES[rt]["build"]), str(p.get("from") or "")
+            out["to"], out["from"] = to, frm
+            if not why:
+                r.update(active=to, prev=frm, note="")
+                r.pop("next", None)
+                fails = r.get("fails") if isinstance(r.get("fails"), dict) else {}
+                fails.pop(to, None)
+                r["fails"] = fails
+                return
+            r["active"] = frm
+            fails = r.get("fails") if isinstance(r.get("fails"), dict) else {}
+            n = int(fails.get(to) or 0) + (1 if counted else 0)
+            if counted and n >= RUNTIME_BAD_TRIES:
+                bad = r.get("bad") if isinstance(r.get("bad"), dict) else {}
+                bad[to] = {"why": f"{why} ({n} times)"[:80], "at": self.wall()}
+                r["bad"] = dict(list(bad.items())[-5:])
+                fails.pop(to, None)
+                r.pop("next", None)
+                r["note"] = ""
+                out["bad"] = f"{why} ({n} times)"
+            else:
+                fails[to] = n
+                wait = min(RUNTIME_RETRY_S * 2 ** max(n - 1, 0), RUNTIME_RETRY_MAX_S)
+                r["next"], r["note"] = self.wall() + wait, f"rolled back: {why}"[:50]
+                out["wait"] = wait
+            r["fails"] = fails
+        self._change(rt, f)
+        self.built[rt] = self.build(rt)
+        if not why:
+            self.status[rt] = "ok"
+            log.info("runtimes: %s %s passed its test: kept (%s before it)", rt, out["to"], out["from"] or "the installer's")
+            self.prune(rt)
+            return
+        if out.get("bad"):
+            self.status[rt] = f"bad: {out['bad']}"[:60]
+            log.error("runtimes: %s %s: %s: rolled back to %s, marked bad for %.0f h", rt, out["to"], why,
+                      out["from"] or "the installer's", RUNTIME_BAD_S / 3600)
+        else:
+            self.status[rt] = self._note(rt)
+            log.error("runtimes: %s %s: %s: rolled back to %s; tried again in %.0f min", rt, out["to"], why,
+                      out["from"] or "the installer's", out["wait"] / 60)
+
+    def boot(self) -> list:
+        """At the worker's start: a switch cut short (the worker stopped before its test ended) rolled back, not
+        counted against the build. Which runtimes."""
+        rolled = [rt for rt in RUNTIMES if isinstance(self._rec(rt).get("pending"), dict)]
+        for rt in rolled:
+            self.finish(rt, "interrupted", counted=False)
+        return rolled
+
+    def prune(self, rt: str) -> None:
+        """runtimes/<rt>/: the builds but the running one and the one before it deleted, and what a torn unpack or a
+        finished download left. Only runtimes/: never the installer's folder."""
+        r = self._rec(rt)
+        keep = {b for b in (r.get("active"), r.get("prev")) if isinstance(b, str) and b}
+        base = self.root / rt if self.root is not None else None
+        if base is None or not base.is_dir():
+            return
+        keep.add(RUNTIMES[rt]["build"])            # (after a success it is the active one: RUNTIME_KEEP at most)
+        for p in list(base.iterdir()):
+            if p.is_dir() and RUNTIME_BUILD.fullmatch(p.name) and p.name not in keep:
+                shutil.rmtree(p, ignore_errors=True)
+                log.info("runtimes: %s %s deleted (not the running build nor the one before it)", rt, p.name)
+        for p in base.iterdir():
+            if p.is_dir() and p.name.endswith(".unpacking"):
+                shutil.rmtree(p, ignore_errors=True)
+        if self.active(rt) == RUNTIMES[rt]["build"]:
+            shutil.rmtree(base / ".download", ignore_errors=True)
+
+    def report(self) -> dict:
+        """What the hub hears (runtimes in hello and state): each runtime worker.toml runs, its build and the update's
+        state in words, as the runtimes thread last saw them (never a --version run on the heartbeat's thread). No
+        paths."""
+        out = {}
+        for rt in RUNTIMES:
+            why = self.unmanaged(rt)
+            if why == "unused":
+                continue
+            out[rt] = {"build": self.built.get(rt, "")[:12], "state": (self.status.get(rt) or why or "checking")[:60]}
+        return out
+
+    def clear_bad(self) -> int:
+        """`worker.py update retry`: the builds marked bad (and their backoffs) may be tried again."""
+        n = 0
+        for rt in RUNTIMES:
+            def f(r):
+                k = len(r.pop("bad", None) or {})
+                r.pop("fails", None)
+                r.pop("next", None)
+                r["note"] = ""
+                return k
+            n += self._change(rt, f) if self._rec(rt) else 0
+        return n
+
+
 def _file_sig(prog: str) -> tuple | None:
     """A program's file (size, time) and its folder's time, found as Popen would (a bare name on PATH); None when
     it isn't there. A change: a new build put in its place."""
@@ -3479,8 +4062,12 @@ class Worker:
         self._lock = threading.Lock()
         self.control = Control(cfg.control_path)
         self.whisper = Whisper(cfg.whisper_url, cfg.whisper_timeout_s)
+        # llama.cpp's and whisper.cpp's builds (Runtimes): the program each server starts from
+        self.runtimes = Runtimes(cfg, run=run_out_err if run is run_cmd else run, clock=clock)
+        self.switching = ""                # a runtime being switched (its servers restarted and tested): no jobs
         self.proc = WhisperProcess(cfg.whisper_server, Path(cfg.state_dir) / "whisper-server.log", popen, clock,
-                                   cfg.base_dir, command=whisper_command) if cfg.whisper_server else None
+                                   cfg.base_dir, command=whisper_command, program=self.runtimes.program) \
+            if cfg.whisper_server else None
         self.gpu = GpuMonitor(cfg, run, clock, busy=self._busy, ours=self._our_pids, fullscreen=fullscreen)
         self.hub = Hub(cfg.hub_url, cfg.token, cfg.cf_client_id, cfg.cf_client_secret)
         self.hb_hub = Hub(cfg.hub_url, cfg.token, cfg.cf_client_id, cfg.cf_client_secret)
@@ -3491,10 +4078,13 @@ class Worker:
         if self.proc is not None:
             self.proc.job, self.proc.children = self.kill_job, self.children
         # the catalog's models (Models): their files and servers, beside whisper_server
-        self.stt_models = Models(cfg, popen, clock, run=run, job=self.kill_job, children=self.children)
+        # (--version: llama-server writes it to stderr, so run_out_err; run_cmd's stdout alone never has it)
+        self.stt_models = Models(cfg, popen, clock, run=run_out_err if run is run_cmd else run, job=self.kill_job,
+                                 children=self.children)
+        self.stt_models.program = self.runtimes.program
         self.llm_proc = WhisperProcess(cfg.llm_server, Path(cfg.state_dir) / "llama-server.log", popen, clock,
                                        cfg.base_dir, name="llama-server", env=self._llm_start_env, job=self.kill_job,
-                                       children=self.children, command=llm_command) \
+                                       children=self.children, command=llm_command, program=self.runtimes.program) \
             if self.llm is not None and cfg.llm_server else None
         self._llm_sig: tuple | None = None   # the checked GGUF's (size, mtime): looked at again before each start
         self.llm_hub = Hub(cfg.hub_url, cfg.token, cfg.cf_client_id, cfg.cf_client_secret)
@@ -3553,7 +4143,7 @@ class Worker:
         return None
 
     def state(self) -> tuple[str, str]:
-        if self.draining:
+        if self.draining or self.switching:
             return "paused", "updating"
         held = self.held()
         if held:
@@ -3606,6 +4196,9 @@ class Worker:
                 "self_update": self.updater.report()}
         if reason:
             body["reason"] = reason
+        rts = self.runtimes.report()
+        if rts:
+            body["runtimes"] = rts
         if self.gpu.info:
             body["gpu"] = dict(self.gpu.info)
         ka = self.keep_awake.report()
@@ -3733,10 +4326,14 @@ class Worker:
                     self._whisper_down("stopped while gaming")     # (said first: no check in between sees it gone)
                     self.proc.stop()
                 self._gaming_stop_models(now)
-                if self.proc is not None and not held and now - last_proc >= 5 and not self.proc.running():
+                if self.switching:
+                    pass                           # (the runtime switch stops, starts and checks whisper-server)
+                elif self.proc is not None and not held and now - last_proc >= 5 and not self.proc.running():
                     last_proc = now
                     self.proc.ensure(self.whisper.alive())
-                if not self.whisper_ok and not held:
+                if self.switching:
+                    pass
+                elif not self.whisper_ok and not held:
                     if now - self._whisper_checked >= self.cfg.whisper_check_s:
                         self.check_whisper()       # a real inference: not while gaming or paused
                 elif self.whisper_ok and not self._inferring and now - last_alive >= self.cfg.whisper_check_s:
@@ -3776,7 +4373,8 @@ class Worker:
         """llama-server's checks on a thread of their own: a slow answer never holds the GPU (gaming) samples."""
         while not self.stopped:
             try:
-                self._llm_monitor(self.clock(), self.held())
+                if not self.switching:             # (the runtime switch stops, starts and checks llama-server)
+                    self._llm_monitor(self.clock(), self.held())
             except Exception:  # noqa: BLE001 - the LLM's checks must outlive any bug
                 log.exception("llm monitor: unexpected error (carrying on)")
                 self._stop.wait(5)
@@ -3922,6 +4520,7 @@ class Worker:
                "pool_on": self.pool_on, "model": self.cfg.model, "gpu": self.gpu.info, "jobs": dict(self.counts),
                "last_job_at": self.last_job_at, "started": self.started_at, "updated": time.time(),
                "version": VERSION, "update": self.updater.report(), "keep_awake": self.keep_awake.report(),
+               "runtimes": self.runtimes.report(),
                "models": {**self.stt_models.report(), "catalog": self.stt_models.cat_status,
                           "llm_room": self.stt_models.llm_room_ok}}
         if self.logship is not None:
@@ -3955,7 +4554,7 @@ class Worker:
         """The catalog's models (Models.step): their catalog, files and servers, about every second."""
         while not self.stopped:
             try:
-                held = self.held() is not None or self.draining
+                held = self.held() is not None or self.draining or bool(self.switching)
                 self.stt_models.step(idle=lambda: self.job is None and not self._inferring, held=held,
                                      gpu=self.gpu.info,
                                  llm_running=self.llm_proc is not None and self.llm_proc.running(),
@@ -3969,6 +4568,8 @@ class Worker:
         """Why the worker can't switch to a new file now ("" when it can): the swap restarts it, and its servers."""
         if not self.connected:
             return "the hub"
+        if self.switching:
+            return "a runtime update"
         if self.job is not None:
             return "a clip"
         if self.llm_job is not None or self._llm_call is not None:
@@ -4001,6 +4602,167 @@ class Worker:
         self._wake.set()
         return False
 
+    # -- the runtimes (Runtimes): llama.cpp's and whisper.cpp's builds
+
+    def _runtimes_loop(self) -> None:
+        """Runtimes.step about every second (downloads, unpacking); a build ready and the worker idle: switch_runtime."""
+        while not self.stopped:
+            try:
+                self.runtimes_step()
+            except Exception:  # noqa: BLE001 - the runtimes never take the worker down
+                log.exception("runtimes: unexpected error (carrying on)")
+                self._stop.wait(60)
+            self._stop.wait(1.0)
+
+    def runtimes_step(self) -> bool:
+        """One look: downloads go on unless gaming or paused; a staged build is switched to only while idle. True when
+        a switch kept the new build."""
+        held = self.held()
+        rt = self.runtimes.step(stop=lambda: self.stopped or self.held() is not None,
+                                held=held[0] if held is not None else "")
+        if not rt:
+            return False
+        why = self.runtime_busy()
+        if why:
+            self.runtimes.waiting(rt, why)
+            return False
+        return self.switch_runtime(rt)
+
+    def runtime_busy(self) -> str:
+        """Why a runtime can't be switched now ("" when it can): its servers stop for a while."""
+        if self.draining:
+            return "a self-update"
+        if self.job is not None or self._inferring:
+            return "a clip"
+        if self.llm_job is not None or self._llm_call is not None:
+            return "an LLM job"
+        held = self.held()
+        if held is not None:
+            return held[0]
+        if self.clock() - self._gaming_seen < UPDATE_QUIET_S:
+            return "gaming just ended" if self.clock() - self.updater.started >= UPDATE_QUIET_S else "just started"
+        if any(not s.ok for s in list(self.stt_models.servers.values())):
+            return "a model loading"
+        return ""
+
+    def switch_runtime(self, rt: str) -> bool:
+        """A llama.cpp / whisper.cpp build ready: switched to through _swap (Runtimes.begin, its servers restarted from
+        it, _test_runtime; Runtimes.finish). True when it was kept."""
+        def begin():
+            to, frm = self.runtimes.begin(rt)
+            log.info("runtimes: %s: switching from %s to %s", rt, frm or "the installer's", to)
+        try:
+            return self._swap(rt, begin, lambda: self._restart_runtime(rt),
+                              lambda started, held: self._test_runtime(rt, started, held),
+                              lambda why, counted: self.runtimes.finish(rt, why, counted))
+        except UnzipError as e:
+            self.runtimes.status[rt] = f"{RUNTIMES[rt]['build']}: unpacking again"
+            log.warning("runtimes: %s: %s: unpacking it again", rt, e)
+            return False
+
+    def _swap(self, what: str, begin: Callable[[], object], restart: Callable[[], bool],
+              test: Callable[[bool, list], str], finish: Callable[[str, bool], None]) -> bool:
+        """The one switch path for what the worker's servers run: no new jobs (state paused, "updating"), the claims in
+        flight ended and the jobs in hand done (UPDATE_DRAIN_S at most, else not now); begin() (the new one active; an
+        exception skips the switch), restart() (the servers started again from it: True when one was), test(started,
+        held) ("" passed; held[0] set when the PC was gaming or paused meanwhile), finish(why, counted) (kept, or the
+        one before active again and the new one's backoff: counted False when it wasn't its fault). A failure: the one
+        before restarted and tested too. A stop mid-test leaves the switch for the next start to roll back. True when
+        the new one was kept."""
+        self.switching = what
+        self._wake.set()
+        try:
+            end = self.clock() + UPDATE_DRAIN_S
+            busy = lambda: (self.job is not None or self.llm_job is not None or self._llm_call is not None  # noqa: E731
+                            or self._claiming or self._llm_claiming or self._inferring > 0)
+            while not self.stopped and self.clock() < end and busy():
+                self._stop.wait(0.2)
+            if self.stopped:
+                return False
+            if busy():
+                if what in RUNTIMES:
+                    self.runtimes.waiting(what, "busy")
+                return False
+            begin()
+            held = [False]
+            why = test(restart(), held)
+            if why and self.stopped:
+                return False                       # (pending: the next start rolls it back, not counted)
+            finish(why, not held[0])
+            if not why:
+                return True
+            again = test(restart(), [False])
+            if again:
+                log.error("%s: the one before fails its test too: %s", what, again)
+            return False
+        finally:
+            self.switching = ""
+            self._wake.set()
+
+    def _restart_runtime(self, rt: str) -> bool:
+        """The servers that run this runtime's program stopped, and worker.toml's own one (whisper_server /
+        llm_server) started again from the active build: the catalog models' come back through the models thread.
+        True when one was started (its test then needs it running)."""
+        started = False
+        self.stt_models.stop_all("its runtime is switching", kinds=RUNTIMES[rt]["kinds"])
+        if rt == "llama":
+            self.stt_models._llama_build = None    # (asked again: the program changed)
+        if rt == "whisper" and self.proc is not None and self.runtimes.covers(rt, str(self.cfg.whisper_server[0])):
+            self._whisper_down("updating")
+            self.proc.stop()
+            self.proc.started = -1e9
+            self.proc.ensure(False)
+            started = True
+        if rt == "llama" and self.llm_proc is not None and self.runtimes.covers(rt, str(self.cfg.llm_server[0])):
+            self._llm_down("updating")
+            self.llm_proc.stop()
+            self.llm_proc.started = self._llm_started_at = -1e9
+            if self.llm_verified and self.stt_models.llm_room_ok:
+                self.llm_proc.ensure(False)
+                started = True
+        return started
+
+    def _test_runtime(self, rt: str, started: bool, held: list) -> str:
+        """The restarted servers' test ("" passed): llama-server --version names the active build, then (when it was
+        started) it answers /v1/models and a 1-token constrained answer; whisper-server answers and decodes a second of
+        silence. held[0] set when the PC was gaming or paused meanwhile (a failure then isn't the build's fault)."""
+        end = self.clock() + RUNTIME_TEST_S
+        build = self.runtimes.active(rt)
+
+        def wait(ready: Callable[[], bool], proc: WhisperProcess, name: str) -> str:
+            while not self.stopped:
+                held[0] = held[0] or self.held() is not None
+                if ready():
+                    return ""
+                if not proc.running():
+                    return f"{name} exited"
+                if self.clock() >= end:
+                    return f"{name}: no answer in {RUNTIME_TEST_S:.0f} s"
+                self._stop.wait(0.25)
+            return "the worker stopped"
+
+        why = ""
+        if rt == "llama":
+            n = self.runtimes.version(rt)
+            if build and n != int(build[1:]):
+                why = f"--version says {f'b{n}' if n else 'nothing'}"
+            elif started:
+                why = wait(lambda: self.llm.status() == 200, self.llm_proc, "llama-server")
+                if not why:
+                    try:
+                        out, _tin, _tout = self.llm.check()
+                        if out != {"ok": True}:
+                            why = "llama-server's test answer didn't follow its schema"
+                    except LlmError as e:
+                        why = f"llama-server: {str(e)[:60]}"
+                self._llm_checked = -1e9           # (the LLM's own check next: jobs again)
+        elif started:
+            why = wait(self.whisper.alive, self.proc, "whisper-server")
+            if not why and not self.check_whisper():
+                why = f"whisper-server: {self.whisper_err}"[:80]
+        held[0] = held[0] or self.held() is not None
+        return why
+
     # -- the jobs loop
 
     def reap_leftovers(self) -> list[int]:
@@ -4022,8 +4784,9 @@ class Worker:
             if self.llm_proc is not None and not self.cfg.llm_model_sha256:
                 log.warning("llm_model_sha256 isn't set: llama-server's model isn't checked against its pin")
         self.reap_leftovers()                      # what a worker that died left running (no job object elsewhere)
+        self.runtimes.boot()                       # a runtime switch cut short: the build before it (nothing started yet)
         loops = [(self._heartbeat_loop, "heartbeat"), (self._monitor_loop, "monitor"), (self._update_loop, "update"),
-                 (self._models_loop, "models")]
+                 (self._models_loop, "models"), (self._runtimes_loop, "runtimes")]
         if self.logship is not None:
             loops.append((lambda: self.logship.loop(lambda: self.stopped, self._stop.wait), "logs"))
         if self.llm_verified is None:
@@ -4516,6 +5279,10 @@ def _status_text(cfg: Config, now: float | None = None) -> str:
         if isinstance(up, dict):
             lines.append(f"update: {up.get('state')}; running {str(up.get('sha256') or '?')[:12]}"
                          + (f" (commit {str(up.get('commit'))[:12]})" if up.get("commit") else ""))
+        rts = st.get("runtimes")
+        if isinstance(rts, dict) and rts:
+            lines.append("runtimes: " + "; ".join(f"{rt} {r.get('build') or '?'} ({r.get('state')})"
+                                                  for rt, r in rts.items() if isinstance(r, dict)))
         ka = st.get("keep_awake")
         if isinstance(ka, dict):
             lines.append(f"keep awake: {'on' if ka.get('on') else 'off'}"
@@ -4539,6 +5306,9 @@ def _update_cli(cfg: Config, what: str, config_path) -> int:
     if what == "retry":
         n = up.change(lambda d: len(d.pop("bad", None) or {}))
         print(f"{n} hash(es) marked bad cleared: the worker may try them again (within 10 min)")
+        k = Runtimes(cfg).clear_bad()
+        if k:
+            print(f"{k} llama.cpp / whisper.cpp build(s) marked bad cleared: tried again now")
         return 0
     if what == "rollback":
         if not up.prev_path.exists():

@@ -1,0 +1,13 @@
+{
+  "base": "stt-worker-hello/valid/online-with-gpu.json",
+  "patch": [
+    {
+      "op": "add",
+      "path": "/runtimes",
+      "value": {
+        "llama": {"build": "b12728", "state": "rolled back: --version says b12359 (again in 30 min)"},
+        "whisper": {"build": "", "state": "b5454 ready, waiting: a clip"}
+      }
+    }
+  ]
+}

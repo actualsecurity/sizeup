@@ -199,6 +199,7 @@ class Worker:
     version: str = ""
     update: dict = field(default_factory=dict)  # a GPU worker's self-update: {sha256, commit, auto, state, bad}
     keep_awake: dict = field(default_factory=dict)  # a GPU worker's keep_awake on Windows: {on, held} (none: not said)
+    runtimes: dict = field(default_factory=dict)    # a GPU worker's llama.cpp / whisper.cpp: {rt: {build, state}}
     bye: bool = False                           # its last hello / state said a clean stop (reason "shutdown")
     gpu: dict = field(default_factory=dict)
     seen: float = 0.0
@@ -325,7 +326,8 @@ class Pool:
 
     def seen(self, wid: str, state: str | None = None, model: str | None = None, gpu: dict | None = None,
              version: str | None = None, kind: str | None = None, load: dict | None = None,
-             update: dict | None = None, keep_awake: dict | None = None, reason: str | None = None) -> Worker:
+             update: dict | None = None, keep_awake: dict | None = None, reason: str | None = None,
+             runtimes: dict | None = None) -> Worker:
         """A worker's request (hello, state, claim): its state and when it was last seen. A worker that is no longer
         online hands its pre-alert and Auto · normal jobs back at once (a normal clip has the stations and AWS still
         ahead of it; the rest run to their lease: it may finish them). None: a worker
@@ -358,6 +360,8 @@ class Pool:
                 w.update = dict(update)
             if isinstance(keep_awake, dict):
                 w.keep_awake = dict(keep_awake)
+            if isinstance(runtimes, dict):
+                w.runtimes = {k: dict(v) for k, v in runtimes.items() if isinstance(v, dict)}
             if reason is not None:
                 w.bye = reason == "shutdown"
             if isinstance(gpu, dict):
@@ -936,6 +940,7 @@ class Pool:
                 workers.append({"id": w.id, "kind": w.kind, "load": dict(w.load),
                                 "state": self.state_of(w, now), "model": w.model, "version": w.version,
                                 "update": dict(w.update), "keep_awake": dict(w.keep_awake),
+                                "runtimes": {k: dict(v) for k, v in w.runtimes.items()},
                                 "asleep": self.asleep(w, now),
                                 "gpu": dict(w.gpu), "seen": w.seen, "seen_s": round(now - w.seen, 1),
                                 "jobs_h": len(mine), "done": w.done, "lost": w.lost, "leases": len(w.leases),
