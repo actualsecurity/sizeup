@@ -219,6 +219,9 @@ POST /api/cad/radios/delete               {system, radio_id, operator?}
 POST /api/cad/radios/range                {system: mrrs, lo, hi, label, notes?, id? (edit), operator?}  another system's
                                           ID block -> a label (never overlapping another; an ID's own label wins)
 POST /api/cad/radios/range/delete         {id, operator?}
+POST /api/cad/outside-units              {id, name?, department?, operator?}  the name and department shown for another
+                                          department's unit on our calls (mutual aid, sizeup/cad/outside.py; '' = as
+                                          worked out); admins
 POST /api/cad/radio-id                    {system: mdc | fleetsync, radio_id, unit? | label? | ignore?, operator?}  who a
                                           new FG1 radio is (#163, the state's radio_ids; sizeup/cad/newids.py): unit
                                           names it (its transmissions go on that unit's events), label just says who,
@@ -552,6 +555,7 @@ WRITES = (
     (re.compile(r"/api/cad/runcards(?:/delete)?"), "admin"),
     (re.compile(r"/api/cad/radios(?:/delete)?"), "admin"),                 # the radio-ID registry
     (re.compile(r"/api/cad/radios/range(?:/delete)?"), "admin"),           # ... another system's ID ranges (MRRS)
+    (re.compile(r"/api/cad/outside-units"), "admin"),                       # another department's unit: its name shown
     (DATASOURCE, "admin"),                                                  # a data source's Refresh now (#186)
     (re.compile(r"/api/cad/perf/profile"), "admin"),                        # a CPU profile of the hub (#425, server.py)
     (STT_CORRECTION, "admin"),                                              # a hand-corrected transcript (sttfix.py)
@@ -869,6 +873,8 @@ DOES = (
                                                                f"{_clip(b.get('lo'), 12)}–{_clip(b.get('hi'), 12)}"
                                                                f" → {_clip(b.get('label'), 60)}", "")),
     (re.compile(r"/api/cad/radios/range/delete"), lambda m, b, o, c: ("Changed settings: radio range deleted", "")),
+    (re.compile(r"/api/cad/outside-units"), lambda m, b, o, c: (f"Changed settings: outside unit {_clip(o.get('code'), 32)}"
+                                                                f" → {_clip(o.get('name'), 40)} · {_clip(o.get('department'), 40)}", "")),
     (re.compile(r"/api/incident/([^/]{1,80})/close"), lambda m, b, o, c: (f"Closed monitor incident {m.group(1)}", "")),
     (DVR_PIN, lambda m, b, o, c: (f"{'Kept' if b.get('on') else 'Stopped keeping'} camera {m.group(1)} recording", "")),
     (DVR_CLIP, lambda m, b, o, c: (f"Saved a clip of camera {m.group(1)} to {_number(c, b.get('incident_id')) or 'an event'} "
@@ -1672,6 +1678,8 @@ class CadApi:
             return c.delete_radio_range(body)
         if path == "/api/cad/radio-id":
             return c.name_radio(body)
+        if path == "/api/cad/outside-units":
+            return c.outside.edit(body)
         if m := PREMISE.fullmatch(path):
             if m.group(1) is None:
                 return c.premise.create(body)

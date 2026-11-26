@@ -434,6 +434,9 @@ class RadioLog:
                     op.heard(tid)
                 except Exception as e:  # noqa: BLE001 - the link stands whatever this does
                     self.cad.log(f"CAD: operating channel: {type(e).__name__}")
+            outside = getattr(self.cad, "outside", None)
+            if outside is not None:                      # a mutual-aid unit's radio on the call (outside.py; never raises)
+                outside.heard(tid)
         return got
 
     def consider(self, tid: str) -> list[int]:
