@@ -437,6 +437,7 @@ def test_restart_recovery_and_resend_use_each_items_own_pool():
     hub = SimpleNamespace(aws=t, _aws_since={}, _aws_asked={}, audio=SimpleNamespace(get=lambda i: buf.getvalue()),
                           _aws_pending=lambda: [(item, PD, "traffic"), (fire, "FG1", "traffic")],
                           _stt_state=lambda *a: None, _aws_failed=lambda job, why: failed.append(job.id),
+                          _hub_engine=lambda key: "pin:aws",       # (neither on Auto · normal: its own rules)
                           hub=SimpleNamespace(log=lambda m: None))
     assert HubApp._aws_recover.__get__(hub)() == 2
     assert sent == [PD] and failed == ["fg-1"]              # police to AWS on its own budget, fire to whisper
