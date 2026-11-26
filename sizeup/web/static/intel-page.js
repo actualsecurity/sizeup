@@ -194,9 +194,9 @@ window.IntelPage = (() => {
     const sig = JSON.stringify([d.events, d.total, d.page, d.size]);
     st.data = d;
     facets(d);
+    mapRead(d);                                // (its own key: an event moved on another page reads it; a vote not)
     if (sig === st.sig) return;                // the same answer (a poll): nothing redrawn
     st.sig = sig;
-    mapRead(d);
     const from = d.page * d.size;
     setText($("#il-count"), d.total ? `${d.total} event${d.total === 1 ? "" : "s"}` + (d.total > d.size ? ` · ${from + 1}–${from + d.events.length}` : "") : "None");
     $("#il-count").title = `${when(d.since)} – ${when(Math.min(d.until, d.now || d.until))}`;
@@ -339,7 +339,11 @@ window.IntelPage = (() => {
     const b = $("#il-map-btn");
     b.setAttribute("aria-pressed", String(on));
     show($("#il-mapbox"), on);
-    if (!on) { mp.seq++; mp.pending = false; mp.key = ""; return; }   // hidden: nothing read (shown again: once)
+    if (!on) {                                 // hidden: nothing read (shown again: once), nothing selected
+      mp.seq++; mp.pending = false; mp.key = "";
+      if (st.sel != null) select(null);
+      return;
+    }
     if (read && st.data) mapRead(st.data);
   }
   function mapToggle() {
@@ -363,6 +367,7 @@ window.IntelPage = (() => {
       mp.pending = false;
       mp.data = m;
       mp.qs = qs;
+      if (st.sel != null && !pinned(st.sel)) select(null);    // its pin gone (dismissed, unplaced, filtered out)
       mapDraw();
     } catch (e) {
       if (seq !== mp.seq) return;

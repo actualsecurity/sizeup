@@ -140,7 +140,7 @@ LEVEL_SQL = {"push": "pushed_at IS NOT NULL", "held": "pushed_at IS NULL AND mod
 COLS = ("id, pack, category, source_key, system, first_at, last_at, status, what_score, level, rules, precision, "
         "label_full, town, confirmed, mode, pushed_at, suppressed, near_incident, incident_id, traffic_ids, lat, lon, "
         "radius_m")
-PLACED = "precision != 'none' AND lat IS NOT NULL AND lon IS NOT NULL"     # (on the listing's own columns)
+PLACED = "COALESCE(precision, 'none') != 'none' AND lat IS NOT NULL AND lon IS NOT NULL"   # (the listing's columns; row()'s placed)
 
 
 def is_model(rule_id) -> bool:
@@ -461,6 +461,8 @@ class IntelLog:
             held = {"key": key, "label": label, "tip": tip, "detail": self._detail(key, r)}
         level = "push" if r["pushed_at"] is not None else "held" if r["mode"] == "push" else r["mode"]
         decided = r["decided"] or decided_by(rules)
+        named = r["precision"] not in (None, "none")
+        placed = named and r["lat"] is not None and r["lon"] is not None        # (PLACED's twin: the map's pins)
         return {"id": r["id"], "at": r["first_at"], "last_at": r["last_at"], "status": r["status"], "pack": r["pack"],
                 "pack_label": p.label if p else r["pack"], "category": r["category"],
                 "label": category_label(cat, p.label if p else "", r["category"]), "level": level,
@@ -468,10 +470,10 @@ class IntelLog:
                 "what": r["what_score"], "score_level": r["level"],
                 "parts": [[str(x[0]), x[2] if len(x) > 2 else None] for x in rules if x],
                 "decided": decided, "source_key": r["source_key"], "source": source_name(names, r["source_key"]),
-                "system": r["system"], "place": r["label_full"] if r["precision"] != "none" else "",
+                "system": r["system"], "place": r["label_full"] if named else "",
                 "precision": r["precision"], "confirmed": bool(r["confirmed"]), "town": r["town"],
-                "lat": r["lat"] if r["precision"] != "none" else None, "lon": r["lon"] if r["precision"] != "none" else None,
-                "radius_m": r["radius_m"] or 0, "held": held,
+                "lat": r["lat"] if placed else None, "lon": r["lon"] if placed else None,
+                "radius_m": (r["radius_m"] or 0) if placed else 0, "held": held,
                 "pushed_at": r["pushed_at"], "n": n, "votes": votes, "mine": mine,
                 "near_incident": r["near_incident"], "incident_id": r["incident_id"]}
 

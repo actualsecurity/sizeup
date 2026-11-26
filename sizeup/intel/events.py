@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import fields
 
@@ -189,7 +190,9 @@ class SqlEvents:
         self.store = store
         self.rev = 0                       # bumped on every intel write: the console's intel card reads by it
         self.list_rev = 0                  # ... but a rule hit: what the Intel page lists (eventlog.py) changed
-        self.map_rev = 0                   # ... an event saved or dismissed: what its map shows (#937; never a vote)
+        # ... an event saved or dismissed: what its map shows (#937; never a vote). From the start time in ms, so a
+        # page open across a hub restart never sees a value it already had
+        self.map_rev = int(time.time() * 1000)
         with store.lock:
             store.db.executescript(SCHEMA)
             cols = {r[1] for r in store.db.execute("PRAGMA table_info(intel_events)")}
