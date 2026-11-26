@@ -137,8 +137,8 @@ window.SquelchPanel = (() => {
   // paging: the pages' level and the idle max (the hub's metrics, admins), for the guard's hover and the warning
   function guard(c) {
     const s = st.sugg && st.sugg[c.key];
-    return s ? { idle: s.idle_max ?? null, page: s.page_db ?? null, p10: s.page_p10 ?? null, ceil: s.open_ceiling ?? null }
-      : { idle: null, page: null, p10: null, ceil: null };
+    return s ? { idle: s.idle_max ?? null, page: s.page_db ?? null, min: s.page_min ?? null, ceil: s.open_ceiling ?? null,
+      old: !!s.untagged } : { idle: null, page: null, min: null, ceil: null, old: false };
   }
 
   async function save(c, field, raw) {
@@ -188,7 +188,8 @@ window.SquelchPanel = (() => {
       + (locked ? (paging(c) ? "\nPaging: stays at the default" : `\nRead-only: ${c.kind || "not a traffic"} channel`)
         : "\nEmpty: the default")
       + (g && key === "open_db" ? `\nGuard: idle max ${g.idle ?? "?"} + 2 dB to `
-        + (g.ceil !== null ? `${g.ceil} dB (pages: p10 ${g.p10}, median ${g.page})` : `${(dflt ?? 10) + 6} dB (under 10 pages)`)
+        + (g.ceil !== null ? `${g.ceil} dB (pages: weakest ${g.min}, median ${g.page})` : `${(dflt ?? 10) + 6} dB (under 10 pages)`)
+        + (g.old ? "\nFrom older readings: tightens until 10 new pages" : "")
         + "; +3 dB a day at most" : "")
       + (near ? `\nWithin ${PAGE_GAP_DB} dB of the pages: pages could be missed` : "");
     i.setAttribute("aria-label", `${c.key} ${f[1]}`);
@@ -271,6 +272,11 @@ window.SquelchPanel = (() => {
     const kids = [];
     if (!(d.channels || []).length) kids.push(el("div", "empty", "No FM channels reported"));
     else kids.push(t);
+    for (const c of (d.channels || []).filter((c) => paging(c) && guard(c).old)) {   // the ceiling from pre-sorting readings
+      const n = el("div", "dim small", `${c.key}: Open ceiling from older readings; tightens until 10 new pages`);
+      n.title = "Pages recorded before the station sorted its transmissions (unknown tones, silent carriers) still set it";
+      kids.push(n);
+    }
     for (const o of d.orphans || []) {     // set for a channel that is gone, renamed or paging: not applied
       const r = el("div", "row small warn");
       const what = FIELDS.filter((f) => o.set[f[0]] !== undefined).map((f) => `${f[1]} ${o.set[f[0]]}`).join(" · ");

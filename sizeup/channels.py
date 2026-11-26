@@ -75,11 +75,11 @@ PAGING_FIELDS = ("open_db", "close_db")   # what a paging channel's squelch take
 # PAGING_STATIC_OVER_DB, never over PAGING_STATIC_MAX_DB (raising the Open never widens the gate). A real page carries
 # tones, runs 10-60 s and sits ~20 dB over the Open; anything with a tone or speech in it, 2 s or longer, or quieted past
 # that line is kept as a page as before. Conservative both ways: only short, weak, silent, tone-less opens are dropped.
-# (Synthetic static measures 0.0 s of speech; a short spoken "disregard" ~0.6 s.)
+# (Synthetic static measures 0.0 s of speech; a short spoken "disregard" ~0.6 s, a 0.6 s weak word 0.26-0.28 s.)
 PAGING_STATIC_MAX_S = 2.0
 PAGING_STATIC_OVER_DB = 4.0
 PAGING_STATIC_MAX_DB = 15.0
-PAGING_SPEECH_S = 0.3
+PAGING_SPEECH_S = 0.15
 # A paging open whose only content is a tone pair none of ours (no speech after it): its own metric kind (#973: a weak
 # transmitter's periodic tone, kept for learning, would otherwise read as a weak page). Never a page's level.
 TONES_OTHER = "tones_other"

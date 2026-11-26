@@ -208,7 +208,7 @@ def test_tones_other_never_sets_the_page_level():
     pages = [dict(d, pc=1) for d in transmissions(NOW - 7 * DAY, 7 * DAY, [30.0] * 12, kind="page")]
     other = [dict(d, pc=1, dur=4.7) for d in transmissions(NOW - 7 * DAY, 7 * DAY, [13.0] * 300, kind="tones_other", seed=9)]
     out = mi.suggest(floor, pages + other, CFG, NOW)
-    assert out["pages"] == 12 and out["page_db"] == 30.0 and out["page_p10"] == 30.0
+    assert out["pages"] == 12 and out["page_db"] == 30.0 and out["page_min"] == 30.0
     assert mi.check_levels(pages, pages + other, CFG, paging=True) == []
     from sizeup.cloud.metricstore import METRICS
     assert not METRICS["tx_q_open"][1]({"kind": "tones_other"}) and METRICS["tx_q_open"][1]({"kind": "page"})
@@ -227,7 +227,7 @@ class Levels:
     """Stands in for the hub's metric insight (Insight.paging_levels): the numbers of a suggestion."""
 
     def __init__(self, sugg=None, **lv):
-        keys = ("idle_max", "page_db", "page_p10", "open_ceiling", "close_ceiling")
+        keys = ("idle_max", "page_db", "page_min", "open_ceiling", "close_ceiling", "untagged")
         self.lv = {**{k: (sugg or {}).get(k) for k in keys}, "pages": (sugg or {}).get("pages", 0), **lv}
         self.forgot = []
 
@@ -252,7 +252,7 @@ def test_u1_one_strong_page_is_not_enough_to_raise_far():
 def test_u2_the_ceiling_follows_the_weak_tail_not_the_median(app):
     """6 pages at 30 and 4 at 18: the median says 30, the tail 18: Open at most 15."""
     out = paging_suggestion([30.0] * 6 + [18.0] * 4)
-    assert out["page_db"] == 30.0 and out["page_p10"] == 18.0 and out["open_ceiling"] == 15.0
+    assert out["page_db"] == 30.0 and out["page_min"] == 18.0 and out["open_ceiling"] == 15.0
     app.cad.station_metrics_insight = Levels(out, idle_max=9.0)
     with pytest.raises(CadError, match="pages could be missed"):
         post(app, open_db=15.5)
@@ -279,15 +279,15 @@ def test_u3_a_raise_is_at_most_3_db_a_day(app):
     app.cad.station_metrics_insight = Levels(paging_suggestion([30.0] * 12), idle_max=6.0)
     clock = {"t": app.cad.store.clock()}
     app.cad.store.clock = lambda: clock["t"]
-    with pytest.raises(CadError, match="13 dB at most today"):
+    with pytest.raises(CadError, match=r"^Open up to 13 dB now \(3 dB a day\)"):
         post(app, open_db=14)
     post(app, open_db=12)
     post(app, open_db=13)                                           # 13 <= 10 (the lowest today) + 3
-    with pytest.raises(CadError, match="13 dB at most today"):
+    with pytest.raises(CadError, match=r"^Open up to 13 dB until \d\d:\d\d tomorrow \(3 dB a day\)"):
         post(app, open_db=13.5)
     post(app, open_db=11)                                           # lower: always (over the idle max)
     clock["t"] += 25 * 3600
-    with pytest.raises(CadError, match="14 dB at most today"):
+    with pytest.raises(CadError, match="Open up to 14 dB now"):
         post(app, open_db=15)
     post(app, open_db=14)
     assert app._receiver("South 2").squelch.params[0] == 14.0
@@ -312,16 +312,16 @@ def test_u5_polluted_history_never_counts_once_the_station_sorts_its_pages():
     GUARD_PAGES sorted pages are there, only those count."""
     old = [dict(d, dur=4.7) for d in transmissions(NOW - 7 * DAY, 7 * DAY, [12.0] * 40, kind="page", seed=11)]
     mixed = paging_suggestion([30.0] * 12, extra=old)
-    assert mixed["pages"] == 12 and mixed["page_p10"] == 30.0 and mixed["open_ceiling"] == 21.0
+    assert mixed["pages"] == 12 and mixed["page_min"] == 30.0 and mixed["open_ceiling"] == 21.0
     unsorted = paging_suggestion([30.0] * 12, extra=old, classified=False)          # (a station from before)
-    assert unsorted["page_p10"] == 12.0
+    assert unsorted["page_min"] == 12.0
 
 
 def test_without_numbers_it_stays_near_the_default(app):
     """No idle numbers: never under the default; under GUARD_PAGES pages: at most 6 dB over it (and 3 a day)."""
     with pytest.raises(CadError, match="no idle numbers"):
         post(app, open_db=9.5)
-    with pytest.raises(CadError, match="16 dB at most"):
+    with pytest.raises(CadError, match="^under 10 recent pages to check against: Open 16 dB at most"):
         post(app, open_db=16.5)
     post(app, open_db=13, close_db=9)
     assert app._receiver("South 2").squelch.params == (13.0, 9.0, 6)
@@ -476,3 +476,60 @@ def test_tones_other_has_its_own_colour_on_the_signal_chart():
     css = (static_dir / "settings.css").read_text() + (static_dir / "style.css").read_text()
     assert '["tones_other", "Tones (not ours)", "sg-tones"]' in js
     assert ".sg-tones { fill: var(--viz-5); }" in css and "--viz-5:" in css
+
+
+# -- re-review: the step limit through an import, the Open ceiling's weakest page and continuations -----------------------
+
+def import_squelch(app, sq):
+    data = app.cad.settings.export()
+    data["overrides"]["squelch"] = sq
+    return app.cad.settings.post("import", {"action": "apply", "settings": data, "operator": ADMIN})
+
+
+def test_a1_an_import_never_bypasses_the_step_limit(app):
+    """An import's audit row has no old value: it counts as the receiver's default, so 10 stays the day's lowest."""
+    app.cad.station_metrics_insight = Levels(paging_suggestion([30.0] * 12), idle_max=6.0)
+    import_squelch(app, {"South 2": {"open_db": 13.0, "close_db": 9.0}})
+    assert app._receiver("South 2").squelch.params[0] == 13.0
+    with pytest.raises(CadError, match=r"^Open up to 13 dB until \d\d:\d\d"):
+        post(app, open_db=16)
+    r = import_squelch(app, {"South 2": {"open_db": 16.0, "close_db": 12.0}})
+    assert any("South 2" in n and "skipped (paging: Open up to 13 dB" in n for n in r["notes"])
+    assert "South 2" not in app._sq_ov and app._receiver("South 2").squelch.params[0] != 16.0   # (left out of the import)
+
+
+def test_a1_the_step_limit_reads_its_rows_past_other_radio_edits(app):
+    """The audit is read by key: 300 other Radios rows since never hide the squelch row that started the day."""
+    app.cad.station_metrics_insight = Levels(paging_suggestion([30.0] * 12), idle_max=6.0)
+    post(app, open_db=13)
+    with app.cad.store.tx() as db:
+        for k in range(300):
+            app.cad.settings._audit(db, app.cad.store.clock(), ADMIN, "radios", f"channels/FG{k}", None, {"record": True})
+    with pytest.raises(CadError, match="Open up to 13 dB until"):
+        post(app, open_db=16)
+
+
+def test_a2_one_weak_page_in_twenty_holds_the_open_ceiling():
+    out = paging_suggestion([30.0] * 19 + [14.0])
+    assert out["page_min"] == 14.0 and out["open_ceiling"] == 11.0       # min(14, 30 - 6) - 3: never over the weak one
+
+
+def test_a2_continuations_count_for_close_only():
+    """A page back after a fade re-opens at Close: its level at open is low and says nothing about the Open."""
+    conts = [dict(d, pc=1, cont=1, qc=7.0) for d in transmissions(NOW - 7 * DAY, 7 * DAY, [8.0] * 4, kind="page", seed=13)]
+    out = paging_suggestion([30.0] * 20, extra=conts)
+    assert out["pages"] == 20 and out["page_min"] == 30.0 and out["open_ceiling"] == 21.0
+    assert out["close_ceiling"] == 4.0                                  # the continuations' tails (7) - 3
+
+
+def test_untagged_history_is_flagged_for_the_card():
+    old = [dict(d, dur=4.7) for d in transmissions(NOW - 7 * DAY, 7 * DAY, [12.0] * 4, kind="page", seed=11)]
+    assert paging_suggestion([30.0] * 6, extra=old, classified=True)["untagged"]        # 6 sorted: not enough alone
+    assert not paging_suggestion([30.0] * 12, extra=old)["untagged"]                     # 12 sorted: only those
+
+
+def test_a_short_weak_word_is_speech():
+    """A 0.6 s weak word measures ~0.26-0.28 s of speech: over PAGING_SPEECH_S (0.15); static 0.0."""
+    from sizeup.radio.fm import speech_seconds
+    assert channels.PAGING_SPEECH_S == 0.15
+    assert speech_seconds(static(0.8)) < channels.PAGING_SPEECH_S

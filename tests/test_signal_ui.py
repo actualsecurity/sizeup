@@ -215,7 +215,8 @@ def squelch_data(admin=True, status=200):
     sugg = mi.suggest(floor_minutes(NOW - 7 * DAY, 7 * 1440), transmissions(NOW - 7 * DAY, 7 * DAY, [20.0] * 212),
                       mi.DEFAULTS, NOW)
     page = mi.suggest(floor_minutes(NOW - 7 * DAY, 7 * 1440, kind="paging"),
-                      transmissions(NOW - 7 * DAY, 7 * DAY, [22.0] * 30, kind="page"), mi.DEFAULTS, NOW)
+                      [dict(d, pc=1) for d in transmissions(NOW - 7 * DAY, 7 * DAY, [22.0] * 30, kind="page")],
+                      mi.DEFAULTS, NOW)
     row = lambda key, kind, run=(10.0, 6.0): {"key": key, "kind": kind, "editable": kind in ("traffic", "paging"), "set": {},
                              "state": "ok",
                              "default": {"open_db": 10.0, "close_db": 6.0, "min_open_s": 0.3},
@@ -281,7 +282,8 @@ const inputs = south.map((n) => ({ l: n.attrs["aria-label"], disabled: n.disable
 const close = south.find((n) => n.attrs["aria-label"] === "South 2 Close");
 close.value = "13"; close.on.change[0]();
 for (let i = 0; i < 10; i++) await flush();
-console.log(JSON.stringify({ inputs, posted }));
+const notes = all(box, (n) => (n.textContent || "").includes("older readings")).map((n) => n.textContent);
+console.log(JSON.stringify({ inputs, posted, notes }));
 """
 
 
@@ -293,13 +295,23 @@ def test_paging_open_and_close_are_editable_for_an_admin_with_the_guard_on_hover
     out = run(tmp_path, PAGING_ROW, data)
     o, c, m = out["inputs"]
     assert (o["l"], o["disabled"], c["disabled"], m["disabled"]) == ("South 2 Open", False, False, True)
-    assert o["warn"] and "Guard: idle max" in o["title"] and "to 13 dB (pages: p10 22, median 22)" in o["title"]
+    assert o["warn"] and "Guard: idle max" in o["title"] and "to 13 dB (pages: weakest 22, median 22)" in o["title"]
     assert "+3 dB a day at most" in o["title"]
     assert "pages could be missed" in o["title"] and not c["warn"]
     assert out["posted"] == [["/api/cad/settings/squelch", {"action": "set", "key": "South 2", "close_db": 13,
                                                             "open_db": 17, "operator": "KM"}]]
+    assert out["notes"] == []
     out = run(tmp_path, PAGING_ROW, squelch_data(admin=False))
     assert all(i["disabled"] for i in out["inputs"])                  # not an admin: read only
+
+
+def test_a_paging_ceiling_from_older_readings_says_so_on_the_card(tmp_path):
+    data = squelch_data()
+    chans = data["fetch"]["/api/cad/metrics?view=squelch"]["body"]["channels"]
+    chans[1]["untagged"] = True
+    out = run(tmp_path, PAGING_ROW, data)
+    assert out["notes"] == ["South 2: Open ceiling from older readings; tightens until 10 new pages"]
+    assert "From older readings" in out["inputs"][0]["title"]
 
 
 # -- Health -----------------------------------------------------------------------------------------------------------

@@ -130,7 +130,7 @@ from datetime import datetime
 from pathlib import Path
 
 from sizeup import channels as channels_mod
-from sizeup import radionames
+from sizeup import radionames, tz
 from sizeup.cad import alarms as alarms_mod
 from sizeup.cad import commonplaces, dispatcher, eta, feedtypes, mapview, radiofolders, radioviews, reminders, runcards, tonelist
 from sizeup.cad import lists as lists_mod
@@ -2787,29 +2787,32 @@ class Editor:
         except Exception:  # noqa: BLE001 - no numbers: the blind limits
             return {}
 
-    def _paging_lowest_open(self, key: str, base: float, now: float) -> float | None:
-        """The lowest Open the channel ran in the last PAGING_STEP_S, from the audit (None: no change in it)."""
-        opens = []
-        for r in self.audit_log("radios", 200):
-            if r.get("key") != f"squelch/{key}" or not isinstance(r.get("at"), (int, float)) or now - r["at"] > PAGING_STEP_S:
-                continue
-            for raw in (r.get("old"), r.get("new")):
-                try:
-                    v = json.loads(raw) if isinstance(raw, str) else raw
-                except ValueError:
-                    v = raw
-                if v == "default" or v is None:
-                    opens.append(base)
-                elif isinstance(v, dict) and isinstance(v.get("open_db"), (int, float)):
-                    opens.append(float(v["open_db"]))
-        return min(opens) if opens else None
+    def _paging_step(self, key: str, base: float, cur_open: float, now: float) -> tuple[float, float | None]:
+        """The highest Open a raise may set now: PAGING_STEP_DB over the lowest Open the channel ran in the last
+        PAGING_STEP_S (its audit rows, read by key; an Open not given, "" or null in a row: the receiver's default, as
+        an import's row has no old value), and when that rises (None: only with a change)."""
+        def open_of(raw) -> float:
+            try:
+                v = json.loads(raw) if isinstance(raw, str) and raw[:1] in "{[" else raw
+            except ValueError:
+                v = raw
+            if isinstance(v, dict) and isinstance(v.get("open_db"), (int, float)) and not isinstance(v["open_db"], bool):
+                return float(v["open_db"])
+            return base                                  # "default", "", None, an entry with no Open of its own
+        seen: list[tuple[float, float | None]] = [(cur_open, None)]
+        for r in self.store.q("SELECT at, old, new FROM settings_audit WHERE section = ? AND key = ? AND at >= ? "
+                              "ORDER BY at", ("radios", f"squelch/{key}", now - PAGING_STEP_S)):
+            seen += [(open_of(r.get("old")), r["at"]), (open_of(r.get("new")), r["at"])]
+        low = min(v for v, _t in seen)
+        when = [t for v, t in seen if t is not None and v <= low]
+        return low + PAGING_STEP_DB, (max(when) + PAGING_STEP_S if when and cur_open > low else None)
 
     def _paging_guard(self, key: str, open_db: float, dflt: dict, close_db: float | None = None,
                       cur_open: float | None = None) -> dict:
         """A paging channel's Open / Close checked against what it hears (sizeup/cloud/metricsinsight.py paging_levels,
         the hub's signal metrics, from GUARD_PAGES pages: fewer, the blind limits):
             Open    at least PAGING_IDLE_GAP_DB over the recent idle max (under it the squelch opens on the idle noise);
-                    at most open_ceiling = min(the pages' p10, their median - 6 dB) - 3 dB (over it weak pages go
+                    at most open_ceiling = min(the weakest page, their median - 6 dB) - 3 dB (over it weak pages go
                     unheard). No idle numbers: never under the receiver's default; no pages: at most
                     PAGING_BLIND_RAISE_DB over it.
             raise   (cur_open: what runs now) at most PAGING_STEP_DB over the lowest Open of the last 24 h: the metrics
@@ -2822,24 +2825,27 @@ class Editor:
         idle, ceil, cceil = lv.get("idle_max"), lv.get("open_ceiling"), lv.get("close_ceiling")
         base = float(dflt.get("open_db") or 10.0)
         if idle is not None and open_db < idle + PAGING_IDLE_GAP_DB:
-            raise CadError(f"{key}: Open {open_db:g} dB is under the idle max {idle:g} + {PAGING_IDLE_GAP_DB:g} dB: "
+            raise CadError(f"Open {open_db:g} dB is under the idle max {idle:g} + {PAGING_IDLE_GAP_DB:g} dB: "
                            "it would open on the noise")
         if idle is None and open_db < base:
-            raise CadError(f"{key}: no idle numbers to check a lower Open against (default {base:g} dB)")
+            raise CadError(f"no idle numbers to check a lower Open against (default {base:g} dB)")
         if ceil is not None and open_db > ceil:
-            raise CadError(f"{key}: Open {open_db:g} dB is over {ceil:g} dB (the weakest pages {lv.get('page_p10')} dB, "
+            raise CadError(f"Open {open_db:g} dB is over {ceil:g} dB (the weakest page {lv.get('page_min')} dB, "
                            f"median {lv.get('page_db')} dB): pages could be missed")
         if ceil is None and open_db > base + PAGING_BLIND_RAISE_DB:
-            raise CadError(f"{key}: under {metricsinsight.GUARD_PAGES} recent pages to check against: Open "
+            raise CadError(f"under {metricsinsight.GUARD_PAGES} recent pages to check against: Open "
                            f"{base + PAGING_BLIND_RAISE_DB:g} dB at most")
         if cur_open is not None and open_db > cur_open:
-            low = min(x for x in (cur_open, self._paging_lowest_open(key, base, self.store.clock())) if x is not None)
-            if open_db > low + PAGING_STEP_DB:
-                raise CadError(f"{key}: Open {low + PAGING_STEP_DB:g} dB at most today ({PAGING_STEP_DB:g} dB over "
-                               f"{low:g}, the lowest in 24 h): raise it in steps a day apart")
+            now = self.store.clock()
+            top, until = self._paging_step(key, base, cur_open, now)
+            if open_db > top:
+                if until is None:
+                    raise CadError(f"Open up to {top:g} dB now ({PAGING_STEP_DB:g} dB a day): raise it in steps")
+                day = "" if tz.clock(until, "%Y-%m-%d") == tz.clock(now, "%Y-%m-%d") else " tomorrow"
+                raise CadError(f"Open up to {top:g} dB until {tz.hhmm(until)}{day} ({PAGING_STEP_DB:g} dB a day)")
         if close_db is not None and cceil is not None and close_db > cceil:
-            raise CadError(f"{key}: Close {close_db:g} dB is over {cceil:g} dB (the pages' tails): pages would be cut")
-        return {k: lv.get(k) for k in ("idle_max", "page_db", "page_p10", "open_ceiling", "close_ceiling")} | {
+            raise CadError(f"Close {close_db:g} dB is over {cceil:g} dB (the pages' tails): pages would be cut")
+        return {k: lv.get(k) for k in ("idle_max", "page_db", "page_min", "open_ceiling", "close_ceiling", "untagged")} | {
             "pages": int(lv.get("pages") or 0)}
 
     def _paging_squelch_set(self, key: str, body: dict, op: str, ov: dict, dflt: dict) -> dict:
@@ -2847,7 +2853,7 @@ class Editor:
         back to the default. Close not given: the one set if it still fits under the new Open and the pages' tails,
         else Open less the default hysteresis (never over the tails). Min stays the receiver's."""
         if body.get("min_open_s") is not None or body.get("expect") is not None:
-            raise CadError(f"{key}: paging channel: Open and Close only")
+            raise CadError("paging channel: Open and Close only")
         before = {**{f: dflt.get(f) for f in channels_mod.PAGING_FIELDS}, **(ov.get(key) or {})}
         if "open_db" in body and body["open_db"] is None:
             if key not in ov:
@@ -2857,7 +2863,7 @@ class Editor:
         else:
             o = body.get("open_db", (ov.get(key) or {}).get("open_db"))
             if o is None:
-                raise CadError(f"{key}: open_db: required")
+                raise CadError("open_db: required")
             raw = {"open_db": o, "close_db": body.get("close_db")}
             try:
                 vals = channels_mod.clean_squelch(key, {f: v for f, v in raw.items() if v is not None})
