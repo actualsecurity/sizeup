@@ -2400,29 +2400,53 @@ class HubApp(App):
             return True
 
     def stt_champion_change(self, key: str, old: str, new: str, operator: str, why: str) -> dict:
-        """The hook every champion change goes through (Settings' channel model, a promote, an automatic rollback:
-        #728), called BEFORE it applies. Kept (hub.sqlite meta stt_champion_log: what the intel session reads, newest
-        last, HubApp.stt_champion_log), said in the hub's log (the channel key and model ids only), and passed to each
-        listener in stt_champion_hooks (intel's, when it subscribes: never in the way of the change). The audit entry
-        is the caller's (Radios, by its operator)."""
-        row = {"at": time.time(), "key": str(key)[:60], "old": str(old or "")[:48], "new": str(new or "")[:48],
-               "by": str(operator or "")[:60], "why": str(why or "")[:40], "prealert": self.prealert_channel(key)}
+        """The hook every champion change goes through (Settings' channel model "settings", a promote, an automatic
+        rollback: #728), called BEFORE it applies (the same request, ms before it is stored). Kept in hub.sqlite (table
+        stt_champion: what intel reads, champion_changes), said in the hub's log (the channel key and model ids only,
+        and how many listeners heard it), and passed to each listener in stt_champion_hooks (never in the way of the
+        change). The audit entry is the caller's (Radios, by its operator)."""
         try:
-            self.stt_choices.note_change(row)
+            channel = self._key_service(key)[0] or str(key)
+        except Exception:  # noqa: BLE001 - the hub's own key then
+            channel = str(key)
+        row = {"at": time.time(), "channel": str(channel)[:80], "key": str(key)[:60], "old": str(old or "")[:48],
+               "new": str(new or "")[:48], "why": str(why or "")[:20], "by": str(operator or "")[:60],
+               "prealert": self.prealert_channel(key)}
+        try:
+            self.mdb.champion_add(**row)
         except Exception as e:  # noqa: BLE001 - said; the change still goes through the audit
             self.hub.log(f"stt models: a champion change not kept ({type(e).__name__})")
-        self.hub.log(f"stt models: {row['key']}: champion {row['old'] or 'default'} -> {row['new'] or 'default'} "
-                     f"({row['why']})" + (": a pre-alert channel, intel told" if row["prealert"] else ""))
+        told = 0
         for fn in list(self.stt_champion_hooks):
             try:
                 fn(dict(row))
+                told += 1
             except Exception as e:  # noqa: BLE001 - a listener's trouble is its own
                 self.hub.log(f"stt models: a champion listener failed ({type(e).__name__})")
+        self.hub.log(f"stt models: {row['key']}: champion {row['old'] or 'default'} -> {row['new'] or 'default'} "
+                     f"({row['why']})" + (" on a pre-alert channel" if row["prealert"] else "")
+                     + f"; kept for intel, {told} listener(s) told")
         return row
 
+    def champion_changes(self, since: float | None = None, until: float | None = None,
+                         channel: str | None = None) -> list[dict]:
+        """Intel's read of the champion changes, oldest first: [{at, channel, old, new, why}]. at: epoch seconds when
+        it took effect (stored in the same request, just after the hook); channel: the radio log's source key
+        (radio_traffic.source: "p25:county:307", "fm:FG1", "air:HPN Tower": channel_source() maps a hub key to it);
+        old/new: model ids ("" the default); why: "settings" (an admin's choice), "promote" or "rollback". since/until
+        filter on at. Kept in hub.sqlite (litestream) at least 90 days, and each channel's last 20 whatever their age.
+        Never words."""
+        return [{k: r[k] for k in ("at", "channel", "old", "new", "why")}
+                for r in self.mdb.champion_changes(since, until, channel)]
+
+    def channel_source(self, key: str) -> str:
+        """A hub channel key ("FG1", "tg:307", "p25:mrrs:9211") as the radio log's source key (radio_traffic.source)."""
+        return self._key_service(key)[0] or str(key)
+
     def stt_champion_log(self, since: float = 0.0) -> list[dict]:
-        """The champion changes after `since` (newest last): {at, key, old, new, by, why, prealert}."""
-        return self.stt_choices.changes(since)
+        """Every field of the champion changes after `since` (newest last): {at, channel, key, old, new, why, by,
+        prealert} (Settings' audit-like view; intel reads champion_changes)."""
+        return [r for r in self.mdb.champion_changes(None, None, None) if r["at"] > since]
 
     def stt_chosen(self, cid: str) -> str:
         """The engine the route chose for this clip now (sizeup/sttroute.py Routes.chosen): "GPU" (any GPU worker), a

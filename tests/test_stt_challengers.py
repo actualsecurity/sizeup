@@ -145,7 +145,9 @@ def test_on_a_hub_the_same_input_and_context_a_private_run_promote_on_evidence_a
         def post(self, path, body):
             if path.endswith(("/claim", "/hello", "/state")):
                 body = dict(body, models=[Q5, QWEN, Q8] if path.endswith("/claim") else body.get("models"),
-                            caps=["challenger"])
+                            caps=["challenger", "challenger_same_model"])
+                if path.endswith("/claim"):
+                    body["try_loaded"] = [QWEN, Q8]                 # (separate try instances, beside the live ones)
             elif path.endswith("/complete") and self.jobs:
                 job = self.jobs[-1]
                 body = dict(body, model=job.get("model") or Q5)
@@ -217,6 +219,14 @@ def test_on_a_hub_the_same_input_and_context_a_private_run_promote_on_evidence_a
         assert told[-1]["why"] == "promote" and told[-1]["new"] == Q8 and told[-1]["by"]
         audit = app.cad.store.q("SELECT key, old, new FROM settings_audit WHERE key LIKE 'stt_models/FG1/%'")
         assert {"key": "stt_models/FG1/model", "old": QWEN, "new": Q8} in audit
+        # the replaced champion (QWEN, still resident until the next word) is the challenger now: it gets samples on
+        # its separate try instance, so the rollback watch has evidence
+        monkeypatch.setattr(app, "challenge_board", real_board)
+        app._stt_models_word()
+        assert QWEN in app.sttpool.resident or Q8 in app.sttpool.resident
+        send(hub, pending_event("FG1-22", seq=2))
+        assert wait(lambda: any(r["role"] == "challenger" and r["model"] == QWEN
+                                for r in app.stt_runs.of("FG1-22")), 30)
         code, raw, _ = api.get("/api/cad/stt-workers", "", Identity(email=CASEY))
         assert "Engine 60 Ladder 31" not in raw.decode()                         # (scores only, never a transcript)
         # the model it replaced does better since: rolled back, intel told first, audited, the admins notified
@@ -273,6 +283,28 @@ def test_never_on_a_worker_from_before_challengers_nor_on_a_model_live_traffic_d
     assert not p.chall_ready("FG1", Q5, 3.0)[0]                     # (the worker's primary: whisper_server's)
     p.resident = frozenset()
     assert p.claim("gpu-a", 0).id == "c1~ch"
+
+
+def test_a_model_served_live_runs_as_a_challenger_only_on_its_separate_try_instance():
+    """The primary model (every unconfigured channel's champion) and a champion after a promote can be challengers or
+    shadow candidates: on a separate try instance of the same files (the worker's challenger_same_model, try_loaded),
+    never on the live server; a live clip takes it back at once and never waits."""
+    clk, p, jobs, w = _pool()
+    p.resident = frozenset({QWEN})                                  # (QWEN a champion: its live server)
+    w.models = [Q5, QWEN]
+    assert not p.chall_ready("FG1", Q5, 3.0)[0] and not p.chall_ready("FG1", QWEN, 3.0)[0]
+    w.caps = frozenset({"challenger", "challenger_same_model"})
+    assert not p.chall_ready("FG1", Q5, 3.0)[0]                     # (no separate instance loaded yet)
+    w.try_models = frozenset({Q5, QWEN})                            # (the worker loaded them beside, on demand)
+    assert p.chall_ready("FG1", Q5, 3.0)[0] and p.chall_ready("FG1", QWEN, 3.0)[0]
+    assert p.submit(chall(jobs, "p", model=Q5))
+    j = p.claim("gpu-a", 0)
+    assert j.id == "p~ch" and j.public()["model"] == Q5
+    w.polling = 0
+    assert p.submit(jobs.job("live9", URGENT, forced=True))         # a live clip: the challenger taken back at once
+    assert p.watch("gpu-a", j.lease, 1) is False
+    w.polling = 1
+    assert p.claim("gpu-a", 0).id == "live9"
 
 
 def test_a_stations_identity_gets_403_on_a_challengers_watch(tmp_path):
