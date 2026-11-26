@@ -206,13 +206,13 @@ http://127.0.0.1:8180`. With it running, `py -3 "$d\worker.py" check` also tries
 
 ### 5. The worker
 
-For the first install, `worker.py` is pinned to a commit (236,911 bytes). Check its hash after the download. From then on it
+For the first install, `worker.py` is pinned to a commit (245,409 bytes). Check its hash after the download. From then on it
 [updates itself](#updating). A worker installed from an older pin (before the self-update) needs this download once
 more to get it.
 
 ```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/36608ba643a74cc46e9ac8db54e88afc2b474975/deploy/stt-worker/worker.py -OutFile "$d\worker.py"
-(Get-FileHash "$d\worker.py").Hash -eq '4361607043AE5416F4FF0123DEA44518A5346E93E9822B687EE5489A6BD34C3F'   # True
+Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/b1a190cc27dd0777404f58d71ecd9f9afcc0c2b2/deploy/stt-worker/worker.py -OutFile "$d\worker.py"
+(Get-FileHash "$d\worker.py").Hash -eq '30240EDAECBF54CD0AD6BC86A582D9C41492506189752E1A56F841CB909CA3E8'   # True
 notepad "$d\worker.toml"
 ```
 
@@ -226,6 +226,7 @@ model = "large-v3-turbo-q5_0"
 whisper_server = ['whisper\Release\whisper-server.exe', '-m', 'models\ggml-large-v3-turbo-q5_0.bin',
                   '--host', '127.0.0.1', '--port', '8179', '-t', '4',
                   '-l', 'en', '-sns', '-et', '2.4', '-lpt', '-1.0', '-nth', '0.6']
+keep_awake = true                            # no idle sleep while the worker runs (see "Keeping the PC awake")
 # the local LLM (optional: leave these out for none; see "The local LLM" below)
 llm_url = "http://127.0.0.1:8180"
 llm_model = "qwen3-8b-q4_k_m"
@@ -408,6 +409,8 @@ that folder and keeps the file's mode. The state stays in `~/.local/state/sizeup
   `auto_update`, the update's state, the hashes marked bad). The answer carries `worker_update` (`mode`, `commit`,
   `sha256`): the version the hub wants it on ([Updating](#updating)). Health shows each worker's version, green when it
   is the hub's.
+- **Keep awake:** on Windows, every hello and heartbeat carries `keep_awake` (`on`: the config key, `held`: no idle
+  sleep now). A hub from before ignores it.
 - **LLM jobs** (with `llm_url`): claimed on a thread and hub connection of their own (`/api/station/stt/infer/*`,
   the same tokens), one at a time, never while a pre-alert clip is held. The worker tells the hub its models with every
   heartbeat (`models: {stt, llm, llm_version}`); `llm` is empty while llama-server isn't answering, and the hub sends
@@ -597,6 +600,28 @@ py -3 "$d\worker.py" status
 For one-click toggles, make desktop shortcuts to `pythonw.exe "%LOCALAPPDATA%\sizeup-stt\worker.py" gaming on` (and
 `off`). There is no tray icon or hotkey: the standard library has none on Windows.
 
+## Keeping the PC awake
+
+With `keep_awake = true` (the default), Windows doesn't idle-sleep the PC while the worker runs, so the pool doesn't
+lose it overnight. A worker that has updated itself to this version does it with no step on the PC.
+
+- **How:** `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` from a thread of the worker's own. No
+  administrator rights and no `powercfg` change; nothing outlives the worker.
+- **The screen** still turns off on its timer (never `ES_DISPLAY_REQUIRED`). Sleep from the Start menu, the lid and
+  the power button still work.
+- **Released** on `worker.py pause`, a stop or the exit, and when the worker crashes or is killed (Windows drops the
+  flag with its thread). `worker.py resume` takes it again. Gaming, a self-update and whisper-server trouble don't
+  change it. A stop (a self-update's restart too) first resets the idle timer, so the PC gets a whole sleep timeout
+  before it may sleep: time for the task to start the worker again.
+- **Modern Standby PCs** (`powercfg /a` says S0 Low Power Idle): check that `powercfg /requests` (an administrator
+  prompt) lists the worker's `python`/`pythonw` under `SYSTEM` while it runs.
+- **Off:** `keep_awake = false` in `worker.toml`, then restart the task. A `worker.py` from before this key refuses a
+  `worker.toml` that has it: take the line out before an `update rollback` to such a version or a **Pin** to one.
+- **Seen:** `worker.py status` (`keep awake: on, held`) and Health: the worker's state says `keeps PC awake`. A worker
+  gone silent shows `offline since HH:MM`, with `(asleep?)` when its last heartbeat said keep-awake off or released,
+  or its heartbeats just stopped while online.
+- Not Windows: nothing (use the OS's own settings).
+
 ## Files
 
 These are in `%LOCALAPPDATA%\sizeup-stt\state` (`state_dir`):
@@ -689,6 +714,7 @@ rollback) still starts with a newer one's keys; a known key with a bad value sto
 | `gate_dbfs` | -55 | clips quieter than this aren't decoded (no speech), on every model and the primary; -120 never |
 | `llm_priority` | `yield` | the local LLM vs a speech model that doesn't fit beside it: `yield` (the LLM stops for it) or `keep` (the model isn't loaded); the hub's word wins ([Speech models](#speech-models)) |
 | `catalog_file` | | a local `models.json` instead of the hub's (testing only) |
+| `keep_awake` | `true` | Windows: no idle sleep while the worker runs and isn't paused (see [Keeping the PC awake](#keeping-the-pc-awake)); `false`: Windows' own sleep settings. `true` or `false` only |
 
 ## Troubleshooting
 

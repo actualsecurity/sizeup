@@ -38,14 +38,23 @@ const S_STATION_TABS = [["health", "Health"], ["stations", "Stations"], ["worker
 // Settings > Radios, one tab per part (#115; the Lists page's tabs): which RadioControls card, the Tones page and the
 // Radio IDs editor each go under (data-rtab on each).
 const S_RADIO_TABS = [["receivers", "Receivers"], ["channels", "Channels"], ["squelch", "Squelch"], ["signal", "Signal"], ["tones", "Tones"],
-  ["ids", "Radio IDs"], ["vocabulary", "Vocabulary"], ["stt", "Speech-to-text"], ["emergencies", "Emergencies"]];
+  ["ids", "Radio IDs"], ["vocabulary", "Vocabulary"], ["stt", "Speech-to-text"], ["emergencies", "Emergencies"], ["views", "Views"]];
 const S_RC_TABS = new Set(["receivers", "channels", "vocabulary", "stt"]);    // radio-controls.js's cards
 // Channels' display names (#607): the radio rail's own store (sizeup/cad/radiofolders.py), so a name set in either place
 // shows in both. The CAD's (the station's own page mounts RadioControls without: no names there)
+// ... and beside each name its short label for chips (sizeup/radionames.py: the settings section radio_shorts). One
+// name per channel: every chip and hover on every page reads these two (radio-names.js)
 const S_RC_NAMES = {
-  load: async () => (await api("GET", "/api/cad/comms/sources")).folders || { rev: "", names: {} },
+  load: async () => {
+    const [src, nm] = await Promise.all([api("GET", "/api/cad/comms/sources"), api("GET", "/api/cad/radio-names")]);
+    const f = src.folders || { rev: "", names: {} };
+    // (the rev radio-controls.js compares with the push: the folders' and the names')
+    return { rev: `${f.rev || ""}|${nm.rev || ""}`, names: f.names || {}, shorts: nm.shorts || {} };
+  },
   save: async (key, name) => (await api("POST", "/api/cad/settings/radio_folders", { action: "name", key, name, operator: operator() }))
     .radio_folders || { rev: "", names: {} },
+  saveShort: async (key, short) => (await api("POST", "/api/cad/settings/radio_folders", { action: "short", key, short, operator: operator() }))
+    .radio_shorts || {},
 };
 // ... and each source's service (fire, police, ...: the settings section radio_services), the rail's Edit sets it too
 const S_RC_SERVICES = {
@@ -444,7 +453,8 @@ function sRoute() {
     if (S_RADIO_TABS.some(([k]) => k === m[2])) S.rtab = m[2];
     if (!S_RADIO_TABS.some(([k]) => k === S.rtab)) S.rtab = "receivers";
     store("sizeup.cad.settings.radios", S.rtab);
-    const q = S.rtab === "signal" ? (location.hash.match(/\?[^#]*$/) || [""])[0] : "";   // a Health hint's ?s=FG1&at=
+    // a Health hint's ?s=FG1&at= (Signal); an "SDR gone" alert's ?sdr=<serial> (Receivers: that dongle's row)
+    const q = S.rtab === "signal" || S.rtab === "receivers" ? (location.hash.match(/\?[^#]*$/) || [""])[0] : "";
     if (location.hash !== `#settings/radios/${S.rtab}${q}`) history.replaceState(null, "", `#settings/radios/${S.rtab}${q}`);
   }
   if (!S_SECTIONS.some(([k]) => k === sec)) {
@@ -536,6 +546,7 @@ function sRadioTab() {
   for (const n of panel.querySelectorAll("[data-rtab]")) show(n, n.dataset.rtab === S.rtab);
   if (S.rtab === "squelch" && window.SquelchPanel) SquelchPanel.mount($("#settings-squelch"));   // squelch-panel.js
   if (S.rtab === "signal" && window.SignalPanel) SignalPanel.mount($("#settings-signal"));       // signal-panel.js (#606)
+  if (S.rtab === "views" && window.RadioViews) RadioViews.mountSettings($("#settings-views"));    // the rail's views
 }
 
 function sRadios() {
@@ -545,6 +556,26 @@ function sRadios() {
   if (em && S.rtab === "emergencies" && S.data.radio_emergencies) em.replaceChildren(sEmergencies(S.data.radio_emergencies));
   const th = $("#settings-signal-thresholds");
   if (th && S.rtab === "signal" && S.data.signal_metrics && sIsHub()) th.replaceChildren(sSignalThresholds(S.data.signal_metrics));
+  const sw = $("#settings-dongle-swap");
+  if (sw && S.rtab === "receivers" && S.data.dongle_swap && sIsHub()) sw.replaceChildren(sDongleSwap(S.data.dongle_swap));
+}
+
+// A gone dongle's jobs to a new one (sizeup/radio/replace.py): offered on Health and the console, moved by a person's
+// "Use it". This switch (off by default) lets Fire/EMS 15 and paging move by themselves (sizeup/cloud/dongleswap.py).
+function sDongleSwap(d) {
+  const v = d.auto_critical;
+  const card = sCard(sCardHead("New dongles", v.value ? "auto" : "ask", sHelp("A dongle gone 60 s whose jobs a new, free "
+    + "dongle can run (tuner, range, sample rate): Health and the console ask \"Use it?\". Auto: Fire/EMS 15 and paging "
+    + "move by themselves only when it is clearly a swap: one new dongle fits, in the old one's USB port, plugged in "
+    + "after it went, the job running nowhere else, the same tuner. Anything less is asked. A push says what moved. "
+    + "Audited.")));
+  card.id = "s-dongle-swap";
+  const [lab, cb] = sCheck(v.label, v.value, "Off: always asked");
+  cb.disabled = !canDo("admin");
+  cb.addEventListener("change", () => sPost("dongle_swap", { action: "set", key: "auto_critical", value: cb.checked },
+    `${v.label}: ${cb.checked ? "on" : "off"}`));
+  card.append(lab);
+  return card;
 }
 
 // Settings > Radios > Signal (#606, sizeup/cloud/metricsinsight.py): the suggested squelch's margin and the shift
@@ -881,7 +912,7 @@ function sUnnamed(d) {
     const tr = el("tr", "s-trow");
     tr.dataset.id = key;
     const playB = Icon.play(el("button", "play ro-ok"));
-    playB.title = u.has_audio ? `Play its latest page (${fmtTime(u.last)} ${u.channel}), tones and all` : "Recording expired (12 h)";
+    playB.title = u.has_audio ? `Play its latest page (${fmtTime(u.last)} ${(typeof chName === "function" ? chName(u) : u.channel)}), tones and all` : "Recording expired (12 h)";
     playB.disabled = !u.has_audio;
     playB.addEventListener("click", () => play(clipUrl({ id: u.page }, true)));
     const acts = sTd("s-t-act");

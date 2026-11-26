@@ -50,7 +50,7 @@
     if (document.visibilityState !== "hidden") r.timer = setTimeout(pollRadio, pushed() ? SAFETY_MS : RADIO_POLL_MS);
   }
   function renderRadio() {
-    setText($("#b-radio-sum"), [...new Set(r.rows.map((t) => t.channel))].join(" · ") || "Main channels");
+    setText($("#b-radio-sum"), [...new Set(r.rows.map((t) => (typeof chName === "function" ? chName(t) : t.channel)))].join(" · ") || "Main channels");
     syncList($("#b-radio"), r.rows, {
       key: (t) => t.id,
       sig: (t) => JSON.stringify([t.text, t.status, t.rig, t.talker, t.has_audio, t.model, t.alt_text, fireground(t), talkSig(t.rig),

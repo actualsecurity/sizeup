@@ -146,6 +146,8 @@ class Worker:
     model: str = ""
     version: str = ""
     update: dict = field(default_factory=dict)  # a GPU worker's self-update: {sha256, commit, auto, state, bad}
+    keep_awake: dict = field(default_factory=dict)  # a GPU worker's keep_awake on Windows: {on, held} (none: not said)
+    bye: bool = False                           # its last hello / state said a clean stop (reason "shutdown")
     gpu: dict = field(default_factory=dict)
     seen: float = 0.0
     polling: int = 0
@@ -267,7 +269,7 @@ class Pool:
 
     def seen(self, wid: str, state: str | None = None, model: str | None = None, gpu: dict | None = None,
              version: str | None = None, kind: str | None = None, load: dict | None = None,
-             update: dict | None = None) -> Worker:
+             update: dict | None = None, keep_awake: dict | None = None, reason: str | None = None) -> Worker:
         """A worker's request (hello, state, claim): its state and when it was last seen. A worker that is no longer
         online hands its pre-alert jobs back at once (the rest run to their lease: it may finish them). None: a worker
         whose token no longer stands (revoked meanwhile)."""
@@ -297,6 +299,10 @@ class Pool:
                 w.version = str(version)[:40]
             if isinstance(update, dict):
                 w.update = dict(update)
+            if isinstance(keep_awake, dict):
+                w.keep_awake = dict(keep_awake)
+            if reason is not None:
+                w.bye = reason == "shutdown"
             if isinstance(gpu, dict):
                 w.gpu = {k: gpu[k] for k in ("util_pct", "mem_used_mb", "mem_total_mb", "others", "name")
                          if isinstance(gpu.get(k), (int, float, str)) and not isinstance(gpu.get(k), bool)}
@@ -335,6 +341,13 @@ class Pool:
         if w.state == "online" and now < w.cool_until:
             return "cooling"
         return w.state
+
+    def asleep(self, w: Worker, now: float) -> bool:
+        """A GPU worker offline that looks asleep (Health's "(asleep?)"): its last word said keep_awake off or not held,
+        or its heartbeats stopped while it was online (no pause, gaming or clean stop before). A guess, never an alert."""
+        if w.kind != "gpu" or w.bye or self.state_of(w, now) != "offline":
+            return False
+        return w.state == "online" or w.keep_awake.get("on") is False or w.keep_awake.get("held") is False
 
     def _service_s(self) -> float:
         """The median claim -> text of the last 50 jobs."""
@@ -643,7 +656,8 @@ class Pool:
                 mine = [x for x in hour if x[5] == w.id]
                 workers.append({"id": w.id, "kind": w.kind, "load": dict(w.load),
                                 "state": self.state_of(w, now), "model": w.model, "version": w.version,
-                                "update": dict(w.update),
+                                "update": dict(w.update), "keep_awake": dict(w.keep_awake),
+                                "asleep": self.asleep(w, now),
                                 "gpu": dict(w.gpu), "seen": w.seen, "seen_s": round(now - w.seen, 1),
                                 "jobs_h": len(mine), "done": w.done, "lost": w.lost, "leases": len(w.leases),
                                 "cool_until": w.cool_until if w.cool_until > now else None})
