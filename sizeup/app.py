@@ -4126,7 +4126,9 @@ class App:
         return {"prefs": self._chan_ov, "aws_channels": list(self.cfg.stt_aws_channels),
                 "record_only": list(self.cfg.stt_record_only), "aws_ok": ok, "aws_why": why,
                 "aws_reserve": reserve, "aws_deny": deny,
+                # each channel's Main switch (Our calls, settings radio_main) where there is a CAD to keep it
                 "fm": [{"key": c.label, "kind": c.kind, "mhz": c.mhz,
+                        **({"main": self.cad.fm_main(c.label, c.kind)} if getattr(self, "cad", None) is not None else {}),
                         **({"schedule": plan_text(c)} if getattr(c, "schedule", ()) or getattr(c, "also", ()) else {})}
                        for c in self.cfg.channels],
                 "sync": self.channels_sync(), "aws": self.aws_status(), "tiers": self.tiers_state()}
