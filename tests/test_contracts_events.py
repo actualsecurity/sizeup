@@ -401,6 +401,7 @@ def test_the_recorded_at_close_vectors_and_a_station_that_sends_a_transmission_a
         d = tr[0]["data"]
         assert (d["status"], d["text"], d["transcript_pending"]) == ("pending", "", "station") and tr[0]["audio"]
         assert fills[0]["audio"] is None and fills[0]["data"]["engine"] == "station-whisper"
+        assert fills[0]["data"].get("authoritative", True) is (tid != ran_close.ids["fm_withdrawn"])
     pool = next(ev["data"] for ev in ran_close.events if ev["type"] == "retext" and ev["data"].get("fill")
                 and ev["data"]["id"] == ran_close.ids["fm_pool"])
     assert (pool["transcript_pending"], pool["status"], pool["model"]) == ("pool", "remote", "pool")

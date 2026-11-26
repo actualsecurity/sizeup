@@ -179,7 +179,7 @@ def test_a_whisper_clip_is_on_the_hub_at_its_close_and_its_text_fills_the_same_r
     assert [x["id"] for x in rows if x["id"] in (a, b)] == [b, a]      # never re-ordered
     assert [len(held(hub.app, tid)) for tid in (a, b)] == [1, 1]       # one transmission each on the hub
     t = held(hub.app, a)[0]
-    assert t.text == SAID and getattr(t, "station_wait", None) is None and not getattr(t, "history", None)
+    assert t.text == SAID and not hub.app.mdb.is_waiting(a) and not getattr(t, "history", None)
     # the station's run, with whisper's wait and run, as when it came in one event
     runs = hub.app.stt_runs.of(a)
     assert [(r["engine"], r["role"], r["text"]) for r in runs] == [(STATION_WHISPER, "text", SAID)]
@@ -387,31 +387,171 @@ def test_a_resent_event_at_the_close_is_one_row_and_never_undoes_its_text(hub, m
 
 def test_a_fill_for_a_row_another_engine_filled_first_is_kept_as_a_run_not_the_text(hub, made):
     st = made({3: SAID})
+    heard = hooks(hub)
     tid = fm(st, time.time() - 30)
     st.flush(hub)
     hub.app._retext(tid, "Engine 5 on location", "done", 0.9, "gpu-worker:large", why="pool")    # (another engine first)
-    held(hub.app, tid)[0].__dict__.pop("station_wait", None)
+    assert heard["text"] == [tid]
     st.whisper.go.set()
     assert wait(lambda: st.kinds(tid) == ["traffic", "retext"], 15)
     st.flush(hub)
     assert row(hub, tid)["text"] == "Engine 5 on location"
+    assert [(r["engine"], r["role"], r["text"]) for r in hub.app.stt_runs.of(tid)] == [(STATION_WHISPER, "late", SAID)]
+    assert heard["text"] == [tid] and heard["intel"] == [tid]       # the hooks heard it once: on the first text
 
 
-def test_the_hub_flags_a_row_whose_text_never_comes_and_takes_the_text_if_it_does(hub, made):
+def evidence(hub: HubRun, monkeypatch, boot: str = "boot-a") -> None:
+    """The hub has heard a station (connected, its machine's boot) as a state post would say."""
+    monkeypatch.setattr(hub.app.hub, "connected", lambda: True)
+    hub.app.hub.boot_id = boot
+
+
+def test_a_row_waiting_behind_a_two_hour_backlog_stays_transcribing(hub, made, monkeypatch):
     st = made({3: SAID})
+    evidence(hub, monkeypatch)
     tid = fm(st, time.time() - 30)
     st.flush(hub)
-    t = held(hub.app, tid)[0]
-    assert isinstance(t.station_wait, float)
-    assert hub.app._flag_waiting(time.time() + hub_mod.STATION_WAIT_S - 60) == 0
-    assert hub.app._flag_waiting(time.time() + hub_mod.STATION_WAIT_S + 1) == 1
-    r = row(hub, tid)
-    assert r["status"] == "error" and "no transcript from the station in 30 min" in r["model"]
-    assert hub.app._flag_waiting(time.time() + 2 * hub_mod.STATION_WAIT_S) == 0     # (once)
-    st.whisper.go.set()                                             # (a station back from a crash: late, but its text)
+    assert hub.app.mdb.is_waiting(tid)
+    assert hub.app._flag_waiting(time.time() + 2 * 3600) == 0       # (an URGENT clip may wait that long: no evidence)
+    assert row(hub, tid)["status"] == "pending"
+    st.whisper.go.set()
     assert wait(lambda: st.kinds(tid) == ["traffic", "retext"], 15)
     st.flush(hub)
     assert (row(hub, tid)["status"], row(hub, tid)["text"]) == ("done", SAID)
+
+
+@pytest.mark.parametrize("how", ["reboot", "offline", "too old"])
+def test_a_row_whose_station_rebooted_is_shed_for_the_catch_up_and_its_text_still_fills_it(hub, made, monkeypatch, how):
+    from sizeup.stt import MAX_WAIT_S
+    st = made({3: SAID})
+    evidence(hub, monkeypatch)
+    tid = fm(st, time.time() - 30)
+    st.flush(hub)
+    later = time.time() + 60
+    if how == "reboot":
+        hub.app.hub.boot_id = "boot-b"                              # (#795: the station's machine came up again)
+    elif how == "offline":
+        monkeypatch.setattr(hub.app.hub, "connected", lambda: False)
+        hub.app.hub.last_seen = time.time()
+        later = time.time() + hub_mod.STATION_OFFLINE_S + 1
+    else:
+        later = time.time() + MAX_WAIT_S + hub_mod.STATION_GRACE_S + 1
+    assert hub.app._flag_waiting(later) == 1
+    r = row(hub, tid)
+    assert r["status"] == "skipped" and SHED in r["model"] and r["text"] == ""
+    assert [x["id"] for x in hub.app.cad.comms.shed_clips(time.time() - 3600)[0]] == [tid]   # the catch-up's now
+    assert hub.app._flag_waiting(later + 60) == 0                   # (once)
+    st.whisper.go.set()                                             # (its text after all: late, but the text)
+    assert wait(lambda: st.kinds(tid) == ["traffic", "retext"], 15)
+    st.flush(hub)
+    assert (row(hub, tid)["status"], row(hub, tid)["text"]) == ("done", SAID) and not hub.app.mdb.is_waiting(tid)
+
+
+def test_a_fill_for_a_row_no_longer_in_memory_fills_the_radio_log_and_alarms_on_a_mayday(hub, made):
+    from sizeup.incidents import Traffic
+    st = made({3: MAYDAY})
+    heard = hooks(hub)
+    tid = fm(st, time.time() - 30)
+    st.flush(hub)
+    for k in range(1000):                                           # (an evening's newer rows: it leaves memory)
+        hub.app.store.loose.append(Traffic(f"FG1-{k}", "FG1", 1.0 + k, 2.0 + k, "", status="done"))
+    assert held(hub.app, tid) == [] and row(hub, tid)["status"] == "pending"
+    st.post(hub, "traffic", st.sent[0][1], st.sent[0][2])           # (sent again now: never a second row)
+    assert held(hub.app, tid) == [] and row(hub, tid)["status"] == "pending"
+    st.whisper.go.set()
+    assert wait(lambda: st.kinds(tid) == ["traffic", "retext"], 15)
+    st.flush(hub)
+    assert (row(hub, tid)["text"], row(hub, tid)["status"]) == (MAYDAY, "done") and not hub.app.mdb.is_waiting(tid)
+    assert wait(lambda: len(hub.app.cad.store.q("SELECT * FROM alarms")) == 1, 10)
+    assert heard["text"] == [tid]
+    st.post(hub, "traffic", st.sent[0][1], st.sent[0][2])           # ... and after its text: it never blanks it
+    assert (row(hub, tid)["text"], row(hub, tid)["status"]) == (MAYDAY, "done")
+
+
+def test_a_fill_that_comes_before_its_transmission_waits_for_it(hub, made):
+    st = made({2: MAYDAY})
+    heard = hooks(hub)
+    now = time.time() - 30
+    st.app._call(Call(f"{TG}-4-call_4", TG, "Fire/EMS 15", now, now + 2, ["41005"], voice(2.0), "",
+                      [Turn(0.0, "41005", "41005", at=now)], emergency=True))
+    tid = f"{TG}-4-call_4"
+    st.whisper.go.set()
+    assert wait(lambda: st.kinds(tid) == ["alarm", "traffic", "retext"], 15)
+    alarm, pending, fill = (x for x in st.sent if x[1].get("id") == tid)
+    st.post(hub, *alarm[:2], alarm[2])
+    st.post(hub, "retext", fill[1])                                 # (its traffic held back: quarantined, sent later)
+    assert row(hub, tid) == {} and heard["text"] == []
+    st.post(hub, "traffic", pending[1], pending[2])
+    r = row(hub, tid)
+    assert (r["text"], r["status"]) == (MAYDAY, "done") and not hub.app.mdb.is_waiting(tid)
+    assert hub.app.mdb.early_take(tid) is None
+    assert wait(lambda: hub.app.cad.store.q("SELECT text FROM alarms")[0]["text"] == MAYDAY, 10)
+    assert len(hub.app.cad.store.q("SELECT * FROM alarms")) == 1 and heard["text"] == [tid]
+
+
+def test_a_hub_restart_between_the_close_and_the_fill_still_fills_the_row(tmp_path, made):
+    st = made({3: SAID})
+    tid = fm(st, time.time() - 30)
+    first = HubRun(hub_cfg(tmp_path))
+    try:
+        st.flush(first)
+    finally:
+        first.close()
+    again = HubRun(hub_cfg(tmp_path))                               # (a redeploy: from hub.sqlite and cad.sqlite)
+    try:
+        assert again.app.mdb.is_waiting(tid) and row(again, tid)["status"] == "pending"
+        st.whisper.go.set()
+        assert wait(lambda: st.kinds(tid) == ["traffic", "retext"], 15)
+        st.flush(again)
+        assert (row(again, tid)["text"], row(again, tid)["status"]) == (SAID, "done")
+        assert not again.app.mdb.is_waiting(tid)
+    finally:
+        again.close()
+
+
+def test_a_row_still_transcribing_reaches_the_radio_logs_rules_that_need_no_words(hub, made, monkeypatch):
+    st = made({3: SAID})
+    seen = []
+    real = hub.app.cad.radiolog.consider
+    monkeypatch.setattr(hub.app.cad.radiolog, "consider", lambda tid: (seen.append(tid), real(tid))[1])
+    tid = fm(st, time.time() - 30)
+    st.flush(hub)
+    assert seen == [tid]                                            # (a fireground's links: at its close)
+
+
+def test_a_second_answer_after_the_fill_sends_nothing_and_adds_no_row(made):
+    st = made({3: SAID}, held=False)
+    tid = fm(st, time.time() - 30)
+    assert wait(lambda: st.kinds(tid) == ["traffic", "retext"], 15)
+    [item] = held(st.app, tid)
+    item.status = "done"
+    st.app._transcribed(item)                                       # (a stop handing on a clip whisper just finished)
+    assert st.kinds(tid) == ["traffic", "retext"] and len(held(st.app, tid)) == 1
+
+
+def test_a_loose_row_at_its_close_is_written_with_its_fill_one_write(made):
+    st = made({3: SAID})
+    n = st.app.store.writes
+    tid = fm(st, time.time() - 30)
+    assert held(st.app, tid) and st.app.store.writes == n          # (its close: in memory, not on disk yet)
+    st.whisper.go.set()
+    assert wait(lambda: st.kinds(tid) == ["traffic", "retext"], 15)
+    assert st.app.store.writes == n + 1
+
+
+def test_a_stations_saves_are_coalesced(tmp_path):
+    from sizeup.incidents import IncidentStore, Traffic
+    store = IncidentStore(set(), path=tmp_path / "incidents.json")
+    store.save_delay = 0.3
+    for k in range(5):                                              # (a close and its fill, and a few more)
+        store.on_traffic(Traffic(f"FG1-{k}", "FG1", 1.0 + k, 2.0 + k, ""), attach=False)
+        store.retext(f"FG1-{k}", "Engine 5 on location", "done")
+    assert store.writes == 0
+    assert wait(lambda: store.writes == 1, 5)
+    assert len(json.loads((tmp_path / "incidents.json").read_text())["loose"]) == 5
+    store.save()
+    store.flush()                                                   # (a stop: written at once)
+    assert store.writes == 2
 
 
 def test_a_station_restart_keeps_what_is_on_the_hub_a_fill(tmp_path, monkeypatch, made):
@@ -444,7 +584,7 @@ def test_a_clip_withdrawn_while_it_waits_is_taken_out_and_nothing_goes_up_for_it
     assert wait(lambda: st.whisper.asked == [3], 10)
     b = fm(st, t0 + 10, 4.0)                                        # waiting behind it
     got = st.app.stt_withdraw([b, "FG1-1"])
-    assert got == {"withdrawn": [b], "running": [], "gone": ["FG1-1"]}
+    assert got == {"withdrawn": [b], "running": [], "sent": [], "unknown": ["FG1-1"]}
     st.whisper.go.set()
     assert wait(lambda: st.kinds(a) == ["traffic", "retext"], 15)
     time.sleep(0.3)
@@ -453,24 +593,27 @@ def test_a_clip_withdrawn_while_it_waits_is_taken_out_and_nothing_goes_up_for_it
     assert (r["status"], r["model"]) == ("remote", "pool")
 
 
-def test_a_clip_withdrawn_once_whisper_began_runs_on_and_its_text_stays_on_the_station(made):
+def test_a_clip_withdrawn_once_whisper_began_sends_its_text_as_a_run_only(hub, made):
     st = made({3: SAID})
     tid = fm(st, time.time() - 30)
+    st.flush(hub)
     assert wait(lambda: st.whisper.asked == [3], 10)
-    assert st.app.stt_withdraw([tid]) == {"withdrawn": [], "running": [tid], "gone": []}
+    assert st.app.stt_withdraw([tid]) == {"withdrawn": [], "running": [tid], "sent": [], "unknown": []}
     st.whisper.go.set()
-    assert wait(lambda: held(st.app, tid)[0].status == "done", 15)
-    time.sleep(0.3)
-    assert st.kinds(tid) == ["traffic"]                             # nothing goes up for it
-    r = st.app.cad.store.one("SELECT status, text FROM radio_traffic WHERE id = ?", (tid,))
-    assert (r["status"], r["text"]) == ("done", SAID)
+    assert wait(lambda: st.kinds(tid) == ["traffic", "retext"], 15)
+    fill = st.of("retext", tid)[0]
+    assert fill["fill"] is True and fill["authoritative"] is False and fill["text"] == SAID
+    st.flush(hub)
+    assert row(hub, tid)["status"] == "pending"                    # (the pool's to say: never this text by itself)
+    assert [(r["engine"], r["role"]) for r in hub.app.stt_runs.of(tid)] == [(STATION_WHISPER, "late")]
 
 
-def test_a_withdraw_after_the_text_went_up_changes_nothing_the_hub_decides(made):
+def test_a_withdraw_after_the_text_went_up_says_sent_and_one_never_landed_unknown(made):
     st = made({3: SAID}, held=False)
     tid = fm(st, time.time() - 30)
     assert wait(lambda: st.kinds(tid) == ["traffic", "retext"], 15)
-    assert st.app.stt_withdraw([tid]) == {"withdrawn": [], "running": [], "gone": [tid]}
+    assert st.app.stt_withdraw([tid, "FG1-1", "../x"]) == {"withdrawn": [], "running": [], "sent": [tid],
+                                                            "unknown": ["FG1-1", "../x"]}
     assert st.kinds(tid) == ["traffic", "retext"]
 
 
@@ -481,17 +624,22 @@ def test_a_withdraw_is_refused_for_what_is_not_a_list_of_ids(made):
             st.app.stt_withdraw(bad)
 
 
-def test_the_hub_asks_only_a_connected_station_that_says_it_takes_a_withdraw(hub, monkeypatch):
+def test_the_hub_asks_only_a_connected_station_that_says_it_takes_a_withdraw(hub, made, monkeypatch):
+    st = made({3: SAID})
+    tid = fm(st, time.time() - 30)
+    st.flush(hub)
     asked = []
     monkeypatch.setattr(hub.app.hub, "remote", lambda fn, *a, **k: asked.append((fn, a)) or
-                        {"withdrawn": list(a[0]), "running": [], "gone": []})
-    assert hub.app.stt_withdraw_station(["FG1-1"]) is None and asked == []      # no station connected
+                        {"withdrawn": list(a[0]), "running": [], "sent": [], "unknown": []})
+    assert hub.app.stt_withdraw_station([tid]) is None and asked == []      # no station connected
     monkeypatch.setattr(hub.app.hub, "connected", lambda: True)
     hub.app.hub.status = {"caps": []}
-    assert hub.app.stt_withdraw_station(["FG1-1"]) is None and asked == []      # an older station: transcribes as ever
+    assert hub.app.stt_withdraw_station([tid]) is None and asked == []      # an older station: transcribes as ever
     hub.app.hub.status = {"caps": ["stt_withdraw"]}
-    assert hub.app.stt_withdraw_station(["FG1-1", "../x"]) == {"withdrawn": ["FG1-1"], "running": [], "gone": []}
-    assert asked == [("stt_withdraw", (["FG1-1"],))]
+    assert hub.app.mdb.is_waiting(tid)
+    assert hub.app.stt_withdraw_station([tid, "../x"]) == {"withdrawn": [tid], "running": [], "sent": [], "unknown": []}
+    assert asked == [("stt_withdraw", ([tid],))]
+    assert not hub.app.mdb.is_waiting(tid)                          # (the pool's now: no sweep, no AWS resend for it)
 
 
 def test_every_retext_of_a_station_says_its_engine(made):

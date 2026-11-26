@@ -196,12 +196,13 @@
       "description": "App.stt_withdraw's answer (#927): each id it was sent in one of three lists.",
       "x-complete": true,
       "type": "object",
-      "required": ["withdrawn", "running", "gone"],
+      "required": ["withdrawn", "running", "sent", "unknown"],
       "additionalProperties": true,
       "properties": {
         "withdrawn": {"type": "array", "items": {"type": "string"}, "description": "Taken out of whisper's queue: nothing goes up for them."},
-        "running": {"type": "array", "items": {"type": "string"}, "description": "On whisper already: it runs on, and its text stays on the station."},
-        "gone": {"type": "array", "items": {"type": "string"}, "description": "Not waiting here: its text went up already, it was never sent at its close, or the station doesn't know it. The hub decides between the texts."}
+        "running": {"type": "array", "items": {"type": "string"}, "description": "On whisper already: it runs on, and its text goes up as a fill with `authoritative: false` (a run for the hub's rule)."},
+        "sent": {"type": "array", "items": {"type": "string"}, "description": "Its text went up already or is about to: the hub decides between the texts."},
+        "unknown": {"type": "array", "items": {"type": "string"}, "description": "The station doesn't know it: never sent at its close, or from before the station's restart."}
       }
     },
     "result.sources_reset": {

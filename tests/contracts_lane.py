@@ -190,11 +190,16 @@ def at_the_close(lv: Lane, st, monkeypatch) -> dict[str, str]:
     from sizeup.stt import SHED
     from tests.test_app import wait
     assert wait(lambda: "traffic_pending" in st.link.hub_caps, 30)
-    gate, real = threading.Event(), st.stt.client
+    gate, then, real = threading.Event(), threading.Event(), st.stt.client
+    calls = []
 
     class Held:
         def transcribe(self, audio, prompt=""):
-            gate.wait(30)
+            calls.append(1)
+            if len(calls) == 1:
+                gate.wait(30)                                 # (the first clip held while the others queue)
+            elif round(len(audio) / 16000) == 4:
+                then.wait(30)                                 # (the one the hub withdraws while whisper has it)
             return real.transcribe(audio, prompt)
     st.stt.client = Held()
     ids: dict[str, str] = {}
@@ -206,10 +211,15 @@ def at_the_close(lv: Lane, st, monkeypatch) -> dict[str, str]:
         monkeypatch.setattr(st.link, name, fn)
     [(_p, item, _a, _c, _q)] = st.stt.withdraw(ids={ids["fm_pool"]})
     st._stt_dropped(item, f"{SHED} (the contract run)")                         # transcript_pending pool, stt_class
+    ids["fm_withdrawn"] = fm(st, at=t + 15, seconds=4.0, radio=0x7307)          # the hub's pool takes it: authoritative
     monkeypatch.setattr(lv.hub.app, "channels_check", lambda force=False: None)   # (the hub's map: not pushed back)
     st.set_channel_prefs({"Fireground 1": {"engine": "both"}}, {"ok": True, "why": "", "reserve": []})
     ids["fm_both"] = fm(st, at=t + 20, radio=0x7305)                            # stt both
     gate.set()
+    assert wait(lambda: getattr((st.stt.current() or (0, None))[1], "id", "") == ids["fm_withdrawn"], 10)
+    got = st.stt_withdraw([ids["fm_withdrawn"]])
+    assert got["running"] == [ids["fm_withdrawn"]], got                         # (whisper began it)
+    then.set()
 
     def filled() -> bool:
         got = {ev["data"]["id"] for ev in lv.events("retext") if ev["data"].get("fill")}

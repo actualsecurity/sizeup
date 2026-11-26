@@ -242,7 +242,8 @@
         "stt_class": {"type": "string", "description": "With `fill`: the class of the whisper queue it ran in, or (with `transcript_pending` `pool`) the class the pool is to take it in.", "x-known": ["urgent", "high", "live", "rerun", "context-fallback", "context", "low", "catchup"]},
         "stt_wait_s": {"type": ["number", "null"], "minimum": 0, "description": "With `fill`: how long it waited in the station's whisper queue, seconds, two decimals; null when it never queued. Present once whisper ran."},
         "stt_run_s": {"type": "number", "minimum": 0, "description": "With `fill`: how long whisper ran on it, seconds, two decimals. Present once whisper ran."},
-        "stt": {"const": "both", "description": "With `fill`: present (`both`) only on a channel set to both engines: the hub adds Amazon Transcribe's text, the station's kept as the alternative."}
+        "stt": {"const": "both", "description": "With `fill`: present (`both`) only on a channel set to both engines: the hub adds Amazon Transcribe's text, the station's kept as the alternative."},
+        "authoritative": {"const": false, "description": "With `fill`: present (false) only when the hub had withdrawn the clip from the station's whisper (`stt_withdraw`) after whisper began it: the hub keeps the words as a run (stt_runs), never as the row's text by themselves; its own rule decides."}
       }
     },
     "rerun": {

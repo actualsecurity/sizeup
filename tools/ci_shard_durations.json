@@ -278,7 +278,7 @@
  "tests/test_tone_settings.py": 36.51,
  "tests/test_tones.py": 0.1,
  "tests/test_tones_47.py": 6.84,
- "tests/test_traffic_pending.py": 30.0,
+ "tests/test_traffic_pending.py": 60.0,
  "tests/test_train_alerts.py": 0.34,
  "tests/test_train_follow.py": 0.73,
  "tests/test_train_live.py": 14.09,

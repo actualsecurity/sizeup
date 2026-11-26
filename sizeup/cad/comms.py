@@ -244,6 +244,10 @@ class Comms:
         # "late"): only what keeps the record (the per-incident radio log), never on_text's consumers (status hints,
         # pre-alerts, possible incoming, the airport) nor on_context_text. Called after commit, like on_text.
         self.on_late_text = None
+        # traffic id -> None: one of our rows logged with its text still to come (#927: status pending / remote, no
+        # text): what needs no words (the per-incident radio log's rules: a fireground's links), never on_text's
+        # consumers, which hear it once its text comes (retext). Called after commit, like on_text.
+        self.on_keyup = None
         # (t, rigs) -> ({incident: (why, unit)}, {incident}): the operating channels' links for a transmission and the
         # "on this channel" links it must not keep (sizeup/cad/opchannel.py rule_links), asked before record()'s
         # transaction; None: none. on_pages_linked(iid, page ids): after link_pages committed.
@@ -305,10 +309,14 @@ class Comms:
             except Exception as e:  # noqa: BLE001 - the transmission is logged whatever this does
                 self.log(f"CAD: operating channel: {type(e).__name__}")
         with self.store.tx() as db:
-            have = db.execute("SELECT talkgroup, channel, system, EXISTS (SELECT 1 FROM radio_links WHERE traffic_id = ?) AS linked "
+            have = db.execute("SELECT talkgroup, channel, system, text, status, "
+                              "EXISTS (SELECT 1 FROM radio_links WHERE traffic_id = ?) AS linked "
                               "FROM radio_traffic WHERE id = ?", (tid, tid)).fetchone()
             if have and not replace:
                 return []
+            if have and (t.get("status") or "") in WAITING and not (t.get("text") or "").strip() \
+                    and ((have["text"] or "").strip() or have["status"] in LANDED):
+                return []       # (#927) a copy still "Transcribing" (sent again) never blanks the text it has now
             tones = json.dumps(t["tones"]) if t.get("tones") else ""
             seq = json.dumps(t["tone_seq"]) if t.get("tone_seq") else ""
             known = bool(rigs) or bool(t.get("radio_id")) or bool(talker)
@@ -401,7 +409,12 @@ class Comms:
             self._logged[kind] = 0
             self._trim_changes(kind)
         if (t.get("status") or "") in WAITING and not (t.get("text") or "").strip():
-            return out          # (#927) on the timeline, its text still to come: nothing has been said yet (retext tells)
+            if self.on_keyup is not None:       # (#927) on the timeline, its text still to come: only what needs no
+                try:                            # words now; the text hooks hear it with its text (retext)
+                    self.on_keyup(tid)
+                except Exception as e:  # noqa: BLE001 - the radio log never stops the write
+                    self.log(f"CAD: key-up {tid}: {type(e).__name__}: {e}")
+            return out
         if late:
             self._heard_late(tid)
         else:

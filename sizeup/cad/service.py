@@ -392,6 +392,7 @@ class Cad:
         self.intel.fire_incidents = self.intel_fire_incidents   # a fire-related one the FD is already at: no pre-alert
         self.comms.on_context_text = self.intel.consider      # comms.py calls it with the str tid, after commit (#483)
         self.comms.on_late_text = self._on_late_text          # a P25 call from while sizeup was down (#747)
+        self.comms.on_keyup = self._on_late_text              # a row still transcribing (#927): the same, no words yet
         # The place search (sizeup/geo/places.py, #67): the app sets place_source, a function that builds the
         # PlaceIndex over its gazetteer (once, on first use); None: no gazetteer, no place suggestions.
         self.place_source: Callable[[], object] | None = None

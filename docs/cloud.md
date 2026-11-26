@@ -1623,15 +1623,27 @@ flag. It shows "Transcribing on the station (whisper)", and the text fills the s
   `remote` with no text. The emergency button still alarms at the close (the `alarm` event), and the words update that
   same alarm. A late call (#747) is late on both events.
 - **First text wins:** a fill for a row whose text came another way first is kept as a `late` run, not the text.
-- **Never stuck:** a row with no fill 30 min after it came (`STATION_WAIT_S`, a station that crashed) is flagged
-  "Transcription failed". Its text still fills it if it comes. A clip saved at a stop keeps `landed` in
-  `stt-queue.json`, so after the restart its text is a fill too.
+- **Durable:** the rows waiting for their text are in hub.sqlite (`station_wait`), not only in memory. A fill for a
+  row that has left memory (1000 newer rows, a hub restart) fills the radio log by its id, and its mayday still
+  alarms. A fill that comes before its transmission (that event held back and sent again later) is kept
+  (`early_fill`, 6 h) and applied when the transmission comes. A copy still "Transcribing" that is sent again never
+  blanks a row that has its text.
+- **Never stuck, never flagged early:** a row is marked shed (`skipped`, so the catch-up runs it from the hub's clip)
+  only on evidence: the station's machine rebooted since the row came (its `boot_id`, #795), the station has been
+  offline over 10 min, or the row is older than whisper ever keeps a clip waiting (`MAX_WAIT_S`, 3 h) + 15 min.
+  Behind a long backlog it stays "Transcribing". Its text still fills it if it comes. A clip saved at a stop keeps
+  `landed` in `stt-queue.json`, so after the restart its text is a fill too.
+- **Writes:** a loose row at its close is written to the station's `incidents.json` with its fill, and the station
+  coalesces those writes (at most one each 1.5 s). The radio log's rules that need no words (a fireground's links)
+  run at the close.
 - **Gated:** only for a hub whose caps say `traffic_pending`. An older hub gets the one `traffic` after the text. Pages
   keep their own way (PageHold, `page_text`).
 - **Withdraw (for the pool, #896):** `HubApp.stt_withdraw_station(ids)` calls the station's `stt_withdraw`. It is
   sent only to a connected station whose status `caps` has `stt_withdraw`, and returns None otherwise. The station takes
   a waiting landed clip out of whisper's queue and sends nothing for it, not even a `skipped`. A clip whisper has begun
-  runs on, and its text stays on the station. An id whose text went up already is `gone`, and the hub decides.
+  runs on, and its text goes up as a fill with `authoritative: false`: the hub keeps it as a run, never as the text by
+  itself. The answer is `{withdrawn, running, sent, unknown}` (sent: its text went up already or is about to; unknown:
+  the station doesn't know it, as after its restart). A withdrawn or running one no longer waits for the station.
 - **Volume:** one more event per whisper clip (about 7–10k a day), each a `retext` of about 350 bytes with no audio.
   The audio moves to the event at the close.
 

@@ -1321,7 +1321,7 @@
       ]
     },
     "call.stt_withdraw": {
-      "description": "App.stt_withdraw(ids): the hub's pool took these clips (#927, HubApp.stt_withdraw_station): the station's whisper skips them. Sent only to a connected station whose status `caps` has `stt_withdraw`. Only a transmission the station sent at its close (`transcript_pending` `station`) is taken: one still waiting leaves whisper's queue and nothing goes up for it (no `skipped` over the pool's text); one whisper has begun runs on and its text stays on the station. Result: {withdrawn, running, gone}.",
+      "description": "App.stt_withdraw(ids): the hub's pool took these clips (#927, HubApp.stt_withdraw_station): the station's whisper skips them. Sent only to a connected station whose status `caps` has `stt_withdraw`. Only a transmission the station sent at its close (`transcript_pending` `station`) is taken: one still waiting leaves whisper's queue and nothing goes up for it (no `skipped` over the pool's text); one whisper has begun runs on and its text goes up as a fill with `authoritative: false`. Result: {withdrawn, running, sent, unknown}.",
       "x-names": [
         "ids"
       ],
@@ -1337,7 +1337,7 @@
           "items": {
             "$ref": "station-events.schema.json#/$defs/clip_id"
           },
-          "description": "ids: the clip ids (at most 500; the hub sends only ids of the clip id pattern). More than 500, or no list of strings, is refused (ValueError); an id of another shape is answered `gone`."
+          "description": "ids: the clip ids (at most 500; the hub sends only ids of the clip id pattern). More than 500, or no list of strings, is refused (ValueError); an id of another shape is answered `unknown`."
         }
       ]
     }

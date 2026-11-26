@@ -1,4 +1,4 @@
 {
   "ok": true,
-  "result": {"withdrawn": [], "running": [], "gone": ["Fireground1-1794990000000"]}
+  "result": {"withdrawn": [], "running": [], "sent": ["Fireground1-1794990000000"], "unknown": []}
 }

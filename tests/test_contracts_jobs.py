@@ -268,7 +268,8 @@ def every_job_the_hub_makes(lv, st, wire, tmp_path, monkeypatch) -> dict[str, tu
                                                       "sdr": "00000105", "minutes": 15}, "admin@example.org"))
     one("reception_sample_b64", lambda: app.reception_sample("0123456789ab"))
     # the pre-alerts' sources, when the station's revision differs from the intel engine's
-    app._push_cache = (time.monotonic(), frozenset({"fm:Paging 1", "p25:east:7001"}), 4242)
+    # (held for the rest of the run: the cache's 5 s running out would send the engine's own set again, a race)
+    monkeypatch.setattr(app, "_stt_alert_source", lambda: (frozenset({"fm:Paging 1", "p25:east:7001"}), 4242))
     one("set_stt_alert_keys", app.alert_keys_check)
     assert wait(lambda: not app._alert_push, 5)
     # the term lists for whisper's prompt, when the station's version differs
@@ -302,7 +303,7 @@ def every_job_the_hub_makes(lv, st, wire, tmp_path, monkeypatch) -> dict[str, tu
     ob.late(q["id"], "alarm delivered late, not raised (40 min after it ended)")
     one("quarantine_dismiss", lambda: h.dismiss_rejected("alarm", "admin@example.org"))
     assert [(r["kind"], r["state"]) for r in ob.summary()["rows"]] == [("alarm", "held")]
-    # the hub's pool takes a clip back from the station's whisper (#927): one whose text went up long ago, so "gone"
+    # the hub's pool takes a clip back from the station's whisper (#927): one whose text went up long ago, so "sent"
     one("stt_withdraw", lambda: app.stt_withdraw_station([tid]))
     return out
 
@@ -400,7 +401,8 @@ def test_the_recorded_jobs_and_results_are_what_the_hub_and_the_station_send_now
     assert r["set_stt_terms"]["result"]["v"] == live.hub.app.stt_terms.v != ""
     assert r["tts"]["label"].startswith("Voice: ") and r["sources_reset"]["result"].startswith("east-cad: reset asked")
     assert r["quarantine_dismiss"]["result"] == 1
-    assert r["stt_withdraw"]["result"] == {"withdrawn": [], "running": [], "gone": [got["stt_withdraw"][0]["args"]["args"][0][0]]}
+    assert r["stt_withdraw"]["result"] == {"withdrawn": [], "running": [], "sent": [got["stt_withdraw"][0]["args"]["args"][0][0]],
+                                           "unknown": []}               # (its text went up long ago)
     # the hub puts the channels' result in the status it has (and the station's next status says the same)
     assert wait(lambda: live.hub.app.hub.status["channels"] == r["set_channel_prefs"]["result"], 20)
 

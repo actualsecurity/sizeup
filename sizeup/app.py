@@ -491,6 +491,7 @@ class App:
         # once; and the ones the hub withdrew from this whisper (stt_withdraw) that whisper had begun: nothing goes up
         self._landed: OrderedDict[str, None] = OrderedDict()
         self._withdrawn: OrderedDict[str, None] = OrderedDict()
+        self._sent: OrderedDict[str, None] = OrderedDict()     # (station) landed ones whose fill went up
         self._landed_lock = threading.Lock()
         self.clips: OrderedDict[str, tuple[np.ndarray, float]] = OrderedDict()   # id -> (pcm, saved at)
         self.clips_dir = Path(cfg.clips_dir) if cfg.clips_dir else None
@@ -499,6 +500,8 @@ class App:
         # Pages, incidents and traffic survive restarts (storage.keep_hours); old clips are pruned.
         self.store = IncidentStore(set(cfg.ours), geocode=self._geocode, keep_s=self.keep_s,
                                    path=(self.clips_dir.parent / "incidents.json") if self.clips_dir else None)
+        if cfg.cloud_role == "station":   # (#927: each transmission saved at its close and on its text: one write)
+            self.store.save_delay = STORE_SAVE_S
         self.pages: deque[Page] = deque(maxlen=1000)
         self._load_pages()
         self.tg = TalkgroupPrefs(cfg.p25_tg_info or {k: {"name": v} for k, v in cfg.p25_talkgroups.items()},
@@ -2073,6 +2076,9 @@ class App:
     def _transcribed_one(self, item) -> None:
         if isinstance(item, Traffic) and item.id in self._landed and item.status != "pending":
             return self._fill_pending(item)        # (station) landed "Transcribing" at its close: its text fills that row
+        if isinstance(item, Traffic) and item.id in self._sent:
+            log(f"speech-to-text: {item.id}: a second answer after its text went up: dropped")   # (#927: first wins)
+            return
         if isinstance(item, Traffic):
             # any engine's words checked first (sizeup/stt_quality.py): a loop or noise is "unclear", its text ""
             item.raw, item.status, _q = self._screen(item, getattr(item, "raw", ""), item.status)
@@ -2099,7 +2105,8 @@ class App:
             # which model wrote this text (the station's, when the hub replays it)
             item.model = getattr(item, "model", "") or Path(self.cfg.stt_model).name  # type: ignore[attr-defined]
             self._emit("traffic", dict(item.as_dict(), attach=attach, pairs=pairs), item.id)
-            self.store.on_traffic(item, attach=attach)
+            # (#927: a station's row at its close, loose, is written with its fill: one write of incidents.json)
+            self.store.on_traffic(item, attach=attach, save=getattr(item, "transcript_pending", "") != "station")
             self._to_cad(item)
             if not getattr(item, "system", ""):      # another system's traffic (#409) raises none of our alarms
                 self._alarm(item, getattr(item, "unclear_text", None) if item.status == stt_quality.UNCLEAR else None)
@@ -2182,11 +2189,15 @@ class App:
         radio log) and on the hub (a "retext" with fill: never a second "traffic", which the hub drops). Whatever
         whisper made of it: words, no speech, an error, shed ("skipped"), or handed to the hub's pool. Once: a second
         answer for it (a stop handing on a clip whisper finished meanwhile) is dropped, as the hub keeps the first. One
-        the hub withdrew (stt_withdraw) while whisper had it: its row here only; nothing goes up."""
+        the hub withdrew (stt_withdraw) while whisper had it: its fill says `authoritative: false` (the hub keeps it as
+        a run, its own rule decides; a pool that fails then needn't transcribe it again)."""
         with self._landed_lock:
             if self._landed.pop(item.id, 0) is not None:
                 return                                    # (its text went up already)
             withdrawn = self._withdrawn.pop(item.id, 0) is None
+            self._sent[item.id] = None                    # (any later answer for it: dropped, stt_withdraw says "sent")
+            while len(self._sent) > LANDED_MAX:
+                self._sent.popitem(last=False)
         item.text = getattr(item, "raw", "") or ""
         if item.status == "no_speech":
             item.text = ""
@@ -2202,10 +2213,11 @@ class App:
         item.__dict__.pop("transcript_pending", None)
         self.store.retext(item.id, item.text, item.status, getattr(item, "confidence", None), item.model)
         self._to_cad(item)
+        doc = self._fill_doc(item, pool)
         if withdrawn:
-            log(f"speech-to-text: {item.id}: withdrawn by the hub, its text kept here only")
-        else:
-            self._emit("retext", self._fill_doc(item, pool))
+            doc["authoritative"] = False
+            log(f"speech-to-text: {item.id}: withdrawn by the hub while whisper had it: its text sent as a run only")
+        self._emit("retext", doc)
         if item.status != "no_speech":         # (its words never in a log: CloudWatch, #419)
             log(f"{item.source}: transmission {item.id} ({item.status}, {logscrub.said(item.text)})"
                 + (f" · unit {item.unit}" if item.unit and not getattr(item, "system", "") else ""))
@@ -2239,15 +2251,16 @@ class App:
         """(station; the hub's call, #927) These clips are the hub's to transcribe now (its pool took them): this
         station's whisper skips them. Only a transmission landed "Transcribing" at its close (the hub has its row): one
         still waiting is taken out of whisper's queue with nothing sent (no "skipped" that could cover the pool's text);
-        one whisper has begun runs on, and its text stays here (sent nowhere). One whose text went up already, or that
-        isn't here: the hub decides. -> {withdrawn: [ids], running: [ids], gone: [ids]}."""
+        one whisper has begun runs on, and its text goes up as a fill with `authoritative: false` (a run for the hub's
+        rule, never its text by itself). -> {withdrawn, running, sent: its text went up already or is about to (the
+        hub decides), unknown: this station doesn't know it (never sent at its close, or from before a restart)}."""
         if not isinstance(ids, list) or len(ids) > WITHDRAW_MAX or not all(isinstance(x, str) for x in ids):
             raise ValueError(f"ids: a list of clip ids (at most {WITHDRAW_MAX})")
-        want = [x for x in dict.fromkeys(ids) if CLIP_ID.fullmatch(x)]
+        want = list(dict.fromkeys(ids))
         with self._landed_lock:
-            mine = {x for x in want if x in self._landed}
+            mine = {x for x in want if CLIP_ID.fullmatch(x) and x in self._landed}
         got = self.stt.withdraw(ids=mine) if mine and hasattr(self.stt, "withdraw") else []
-        out: dict[str, list[str]] = {"withdrawn": [], "running": [], "gone": []}
+        out: dict[str, list[str]] = {"withdrawn": [], "running": [], "sent": [], "unknown": []}
         for _prio, item, _audio, _ch, _queued in got:
             with self._landed_lock:
                 self._landed.pop(item.id, None)
@@ -2269,10 +2282,12 @@ class App:
                             self._withdrawn.popitem(last=False)
                         out["running"].append(cid)
                         continue
-            out["gone"].append(cid)
+            with self._landed_lock:
+                known = cid in self._sent or cid in self._landed      # (landed, neither waiting nor on whisper: its
+            out["sent" if known else "unknown"].append(cid)           # answer is on its way up now)
         if out["withdrawn"] or out["running"]:
             log(f"speech-to-text: the hub's pool took {len(out['withdrawn'])} waiting clip(s)"
-                + (f", {len(out['running'])} already on whisper (its text kept here)" if out["running"] else ""))
+                + (f", {len(out['running'])} already on whisper (its text a run only)" if out["running"] else ""))
         return out
 
     def _page_incident(self, page: Page, depts: list[str], d, tones_half: Page | None = None):
@@ -6101,6 +6116,7 @@ class App:
             self._stt_handoff()                # (before the outbox closes: nothing waiting for whisper is lost on a restart)
         except Exception as e:  # noqa: BLE001 - never in the way of stopping
             log(f"speech-to-text: handing over at stop: {type(e).__name__}: {e}")
+        self.store.flush()                     # (a coalesced save still waiting: on disk before the exit)
         self.whisper.stop()
         if self.aws is not None:
             self.aws.stop()
@@ -6256,6 +6272,7 @@ WHISPER_FALLBACK_STATION = "whisper on the station"
 PENDING_CAP = "traffic_pending"
 STATION_WHISPER = "station-whisper"     # a station retext's engine: its whisper (the hub's stt_runs engine name) ...
 STATION_AWS = "station-aws"             # ... or Amazon Transcribe run where the station is the CAD of record
+STORE_SAVE_S = 1.5      # (#927) a station's incidents.json written at most this often (IncidentStore.save_delay)
 LANDED_MAX = 20000      # landed transmissions remembered for their fill (whisper's queue holds at most 2000)
 WITHDRAW_MAX = 500      # clip ids in one stt_withdraw
 
