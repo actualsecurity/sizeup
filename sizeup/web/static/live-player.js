@@ -20,8 +20,9 @@
 //              play/pause, skip, mute, volume, the quick toggles, Listening (the choices) and Go to (the Radio view's
 //              row). Keys: M mute, ] skip. Elapsed is drawn from the audio's own timeupdate (no ticking timer), and a
 //              state push redraws nothing unless what it shows changed.
-//   A clip played by hand (any row's ▶) holds the player until it ends. Signed out (#818): the clip waits and plays
-//   once signed in again (as RadioLive did).
+//   A clip played by hand (any row's ▶) holds the player until it ends or is paused. Signed out (#818): the clip
+//   waits and plays once signed in again (as RadioLive did). Not allowed sound (autoplay): back in the queue, and the
+//   header says Tap for sound.
 //
 // ListenCore is the pure part (levels and the queue), tested in node (tests/test_live_player.py).
 "use strict";
@@ -170,7 +171,7 @@ window.LivePlayer = (() => {
     p: C.norm(local), on: dev.on === true, armed: false, blocked: false, held: false, manual: false, paused: false,
     volume: Number.isFinite(dev.volume) ? Math.min(1, Math.max(0, dev.volume)) : 1, muted: dev.muted === true,
     q: C.make(), cur: null, over: null,              // cur: on the main element; over: a Priority one ducking it
-    since: 0, cursor: null, rev: "", busy: false, again: false, gen: 0, sig: "", elapsed: "", sources: null, srcAt: 0,
+    since: 0, cursor: null, rev: "", busy: false, again: false, gen: 0, sig: "", elapsed: "", sources: null, srcAt: 0, arming: false,
     panel: false,
   };
   const a = new Audio(), b = new Audio();          // a: the queue; b: a Priority one over a ducked Normal one
@@ -206,46 +207,82 @@ window.LivePlayer = (() => {
     const u = `/api/audio/${encodeURIComponent(t.id)}.wav`;
     return t.voice_at > 0 ? `${u}#t=${Number(t.voice_at).toFixed(2)}` : u;      // a page: from where the voice starts
   }
+  const loaded = (el) => !!el.getAttribute("src") && !el.src.startsWith("data:");      // a clip (not the unlock, not none)
+  const free = () => st.on && st.armed && !st.held && !st.manual && !st.paused;
+  // Not allowed sound (a browser's autoplay rule, Safari after a long idle): what plays goes back in the queue where it
+  // was (a Priority one first, a Normal one to resume), and it waits for the click (Tap for sound)
+  function requeue() {
+    if (st.over) { const it = st.over; it.at = b.currentTime || 0; b.pause(); st.over = null; st.q.pq.unshift(it); }
+    if (st.cur) {
+      const it = st.cur;
+      it.at = a.currentTime || 0;
+      it.stopped = false;
+      a.pause();
+      st.cur = null;
+      st.q.playing = null;
+      if (it.lvl === "priority") st.q.pq.unshift(it);
+      else {
+        if (st.q.paused) { st.q.nq.push(st.q.paused); st.q.nq.sort((x, y) => x.start - y.start); }
+        st.q.paused = it;
+      }
+    }
+    levels();
+  }
+  function block() {
+    st.blocked = true;
+    st.armed = false;
+    requeue();
+    paint();
+  }
+  // every play: a refusal that isn't the clip replaced (AbortError) or not loading (its error event) is the browser's
+  function play(el) {
+    const p = el.play();
+    if (p && p.then) p.then(() => { if (st.blocked) { st.blocked = false; paint(); } }).catch((e) => {
+      if (e && (e.name === "AbortError" || e.name === "NotSupportedError")) return;
+      block();
+    });
+  }
   function start(el, it, at = 0) {
     el.src = url(it.row);
     if (at > 0) el.addEventListener("loadedmetadata", () => { try { el.currentTime = at; } catch (_) { /* from the start */ } }, { once: true });
+    it.at = 0;
     levels();
-    el.play().then(() => { st.blocked = false; paint(); }).catch((e) => {
-      if (e && e.name === "NotSupportedError") return;      // it didn't load: its error event goes on
-      if (e && e.name === "AbortError") return;             // replaced by the next one
-      st.blocked = true;                                    // not allowed sound (yet): it waits for the click
-      st.armed = false;
-      it.at = el.currentTime || 0;
-      if (it.lvl === "priority") st.q.pq.unshift(it); else st.q.paused = it;
-      if (el === a) { st.cur = null; st.q.playing = null; } else { st.over = null; levels(); }
-      paint();
-    });
+    play(el);
   }
   function pump() {
-    if (!st.on || !st.armed || st.held || st.manual || st.paused) return paint();
-    if (st.cur || st.over) return paint();
+    if (!free() || st.cur || st.over) return paint();
     const it = C.next(st.q, now(), st.p);
     if (!it) { st.q.playing = null; return paint(); }
     st.cur = it;
     st.q.playing = it;
     start(a, it, it.at || 0);
-    it.at = 0;
+    return paint();
+  }
+  // A Priority one waiting while a Normal one plays: over it on the second element, the Normal one paused where it is
+  // (interrupt) or on, quieter (duck); queue: it waits its turn
+  function priorityOver() {
+    if (!free() || !st.cur || st.cur.lvl === "priority" || st.over || !st.q.pq.length || st.p.mode === "queue") return false;
+    if (st.p.mode === "interrupt") { a.pause(); st.cur.stopped = true; }
+    st.over = st.q.pq.shift();
+    start(b, st.over);
     paint();
+    return true;
   }
   function ended(el) {
-    if (el.src.startsWith("data:")) return;
+    if (!loaded(el)) return;
     if (el === b) return overDone();
     st.cur = null;
     st.q.playing = null;
     if (st.over) return paint();                  // the Priority one over it finishes first
-    pump();
+    return pump();
   }
-  // The Priority one over a Normal one (interrupted: paused where it was; ducked: still playing, quieter) is done: the
-  // next Priority one over it, else the Normal one again (an interrupted one resumes where it stopped, unless too old)
+  // The Priority one over a Normal one is done (or skipped): the next Priority one over it, else the Normal one again
+  // (an interrupted one resumes where it stopped, unless too old). Held, paused or signed out: nothing starts
   function overDone() {
     st.over = null;
-    if (st.cur && st.q.pq.length) { st.over = st.q.pq.shift(); start(b, st.over); return paint(); }
     levels();
+    if (!free()) return paint();
+    if (st.cur && st.q.pq.length) { st.over = st.q.pq.shift(); start(b, st.over); return paint(); }
     if (!st.cur) return pump();
     if (st.cur.stopped) {
       st.cur.stopped = false;
@@ -256,17 +293,26 @@ window.LivePlayer = (() => {
         st.q.playing = null;
         return pump();
       }
-      if (!st.paused && !st.manual && !st.held) a.play().catch(() => {});
+      play(a);
     }
     return paint();
+  }
+  // After a hold, a pause or a sign-in: what was playing goes on (a Priority one that came meanwhile first, as chosen)
+  function resume() {
+    if (!free()) return paint();
+    if (st.over) { play(b); if (st.cur && !st.cur.stopped) play(a); return paint(); }
+    if (st.cur && st.cur.stopped) return overDone();
+    if (st.cur) { if (!priorityOver()) play(a); return paint(); }
+    return pump();
   }
   a.addEventListener("ended", () => ended(a));
   b.addEventListener("ended", () => ended(b));
   // A clip that won't load: the next one, unless the sign-in ended (#818): then it waits, first, until signed in again
   function failed(el) {
-    if (el.src.startsWith("data:")) return;
+    if (!loaded(el)) return;
     const it = el === a ? st.cur : st.over, gen = st.gen;
-    if (!window.SessionWatch || !it) return ended(el);
+    if (!it) return;
+    if (!window.SessionWatch) { ended(el); return; }
     if (el === a) { st.cur = null; st.q.playing = null; } else st.over = null;
     st.held = true;
     paint();
@@ -276,7 +322,8 @@ window.LivePlayer = (() => {
         if (st.gen === gen && st.on) st.q.pq.unshift(it.lvl === "priority" ? it : { ...it, lvl: "priority" });
         return SessionWatch.whenIn();
       })
-      .then(() => { st.held = false; levels(); pump(); });
+      .catch(() => null)
+      .then(() => { st.held = false; levels(); if (el === b) overDone(); else resume(); });
   }
   a.addEventListener("error", () => failed(a));
   b.addEventListener("error", () => failed(b));
@@ -293,20 +340,17 @@ window.LivePlayer = (() => {
   b.addEventListener("timeupdate", tick);
   const fmtS = (s) => { s = Math.max(0, Math.floor(s || 0)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
 
-  // A clip played by hand (cad.js's player, any row's ▶): the live one holds until it is done
+  // A clip played by hand (cad.js's player, any row's ▶): the live one holds until it ends or is paused
   function manualHold(on) {
     if (on === st.manual) return;
     st.manual = on;
     if (on) {                                     // both paused where they are
       if (st.cur) a.pause();
       if (st.over) b.pause();
-      return paint();
+      paint();
+      return;
     }
-    if (!st.paused) {
-      if (st.over) b.play().catch(() => {});
-      if (st.cur && !(st.over && st.cur.stopped)) a.play().catch(() => {});
-    }
-    pump();
+    resume();
   }
   if (typeof player !== "undefined" && player && player.addEventListener) {
     player.addEventListener("play", () => manualHold(true));
@@ -325,14 +369,7 @@ window.LivePlayer = (() => {
       const r = C.add(st.q, { id: t.id, start: t.start, lvl: C.level(t, st.p), row: t }, t0, st.p);
       if (r === "interrupt" || r === "duck" || (r === "play" && act === "none")) act = r;
     }
-    // a Priority one over the Normal one playing: on the second element, the Normal one paused where it is
-    // (interrupt) or on, quieter (duck); it goes on from there after
-    if ((act === "interrupt" || act === "duck") && st.cur && st.cur.lvl !== "priority" && !st.over && st.armed && !st.held
-        && !st.manual && !st.paused && st.q.pq.length) {
-      if (act === "interrupt") { a.pause(); st.cur.stopped = true; }
-      st.over = st.q.pq.shift();
-      start(b, st.over);
-    }
+    if (act === "interrupt" || act === "duck") priorityOver();
     pump();
   }
   async function get(path) {
@@ -383,16 +420,21 @@ window.LivePlayer = (() => {
   }
 
   // ---- on, off, the controls ---------------------------------------------------------------------------------------
-  function arm() {                                 // this click unlocks sound (Safari: a play in the click itself)
-    a.src = SILENT;
-    const p = a.play();
+  // This click allows sound: both elements play the unlock in the click itself (Safari allows each element on its own);
+  // armed only once it did. What was playing (a reload, a refusal) waits in the queue meanwhile
+  function arm() {
+    if (st.arming) return;
+    requeue();
+    st.arming = true;
     st.blocked = false;
-    st.armed = true;
-    (p && p.then ? p : Promise.resolve()).then(() => {
-      if (!st.armed) return;
-      st.gen++;
-      prime().then(pump);
-    }).catch(() => { st.blocked = true; st.armed = false; paint(); });
+    a.src = SILENT;
+    b.src = SILENT;
+    Promise.all([a.play(), b.play()]).then(() => {
+      st.arming = false;
+      if (!st.on) return;
+      st.armed = true;
+      if (st.cursor === null) { st.gen++; prime().then(pump); } else resume();
+    }).catch(() => { st.arming = false; st.blocked = true; st.armed = false; paint(); });
     paint();
   }
   function setOn(on) {
@@ -401,11 +443,12 @@ window.LivePlayer = (() => {
     if (on) return arm();
     st.armed = false;
     st.gen++;
-    for (const el of [a, b]) { el.pause(); el.removeAttribute("src"); }
+    for (const el of [a, b]) { el.pause(); el.removeAttribute("src"); el.load(); }     // (load: let go of the clip)
     st.q = C.make();
     st.cur = st.over = null;
+    st.cursor = null;                              // on again: from then, never what was heard while it was off
     st.paused = false;
-    st.panel = false;
+    closePanel();
     paint(true);
     return null;
   }
@@ -416,20 +459,15 @@ window.LivePlayer = (() => {
   function skip() {
     if (st.over) { b.pause(); return overDone(); }
     if (st.cur) { a.pause(); st.cur = null; st.q.playing = null; }
-    pump();
-    return paint();
+    return pump();
   }
   function playPause() {
     if (!st.on) return setOn(true);
     if (!st.armed) return arm();
     st.paused = !st.paused;
-    if (st.paused) {
-      if (st.cur) a.pause();
-      if (st.over) b.pause();
-    } else if (st.cur || st.over) {
-      if (st.cur && !(st.over && st.cur.stopped)) a.play().catch(() => {});
-      if (st.over) b.play().catch(() => {});
-    } else pump();
+    if (!st.paused) return resume();
+    if (st.cur) a.pause();
+    if (st.over) b.pause();
     return paint();
   }
   function mute(on = !st.muted) {
@@ -495,7 +533,8 @@ window.LivePlayer = (() => {
       np.lastChild.id = "lp-elapsed";
       if (it.lvl === "priority") np.prepend(el("span", "badge lp-p", "P"));
       np.title = `${chTitle(t)}${who ? ` · ${who}` : ""} · ${typeof fmtTime === "function" ? fmtTime(t.start, true) : ""}`
-        + (it.lvl === "priority" ? " · Priority" : "") + (st.over ? " · over a Normal one (ducked)" : "");
+        + (it.lvl === "priority" ? " · Priority" : "")
+        + (st.over && st.cur ? (st.cur.stopped ? " · a Normal one paused under it" : " · over a Normal one, quieter") : "");
     } else {
       st.elapsed = "";
       np.replaceChildren(el("span", "dim", !st.armed ? "Tap for sound" : st.held ? "Signed out: waiting" : st.manual
@@ -558,6 +597,13 @@ window.LivePlayer = (() => {
     r.append(name, el("span", "spacer"), lvlSelect(target, st.p.rules[target] || "", `${label}: level`));
     if (extra) r.append(extra);
     return r;
+  }
+  // a control's selector, to find it again after a redraw
+  function focusKey(n) {
+    for (const k of ["target", "mode", "drop", "act"]) {
+      if (n.dataset && n.dataset[k] !== undefined) return `[data-${k}="${CSS.escape(n.dataset[k])}"]`;
+    }
+    return n.id ? `#${CSS.escape(n.id)}` : "";
   }
   function renderPanel() {
     const box = $id("lp-panel");
@@ -643,7 +689,13 @@ window.LivePlayer = (() => {
     foot.append(btn("sm quiet", "Reset", "Our calls Priority, the rest Off", { act: "reset" }), el("span", "spacer"),
                 el("span", "dim small", window.MePrefs && MePrefs._st && MePrefs._st.mode === "hub" ? "Yours, on every device" : "This browser"));
     out.push(foot);
+    // drawn again on each change: the focus stays on the same control (a keyboard user is never dropped to the page)
+    const at = document.activeElement, keep = at && box.contains(at) ? focusKey(at) : "";
     box.replaceChildren(...out);
+    if (keep) {
+      const n = box.querySelector(keep) || box.querySelector('[data-act="close"]');
+      if (n && n.focus) n.focus();
+    }
   }
   function openPanel() {
     st.panel = true;
@@ -668,13 +720,13 @@ window.LivePlayer = (() => {
   function sourceControl(s) {
     const lv = C.sourceLevel(s, st.p);
     const face = el("span", `lp-lv lp-${lv.effective}${lv.own ? " own" : ""}`, LVL_MARK[lv.effective]);
-    const label = `Listen: ${LVL_TEXT[lv.effective]}${lv.own ? "" : " (default)"}`;
+    const label = `Listen ${LVL_TEXT[lv.effective]}${lv.own ? "" : " (default)"}`;
     const items = () => {
       const cur = C.sourceLevel(s, st.p);
       return [...C.LEVELS.map((l) => ({ label: LVL_TEXT[l], checked: cur.own === l, run: () => setSource(s.key, l) })), "-",
               { label: "Default", checked: !cur.own, hint: LVL_TEXT[cur.inherited], run: () => setSource(s.key, "") }];
     };
-    const b = UI.menu.button(`${label}: ${s.name}`, items, { cls: "rn-act lp-src", face });
+    const b = UI.menu.button(`${s.name}: ${label.toLowerCase()}`, items, { cls: "rn-act lp-src", face });
     b.title = label;
     b.dataset.listen = s.key;
     return b;
@@ -729,9 +781,16 @@ window.LivePlayer = (() => {
     saveDevice();
     paint();
   });
-  $id("lp").addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && st.panel) { e.stopPropagation(); e.preventDefault(); closePanel(true); }
-  });
+  // the Listening panel: Escape (from anywhere while it is open) and a click outside it close it
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || !st.panel || (UI.dialog && UI.dialog.isOpen && UI.dialog.isOpen())) return;
+    e.stopPropagation();
+    e.preventDefault();
+    closePanel($id("lp-panel").contains(document.activeElement) || document.activeElement === document.body);
+  }, true);
+  document.addEventListener("mousedown", (e) => {
+    if (st.panel && !e.target.closest("#lp-panel, #lp-set")) closePanel();
+  }, true);
   // Go to: the Radio view on that channel, its row brought into view once it is drawn
   function goToRow() {
     const it = st.over || st.cur;
