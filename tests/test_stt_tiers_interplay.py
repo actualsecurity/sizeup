@@ -20,7 +20,7 @@ from tests.test_app import voice, wait
 from tests.test_channels import AWS_TEXT, aws_cfg, fake_aws  # noqa: F401 (fake_aws: a fixture)
 from tests.test_cloud import HubRun, hub_cfg
 from tests.test_stt_engine_select import _set
-from tests.test_stt_pool import GPU_TEXT, Clock, Jobs, online, pool, send
+from tests.test_stt_pool import GPU_TEXT, Clock, FakeWorker, Jobs, online, pool, send
 
 
 # -- 1. the pre-alert speed gate: priority work alone ------------------------------------------------------------------
@@ -259,3 +259,164 @@ def test_the_store_never_holds_one_id_twice():
     st.on_traffic(b, attach=False)
     st.on_traffic(a, attach=False)
     assert list(st.loose) == [a] and a.model == "gpu-worker"
+
+
+# -- 4. a priority clip never waits behind a normal decode --------------------------------------------------------------
+
+
+def test_a_page_never_waits_behind_a_normal_decode_even_with_aws_out():
+    clk, jobs = Clock(), Jobs()
+    p = pool(clk)
+    online(p, "gpu-1")
+    assert p.submit(jobs.job("norm", sttpool.LOW, seconds=20.0, forced=True, norm=True))
+    assert p.claim("gpu-1", 0).id == "norm"                       # the GPU decodes a normal clip ...
+    # ... a page comes in with AWS out (queue_ok): never queued behind it (the station's whisper takes it now)
+    assert p.ready_forced(URGENT, queue_ok=True) == (False, "gpu-1 busy (normal)")
+    page = jobs.job("page", URGENT, forced=True, gpu_only=True, extra={"queue_ok": True})
+    assert not p.submit(page)
+    # (behind a priority decode it may still wait its claim time: that is what queue_ok is for)
+    q = pool(clk)
+    online(q, "gpu-1")
+    assert q.submit(jobs.job("prio", sttpool.LIVE, forced=True))
+    assert q.claim("gpu-1", 0).id == "prio"
+    assert q.ready_forced(URGENT, queue_ok=True) == (True, "")
+
+
+def test_a_normal_clip_keeps_off_the_gpu_while_priority_work_waits_or_just_came_in():
+    clk, jobs = Clock(), Jobs()
+    p = pool(clk)
+    online(p, "gpu-1")
+    clk.t += 60
+    assert p.submit(jobs.job("prio", sttpool.LIVE, forced=True))
+    assert p.submit(jobs.job("norm", sttpool.LOW, forced=True, norm=True,
+                             extra={"claim_wait": sttroute.NORM_GPU_BUDGET_S}))
+    got = p.claim("gpu-1", 0)
+    assert got.id == "prio"
+    assert p.complete("gpu-1", got.lease, {"text": "x"})
+    assert p.claim("gpu-1", 0) is None                             # (the quiet window: a page may be right behind)
+    clk.t += sttpool.NORM_QUIET_S
+    assert p.claim("gpu-1", 0).id == "norm"
+
+
+# -- 5. a restart recovers normal clips by their own rules ---------------------------------------------------------------
+
+
+def _restart(hub, tmp_path, fake):
+    hub.close()
+    return HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
+
+
+def test_a_restart_recovers_a_normal_clip_on_the_gpu_by_its_own_rules_never_aws_over_its_budget(
+        tmp_path, monkeypatch, fake_aws):  # noqa: F811
+    fake = FakeTranscribe(phrases={500: AWS_TEXT})
+    hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
+    w = None
+    try:
+        _set(hub, NORM_KEY, sttroute.AUTO_NORM)
+        token = hub.app.hub.workers.add("gpu-1")
+        w = FakeWorker(hub.url, token, mode="vanish", wait_s=20.0).start()
+        assert wait(lambda: hub.app.sttpool.norm_place(3.0)[0], 5)
+        send(hub, _handed("TG325-9", NORM_KEY, 1))
+        assert wait(lambda: w.jobs, 10)                            # a GPU has it ... and the hub goes down
+        assert getattr(_held(hub.app, "TG325-9")[0], "stt", "") == "pool"
+        assert not [x for x, _k, _kind in hub.app._aws_pending() if x.id == "TG325-9"]
+        w.close()
+        aws_cls = type(hub.app.aws)                                # (AWS over Auto · normal's share of its month)
+        monkeypatch.setattr(aws_cls, "budget", lambda self: {"pct": 95.0})
+        monkeypatch.setattr(aws_cls, "context_budget", lambda self: {"pct": 95.0}, raising=False)
+        hub = _restart(hub, tmp_path, fake)
+        assert wait(lambda: _row(hub, "TG325-9").get("status") == "skipped", 20), _row(hub, "TG325-9")
+        assert hub.app.aws.health()["done"] == 0 and _row(hub, "TG325-9")["text"] == ""
+    finally:
+        if w is not None:
+            w.close()
+        hub.close()
+        fake.close()
+
+
+def test_a_restart_recovers_a_normal_clip_placed_on_another_station(tmp_path, monkeypatch, fake_aws):  # noqa: F811
+    fake = FakeTranscribe(phrases={500: AWS_TEXT})
+    hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
+    try:
+        _set(hub, NORM_KEY, sttroute.AUTO_NORM)
+        monkeypatch.setattr(hub.app.hub.workers, "stations_on", lambda sid=None: True)
+        hub.app.sttpool.allowed = lambda wid: True
+        st = hub.app.sttpool.seen("station:west", "online", kind="station",
+                                  load={"own": 0, "service_s": 10.0, "max_s": 60.0})
+        st.polling = 1
+        send(hub, _handed("TG325-8", NORM_KEY, 1))
+        assert wait(lambda: hub.app.stt_chosen("TG325-8") == "stations", 10)
+        assert getattr(_held(hub.app, "TG325-8")[0], "stt", "") == "pool"
+        hub = _restart(hub, tmp_path, fake)                         # (never left "Transcribing")
+        assert wait(lambda: _row(hub, "TG325-8").get("text") == AWS_TEXT + ".", 30), _row(hub, "TG325-8")
+    finally:
+        hub.close()
+        fake.close()
+
+
+# -- 6. a GPU gone frees normal clips at once ----------------------------------------------------------------------------
+
+
+def test_a_gpu_gone_or_gaming_frees_its_normal_clips_at_once():
+    clk, jobs = Clock(), Jobs()
+    p = pool(clk)
+    st = p.seen("station:west", "online", kind="station", load={"own": 0, "service_s": 10.0, "max_s": 60.0})
+    st.polling = 1
+    w = online(p, "gpu-1")
+    assert p.submit(jobs.job("held", sttpool.LOW, forced=True, norm=True, gpu_only=True))
+    assert p.claim("gpu-1", 0).id == "held"
+    w.polling = 0
+    assert p.submit(jobs.job("waits", sttpool.LOW, forced=True, norm=True, gpu_only=True,
+                             extra={"claim_wait": sttroute.NORM_GPU_BUDGET_S}))
+    p.seen("gpu-1", "gaming")                                      # the game starts: its normal lease back now
+    assert p.drain() == 1 and "went gaming" in jobs.fell["held"]
+    clk.t += 0.25
+    p.seen("station:west")
+    assert p.tick() == 1 and p.drain() == 1                        # (a pooled station never takes a GPU-only clip)
+    assert jobs.fell["waits"] == "no GPU worker ready"
+
+
+# -- 7-9. the estimates and the order ------------------------------------------------------------------------------------
+
+
+def test_normal_work_is_never_counted_ahead_of_a_priority_clip():
+    clk, jobs = Clock(), Jobs()
+    p = pool(clk)
+    w = online(p, "gpu-1")
+    assert p.submit(jobs.job("n0", URGENT, forced=True, norm=True))     # (a fireground's normal clips: a high class)
+    assert p.claim("gpu-1", 0).id == "n0"
+    w.polling = 0
+    for i in range(1, 5):
+        assert p.submit(jobs.job(f"n{i}", URGENT, forced=True, norm=True))
+    assert p.ready(sttpool.LIVE) == (True, "")
+
+
+def test_the_normal_tier_goes_in_air_time_order():
+    clk, jobs = Clock(), Jobs()
+    p = pool(clk)
+    online(p, "gpu-1")
+    assert p.submit(jobs.job("said-later", sttpool.LOW, forced=True, norm=True, clip_end=clk.t - 5))
+    clk.t += 1
+    assert p.submit(jobs.job("said-first", URGENT, forced=True, norm=True, clip_end=clk.t - 30))
+    clk.t += sttpool.NORM_QUIET_S
+    assert p.claim("gpu-1", 0).id == "said-first"
+
+
+def test_a_departed_station_never_passes_for_a_gpu_in_the_gpu_service_time():
+    clk, jobs = Clock(), Jobs()
+    p = pool(clk)
+    p.allowed = lambda wid: True
+    st = p.seen("station:west", "online", kind="station", load={"own": 0, "service_s": 30.0, "max_s": 60.0})
+    st.polling = 1
+    assert p.submit(jobs.job("slow", sttpool.LOW))
+    got = p.claim("station:west", 0)
+    clk.t += 15.0
+    p.seen("station:west")
+    assert p.complete("station:west", got.lease, {"text": "x"})
+    p.forget("station:west")
+    online(p, "gpu-1")
+    assert p.submit(jobs.job("quick", sttpool.LOW))
+    got = p.claim("gpu-1", 0)
+    clk.t += 1.0
+    assert p.complete("gpu-1", got.lease, {"text": "x"})
+    assert p._service_s(gpu=True) == 1.0

@@ -1865,16 +1865,25 @@ class HubApp(App):
     def _aws_recover(self) -> int:
         """After a restart (a redeploy, a crash) nothing that waited for Amazon Transcribe is left
         "Transcribing": less than RECOVER_S old with its clip here, to AWS again when it can take it; the
-        rest (and all of it when AWS can't: the breaker, the limit, not set up) to the station's whisper."""
+        rest (and all of it when AWS can't: the breaker, the limit, not set up) to the station's whisper. An Auto · normal
+        clip goes its own way again (_norm_first: AWS only under its budget)."""
         from sizeup.transcribe import wav_pcm
         now = time.time()
-        again = whisper = 0
+        again = whisper = norm = 0
         for item, key, kind in self._aws_pending():
             # each item's own pool (a police source's budget is its own, radio-intel PR 3)
             ok, why = self.aws.available(key) if self.aws is not None else (False, "Amazon Transcribe isn't set up on the hub")
             page = item if kind == "page" else None
             wav = self.audio.get(item.id)
             pcm = wav_pcm(wav, getattr(item, "voice_offset_s", 0.0) if page is not None else 0.0) if wav else None
+            if pcm is not None and item.end > now - RECOVER_S and self._hub_engine(key) == sttroute.AUTO_NORM:
+                # an Auto · normal clip by its own rules: a GPU after the priority work, the stations, AWS only under
+                # its budget (CATCHUP_AWS_PCT), else its own station: never AWS at full budget
+                self._aws_since.pop(item.id, None)
+                self._norm_first(item, pcm, key, self._pool_class(item, key),
+                                 str(getattr(item, "origin_station", "") or self.clip_origin), handed=True)
+                norm += 1
+                continue
             if ok and pcm is not None and item.end > now - RECOVER_S:
                 self._aws_since[item.id] = now
                 self._stt_state(item, item.id, "pending", channels_model())    # the log says AWS again
@@ -1884,10 +1893,10 @@ class HubApp(App):
             reason = why if not ok else "no clip on the hub" if pcm is None else f"waiting over {RECOVER_S / 60:.0f} min"
             self._aws_failed(AwsJob(kind, item.id, key, page=page, recovered=True), f"the hub restarted ({reason})")
             whisper += 1
-        if again or whisper:
+        if again or whisper or norm:
             self.hub.log(f"hub: after the restart, {again} waiting for Amazon Transcribe sent to it again, "
-                         f"{whisper} to the station's whisper")
-        return again + whisper
+                         f"{whisper} to the station's whisper, {norm} Auto · normal routed again")
+        return again + whisper + norm
 
     def _aws_sweep(self, now: float | None = None) -> int:
         """Anything still pending "aws" past its deadline (+ SWEEP_GRACE_S) is failed over, whatever became of
@@ -2231,7 +2240,9 @@ class HubApp(App):
                           extra={"pcm": pcm, "page": page, "vocab_v": vocab_v, **self._log_item(item),
                                  **(more or {})}, **kw)
         item.status, item.raw, item.confidence, item.model = "pending", "", None, sttpool.PENDING_MODEL
-        item.stt = "aws"                          # (still waiting for the AWS path: the sweep and a restart know it)
+        # (still waiting for the AWS path: the sweep and a restart know it; an Auto · normal clip is the pool's: a restart
+        # routes it by its own rules, _pool_recover, never to AWS at full budget)
+        item.stt = "pool" if kw.get("norm") else "aws"
         if page is None:
             item.__dict__.pop("transcript_pending", None)
             self._transcribed(item)
@@ -2489,6 +2500,7 @@ class HubApp(App):
                 prompt, vocab_v = self._pool_prompt_v(item)
             except Exception:  # noqa: BLE001 - no prompt is still a transcript
                 prompt, vocab_v = "", ""
+            item.stt = "pool"                     # (another station's: a restart routes it again, _pool_recover)
             job = sttpool.Job(item.id, cls, key, "page" if page is not None else "traffic", len(pcm) / 8000.0,
                               audio_wait=True, audio=self._pool_audio_of(item.id, page, pcm), on_done=self._pool_done,
                               on_fallback=self._pool_fallback, prompt=prompt,
@@ -2637,7 +2649,7 @@ class HubApp(App):
             self._rerun_note.pop(job.id, None)
             self.catchup.forget(job.id)
             return
-        if job.worker and job.extra.get("kind") == "gpu" and not job.bg and not job.norm and job.extra.get("fell") in (
+        if job.worker and job.extra.get("kind") == "gpu" and sttpool.priority(job) and job.extra.get("fell") in (
                 "lease", "error", "released") and not re.search(r"went (gaming|paused)|shutdown|stopping", why):
             self.stt_engines.add(job.worker, None, ok=False, gpu=True,      # (the latency guard's failures: #878)
                                  priority=job.cls in sttruns.TARGET_CLASSES + (LIVE_CLS,))
