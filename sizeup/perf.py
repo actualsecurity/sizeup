@@ -21,6 +21,8 @@ and nothing said which. Three parts, all standard library:
   CPU measured and reported. What it cannot see: time inside one C call is its Python caller's (json, sqlite, zlib).
 - **Trend** (Perf.hour_line): one log line an hour with the top threads' shares, memory and thread count, so what grows
   with uptime shows in the log without anyone asking.
+- **Audio lag** (ClipLag, #986): per source kind, how long after its air start a clip reached the hub, was playable and
+  was first fetched by a browser; p50 / p90 over the last hour, a "lag 1h:" line next to the trend line.
 
 Nothing here reads a request, a body, a query string or a local variable: thread groups, function names, file:line and
 path families only. GET /api/cad/perf and POST /api/cad/perf/profile are admins' (sizeup/cad/api.py ADMIN_READS, WRITES).
@@ -31,12 +33,13 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import gc
+import math
 import os
 import re
 import sys
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from typing import Callable, Iterable
 
 TICK_S = 60.0                # the accounting's period
@@ -505,6 +508,141 @@ def summarize(agg: dict, lines: dict, meta: dict) -> dict:
             "folded": "\n".join(f"{s} {max(1, round(w * 1e6))}" for w, s in folded[:FOLDED_MAX])}
 
 
+# -- audio lag (#986) ---------------------------------------------------------------------------------------------------
+#
+# How long after its air start (the clip's own "start", the station's clock; else the epoch ms its id ends with) a clip
+# got to each point on the hub, per source *kind* (never a channel, a talkgroup or an id):
+#
+#   upload  its event applied  -  the clip's end      (close on the station -> row on the hub: the upload itself)
+#   recv    its event applied  -  its air start       (the clip / event reached the hub)
+#   audio   its audio stored   -  its air start       (playable: GET /api/audio/<id>.wav answers)
+#   play    first fetch        -  its air start       (the first browser GET of its audio, once per clip, and only within
+#                                                      LAG_LIVE_S of it being playable: the live player, not a replay)
+#
+# Bounded: the newest LAG_KEEP samples per (kind, stage), the newest LAG_CLIPS clips remembered (for the first fetch and
+# for "once per clip"). A sample over LAG_LATE_S (an outbox backlog after an outage, a resend) is counted as late, never
+# in the percentiles. The first fetch includes any wait in the player's queue behind other clips: an upper bound.
+
+LAG_KINDS = ("county", "mrrs", "p25-other", "paging", "airband", "fm")
+LAG_STAGES = ("upload", "recv", "audio", "play")
+LAG_KEEP = 512               # samples kept per (kind, stage): the newest
+LAG_CLIPS = 4000             # clips remembered (once per clip; the first fetch)
+LAG_LIVE_S = 120.0           # a first fetch this long after the clip was playable: a replay, not counted
+LAG_LATE_S = 600.0           # a lag over this: late (counted, never in the percentiles)
+LAG_WINDOW_S = 3600.0
+_ID_MS = re.compile(r"-(\d{12,13})$")
+
+
+def lag_kind(page: bool, system: str = "", talkgroup=None, channel_kind: str = "", context: bool = False) -> str:
+    """A clip's source kind, from what its event says (context: another P25 system's, sourcekeys.is_context): generic,
+    never its channel or talkgroup."""
+    if page:
+        return "paging"
+    if system == "mrrs":
+        return "mrrs"
+    if context:
+        return "p25-other"
+    if talkgroup is not None and not isinstance(talkgroup, bool):
+        return "county"
+    return "airband" if channel_kind == "airband" or system == "airband" else "fm"
+
+
+def air_start(cid: str, start=None) -> float | None:
+    """A clip's air start: its event's "start" (epoch s), else the epoch ms its id ends with ("<label>-<ms>")."""
+    if isinstance(start, (int, float)) and not isinstance(start, bool) and start > 0:
+        return float(start)
+    m = _ID_MS.search(cid or "")
+    return int(m.group(1)) / 1000.0 if m else None
+
+
+def quantile(vals: list[float], q: float) -> float:
+    """Nearest-rank: the smallest value with at least q of them at or below it (sorted or not)."""
+    s = sorted(vals)
+    k = max(0, min(len(s) - 1, math.ceil(round(q * len(s), 9)) - 1))
+    return s[k]
+
+
+class ClipLag:
+    def __init__(self, clock: Callable[[], float] = time.time):
+        self.clock = clock
+        self._lock = threading.Lock()
+        self._s: dict[tuple[str, str], deque] = {}                # (kind, stage) -> deque((at, lag s))
+        self._clips: OrderedDict[str, list] = OrderedDict()       # cid -> [air start, kind, playable at | None, fetched]
+
+    def _add(self, kind: str, stage: str, at: float, lag: float) -> None:
+        q = self._s.get((kind, stage))
+        if q is None:
+            q = self._s[(kind, stage)] = deque(maxlen=LAG_KEEP)
+        q.append((at, lag))
+
+    def event(self, cid: str, kind: str, start: float | None, end=None, audio: bool = False,
+              now: float | None = None) -> None:
+        """A clip's event applied on the hub (traffic / page / alarm): recv and upload the first time, audio the first
+        time it came with its audio."""
+        if start is None or kind not in LAG_KINDS:
+            return
+        now = self.clock() if now is None else now
+        with self._lock:
+            c = self._clips.get(cid)
+            if c is None:
+                c = self._clips[cid] = [start, kind, None, False]
+                while len(self._clips) > LAG_CLIPS:
+                    self._clips.popitem(last=False)
+                self._add(kind, "recv", now, now - start)
+                if isinstance(end, (int, float)) and not isinstance(end, bool) and end >= start:
+                    self._add(kind, "upload", now, now - end)
+            if audio and c[2] is None:
+                c[2] = now
+                self._add(c[1], "audio", now, now - c[0])
+
+    def fetched(self, cid: str, now: float | None = None) -> None:
+        """A browser fetched the clip's audio (200): counted for its first fetch only, while it is live."""
+        with self._lock:
+            c = self._clips.get(cid)
+            if c is None or c[3] or c[2] is None:
+                return
+            now = self.clock() if now is None else now
+            c[3] = True
+            if now - c[2] <= LAG_LIVE_S:
+                self._add(c[1], "play", now, now - c[0])
+
+    def stats(self, window: float = LAG_WINDOW_S, now: float | None = None) -> dict:
+        """{kind: {stage: {n, p50, p90, late}}} over the last window seconds; kinds with none left out."""
+        now = self.clock() if now is None else now
+        with self._lock:
+            got = {k: [lag for at, lag in q if now - at <= window] for k, q in self._s.items()}
+        out: dict[str, dict] = {}
+        for kind in LAG_KINDS:
+            row = {}
+            for stage in LAG_STAGES:
+                vals = got.get((kind, stage)) or []
+                ok = [v for v in vals if v <= LAG_LATE_S]
+                if vals:
+                    row[stage] = {"n": len(ok), "late": len(vals) - len(ok),
+                                  "p50": round(quantile(ok, 0.5), 1) if ok else None,
+                                  "p90": round(quantile(ok, 0.9), 1) if ok else None}
+            if row:
+                out[kind] = row
+        return out
+
+    def line(self, window: float = LAG_WINDOW_S, now: float | None = None) -> str | None:
+        """The log line: "lag 1h: county[n=40 upload=0.6/1.2 recv=8.2/13.6 audio=8.2/13.6 play=13.3/30.6 played=12]
+        paging[...]"; seconds p50/p90, n/a for a stage with none. None with no clip at all."""
+        st = self.stats(window, now)
+        if not st:
+            return None
+        span = f"{window / 3600:.0f}h" if window >= 3000 else f"{window / 60:.0f}m"
+        parts = []
+        for kind, row in st.items():
+            def pq(stage: str) -> str:
+                x = row.get(stage)
+                return f"{x['p50']:.1f}/{x['p90']:.1f}" if x and x["p50"] is not None else "n/a"
+            late = sum(x["late"] for x in row.values())
+            parts.append(f"{kind}[n={(row.get('recv') or {}).get('n', 0)} " + " ".join(f"{s}={pq(s)}" for s in LAG_STAGES)
+                         + f" played={(row.get('play') or {}).get('n', 0)}" + (f" late={late}" if late else "") + "]")
+        return f"lag {span}: " + " ".join(parts)
+
+
 # -- the whole of it ---------------------------------------------------------------------------------------------------
 
 class Perf:
@@ -539,6 +677,7 @@ class Perf:
         self._pdone = threading.Event()
         self._next_ok = 0.0
         self.last_profile: dict | None = None
+        self.lag = ClipLag(clock)                  # (#986) the clips' lag from their air start, by source kind
 
     # -- registered sizes: how many things a cache holds (cheap, a len()) ---------------------------------------------
 
@@ -688,6 +827,9 @@ class Perf:
             if n % HOUR_TICKS == 0:
                 self.hours.append(hour)
             self.log(self.hour_line(hour))
+            lag = self.lag.line(min(LAG_WINDOW_S, max(60.0, hour["s"])))
+            if lag:
+                self.log(lag)
         return rec
 
     def _window(self, n: int | None) -> tuple[float, dict[str, float], float, float]:
@@ -769,7 +911,7 @@ class Perf:
                             "fds": open_fds(self.proc), "blocks": sys.getallocatedblocks(),
                             "gc": {"collections": list(self.gc_n), "s": round(self.gc_s, 3), "max_ms": round(self.gc_max * 1000, 1)}},
                 "gauges": (last or {}).get("gauges") or self._gauges(), "routes": routes, "hours": list(self.hours),
-                "profile": prof}
+                "lag": self.lag.stats(), "profile": prof}
 
     # -- the profiler --------------------------------------------------------------------------------------------------
 

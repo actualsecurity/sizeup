@@ -4164,6 +4164,14 @@ the Settings audit, per-transmission detail, several stations, and nothing to pa
 - **A line an hour** in the log (CloudWatch), and one 5 minutes after the start to compare with:
   `perf 1h: cpu=41.2% of 0.5 vCPU top[broadcast=12.3 http-stream=8.1 ...] gc=0.8% rss_mb=412 threads=53 fds=88 up_h=5.0`
   The top 8 thread groups, as shares of the task's CPU (ECS says how much that is; else of one core).
+- **Audio lag** (#986), a line after it whenever a clip came in the hour:
+  `lag 1h: county[n=120 upload=0.6/1.2 recv=8.2/13.6 audio=8.2/13.6 play=13.3/30.6 played=40] paging[...] ...`
+  Seconds, median/p90, by source kind (`county`, `mrrs`, `p25-other`, `paging`, `airband`, `fm`; never a channel,
+  talkgroup or id), from the clip's air start (its event's `start`, else the epoch ms its id ends with): `upload`
+  clip end → event applied, `recv` → event applied, `audio` → its audio stored (playable), `play` → the first
+  `GET /api/audio/<id>.wav` (once per clip, within 2 min of playable; includes the player's queue, so an upper bound).
+  Over 10 min (an outbox backlog) is `late`, never in the percentiles. The newest 512 per kind and stage, 4000 clips
+  remembered. Also `lag` in `GET /api/cad/perf` and the "Audio lag 1 h" table under Hub CPU.
 
 Admins only (`ADMIN_READS`, `WRITES`), on Settings > Station > Health ("Hub CPU": threads now / 1 h / since start,
 "Profile 30 s"). Nothing in any of it but thread groups, function names, file:line and path families.

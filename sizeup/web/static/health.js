@@ -768,6 +768,20 @@ const StationHealth = (() => {
       }
     }
     kids.push(t);
+    const lag = Object.entries(d.lag || {});     // #986: the clips' lag from their air start, last hour, by source kind
+    if (lag.length) {
+      const cell2 = (x) => (x && x.p50 !== null ? [`${x.p50} / ${x.p90}`, "num", `${x.n} clips${x.late ? `, ${x.late} late` : ""}`]
+        : ["—", "num dim", x && x.late ? `${x.late} late` : ""]);
+      const lt = table(["Audio lag 1 h", "Upload", "Received", "Playable", "First play"],
+        lag.map(([kind, r]) => [[kind, "mono"], cell2(r.upload), cell2(r.recv), cell2(r.audio), cell2(r.play)]), "");
+      const lth = lt.querySelectorAll("th");
+      lth[0].title = "Seconds, median / p90, over the last hour, by source. Over 10 min (a backlog): late, left out";
+      lth[1].title = "Clip end on the station → its event applied on the hub";
+      lth[2].title = "Air start → its event applied on the hub";
+      lth[3].title = "Air start → its audio stored (playable)";
+      lth[4].title = "Air start → the first browser fetch of its audio, within 2 min of playable (includes the player's queue)";
+      kids.push(lt);
+    }
     if (profileSaid) kids.push(el("p", "notice", profileSaid));
     if (profile && !profile.error) {
       const o = profile.overhead || {};
