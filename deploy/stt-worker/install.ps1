@@ -56,9 +56,9 @@ $PinsJson = @'
     },
     "worker_py": {
       "what": "worker.py (first install; it updates itself afterwards)",
-      "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/fdf677fffde650bfe36cdda8f3ed2a1eb94a4a0d/deploy/stt-worker/worker.py",
-      "bytes": 168506,
-      "sha256": "3BBBF395B84C77CF7EA9C757672C724F42557F9179619782BDA1AA7C46C9735E"
+      "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/00c2b564a06a069be05c10e0cfd854356a9a504c/deploy/stt-worker/worker.py",
+      "bytes": 176983,
+      "sha256": "DABE1646C7EA8F2FA6C2E9C7D7BE69B697B5865AAB4F090B68616015E1369F9C"
     },
     "llama_zip": {
       "what": "llama.cpp b12359, CUDA 12.4 (llama-server.exe)",
@@ -97,6 +97,8 @@ model = "large-v3-turbo-q5_0"
 whisper_server = ['whisper\Release\whisper-server.exe', '-m', 'models\ggml-large-v3-turbo-q5_0.bin',
                   '--host', '127.0.0.1', '--port', '8179', '-t', '4',
                   '-l', 'en', '-sns', '-et', '2.4', '-lpt', '-1.0', '-nth', '0.6']
+# no idle sleep while the worker runs (README "Keeping the PC awake"); false: Windows' own sleep settings
+keep_awake = true
 '@
 $TomlLlm = @'
 # the local LLM (README "The local LLM"): Qwen3-8B, the default

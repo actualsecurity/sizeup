@@ -21,9 +21,9 @@ GPU back at once (see [The local LLM](#the-local-llm-optional)).
 In an ordinary (not elevated) PowerShell window, as the user who games on the PC:
 
 ```powershell
-$u = 'https://raw.githubusercontent.com/actualsecurity/sizeup/0d78a72d3cb616979f2a344ed694dc55a598bfee/deploy/stt-worker/install.ps1'
+$u = 'https://raw.githubusercontent.com/actualsecurity/sizeup/47f3bd147f19f5c6db561e855d87259e71e626aa/deploy/stt-worker/install.ps1'
 Invoke-WebRequest $u -UseBasicParsing -OutFile "$env:TEMP\sizeup-stt-install.ps1"
-(Get-FileHash "$env:TEMP\sizeup-stt-install.ps1").Hash -eq '07E265B535285CA8C38F0F01032FA0DB0AC83C2BC30BFF21BF665A1E501F8F26'   # True
+(Get-FileHash "$env:TEMP\sizeup-stt-install.ps1").Hash -eq 'E86EF62DBA3F2FE7850BA382432B77148B4EEF502257CB549F47E4559FEDDB38'   # True
 powershell -ExecutionPolicy Bypass -File "$env:TEMP\sizeup-stt-install.ps1"
 ```
 
@@ -185,13 +185,13 @@ http://127.0.0.1:8180`. With it running, `py -3 "$d\worker.py" check` also tries
 
 ### 5. The worker
 
-For the first install, `worker.py` is pinned to a commit (168,506 bytes). Check its hash after the download. From then on it
+For the first install, `worker.py` is pinned to a commit (176,983 bytes). Check its hash after the download. From then on it
 [updates itself](#updating). A worker installed from an older pin (before the self-update) needs this download once
 more to get it.
 
 ```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/fdf677fffde650bfe36cdda8f3ed2a1eb94a4a0d/deploy/stt-worker/worker.py -OutFile "$d\worker.py"
-(Get-FileHash "$d\worker.py").Hash -eq '3BBBF395B84C77CF7EA9C757672C724F42557F9179619782BDA1AA7C46C9735E'   # True
+Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/00c2b564a06a069be05c10e0cfd854356a9a504c/deploy/stt-worker/worker.py -OutFile "$d\worker.py"
+(Get-FileHash "$d\worker.py").Hash -eq 'DABE1646C7EA8F2FA6C2E9C7D7BE69B697B5865AAB4F090B68616015E1369F9C'   # True
 notepad "$d\worker.toml"
 ```
 
@@ -205,6 +205,7 @@ model = "large-v3-turbo-q5_0"
 whisper_server = ['whisper\Release\whisper-server.exe', '-m', 'models\ggml-large-v3-turbo-q5_0.bin',
                   '--host', '127.0.0.1', '--port', '8179', '-t', '4',
                   '-l', 'en', '-sns', '-et', '2.4', '-lpt', '-1.0', '-nth', '0.6']
+keep_awake = true                            # no idle sleep while the worker runs (see "Keeping the PC awake")
 # the local LLM (optional: leave these out for none; see "The local LLM" below)
 llm_url = "http://127.0.0.1:8180"
 llm_model = "qwen3-8b-q4_k_m"
@@ -387,6 +388,8 @@ that folder and keeps the file's mode. The state stays in `~/.local/state/sizeup
   `auto_update`, the update's state, the hashes marked bad). The answer carries `worker_update` (`mode`, `commit`,
   `sha256`): the version the hub wants it on ([Updating](#updating)). Health shows each worker's version, green when it
   is the hub's.
+- **Keep awake:** on Windows, every hello and heartbeat carries `keep_awake` (`on`: the config key, `held`: no idle
+  sleep now). A hub from before ignores it.
 - **LLM jobs** (with `llm_url`): claimed on a thread and hub connection of their own (`/api/station/stt/infer/*`,
   the same tokens), one at a time, never while a pre-alert clip is held. The worker tells the hub its models with every
   heartbeat (`models: {stt, llm, llm_version}`); `llm` is empty while llama-server isn't answering, and the hub sends
@@ -480,6 +483,28 @@ py -3 "$d\worker.py" status
 For one-click toggles, make desktop shortcuts to `pythonw.exe "%LOCALAPPDATA%\sizeup-stt\worker.py" gaming on` (and
 `off`). There is no tray icon or hotkey: the standard library has none on Windows.
 
+## Keeping the PC awake
+
+With `keep_awake = true` (the default), Windows doesn't idle-sleep the PC while the worker runs, so the pool doesn't
+lose it overnight. A worker that has updated itself to this version does it with no step on the PC.
+
+- **How:** `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` from a thread of the worker's own. No
+  administrator rights and no `powercfg` change; nothing outlives the worker.
+- **The screen** still turns off on its timer (never `ES_DISPLAY_REQUIRED`). Sleep from the Start menu, the lid and
+  the power button still work.
+- **Released** on `worker.py pause`, a stop or the exit, and when the worker crashes or is killed (Windows drops the
+  flag with its thread). `worker.py resume` takes it again. Gaming, a self-update and whisper-server trouble don't
+  change it. A stop (a self-update's restart too) first resets the idle timer, so the PC gets a whole sleep timeout
+  before it may sleep: time for the task to start the worker again.
+- **Modern Standby PCs** (`powercfg /a` says S0 Low Power Idle): check that `powercfg /requests` (an administrator
+  prompt) lists the worker's `python`/`pythonw` under `SYSTEM` while it runs.
+- **Off:** `keep_awake = false` in `worker.toml`, then restart the task. A `worker.py` from before this key refuses a
+  `worker.toml` that has it: take the line out before an `update rollback` to such a version or a **Pin** to one.
+- **Seen:** `worker.py status` (`keep awake: on, held`) and Health: the worker's state says `keeps PC awake`. A worker
+  gone silent shows `offline since HH:MM`, with `(asleep?)` when its last heartbeat said keep-awake off or released,
+  or its heartbeats just stopped while online.
+- Not Windows: nothing (use the OS's own settings).
+
 ## Files
 
 These are in `%LOCALAPPDATA%\sizeup-stt\state` (`state_dir`):
@@ -562,6 +587,7 @@ Without `-c`, the worker reads `SIZEUP_STT_WORKER_CONFIG`, else `worker.toml` or
 | `llm_no_think` | `true` | sends `enable_thinking: false` to the chat template (Qwen3); other templates ignore it |
 | `auto_update` | `true` | updates itself to the version the hub names (see [Updating](#updating)); `false`: never |
 | `log_ship` | `true` | `worker.log`'s lines to the hub too (see [Logs](#logs-cloudwatch)); `false`: they stay on the PC |
+| `keep_awake` | `true` | Windows: no idle sleep while the worker runs and isn't paused (see [Keeping the PC awake](#keeping-the-pc-awake)); `false`: Windows' own sleep settings. `true` or `false` only |
 
 ## Troubleshooting
 
