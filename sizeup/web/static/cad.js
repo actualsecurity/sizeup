@@ -1365,6 +1365,10 @@ function radioRow(t, ctx = {}) {
     const fixes = (t.atc_snaps || []).map((x) => `“${x.from}” → ${x.to} (on ADS-B)`);
     txt.title = `As transcribed: ${t.text}` + (fixes.length ? `\nCallsign matched to ADS-B: ${fixes.join(", ")}` : "");
   }
+  if (!shown && t.status === "unclear" && t.unclear_text) {
+    const w = t.unclear_text;
+    txt.title = `Heard (${t.model || "unknown"}): ${w.length > 300 ? w.slice(0, 299) + "…" : w}`;
+  }
   if (!txt.title && t.model && t.status !== "off") txt.title = (shown ? "Transcribed by " : "Speech-to-text: ") + t.model;
   if (t.atc_weak) {                      // a marginal AM carrier (#257): transcribed, but the words may be wrong
     const w = el("span", "atc-weak", "weak signal");
@@ -1779,6 +1783,9 @@ function repaintTx() {                   // the rows' busy state changed: draw t
   if (cad.state) render();
   txChanged();
 }
+// An unclear transcript's reason (sizeup/stt_quality.py LABELS): a loop, more words than the clip holds, noise.
+const UNCLEAR_SAID = { repeated: "Unclear (repeated)", too_long: "Unclear (too long)", stock_phrase: "Unclear (stock phrase)",
+                       no_words: "Unclear (no words)" };
 // What a transmission without text says (its status): sizeup/app.py, sizeup/channels.py.
 // Pending: which engine has it (the row's model, sizeup/app.py _stt_row): AWS, or whisper after AWS failed.
 function sttSaid(t) {
@@ -1787,6 +1794,7 @@ function sttSaid(t) {
     ? "Transcribing on the station (whisper)" : "Transcribing (whisper)";
   if (t.status === "pending" && m.startsWith("aws-transcribe")) return "Transcribing (AWS)";
   if (t.status === "pending" && m.startsWith("gpu-worker")) return "Transcribing (GPU)";
+  if (t.status === "unclear") return UNCLEAR_SAID[t.quality] || "Unclear";   // sizeup/stt_quality.py: the words on hover
   return { no_speech: "Key-up, no speech", no_voice: "Tones only, no message", pending: "Transcribing", remote: "Transcribing on the hub (AWS)", off: "Not transcribed",
            skipped: "Skipped: busy", error: "Transcription failed" }[t.status] || "—";
 }
