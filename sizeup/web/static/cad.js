@@ -3563,6 +3563,7 @@ function addressBox(input, geoNote, list, opts = {}) {
     const p = box.picked;
     if (!p) return {};
     const out = { lat: p.lat, lon: p.lon, geo_label: p.moved ? `${p.label} (moved on the map)` : p.label };
+    if (p.suggested && !p.moved) out.geo_suggested = true;      // (a feed's point may still replace it)
     if (p.place && placeKept(box, input.value)) out.place = p.place;
     return out;
   };

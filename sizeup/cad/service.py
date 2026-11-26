@@ -1154,8 +1154,9 @@ class Cad:
         # a person set these (#297): a CAD feed only notes its own type / location / pin from now on
         hand = [g for g, ks in (("type", ("type", "subtype")), ("location", ("address", "cross_street", "place")),
                                 ("pin", ("lat", "lon"))) if any(k in f and before[k] != after[k] for k in ks)]
-        if "pin" in hand and "lat" not in body:
-            hand.remove("pin")                       # re-placed from a typed address, not a pin a person put down
+        if "pin" in hand and ("lat" not in body or _bool(body, "geo_suggested")):
+            hand.remove("pin")                       # re-placed from a typed address, or the location box's one sure
+                                                     # reading saved (cad.js suggest): not a pin a person put down
         self.sources.mark_manual(iid, hand, op)
         return after
 

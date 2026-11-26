@@ -2068,9 +2068,14 @@ class Sources:
         return bool(at) and (loc.strip().lower() == at.lower() or same_place(loc, at))
 
     def _geo_sources(self) -> tuple:
-        """Which gazetteer and place search a point was looked for with: tried again only when one changed."""
+        """Which gazetteer, place search and place names a point was looked for with: tried again only when one
+        changed (a common place added: _named_point)."""
         cad = self.cad                                       # (never building the place search to ask)
-        return tuple(id(getattr(cad, k, None)) for k in ("geocoder", "place_source", "_place_ix"))
+        try:
+            names = cad.settings.places_rev()
+        except Exception:  # noqa: BLE001 - no place names: as none
+            names = ""
+        return (*(id(getattr(cad, k, None)) for k in ("geocoder", "place_source", "_place_ix")), names)
 
     def _retry_point(self, iid: int, loc: str) -> bool:
         """Look again for the point of an incident left with none (_apply): a highway's location (a marker or an exit),

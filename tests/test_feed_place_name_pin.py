@@ -108,9 +108,13 @@ def test_the_place_name_is_kept_as_the_incident_s_place(rig):
     [inc] = rig.incidents()
     assert inc["address"] == "45 W Sample Greens Dr (Sample Green Complex), Rye Brook"    # shown as before
     assert (inc["place"], inc["place_address"]) == ("Sample Green Complex", "45 W Sample Greens Dr, Rye Brook")
-    # a person's edit of something else keeps it; a new address drops it
-    rig.cad.update(inc["id"], {"address": inc["address"], "remarks": "gate code at the office", "operator": "JD"})
-    assert rig.cad.store.incident(inc["id"])["place"] == "Sample Green Complex"
+    # a person's edit that saves the address as it was, with a point (the location box's pick), keeps it; a new
+    # address drops it
+    rig.cad.update(inc["id"], {"address": inc["address"], "lat": WEST[0], "lon": WEST[1] + 0.0001,
+                               "geo_label": "45 Sample Greens Dr W, Rye Brook", "operator": "JD"})
+    after = rig.cad.store.incident(inc["id"])
+    assert (after["place"], after["place_address"]) == ("Sample Green Complex", "45 W Sample Greens Dr, Rye Brook")
+    assert after["address"] == inc["address"]
     rig.cad.update(inc["id"], {"address": "47 E Sample Greens Dr", "operator": "JD"})
     assert rig.cad.store.incident(inc["id"])["place"] == ""
 
@@ -203,3 +207,27 @@ def test_the_start_s_sweep_places_an_open_feed_incident_at_a_street_address(rig,
     assert rig.cad.sources.backfill_points() == 1
     assert point(rig, inc["id"]) == WEST
     assert sum("map point" in t for t in rig.feed_lines(inc["id"])) == 1
+
+
+def test_a_common_place_added_later_is_looked_for_on_the_next_report(rig):
+    rig.feed.put("F0071001", type="STRU", location="12 UNHEARD OF WAY : @SAMPLE GREEN COMPLEX RYE_BROOK",
+                 units=("E60",), times={"dispatched": T0})
+    rig.poll()
+    [inc] = rig.incidents()
+    assert point(rig, inc["id"]) is None
+    common_place(rig)                                         # Settings > Place names changed: looked for again
+    rig.at(60)
+    rig.feed.change("F0071001", units=("E60", "E61"))
+    rig.poll()
+    assert point(rig, inc["id"]) == COMPLEX
+
+
+def test_a_saved_suggestion_is_no_pin_a_person_put_down(rig):
+    rig.cad.geocoder = lambda q: []                           # made with no point
+    made = rig.cad.create({"type": "STRU", "address": "45 W Sample Greens Dr", "operator": "JD"})
+    body = {"address": made["address"], "lat": WEST[0], "lon": WEST[1], "geo_label": "45 Sample Greens Dr W, Rye Brook",
+            "operator": "JD"}
+    rig.cad.update(made["id"], dict(body, geo_suggested=True))
+    assert point(rig, made["id"]) == WEST and "pin" not in rig.cad.sources.manual(made["id"])
+    rig.cad.update(made["id"], dict(body, lon=WEST[1] + 0.0002))             # a pin put down: the person's
+    assert "pin" in rig.cad.sources.manual(made["id"])

@@ -49,4 +49,5 @@ def test_a_sure_reading_is_pre_selected_and_save_places_the_event(site, browser,
         time.sleep(0.05)
     inc = cad.store.incident(iid)
     assert (inc["lat"], inc["lon"]) == WEST and inc["address"] == "45 W Sample Greens Dr"
+    assert "pin" not in cad.sources.manual(iid)              # a feed's point may still replace the suggestion
     assert not pg.errors
