@@ -111,9 +111,19 @@ window.PrealertInfo = (() => {
     if (t.kept) li.append(el("div", "pi-kept dim small", t.kept));
     return li;
   }
+  // newest at the top, as every console list (the bundle's own order is oldest first): by air start; a row without
+  // one (gone from the radio log) stays next to the one it followed
+  function newestFirst(items) {
+    let last = -Infinity;
+    const keyed = items.map((t, i) => {
+      if (typeof t.start === "number") last = t.start;
+      return { t, i, at: last };
+    });
+    return keyed.sort((a, b) => b.at - a.at || b.i - a.i).map((x) => x.t);
+  }
   function txList(items, scope) {
     const ol = el("ol", "list log radio-log pi-txs");
-    ol.append(...items.map((t) => tx(t, scope)));
+    ol.append(...newestFirst(items).map((t) => tx(t, scope)));
     return ol;
   }
 
@@ -375,5 +385,5 @@ window.PrealertInfo = (() => {
     }
   }
 
-  return { KINDS, href, parse, open, close, render, reload, features };
+  return { KINDS, href, parse, open, close, render, reload, features, newestFirst };
 })();

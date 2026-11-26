@@ -539,3 +539,53 @@ global.api = async () => IN;
     assert "Dismissed · Jordan Example" in out["outcome"]
     assert "unconfirmed place" in out["unconfirmed"][0] and "Unconfirmed place" in out["unconfirmed"][1]
     assert out["bad"] is None and out["ok"] == {"kind": "intel", "id": 12} and out["href"] == "#prealert/airport/3"
+
+
+def _tx_row(tid, start, text, **kw):
+    return {"id": tid, "start": start, "end": start + 4, "channel": "Example Fire", "text": text, "has_audio": True, **kw}
+
+
+@needs_node
+def test_the_lists_are_newest_first_with_the_trigger_marked_in_place():
+    """Timeline and Heard newest at the top (the bundle's order is oldest first; every console list is newest first),
+    by air start whatever order the bundle has; the trigger stays marked where it fell; a row gone from the radio log
+    stays next to the one it followed. The 60 Control card's play buttons: the latest four, newest first."""
+    heard = [_tx_row("t-200", 1200, "Car 3 responding to 12 Example Road", evidence=True),
+             {"id": "t-gone", "text": "", "transcript_kept": False, "has_audio": False, "kept": "gone"},
+             _tx_row("t-300", 1300, "Car 3 on scene at 12 Example Road", evidence=True)]
+    around = [_tx_row("t-100", 1100, "Engine 9 back in quarters"),
+              heard[0],
+              _tx_row("t-250", 1250, "Car 3, copy"),
+              heard[2],
+              _tx_row("t-400", 1400, "Car 3, units are clear")]
+    d = {"event": {"kind": "intel", "id": 5}, "schema": 1, "cursor": "c", "generated_at": 1500,
+         "summary": {"title": "Example", "level": "medium", "at": 1200, "lines": []},
+         "why": {"rules": [], "matched": [], "score": {"what": 0.5, "where": 0.5, "precision": "address", "confirmed": True}},
+         "trigger": {"items": heard, "empty": ""},
+         # the bundle's order mixed up (another PR may change how it picks and orders them): the page sorts
+         "before_after": {"window_s": 600, "channels": ["Example Fire"], "items": [around[i] for i in (2, 0, 4, 1, 3)], "empty": ""},
+         "place": {"point": None, "empty": "not placed"}, "site_history": {}, "now": {}, "outcome": {"status": "open"}}
+    script = f"""
+{(STATIC / "intel.js").read_text()}
+{(STATIC / "prealert-info.js").read_text()}
+global.api = async () => IN.bundle;
+const played = [];
+global.Audio = class {{ constructor(u) {{ played.push(u); }} addEventListener() {{}} pause() {{}} play() {{ return Promise.resolve(); }} }};
+(async () => {{
+  await PrealertInfo.open("intel/5");
+  const rows = (id) => $("#" + id).find("pi-tx").map((li) => [li.children[1].textContent, li.classList.contains("pi-ev")]);
+  const list = new El("ol");
+  IntelCard.column(list, {{ open: [IN.card] }}, {{ api: async () => ({{}}), operator: () => "", time: String, readonly: true, more: false }});
+  for (const b of list.find("play")) b.on.click[0]({{ stopPropagation() {{}} }});
+  console.log(JSON.stringify({{ around: rows("pi-around"), heard: rows("pi-trigger"), played }}));
+}})();
+"""
+    card = {"id": 5, "level": "medium", "what": 0.5, "where": 0.5, "precision": "address", "rules": [], "first_at": 1200,
+            "place": "12 Example Road", "confirmed": True, "traffic_ids": ["t-1", "t-2", "t-3", "t-4", "t-5"]}
+    out = run_node(script, {"bundle": d, "card": card})
+    assert out["around"] == [["Car 3, units are clear", False], ["Car 3 on scene at 12 Example Road", True],
+                             ["Car 3, copy", False], ["Car 3 responding to 12 Example Road", True],
+                             ["Engine 9 back in quarters", False]]
+    assert out["heard"] == [["Car 3 on scene at 12 Example Road", True], ["", False],
+                            ["Car 3 responding to 12 Example Road", True]]
+    assert out["played"] == [f"/api/audio/t-{n}.wav" for n in (5, 4, 3, 2)]

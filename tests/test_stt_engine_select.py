@@ -919,11 +919,13 @@ def test_a_context_class_background_clip_placed_on_a_station_is_taken_in_its_bud
     assert p.bg_place(sttpool.LOW, 3.0, "west", 90.0)[0] == "gpu"          # (its own station: never back to it)
 
 
-def test_the_hub_reads_main_from_the_stations_own_rows(tmp_path):
+def test_the_hub_reads_the_main_it_serves_for_our_calls(tmp_path):
+    """A county talkgroup's Main is the one the CAD serves (Cad.main_tg: Our calls, #939): Main ours (its own station),
+    not Main a context talkgroup (Auto · background)."""
     fake = FakeTranscribe(phrases={500: AWS_TEXT})
     hub = _hub(tmp_path, fake)
     try:
-        hub.app.hub.talkgroups = [{"tg": 325, "key": "tg:325", "main": True}, {"tg": 326, "key": "tg:326", "main": False}]
+        hub.app.cad.main_tg = lambda tg, system="": tg == 325
         assert hub.app.context_tg("tg:325") is False and hub.app.channel_pref("tg:325")["engine"] == "local"
         assert hub.app.context_tg("tg:326") is True and hub.app.channel_pref("tg:326")["engine"] == "auto_bg"
         # a stored local on a talkgroup the hub's own list doesn't have: still migrated

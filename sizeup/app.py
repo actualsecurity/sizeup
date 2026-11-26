@@ -3942,9 +3942,10 @@ class App:
         try:
             if key.startswith("p25:"):
                 return True
-            if key.startswith("tg:"):
+            if key.startswith("tg:"):          # (the Main the CAD serves: Our calls' own, Cad.main_tg, #939)
                 tsys, tgn = channels.tg_of(key)
-                return not self.tg.main(tgn, tsys) if tsys else not self.tg.main(tgn)
+                main = getattr(getattr(self, "cad", None), "main_tg", None) or self.tg.main
+                return not (main(tgn, tsys) if tsys else main(tgn))
         except Exception:  # noqa: BLE001 - the plain default then
             pass
         return False
@@ -4193,7 +4194,9 @@ class App:
         return {"prefs": self._chan_ov, "aws_channels": list(self.cfg.stt_aws_channels),
                 "record_only": list(self.cfg.stt_record_only), "aws_ok": ok, "aws_why": why,
                 "aws_reserve": reserve, "aws_deny": deny,
+                # each channel's Main switch (Our calls, settings radio_main) where there is a CAD to keep it
                 "fm": [{"key": c.label, "kind": c.kind, "mhz": c.mhz,
+                        **({"main": self.cad.fm_main(c.label, c.kind)} if getattr(self, "cad", None) is not None else {}),
                         **({"schedule": plan_text(c)} if getattr(c, "schedule", ()) or getattr(c, "also", ()) else {})}
                        for c in self.cfg.channels],
                 "sync": self.channels_sync(), "aws": self.aws_status(), "tiers": self.tiers_state()}

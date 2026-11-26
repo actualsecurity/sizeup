@@ -98,9 +98,11 @@ class Event:
     pushed_at: float | None = None
     push_count: int = 0
     suppressed: str = ""               # rate | quiet | shadow | merged | scrub | off | out_of_area | near_incident | unplaced |
-                                       # fd_on_scene | fd_dispatched | fd_there | fd_late | ""
+                                       # fd_on_scene | fd_dispatched | fd_there | fd_late | late | ""
+                                       # (late: its rows read in time don't push it alone, engine._fresh)
     updated_at: float = 0.0
-    note: str = ""                     # "possibly cancelled" (a nameless disregard of a safety call), "moved", "re-opened", "de-escalated"
+    note: str = ""                     # "possibly cancelled" (a nameless disregard of a safety call), "moved", "re-opened", "de-escalated",
+                                       # "source withdrawn" (its only row's text emptied or unclear since)
     near_incident: int | None = None   # our own incident at its place (engine._incident, _fire): linked, never a radio link
     fd: str = ""                       # a fire-related event with the FD at its place (engine._fire): on_scene |
                                        # dispatched | there (said so) -> a push of it is an FYI; cleared -> a pre-alert

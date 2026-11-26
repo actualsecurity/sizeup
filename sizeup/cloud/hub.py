@@ -2010,16 +2010,6 @@ class HubApp(App):
         self.sync()
         return True
 
-    def context_tg(self, key: str) -> bool:
-        """App.context_tg with the station's own Main switch (its talkgroup rows: Main lives on the station; the hub's
-        own copy may be another): a context or neighbour talkgroup's default engine is Auto · background (#896)."""
-        rows = getattr(getattr(self, "hub", None), "talkgroups", None) or []
-        if key.startswith("tg:"):
-            for r in rows:
-                if isinstance(r, dict) and (r.get("key") or (f"tg:{r.get('tg')}" if not r.get("tier_set") else "")) == key:
-                    return not r.get("main")
-        return super().context_tg(key)
-
     def stt_chosen(self, cid: str) -> str:
         """The engine the route chose for this clip now (sizeup/sttroute.py Routes.chosen): "GPU" (any GPU worker), a
         pinned worker's id ("gpu-pc", "station:north"), "pool" (any worker: a GPU, another station's whisper), "AWS",

@@ -28,7 +28,7 @@ window.RadioControls = (() => {
   const GROUP_COLORS = { "Fire/EMS": "#ff7a59", "County Police": "#6aa8ff", "DOT": "#e8d84a", "Hospital": "#f27ad1",
                          "Operations": "#7ee07e", "Interop/Events": "#B8C0CA", "OEM": "#ffcf7a", "": "#9AA3AD" };
   const RADIO_STATE = { ok: "", off: "off", absent: "absent", down: "down", starting: "starting", ambiguous: "serial shared" };
-  const st = { box: null, state: null, timer: 0, pending: new Map(), cpending: new Map(), error: "", sdrBusy: false, sdrError: "",
+  const st = { box: null, state: null, timer: 0, pending: new Map(), cpending: new Map(), fmMain: {}, error: "", sdrBusy: false, sdrError: "",
                adsbBusy: false, adsbError: "",
                rerunBusy: false, rerunMsg: "", confirm: null, confirmTimer: 0, closing: null, closeTimer: 0, n: {},
                stt: null, sttTimer: 0, vocabMsg: "", vocabBusy: false, vocabDirty: false,
@@ -158,6 +158,7 @@ window.RadioControls = (() => {
     st.namesApi = opts.names || null;              // Settings > Radios on the CAD (settings.js S_RC_NAMES); never the station's page
     if (st.namesApi && st.tab === "channels") loadNames();
     st.servicesApi = opts.services || null;        // ... and the service per source (settings.js S_RC_SERVICES)
+    st.mainApi = opts.main || null;                // ... and an FM channel's Main switch (settings.js S_RC_MAIN)
     if (st.servicesApi && st.tab === "channels") loadServices();
     poll();
   }
@@ -1290,7 +1291,9 @@ window.RadioControls = (() => {
   }
   function fmRows() {
     const c = (st.state && st.state.channels) || {};
-    return (c.fm || []).map((f) => ({ key: `ch:${f.key}`, chan: f.key, name: f.key, kind: f.kind, mhz: f.mhz, schedule: f.schedule || "", fm: true, ...chan(f.key) }));
+    return (c.fm || []).map((f) => ({ key: `ch:${f.key}`, chan: f.key, name: f.key, kind: f.kind, mhz: f.mhz, schedule: f.schedule || "", fm: true, ...chan(f.key),
+                                      // its Main switch (Our calls; the hub's settings radio_main): none without a CAD
+                                      main: f.key in st.fmMain ? st.fmMain[f.key] : f.main }));
   }
   function settle() {
     const now = Date.now(), by = new Map(((st.state && st.state.talkgroups) || []).map((r) => [srcOf(r), isOther(r)
@@ -1352,6 +1355,22 @@ window.RadioControls = (() => {
     const next = !r[field];
     if (field === "record" && next) return setTalkgroup(r, "record", true, [], { transcribe: false });
     return setTalkgroup(r, field, next, (next ? CHAIN_ON : CHAIN_OFF)[field].filter((f) => r[f] !== next));
+  }
+  // An FM / airband channel's Main switch (Our calls everywhere): the hub's settings radio_main, admins, audited
+  async function setFmMain(key, label) {
+    const cur = fmRows().find((x) => x.chan === key);
+    if (!cur || cur.main === undefined || !st.mainApi || key in st.fmMain) return;      // (one at a time)
+    st.fmMain[key] = !cur.main;
+    st.error = "";
+    renderTalkgroups();
+    try {
+      await st.mainApi.save(key, !cur.main);
+      await poll();
+    } catch (err) {
+      st.error = `Couldn't change Main for ${label}: ${err.message}`;
+    }
+    delete st.fmMain[key];
+    renderTalkgroups();
   }
   async function setChannel(key, field, value, label) {
     const q = st.cpending.get(key) || { vals: {} };
@@ -1462,6 +1481,7 @@ window.RadioControls = (() => {
     const li = b.closest(".tg-row");
     const other = li.dataset.fm !== "1" && talkgroups().find((x) => x.src === li.dataset.source && x.tier_set);
     if (other) return setOther(other, b.dataset.field);    // another system's: the switches are its tier
+    if (li.dataset.fm === "1" && b.dataset.field === "main") return setFmMain(li.dataset.ckey, li.dataset.label || li.dataset.ckey);
     if (b.dataset.field === "transcribe" || li.dataset.fm === "1") {
       const key = li.dataset.ckey, cur = li.dataset.fm === "1" ? fmRows().find((x) => x.chan === key) : chan(key);
       if (!cur) return;
@@ -1929,8 +1949,8 @@ window.RadioControls = (() => {
               : r.encrypted ? "Encrypted: can't be decoded" : "Not recording: calls dropped";
             if (other) recB.title += `\nTier: ${tierName}`;
             setSwitch(mainB, !!r.main, "Main");
-            mainB.title = other ? "Another system: never Main" : r.main ? "Main: up front in Radio, on our incident" : "Other: folded in Radio";
-            show(mainB, !r.fm);
+            mainB.title = other ? "Another system: never Main" : r.main ? "Main: Our calls (up front in Radio, on our incident, the player's Our calls)" : "Other: folded in Radio, not Our calls";
+            show(mainB, !r.fm || (r.main !== undefined && !!st.mainApi));
             setSwitch(alrB, !!r.alerts, "Alerts");
             alrB.classList.toggle("na", !other);         // the county's: no Alerts of its own (no knob, the hover says why)
             alrB.title = !other ? "County: pre-alerts by the intel packs (Settings > System > Intel)"

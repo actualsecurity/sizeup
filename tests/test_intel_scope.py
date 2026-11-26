@@ -300,7 +300,7 @@ def test_a_late_transcript_older_than_the_window_is_still_read():
     clock = Clock(5000.0)
     e, sink = engine(clock=clock)
     e.feed(row("t2", "Car 6 on location.", clock() - 10))
-    out = e.feed(row("t1", "Respond to 12 Example Road, shots fired.", clock() - 400))     # transcribed after t2
+    out = e.feed(row("t1", "Respond to 12 Example Road, shots fired.", clock() - 250))     # transcribed after t2
     assert [x.category for x in out] == ["weapons"] and pushed(sink)
 
 

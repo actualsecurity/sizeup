@@ -347,6 +347,8 @@ class Pack:
     console_cue: str = "shadow"       # a labelled console's call-out as a dispatch cue (CONSOLE_CUE; engine.py)
     stt_high: bool = True             # its sources are push sources for speech-to-text's priority ("stt_high": false:
                                       # never, engine.push_sources; Settings intel_packs.<pack>.stt_high over the file's)
+    late_s: float = 300.0             # a row read longer than this after its clip ENDED is late (engine.py: context,
+                                      # never a push's origin); Settings intel_packs.<pack>.late_s over the file's
 
     def in_scope(self, row: dict) -> bool:
         """The row is one this pack reads: its service, its source key (a glob), its tier and system, as listed (an
@@ -617,7 +619,8 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                 fd=fd_present(d.get("fd_present"), name),
                 hw=(highway_cfg({**(d.get("highway") or {}), **(po.get("highway") or {})}, name)
                     if any(cd["highway"] for cd in cats.values()) else {}),
-                stt_high=_bool(po.get("stt_high", d.get("stt_high", True)), f"{name}.stt_high"))
+                stt_high=_bool(po.get("stt_high", d.get("stt_high", True)), f"{name}.stt_high"),
+                late_s=_num(po.get("late_s", d.get("late_s", 300)), 30, 3600, f"{name}.late_s"))
 
 
 def read_files(paths=None) -> list[dict]:
