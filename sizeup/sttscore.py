@@ -247,8 +247,9 @@ def promote_ok(board: dict) -> tuple[bool, str]:
 
 def drop_context(refs: dict, context=(), prompt: str = "") -> dict:
     """The refs without what was in the context sent to the models (the admin's rule: a model that only echoes its
-    context, the ADS-B list or a talker's name, never scores for it): each ref whose NORM tokens are in a context item
-    or in the prompt is left out."""
+    context, the ADS-B list, a talker's name or a call sign, never scores for it): each ref whose NORM tokens are a
+    context item, or (prompt) in the prompt, is left out. The hub passes the names it sent (HubApp._pool_models
+    ctx_names), never the channel's vocabulary: both sides get that alike."""
     sent = [" ".join(normalize(c)) for c in context or () if c]
     joined = f" {' '.join(normalize(prompt))} " if prompt else ""
     out: dict = {}
