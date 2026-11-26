@@ -285,12 +285,15 @@ window.IntelPage = (() => {
     return tr;
   }
 
-  // the other calls on its source in its window (eventlog.py siblings): "2 other calls", each a link to its More info
+  // the other calls on its source in its window (eventlog.py siblings, calls): "3 other calls #12 #15", each event
+  // a link to its More info; the calls that are no event counted (a dispatch console's: the hover names them)
   function siblings(e) {
-    const xs = e.siblings || [];
-    if (!xs.length) return null;
-    const d = el("div", "dim small il-sibs", `${xs.length} other call${xs.length === 1 ? "" : "s"} `);
-    d.title = "Other events on this channel in its window";
+    const xs = e.siblings || [], calls = e.calls || [];
+    const n = xs.length + calls.length;
+    if (!n) return null;
+    const d = el("div", "dim small il-sibs", `${n} other call${n === 1 ? "" : "s"} `);
+    d.title = ["Other calls on this channel within ±10 min",
+      ...calls.map((c) => `${when(c.at)} ${c.consoles.join(" → ")} · ${c.n} tx, no event`)].join("\n");
     xs.forEach((x, i) => {
       if (i) d.append(" ");
       const a = el("a", "il-sib", `#${x.id}`);

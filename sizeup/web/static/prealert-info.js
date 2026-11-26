@@ -176,19 +176,25 @@ window.PrealertInfo = (() => {
     return [head("Timeline", span, "Everything on the same channels (and their talkgroup group) around it; the ones that raised it marked"),
       ...others(d.siblings), b.items.length ? txList(b.items, "pi-around") : none(b.empty)];
   }
-  // the other calls on its source in its window (intel: context_bundle siblings), each a link to its own More info
+  // the other calls on its source in its window (intel: context_bundle siblings): its events, each a link to its own
+  // More info, and the calls that are no event (a dispatch console's, in the Timeline below)
   function others(sb) {
-    const items = (sb && sb.items) || [];
-    if (!items.length) return [];
-    const line = el("div", "pi-sibs small", `${items.length} other call${items.length === 1 ? "" : "s"} in this window: `);
-    line.title = `Other events on this channel within ±${Math.round((sb.window_s || 0) / 60)} min of this one`;
-    items.forEach((x, i) => {
-      if (i) line.append(" · ");
+    const items = (sb && sb.items) || [], calls = (sb && sb.calls) || [];
+    const n = items.length + calls.length;
+    if (!n) return [];
+    const line = el("div", "pi-sibs small", `${n} other call${n === 1 ? "" : "s"} in this window: `);
+    line.title = `Other calls on this channel within ±${Math.round((sb.window_s || 0) / 60)} min of this one`;
+    const parts = [...items.map((x) => [x.at, () => {
       const a = el("a", "pi-sib", `${x.label || x.category} ${tm(x.at)}`);
       a.href = href("intel", x.id);
       a.title = `#${x.id}: its More info`;
-      line.append(a);
-    });
+      return a;
+    }]), ...calls.map((c) => [c.at, () => {
+      const t = el("span", "pi-sib", `${c.consoles.join(" → ")} ${tm(c.at)}`);
+      t.title = `No event: ${c.n} tx from a dispatch console (in the Timeline)`;
+      return t;
+    }])].sort((a, b) => a[0] - b[0]);
+    parts.forEach(([, make], i) => { if (i) line.append(" · "); line.append(make()); });
     return [line];
   }
   function place(d) {
@@ -284,7 +290,7 @@ window.PrealertInfo = (() => {
       ["Ack", o.acknowledged ? `${o.acknowledged.by || ""} · ${tm(o.acknowledged.at)}` : ""],
       ["Event", o.incident ? incLink(o.incident) : ""],
       ["Near", o.near_incident ? incLink(o.near_incident, "Our call at its place (linked, never a radio link)") : ""],
-      ["Handoff", (o.handoff || []).length === 2 ? `${o.handoff[0]} → ${o.handoff[1]}` : "",
+      ["Handoff", (o.handoff || []).length >= 2 ? `${o.handoff[0]} → ${o.handoff[1]}${o.handoff[2] ? ` · ${o.handoff[2]}` : ""}` : "",
         "One call another department's console took over: its town is the one that took it"],
       ["FD", o.fd || "", o.fd_state === "cleared" ? `${(o.fd || "").split(" · ")[0]} (cleared): pre-alert`
         : "The FD was already there: no pre-alert (an FYI only when the words added something)"],

@@ -108,7 +108,7 @@ class Event:
                                        # dispatched | there (said so) -> a push of it is an FYI; cleared -> a pre-alert
                                        # as usual ("FD here HH:MM")
     incident_id: int | None = None     # only after a person's Accept, and only for a pack with accept: true
-    handoff: list = field(default_factory=list)        # [from console, to console]: another department's dispatch
+    handoff: list = field(default_factory=list)        # [from console, to console, to town]: another department's dispatch
                                        # console took the call over (engine._handed; the labels Settings > Radios gives)
 
     def place(self) -> Place:

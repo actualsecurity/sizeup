@@ -33,7 +33,8 @@ A row (terse; the page shows it as is):
     ([[rule id, weight]]), decided, source_key, source (its name: source_name()), system, place, precision, confirmed,
     town, lat, lon, radius_m (null / 0 when unplaced), held ({key, label, detail} | None when pushed), pushed_at, n
     (transmissions), votes ({verdict: n}), mine (this reader's verdicts), near_incident, incident_id, siblings
-    ([{id, at, category, label}]: the other calls in its window, siblings())
+    ([{id, at, category, label}]: the other events in its window, siblings()), calls ([{at, n, consoles}]: the
+    calls in it that are no event, console_calls())
 
 level      what happened: push (pushed_at set), held (at push, not pushed: the policy's or the sink's reason), else
            its mode: map, log, shadow
@@ -49,9 +50,11 @@ held       why it didn't push: HELD_SQL, one CASE over the row (the same express
            _corroborated), the rules' own rung, shadow; at push with no reason, its status (dismissed, expired, ended)
 
 siblings   the other events on its source (any pack, category, level or status) whose first_at..last_at is within
-           its window of its own first_at..last_at: the engine's merge span (max(window_s, merge_min): the span an
-           open event takes a new mention over, where a second call used to be taken in), oldest first, at most
-           SIBLINGS_MAX. One read per source of the page, on intel_events_source.
+           SIBLING_S (±10 min: More info's Timeline, the admin's "window") of its own, the nearest SIBLINGS_MAX, oldest
+           first. One bounded read per row, on intel_events_source.
+calls      the calls in that window that are no event (console_calls(): a labelled dispatch console's transmissions
+           in no event and not part of an event's conversation, grouped), [{at, n, consoles}]: a call no rule
+           raised still shows ("2 other calls"). One read of the source's transmissions per row, cached a minute.
 
 Source names come from one helper, source_name() (the radio log's channel per source key, comms.sources_seen: the
 Radio page's own), so a Settings > Radios name resolver can replace it in one place.
@@ -78,7 +81,8 @@ SEARCH_SCAN = 5000                 # ... out of the range's newest this many eve
 SEARCH_WORDS = 8
 WORD_CHUNK = 500                   # ... looked through for words this many at a time, newest first
 DEFAULT_S = 24 * 3600
-DEFAULT_SIBLING_S = 20 * 60        # siblings(): an event's window when its pack isn't loaded (merge_min's default)
+SIBLING_S = 600.0                  # an event's window for its other calls: More info's Timeline's (context_bundle
+                                   # WINDOW_S["intel"]: ±10 min, what the admin reads as "the window")
 FACET_S = 300                      # the filters' choices: read again when the range moved this far (or the events changed)
 SPAN_MAX_S = 92 * 86400            # events are kept 90 days (events.py KEEP_EVENTS_S)
 NOTES_SPAN_S = 367 * 86400         # ... and a year with a note (KEEP_NOTES_S): the review queue's default range
@@ -167,6 +171,34 @@ COLS = ("id, pack, category, source_key, system, first_at, last_at, status, what
         "label_full, town, confirmed, mode, pushed_at, suppressed, near_incident, incident_id, traffic_ids, lat, lon, "
         "radius_m")
 PLACED = "COALESCE(precision, 'none') != 'none' AND lat IS NOT NULL AND lon IS NOT NULL"   # (the listing's columns; row()'s placed)
+
+
+def console_calls(txs: list[dict], event_tids: set, talker_of, gap_s: float) -> list[dict]:
+    """The calls on a source that are no intel event (the admin's "other calls in the window", #961): its labelled
+    dispatch consoles' transmissions (talkers.py: talker_of(row) -> Talker | None) in none of the events, grouped
+    while each is within gap_s of the one before, a group left out when any of its transmissions is within gap_s of
+    an event's own (that event's conversation). txs: [{id, start, system, radio_id}] by air time. [{at, n, consoles:
+    [labels]}], oldest first. No labels: none (as before)."""
+    ev_at = [float(t["start"]) for t in txs if str(t["id"]) in event_tids]
+    groups: list[dict] = []
+    for t in txs:
+        if str(t["id"]) in event_tids:
+            continue
+        tk = talker_of(t)
+        if tk is None or not tk.console:
+            continue
+        at = float(t["start"])
+        if groups and at - groups[-1]["end"] <= gap_s:
+            g = groups[-1]
+        else:
+            g = {"at": at, "end": at, "n": 0, "consoles": [], "times": []}
+            groups.append(g)
+        g["end"], g["n"] = at, g["n"] + 1
+        g["times"].append(at)
+        if tk.label not in g["consoles"]:
+            g["consoles"].append(tk.label)
+    return [{"at": g["at"], "n": g["n"], "consoles": g["consoles"]} for g in groups
+            if all(abs(x - y) > gap_s for x in g["times"] for y in ev_at)]
 
 
 def _words(text: str) -> list[str]:
@@ -272,6 +304,7 @@ class IntelLog:
         self.cad, self.engine = cad, engine
         self._facets: tuple | None = None          # (key, facets): the range's choices, again only on a new revision
         self._totals: dict = {}                     # filters -> (revision, total): a poll's count, again only then
+        self._calls: dict = {}                      # (event id, last_at, minute) -> console_calls(): a poll reads none
 
     def _rev(self) -> int:
         """The events' revision for what the list shows (events.py list_rev: an event saved, dismissed, voted on or
@@ -427,8 +460,8 @@ class IntelLog:
         notes = self._notes(ids)
         sibs = self.siblings(rows)
         out = [{**self.row(r, names, votes.get(r["id"], {}), mine.get(r["id"], [])),
-                "notes": notes.get(r["id"], {"n": 0, "tags": [], "review": 0}), "siblings": sibs.get(r["id"], [])}
-               for r in rows]
+                "notes": notes.get(r["id"], {"n": 0, "tags": [], "review": 0}), "siblings": sibs.get(r["id"], []),
+                "calls": self.console_calls(r)} for r in rows]
         from sizeup.intel.notes import REVIEW_TAGS, TAGS
         return {"events": out, "total": total, "page": page, "size": size, "since": f["since"], "until": f["until"],
                 "now": f["now"], "facets": self.facets(f["since"], f["until"], names), "held": held_options(),
@@ -564,44 +597,60 @@ class IntelLog:
 
     # -- the other calls in an event's window ------------------------------------------------------------------------
 
-    def span(self, pack: str) -> float:
-        """An event's window for its siblings: the engine's merge span of its pack (max(window_s, merge_min))."""
-        p = self.engine.pack(pack) if hasattr(self.engine, "pack") else None
-        try:
-            return float(self.engine._merge_span(p)) if p is not None else DEFAULT_SIBLING_S
-        except Exception:  # noqa: BLE001 - an engine without one: the default
-            return DEFAULT_SIBLING_S
+    def span(self, pack: str = "") -> float:
+        """An event's window for its other calls: More info's Timeline's (±SIBLING_S, context_bundle WINDOW_S)."""
+        return SIBLING_S
 
     def siblings(self, rows: list[dict]) -> dict[int, list[dict]]:
         """{event id: [{id, at, category, label}]}: the other events on each row's source whose first_at..last_at is
-        within the row's window (span()) of its own, oldest first, the nearest SIBLINGS_MAX. One read per source."""
+        within SIBLING_S of its own, the nearest SIBLINGS_MAX by first_at, oldest first. One bounded read per row
+        (intel_events_source), so a busy source never loses one to a shared LIMIT (#961 review)."""
         from sizeup.intel.push import category_label
-        groups: dict[str, list[dict]] = {}
-        for r in rows:
-            if r.get("source_key"):
-                groups.setdefault(r["source_key"], []).append(r)
-        spans = {r["id"]: self.span(r["pack"]) for r in rows}
         labels: dict = {}
         out: dict[int, list[dict]] = {}
-        for key, rs in groups.items():
-            lo = min(float(r["first_at"]) - spans[r["id"]] for r in rs)
-            hi = max(float(r["last_at"]) + spans[r["id"]] for r in rs)
-            near = self.cad.store.q("SELECT id, pack, category, first_at, last_at FROM intel_events WHERE source_key = ? "
-                                    "AND last_at >= ? AND first_at <= ? ORDER BY first_at, id LIMIT 1000", (key, lo, hi))
-            for r in rs:
-                w = spans[r["id"]]
-                got = [o for o in near if o["id"] != r["id"] and float(o["first_at"]) <= float(r["last_at"]) + w
-                       and float(o["last_at"]) >= float(r["first_at"]) - w]
-                got = sorted(sorted(got, key=lambda o: abs(float(o["first_at"]) - float(r["first_at"])))[:SIBLINGS_MAX],
-                             key=lambda o: (o["first_at"], o["id"]))
-                for o in got:
-                    lk = (o["pack"], o["category"])
-                    if lk not in labels:
-                        p = self.engine.pack(o["pack"]) if hasattr(self.engine, "pack") else None
-                        labels[lk] = category_label(p.category(o["category"]) if p else {}, p.label if p else "",
-                                                    o["category"])
-                out[r["id"]] = [{"id": o["id"], "at": o["first_at"], "category": o["category"],
-                                 "label": labels[(o["pack"], o["category"])]} for o in got]
+        for r in rows:
+            if not r.get("source_key"):
+                continue
+            w, lo, hi = SIBLING_S, float(r["first_at"]), float(r["last_at"])
+            got = self.cad.store.q("SELECT id, pack, category, first_at FROM intel_events WHERE source_key = ? AND "
+                                   "last_at >= ? AND first_at <= ? AND id != ? ORDER BY ABS(first_at - ?), id LIMIT ?",
+                                   (r["source_key"], lo - w, hi + w, r["id"], lo, SIBLINGS_MAX))
+            for o in got:
+                lk = (o["pack"], o["category"])
+                if lk not in labels:
+                    p = self.engine.pack(o["pack"]) if hasattr(self.engine, "pack") else None
+                    labels[lk] = category_label(p.category(o["category"]) if p else {}, p.label if p else "",
+                                                o["category"])
+            out[r["id"]] = [{"id": o["id"], "at": o["first_at"], "category": o["category"],
+                             "label": labels[(o["pack"], o["category"])]}
+                            for o in sorted(got, key=lambda o: (o["first_at"], o["id"]))]
+        return out
+
+    def console_calls(self, r: dict, gap_s: float | None = None) -> list[dict]:
+        """The calls in an event's window that are no event at all (console_calls() below, over the source's
+        transmissions within SIBLING_S of its first_at..last_at): [{at, n, consoles}]. Cached a minute per event."""
+        if not r.get("source_key") or self.engine is None or not hasattr(self.engine, "talkers"):
+            return []
+        p = self.engine.pack(r["pack"]) if hasattr(self.engine, "pack") else None
+        gap = float(gap_s if gap_s is not None else (p.window_s if p is not None else 120.0))
+        key = (r["id"], r["last_at"], int(self.cad.clock() // 60))
+        hit = self._calls.get(key)
+        if hit is not None:
+            return hit
+        lo, hi = float(r["first_at"]) - SIBLING_S, float(r["last_at"]) + SIBLING_S
+        txs = self.cad.store.q("SELECT id, start, system, radio_id FROM radio_traffic WHERE source = ? AND start >= ? "
+                               "AND start <= ? ORDER BY start, id LIMIT 2000", (r["source_key"], lo - gap, hi + gap))
+        tids: set = set()
+        for e in self.cad.store.q("SELECT traffic_ids FROM intel_events WHERE source_key = ? AND last_at >= ? AND "
+                                  "first_at <= ?", (r["source_key"], lo - gap, hi + gap)):
+            try:
+                tids |= {str(t) for t in json.loads(e["traffic_ids"] or "[]")}
+            except ValueError:
+                pass
+        out = [c for c in console_calls(txs, tids, self.engine.talkers.of, gap) if lo <= c["at"] <= hi]
+        if len(self._calls) > 512:
+            self._calls.clear()
+        self._calls[key] = out
         return out
 
     def _rq(self, sql: str, args) -> list[dict]:

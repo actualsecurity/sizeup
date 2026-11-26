@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS intel_events (
   note TEXT NOT NULL DEFAULT '',
   near_incident INTEGER, incident_id INTEGER,
   fd TEXT NOT NULL DEFAULT '',                       -- the FD at a fire-related event's place: on_scene | dispatched | there | cleared
-  handoff TEXT NOT NULL DEFAULT '[]',                -- [from console, to console]: a call another console took over
+  handoff TEXT NOT NULL DEFAULT '[]',                -- [from console, to console, to town]: a call another console took over
   updated_at REAL NOT NULL,
   dismissed_by TEXT NOT NULL DEFAULT '',
   delivery TEXT NOT NULL DEFAULT ''                  -- the last push's outcome at ntfy (JSON; the module doc)
