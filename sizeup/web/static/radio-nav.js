@@ -7,8 +7,8 @@
 //                              link (#radio?event=26-000012, ?channel=Fire/EMS 15) opens filtered here too, in All
 //   &view=police &source=<key>  read from a link, never written back: a reload or the Radio tab opens Our calls
 //
-// Our calls is the view the page opens on, every time. Live (RadioLive) plays only Our calls, whatever is on screen;
-// any other view keeps the newest of Our calls in one line on top (a click: back to Our calls). A page going out now
+// Our calls is the view the page opens on, every time. Live audio is the console's player (live-player.js: on every
+// view, what each person listens to); any other view keeps the newest of Our calls in one line on top (a click: back to Our calls). A page going out now
 // (South 2) shows over the list as on the page before.
 // A view is a filter on the hub (GET /api/cad/comms?view=...): one page of 100, older ones by "Older" (?before=),
 // and on each state push whose comms_rev moved only what changed since (?changed=: rows patched by id, `gone` taken
@@ -51,7 +51,8 @@
 // ENC), its meaning in the hover. Another system's traffic comes only to a viewer who may see it (the hub decides).
 //
 // Uses cad.js (el, $, show, setText, syncList, api, fmtTime, cad), radio.js (Radio.fillPaging) and radio-view.js
-// (RadioView.row / rowSig, RadioLive): loaded after them. Tested in node (tests/test_radio_nav.py).
+// (RadioView.row / rowSig, RadioLive): loaded after them. Each channel's live-audio level: live-player.js
+// (LivePlayer.sourceControl, the person's own; loaded after this, asked when the tree is drawn). Tested in node (tests/test_radio_nav.py).
 "use strict";
 
 window.RadioNav = (() => {
@@ -521,7 +522,9 @@ window.RadioNav = (() => {
     pin.title = s.pin ? "Pinned: on top of the tree" : "Pin";
     pin.setAttribute("aria-pressed", String(s.pin));
     pin.setAttribute("aria-label", `Pin ${s.name}`);
-    row.append(b, pin);
+    row.append(b);
+    if (window.LivePlayer) row.append(LivePlayer.sourceControl(s));   // its live-audio level (live-player.js): per person
+    row.append(pin);
     if (!fixed(s)) {                                  // Our calls and our fire channels are never muted
       const mute = el("button", "rn-act quiet sm icon", s.mute ? "✕" : "♪");
       mute.type = "button";
@@ -584,7 +587,7 @@ window.RadioNav = (() => {
     if (!dom || !st.open) return;
     const m = model(st.src, st.p, now(), liveKeys(), windowKeys(), loudServices(), st.layout);
     const here = (v) => v.id === st.f.view && !st.f.source;
-    const sig = JSON.stringify([st.f.view, st.f.source, st.p.rail, st.sheet, st.p.folds, st.layout && st.layout.rev, !!st.edit,
+    const sig = JSON.stringify([st.f.view, st.f.source, st.p.rail, st.sheet, st.p.folds, st.layout && st.layout.rev, !!st.edit, st.listenRev,
                                m.sections.map((x) => [x.label, x.groups.map((g) => [g.id, g.name, g.n, g.live, g.em, g.sources.length])]), m.views,
                                m.rows.map((s) => [s.key, s.name, s.n, s.live, s.recent, s.pin, s.mute, s.em, s.quiet, s.stuck, s.until, s.code])]);
     if (sig === st.railSig) return;
@@ -891,7 +894,7 @@ window.RadioNav = (() => {
     const on = st.open && !!t && (st.f.view !== "ours" || narrowed());
     show(box, on);
     if (!on) return;
-    const who = t.rig || t.talker || t.radio_id || t.channel;
+    const who = t.rig || t.talker || t.radio_id || (typeof chName === "function" ? chName(t) : t.channel);
     const n = st.src.filter((s) => s.ours).reduce((a, s) => a + unread(s, st.p.seen[s.key], now()), 0);
     box.replaceChildren(mark("fire"), el("b", "", "Our calls"), ...(n ? [count(n, true)] : []),
                         el("span", "t", fmtTime(t.start)), el("span", "trunc", `${who}: ${t.text || "—"}`));
@@ -926,20 +929,10 @@ window.RadioNav = (() => {
     fill($("#rn-event"), "Any incident", (d.events || []).map((e) => [e.number || String(e.id), `${e.number || "#" + e.id} ${e.type || ""} ${e.address || ""}`.trim()]),
          st.f.event);
   }
-  // the admins' name for its channel (#607) on the row's channel chip: display only (filters, menus and links keep the
-  // real one); the real one in the hover
-  const shownName = (t) => (st.layout && st.layout.names && t.source && st.layout.names[t.source]) || "";
-  function srcChip(n) {
-    if (n.classList && n.classList.contains("chip") && n.classList.contains("src")) return n;
-    for (const c of n.children || []) { const x = srcChip(c); if (x) return x; }
-    return null;
-  }
+  // (the channel chip: radioRow's, its one name from radio-names.js: the admins' short or name, system and talkgroup on
+  // hover; no name of the rail's own here)
   function fillRow(li, t) {
-    const n = RadioView.row(t), nm = shownName(t), chip = nm && srcChip(n);
-    if (chip) {
-      chip.textContent = nm;
-      chip.title = `${t.channel}${t.talkgroup !== undefined && t.talkgroup !== null ? ` (TG ${t.talkgroup})` : ""}`;
-    }
+    const n = RadioView.row(t);
     li.className = n.className;
     li.replaceChildren(...n.childNodes);
   }
@@ -951,7 +944,7 @@ window.RadioNav = (() => {
     renderChips();
     if (document.activeElement !== $("#rn-q")) $("#rn-q").value = st.f.q;
     setText($("#rv-count"), st.error ? `Load failed: ${st.error}` : `${st.rows.filter((t) => t.kind !== "note").length} TX${st.older ? "+" : ""}`);
-    syncList($("#rn-list"), st.rows, { key: (t) => t.id, sig: (t) => RadioView.rowSig(t) + shownName(t), make: () => el("li"), fill: fillRow,
+    syncList($("#rn-list"), st.rows, { key: (t) => t.id, sig: (t) => RadioView.rowSig(t), make: () => el("li"), fill: fillRow,
                                        empty: narrowed() ? "None match" : "None" });
     show($("#rn-older"), st.older);
   }
@@ -1162,6 +1155,8 @@ window.RadioNav = (() => {
     let drawn = -1;
     cad.hooks.push(() => { if (st.open && drawn !== cad.txRev) { drawn = cad.txRev; render(); } });
     window.addEventListener("sizeup:tx-changed", () => { if (st.open) page(); });
+    // a listen level changed (live-player.js): the tree's level marks again
+    window.addEventListener("sizeup:listen-changed", () => { st.listenRev = (st.listenRev || 0) + 1; if (st.open) renderRail(); });
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") { clearTimeout(st.timer); st.timer = 0; } else if (st.open) page();
     });

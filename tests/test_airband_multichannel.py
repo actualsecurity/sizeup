@@ -5,6 +5,7 @@ only: no radio, no network."""
 from __future__ import annotations
 
 import json
+import os
 import signal
 import stat
 import subprocess
@@ -323,18 +324,47 @@ def test_a_fake_rtl_sdr_through_the_channelizer_process_gives_each_channel_its_t
 
 def test_the_channelizer_closes_rtl_sdr_before_it_exits(tmp_path, monkeypatch):
     """A switch from two to one: rtl_sdr gone (the dongle closed) before the channelizer is, so rtl_fm never races it."""
-    gone = tmp_path / "gone"
+    gone, pid = tmp_path / "gone", tmp_path / "pid"
     exe = tmp_path / "rtl_sdr"
-    exe.write_text(f'#!/bin/sh\ntrap \'sleep 0.5; touch "{gone}"; exit 0\' TERM\n'
+    exe.write_text(f'#!/bin/sh\necho $$ > "{pid}"\ntrap \'sleep 0.5; touch "{gone}"; exit 0\' TERM\n'
                    'while true; do head -c 65536 /dev/zero; sleep 0.05; done\n')
     exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
     monkeypatch.chdir(ROOT)
     p = subprocess.Popen([sys.executable, "-m", "sizeup.radio.channelize", "--rtl-sdr", str(exe), "-f", "125.54",
-                          "-s", "2560000", "--offset", "860000"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(1.5)
-    p.send_signal(signal.SIGTERM)
-    p.wait(timeout=10)
-    assert gone.exists()                                             # rtl_sdr was waited for
+                          "-s", "2560000", "--offset", "860000"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)                     # its own group: the finally can reap all of it
+    try:
+        deadline = time.monotonic() + 30
+        while not (pid.exists() and pid.read_text().strip()) and time.monotonic() < deadline:
+            time.sleep(0.05)                                         # rtl_sdr running (not a fixed sleep: slow under load)
+        assert pid.exists(), "rtl_sdr never started"
+        time.sleep(0.3)
+        p.send_signal(signal.SIGTERM)
+        p.wait(timeout=10)
+        assert gone.exists()                                         # rtl_sdr was waited for
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(pid.read_text()), 0)                         # and is not left running
+        with pytest.raises((ProcessLookupError, PermissionError)):
+            os.killpg(p.pid, 0)                                      # nor anything it started
+    finally:
+        _reap_group(p)
+
+
+def _reap_group(p: subprocess.Popen) -> None:
+    """A test's process and everything in its group gone, whatever the test did: no stub outlives it."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(p.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            break
+        try:
+            p.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            continue
+    try:
+        p.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def test_a_failing_rtl_sdr_falls_back_to_rtl_fm_and_says_why(monkeypatch):

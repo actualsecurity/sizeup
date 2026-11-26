@@ -52,7 +52,7 @@ window.Incoming = (() => {
       const what = el("span", "pa-what");
       what.append(el("b", "pa-t", "Possible incoming"), el("span", "pa-src", `${x.source} · ${deps.time(x.at)} · ${x.text}`));
       const age = el("span", "pa-age");
-      age.dataset.paAt = String(x.at);         // prealert.js ticks every [data-pa-at]
+      if (window.PreAlert) PreAlert.ticking(age, x.at);          // prealert.js ticks it
       li.append(what, age);
       return li;
     }));

@@ -20,7 +20,7 @@ spare = max(1, (len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity")
 threads = min(int(stt.get("threads") or spare), spare)
 argv = [path(stt.get("server_binary") or "/opt/sizeup/whisper/bin/whisper-server"),
         "-m", path(stt.get("model") or "/opt/sizeup/models/whisper.bin"),
-        "--host", "127.0.0.1", "--port", str(int(stt.get("port", 8179))), "-t", str(threads)]
+        "--host", "127.0.0.1", "--port", str(int(stt.get("port", 8179))), "-l", "en", "-t", str(threads)]
 if int(stt.get("beam_size", 0) or 0) > 1:
     argv += ["-bs", str(int(stt["beam_size"]))]
 print("\n".join(argv))

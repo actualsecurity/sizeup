@@ -130,7 +130,7 @@ window.AirportAlerts = (() => {
       }
       li.append(dl);
     }
-    li.append(el("div", "aa-src", `${a.source_name}${a.channel ? ` · ${a.channel}` : ""} · ${deps.time(a.at)}`
+    li.append(el("div", "aa-src", `${a.source_name}${a.channel ? ` · ${typeof chName === "function" ? chName({ channel: a.channel, system: "airband" }) : a.channel}` : ""} · ${deps.time(a.at)}`
                  + (a.count > 1 ? ` · ${a.count} tx` : "")));
     const heard = el("ol", "aa-heard");
     for (const s of d.snippets || []) {

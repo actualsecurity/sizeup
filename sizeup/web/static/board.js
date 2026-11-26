@@ -50,7 +50,7 @@
     if (document.visibilityState !== "hidden") r.timer = setTimeout(pollRadio, pushed() ? SAFETY_MS : RADIO_POLL_MS);
   }
   function renderRadio() {
-    setText($("#b-radio-sum"), [...new Set(r.rows.map((t) => t.channel))].join(" · ") || "Main channels");
+    setText($("#b-radio-sum"), [...new Set(r.rows.map((t) => (typeof chName === "function" ? chName(t) : t.channel)))].join(" · ") || "Main channels");
     syncList($("#b-radio"), r.rows, {
       key: (t) => t.id,
       sig: (t) => JSON.stringify([t.text, t.status, t.rig, t.talker, t.has_audio, t.model, t.alt_text, fireground(t), talkSig(t.rig),
@@ -93,7 +93,7 @@
         else for (const name of p.departments || []) meta.append(el("span", "chip dept", name));
         const done = p.status === "done" && p.raw;
         li.replaceChildren(meta, el("div", done ? "txt clamp" : "txt muted", done ? p.raw
-          : { pending: "Transcribing", no_voice: "Tones only, no message", no_speech: "No speech", error: "Transcription failed" }[p.status] || p.status));
+          : { pending: "Transcribing", no_voice: "Tones only, no message", no_speech: "No speech", unclear: "Unclear", error: "Transcription failed" }[p.status] || p.status));
       },
       empty: "None",
     });

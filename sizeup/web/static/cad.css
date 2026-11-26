@@ -9,12 +9,13 @@
   html.cad, body.cad { overflow: hidden; }
   /* each page shows its own: the board hides the console's controls, the console the board's */
   html:not(.board) .board-only, html.board .console-only { display: none !important; }
-  body.cad { grid-template-rows: auto auto auto auto minmax(0, 1fr); }
+  body.cad { grid-template-rows: auto auto auto auto minmax(0, 1fr) auto; }
   body.cad > header { grid-row: 1; }
   body.cad > .cloud-banner { grid-row: 2; }
   body.cad > .role-banner { grid-row: 3; }
   body.cad > .alert-banners { grid-row: 4; }
   body.cad > main { grid-row: 5; }
+  body.cad > .lp { grid-row: 6; }
   body.stale aside { opacity: 0.55; filter: saturate(0.4); }
   body.ro-dispatch .cad-main [data-ro] { cursor: not-allowed; }
 
@@ -1298,5 +1299,49 @@
     [data-rem], [data-rem] .lbl { animation: none !important; }
     :is(.q > li.qi, .ov-card, .ulist > li.urow, .on-units > li.ou, .card.inc > .card-head, .chip, .b-unit)[data-rem]:not(.talking, .live),
     .cm-rig.rv[data-rem]:not(.talking) .lbl { background-color: color-mix(in srgb, var(--rem) 16%, var(--raised)); }
+  }
+
+  /* ---- the live player (live-player.js): a strip under every view while Listen is on --------------------- */
+  .lp { position: relative; display: flex; align-items: center; gap: var(--s-2); min-inline-size: 0; flex-wrap: wrap;
+        padding: var(--s-1) var(--gutter); background: var(--panel); border-block-start: var(--bw) solid var(--line); }
+  .lp[hidden] { display: none; }
+  .lp-now { display: inline-flex; align-items: center; gap: var(--s-2); min-inline-size: 0; flex: 0 1 auto; }
+  .lp-ch { font-weight: 600; }
+  .lp-who { color: var(--text-2); }
+  .lp-t { font-variant-numeric: tabular-nums; color: var(--dim); }
+  .lp-p { --c: var(--warn); }
+  .lp-queue { font-variant-numeric: tabular-nums; }
+  .lp-quick { flex: none; }
+  /* the header's Listen: an icon (words only while it needs the click: Tap for sound) */
+  #lp-on:not(.blocked) { inline-size: var(--ctl); padding-inline: 0; justify-content: center; }
+  .lp-pause { display: inline-block; inline-size: var(--s-3); block-size: var(--s-3);
+              border-inline: calc(3 * var(--bw)) solid currentColor; }   /* pause: two bars */
+  .lp-vol { inline-size: calc(4 * var(--ctl)); accent-color: var(--ok); }
+  .lp-panel { position: absolute; inset-block-end: calc(100% + var(--s-1)); inset-inline-end: var(--gutter);
+              inline-size: min(calc(16 * var(--ctl)), calc(100vw - 2 * var(--gutter)));
+              max-block-size: calc(100vh - 3 * var(--hdr-h)); overflow-y: auto; display: grid; gap: var(--s-1); }
+  .lp-panel[hidden] { display: none; }
+  .lp-phead, .lp-pfoot, .lp-rule, .lp-add, .lp-how { display: flex; align-items: center; gap: var(--s-2); min-inline-size: 0; }
+  .lp-phead h2 { margin: 0; font-size: var(--fs-md); }
+  .lp-how { flex-wrap: wrap; }
+  .lp-age input { inline-size: calc(2.5 * var(--ctl)); }
+  .lp-sub { margin: var(--s-2) 0 0; font-size: var(--fs-xs); font-weight: 600; color: var(--dim); }
+  .lp-rule > .trunc { min-inline-size: 0; }
+  .lp-lvl { flex: none; }
+  .lp-pick { flex: 1 1 auto; min-inline-size: 0; }
+  .lp-mhz { inline-size: calc(3 * var(--ctl)); }
+  .lp-pfoot { padding-block-start: var(--s-1); border-block-start: var(--bw) solid var(--line); }
+  /* a channel's level on the Radio rail: P filled, N outlined, Off a dash; its own choice bold, a default dimmed */
+  .lp-lv { display: inline-flex; align-items: center; justify-content: center; inline-size: var(--tag-h); block-size: var(--tag-h);
+           font-size: var(--fs-2xs); line-height: var(--lh-2xs); font-weight: 700; border-radius: var(--radius-s);
+           border: var(--bw) solid transparent; color: var(--dim); }
+  .lp-lv.lp-priority { color: var(--on-warn); background: var(--warn); border-color: var(--warn); }
+  .lp-lv.lp-normal { color: var(--text-2); border-color: var(--text-2); }
+  .lp-lv:not(.own) { opacity: 0.6; }
+  .lp-src.menu-btn { flex: none; }
+  .lp-flash { outline: var(--focus-w) solid var(--ok); outline-offset: calc(-1 * var(--focus-w)); }
+  @media (max-width: 1100px) {
+    body.cad > .lp { position: sticky; inset-block-end: 0; z-index: var(--z-sticky); }
+    .lp-vol { display: none; }
   }
 }

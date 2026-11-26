@@ -18,7 +18,10 @@ notice when it clears:
     behind        on another build than the hub's for behind_min (15)                      warning
     update        the update to the hub's build failed or was rolled back                  warning (critical:
                                                                                            the rollback failed too)
-    sdr:<serial>  a dongle the station had is gone (unplugged)                             critical
+    sdr:<serial>  a dongle the station had is gone (unplugged): its job, a new dongle that    critical
+                  fits (sizeup/radio/replace.py), its Receivers row (who.link, the push's
+                  click); cleared by the dongle leaving the config: "removed from config",
+                  never "Recovered" (_removed)
     noaudio:<serial> a dongle that opens but streams no audio (#703: out until it streams     critical
                   again, a person picks its job, or a replug); once, never per stall
     dup:<serial>  two or more dongles on the station share one serial (#242): nothing of  critical
@@ -141,6 +144,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Callable
+from urllib.parse import quote
 
 from sizeup import tz
 from sizeup.channels import CHATTER_PER_MIN
@@ -329,6 +333,52 @@ def _dur(s: float) -> str:
     if s < 5400:
         return f"{round(s / 60)} min"
     return f"{s // 3600} h {(s % 3600) // 60} min"
+
+
+def _fit_name(o: dict) -> str:
+    """The new dongle an offer names, by its name (as the card and the console say it): the pick, else the first."""
+    c = next((c for c in o["choices"] if c["serial"] == o.get("pick")), o["choices"][0])
+    return c["name"] or c["serial"]
+
+
+def _swaps(sdr: dict | None, now: float, skew: float = 0.0) -> tuple[list[dict], list[dict]]:
+    """A dongle swapped for a new one (sizeup/radio/replace.py): the station's offers, shaped for Health's card
+    ("New SDR <serial> seen: use it for <jobs>?"), and a hint per antenna group member gone LONG_GONE_S ("<serial>
+    missing 1 d: remove from group?", with its one-click action)."""
+    from sizeup.radio.replace import LONG_GONE_S
+
+    def rows(v) -> list:                            # (a value of another type, an older or broken station's: none)
+        return v if isinstance(v, list) else []
+    sdr = sdr if isinstance(sdr, dict) else {}
+    offers = []
+    for o in rows(sdr.get("replace")):
+        if not isinstance(o, dict) or not o.get("missing"):
+            continue
+        ch = [{k: str(c.get(k) or "")[:64] for k in ("serial", "name", "product", "tuner")}
+              for c in rows(o.get("choices")) if isinstance(c, dict) and c.get("serial")][:8]
+        if ch:
+            offers.append({"missing": str(o["missing"])[:64], "name": str(o.get("name") or o["missing"])[:64],
+                           "jobs": [str(j)[:40] for j in rows(o.get("jobs"))][:4], "group": str(o.get("group") or "")[:40],
+                           "pick": str(o.get("pick") or "")[:64], "only": bool(o.get("only")),
+                           "critical": bool(o.get("critical")), "choices": ch,
+                           "absent_s": o.get("absent_s") if isinstance(o.get("absent_s"), (int, float))
+                           and not isinstance(o.get("absent_s"), bool) else None})
+    hints = []
+    for x in rows(sdr.get("missing")):
+        at = x.get("last_seen") if isinstance(x, dict) else None
+        if not isinstance(at, (int, float)) or isinstance(at, bool) or not x.get("group"):
+            continue
+        at += skew                                  # (the station's clock -> the hub's)
+        if now - at < LONG_GONE_S:
+            continue
+        days = int((now - at) // 86400)
+        serial = str(x.get("serial") or "")[:64]
+        hints.append({"channel": f"Antenna group {str(x['group'])[:40]}", "level": "warn",
+                      "text": f"{serial} missing {days} d: remove from group?",
+                      "title": f"Last seen {_hhmm(at)}" + (f"; its job {', '.join(str(j) for j in rows(x.get('jobs')))} goes with it"
+                                                          if rows(x.get("jobs")) else ""),
+                      "action": {"label": "Remove", "missing": serial, "do": "drop"}})
+    return offers[:8], hints[:8]
 
 
 # -- the station's side --------------------------------------------------------------------------------------
@@ -807,6 +857,7 @@ class StationHealth:
                           if isinstance(g.get("conflicts"), dict) else {}}
                          for g in (sdr or {}).get("groups") or [] if isinstance(g, dict)][:8]
         out["groups_problem"] = str((sdr or {}).get("groups_problem") or "")[:200]
+        out["swaps"], gone_hints = _swaps(sdr, now, hub.skew)     # a dongle swapped for a new one (sizeup/radio/replace.py)
         rx = hl.get("reception") if isinstance(hl.get("reception"), dict) else None      # (#410)
         out["reception"] = ({"job": str(rx.get("job") or "")[:60], "sdr": str(rx.get("sdr") or "")[:60],
                              "text": str(rx.get("text") or "")[:300], "push": bool(rx.get("push")),
@@ -882,6 +933,7 @@ class StationHealth:
             uptime_s=round(snow - started) if isinstance(started, (int, float)) else None,
             boot=hl["boot"] + hub.skew if isinstance(hl.get("boot"), (int, float)) else None)
         out["hints"] = [{"channel": c["label"], "text": c["hint"]} for c in chans if c["hint"]]
+        out["hints"] += gone_hints
         out["trunk"] = self._trunk_model(p25row, hl, snow) if p25row else None
         ad = hl.get("adsb") if isinstance(hl.get("adsb"), dict) else None
         if ad is not None:                       # our ADS-B receiver (#235), its times on the hub's clock
@@ -1151,10 +1203,13 @@ class StationHealth:
                 continue                                 # a context system down is shown in the panel, never pushed
             if not d["present"]:
                 on = next((x["name"] for x in m["dongles"] if x["serial"] == d.get("on")), "") if d.get("on") else ""
+                fit = next((o for o in m.get("swaps") or [] if o["missing"] == d["serial"]), None)
                 held(f"sdr:{d['serial']}", 0, {"severity": "critical", "title": f"SDR {d['name']} gone",
                                                "text": f"dongle {d['name']} ({d['serial']}) unplugged or not found"
                                                        + (f" · {d['job']} on SDR {on} ({d['group']})" if on else
-                                                          f" · {d['job']} not running" if d["job"] != "Off" else "")})
+                                                          f" · {d['job']} not running" if d["job"] != "Off" else "")
+                                                       + (f" · new SDR {_fit_name(fit)} fits"
+                                                          if fit and fit["choices"] else "")})
             elif d["job"] != "Off" and not d["running"] and (d["job"] != P25_JOB or m["processes"]["recorder"] is None):
                 held(f"job:{d['job']}", JOB_GRACE_S, {"severity": "critical", "title": f"{d['job']} not running",
                                                      "text": f"{d['job']} on SDR {d['name']}: {d['state'] or '?'}"
@@ -1428,6 +1483,7 @@ class StationHealth:
             w["dongle"] = f"SDR {d['name'] if d else arg}"
             if d and d["job"] != "Off":
                 w["channel"] = d["job"]
+            w["link"] = f"#settings/radios/receivers?sdr={quote(arg, safe='')}"    # (its row: reassign it there)
         elif kind == "job":
             w["channel"] = arg
             d = next((d for d in m["dongles"] if d["job"] == arg), None)
@@ -1537,6 +1593,9 @@ class StationHealth:
                 a = self.active.pop(key)
                 a["cleared"] = self._clear_at.pop(key, now)
                 self.history.append(a)
+                if self._removed(key, a, m, now):        # a gone dongle out of the config: never "Recovered"
+                    changes.append(("clear", a))
+                    continue
                 self.settling[key] = a                   # "Recovered" once it has settled (#340)
                 changes.append(("clear", a))
                 self.log(f"health: cleared {a['title']} (after {_dur(now - a['since'])})")
@@ -1560,6 +1619,28 @@ class StationHealth:
                 self._save()
             self._save_gaps(now)
         return changes
+
+    def _removed(self, key: str, a: dict, m: dict, now: float) -> bool:
+        """An "SDR gone" that clears because the station no longer has that dongle at all (its jobs moved to another one
+        and it left the config: Use it, a group saved without it), not because it came back: said as such, pushed when
+        the alert was, and never "Recovered"."""
+        kind, _, serial = key.partition(":")
+        if kind != "sdr" or not m.get("shared") or not m.get("dongles") or not m.get("reported"):
+            return False
+        if any(d["serial"] == serial for d in m["dongles"]) or any(str(x.get("serial")) == serial for x in m.get("usb") or []):
+            return False
+        job = (a.get("who") or {}).get("channel") or ""
+        on = [d["name"] for d in m["dongles"] if job and d["job"] == job and d["present"]]
+        a["title"] = f"SDR {serial} removed from config"
+        a["text"] = f"jobs now on SDR {', '.join(on)}" if on else (f"{job} on no dongle" if job else "it had no job")
+        a["removed"] = True
+        self.log(f"health: {a['title']} ({a['text']}): not a recovery")
+        n = self.notifier
+        if a.get("pushed") and n is not None and n.enabled:
+            n.send(f"{a['title']} ({a['text']})", f"SDR {serial} gone since {_hhmm(a['since'])}, now out of the config: "
+                                                   f"{a['text']}.", priority=3, tags=("information_source", "sizeup"),
+                   click=f"{self.public_url}/cad#settings/radios/receivers" if self.public_url else "", who=a.get("who"))
+        return True
 
     def _resume(self, key: str, now: float) -> dict:
         """A settling alert back (#340): active again as the same episode (its since, whether it was pushed), out of
@@ -1639,6 +1720,7 @@ class StationHealth:
             return
         # (the old address, kept so the pushes are as they were: settings.js opens Settings > Station > Health from it, #203)
         click = f"{self.public_url}/cad#settings/station/health" if self.public_url else ""
+        click = f"{self.public_url}/cad{a['who']['link']}" if self.public_url and (a.get("who") or {}).get("link") else click
         who = a.get("who") or None
         if recovered:
             flap = f", back {a['flap_n']}× before it settled" if a.get("flap_n") else ""

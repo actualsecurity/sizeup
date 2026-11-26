@@ -361,7 +361,8 @@ class SttCorrections:
         if not sourcekeys.may_see_context():
             where.append(f"t.system IN {sourcekeys.OURS_SQL}")
         rows = self.store.q("SELECT t.id, t.channel, t.talkgroup, t.talker, t.start, t.end, t.text, t.model, t.alt_text, "
-                            "t.alt_model, t.dispatcher, t.rig, t.source, t.system, t.service, c.corrected, c.reference, "
+                            "t.alt_model, t.dispatcher, t.rig, t.source, t.system, t.service, "
+                            "t.corr_text, t.corr_rules, c.corrected, c.reference, "
                             "c.\"by\", c.at, c.based_on "
                             "FROM stt_corrections c JOIN radio_traffic t ON t.id = c.traffic_id "
                             f"WHERE {' AND '.join(where)} ORDER BY t.start, t.id LIMIT ?", (*args, limit + 1))

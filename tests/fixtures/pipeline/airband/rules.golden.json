@@ -116,7 +116,7 @@
       "t": 0,
       "id": "brush-fire-quiet-1",
       "ch": "HPN Tower",
-      "dur": 4,
+      "dur": 16,
       "text": "Westchester information bravo is current, wind one six zero at eight, visibility one zero, altimeter two niner niner two, notams: brush fire burning north of the field, advise on initial contact you have information bravo"
      }
     }
@@ -972,7 +972,7 @@
       "t": 0,
       "id": "mayday-fires-2",
       "ch": "HPN Tower",
-      "dur": 4,
+      "dur": 16,
       "text": "Westchester information bravo is current, wind one six zero at eight, visibility one zero, altimeter two niner niner two, notams: mayday relay from November one two three alfa bravo, advise on initial contact you have information bravo"
      },
      "alerts": [
