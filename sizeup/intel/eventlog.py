@@ -420,6 +420,9 @@ class IntelLog:
         f = self.query(q)
         inner, outer, args, page, size = f["inner"], f["outer"], f["args"], f["page"], f["size"]
         store = self.cad.store
+        upto = f["upto"]                 # the newest id, read before the page (an event saved after it: on no page yet)
+        if upto is None:
+            upto = int(store.one("SELECT COALESCE(MAX(id), 0) AS n FROM intel_events", {})["n"])
         rev = self._rev()
         # a poll (the page's own, ?poll=1) counts again only when the events changed: the same filters, the same total
         fkey = json.dumps([sorted((k, v) for k, v in q.items() if k not in ("page", "poll")), self.classes()])
@@ -432,9 +435,6 @@ class IntelLog:
             if len(self._totals) > 64:
                 self._totals.clear()
             self._totals[fkey] = (rev, total, older)
-        upto = f["upto"]
-        if upto is None:
-            upto = int(store.one("SELECT COALESCE(MAX(id), 0) AS n FROM intel_events", {})["n"])
         rows = store.q(f"SELECT * FROM ({inner}) WHERE {outer} ORDER BY first_at DESC, id DESC LIMIT :lim OFFSET :off",
                        {**args, "lim": size, "off": page * size})
         names = source_names(self.cad)
