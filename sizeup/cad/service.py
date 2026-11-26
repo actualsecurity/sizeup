@@ -66,7 +66,8 @@ AUDIO_NAME = re.compile(r"[0-9a-f]{20}")
 COMMS_CACHE_S, COMMS_CACHE_N = 10.0, 32     # GET /api/cad/comms: an answer reused this long, at most this many kept (#284)
 # GET /api/cad/comms: any of these asks for a page of a view (#415, Cad._comms_page), none: Main and Other as before
 COMMS_PAGE_PARAMS = ("view", "system", "group", "source", "service", "tier", "dept", "safety", "mute", "before", "changed", "at")
-COMMS_UNSENT = ("call_id", "turn", "updated_at")   # radio_traffic columns the Radio view never reads (#284: smaller answer)
+# radio_traffic columns the Radio view never reads (#284: smaller answer); corr_*: sent as fixed_text / fixes (#879)
+COMMS_UNSENT = ("call_id", "turn", "updated_at", "corr_text", "corr_rules", "corr_v")
 FIRE_KINDS = ("chief", "engine", "ladder", "tower", "rescue", "utility", "marine")
 PREVIEW_KEEP_S = 24 * 3600
 RETAG_DAYS = 30            # a source's service changed: its rows this recent re-tagged (Cad.retag_services)
@@ -2580,7 +2581,7 @@ class Cad:
                 try:
                     got = self.detail_source(m) or {}
                 except Exception as e:              # the suggestion as it was, without them
-                    self.log(f"CAD: location detail failed for {m.get('label')!r} ({type(e).__name__}: {e})")
+                    self.log(f"CAD: location detail failed ({kind}: {type(e).__name__})")     # (never the address)
                     got = {}
                 if len(self._details) > 500:
                     self._details.clear()
@@ -3036,8 +3037,8 @@ class Cad:
             return old["id"]
         via = "60 CONTROL" if "60 CONTROL" in self.lists.received_codes else ""
         iid = self.store.create_incident(**f, received_via=via, source="60 Control page", source_ref=ref, status="queued")
-        self.log(f"CAD: from 60 Control: {self.lists.type_label(f['type'], f['subtype']) or 'type not set'} at "
-                 f"{f['address'] or '(no location)'}")
+        self.log(f"CAD: from 60 Control: event {iid} queued ({'a location' if f['address'] else 'no location'})")   # (never its
+        # type or address: logs go to CloudWatch, and an EMS type is a medical detail)
         self.comms.link_pages(iid, data.get("pages") or [])   # its page plays from the event (#64)
         self._prealert_match(self.store.incident(iid))
         return iid

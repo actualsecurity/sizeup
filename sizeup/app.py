@@ -66,7 +66,7 @@ import numpy as np
 
 from sizeup.api.v1.switches import Switches
 from sizeup.config import P25_JOB, Config, ConfigError, airband_owner, load
-from sizeup import janitor, tz
+from sizeup import janitor, logscrub, tz
 from sizeup.cad import Cad
 from sizeup.cad.alarms import STUCK_WITHIN_S
 from sizeup.cad.api import CadApi
@@ -101,6 +101,7 @@ from sizeup.cad import tonelist
 from sizeup.radio.tones import ToneEvent, TonePlan, base_name
 from sizeup.talkers import talker_prompt
 from sizeup import channels, stt_quality, stt_terms
+from sizeup import stt_correct
 from sizeup.stt import (CATCHUP, CATCHUP_MAX_CLIP_S, CATCHUP_NOTE, CLASS_NAMES, CONTEXT, CONTEXT_FALLBACK, HIGH, LIVE, LOW,
                         RERUN, SHED, URGENT, Transcriber, WhisperClient, radio_voice, wav_bytes)
 from sizeup.talkgroups import TalkgroupPrefs
@@ -946,7 +947,7 @@ class App:
                                     context=cfg.atc_context, context_s=cfg.atc_context_s, log=log)
                 log(f"atc: airport pre-alerts from {', '.join(airband)} ({len(self.atc.rules.rules)} rules)")
             except (OSError, ValueError, KeyError) as e:
-                log(f"atc: WARNING the pre-alert rules didn't load ({type(e).__name__}: {e}): no HPN ATC pre-alerts")
+                log(f"atc: WARNING the pre-alert rules didn't load ({type(e).__name__}): no HPN ATC pre-alerts")   # (never {e}: rule text)
         # ... and the ones that build up over several transmissions (#369, sizeup/airport_watch.py): an abnormal
         # go-around followed through its frequency changes (_atc, _atc_view), "alert level N" on 60 Control (the CAD's)
         self.cad.airport_watch.configure(cfg.channels, self._atc_aircraft, cfg.atc_alert_level_incident,
@@ -1012,7 +1013,7 @@ class App:
             from sizeup.geo.pagegeo import locate_page
             return locate_page(self.gaz, d.text, tone_departments).as_geo()
         except Exception as e:
-            log(f"geocode error for {d.location!r}: {type(e).__name__}: {e}")
+            log(f"geocode error ({len(d.location or '')} characters): {type(e).__name__}")     # (never the address)
             return None
 
     def _geocode_text(self, q: str) -> list[dict]:
@@ -1021,7 +1022,7 @@ class App:
             return [{k: getattr(m, k) for k in ("label", "lat", "lon", "kind", "municipality", "precision")}
                     | {"confidence": round(float(m.confidence), 2)} | self._geocode_parts(m) for m in self.gaz.candidates(q)[:20]]
         except Exception as e:
-            log(f"geocode error for {q!r}: {type(e).__name__}: {e}")
+            log(f"geocode error ({len(q or '')} characters): {type(e).__name__}")   # (never what was typed: an address)
             return []
 
     @staticmethod
@@ -1859,8 +1860,14 @@ class App:
         for r in rows:
             r["tier_set"] = r["tier"] is not None
             if r["tier"] is None:
-                r["tier"] = tiers.derived(r["record"], self.channel_pref(r["key"])["transcribe"],
-                                          r["encrypted"])
+                tx = bool(self.channel_pref(r["key"])["transcribe"])
+                r["tier"] = tiers.derived(r["record"], tx, r["encrypted"])
+                # the switches beside the tier (Settings > Radios): the county's Transcribe is its channel choice and
+                # it has no Alerts (None: its pre-alerts are the intel packs', tiers.COUNTY_ALERTS)
+                r["transcribe"], r["alerts"] = tx, None
+            else:
+                sw = tiers.switches(r["tier"])
+                r["transcribe"], r["alerts"] = sw["transcribe"], sw["alerts"]
         return rows
 
     def p25_systems_state(self) -> list[dict]:
@@ -2085,6 +2092,8 @@ class App:
                 del item.raw_audio
             # which model wrote this text (the station's, when the hub replays it)
             item.model = getattr(item, "model", "") or Path(self.cfg.stt_model).name  # type: ignore[attr-defined]
+            # its channel's terms put back (#879): beside the raw text before anything stores or reads it
+            self._corr_put(item, self._corr_of(traffic_key(item), item.text))
             self._emit("traffic", dict(item.as_dict(), attach=attach, pairs=pairs), item.id)
             self.store.on_traffic(item, attach=attach)
             self._to_cad(item)
@@ -2093,10 +2102,9 @@ class App:
             self._atc(item)
             if item.status == stt_quality.UNCLEAR:      # (a late call's old words: never asked again, #747)
                 self._unclear(item, traffic_key(item), quiet=bool(getattr(item, "late", False)))
-            if item.status != "no_speech" and other:
-                log(f"{item.source}: transmission {item.id} ({item.status})")     # (#419: its words never in a log)
-            elif item.status != "no_speech":
-                log(f"{item.source}: {'[' + item.unit + '] ' if item.unit else ''}{item.text or '(' + item.status + ')'}")
+            if item.status != "no_speech":         # (its words never in a log: CloudWatch, #419)
+                log(f"{item.source}: transmission {item.id} ({item.status}, {logscrub.said(item.text)})"
+                    + (f" · unit {item.unit}" if item.unit and not other else ""))
             return
         if isinstance(item, Rerun):
             return self._rerun_done(item)
@@ -2108,7 +2116,7 @@ class App:
         self._save_page(page)
         self._page_to_cad(page)                     # its text in the log (before an event links it)
         self._emit("page_text", self._page_doc(page))
-        log(f"{page.label} {page.kind}: {page.raw or '(' + page.status + ')'}"
+        log(f"{page.label} {page.kind} {page.id}: {page.status}, {logscrub.said(page.raw)}"     # (never its words)
             + {True: " [read twice]", False: " [not read twice]"}.get(page.read_twice, ""))
         if page.status == stt_quality.UNCLEAR:
             self._unclear(page, page.label)
@@ -2142,10 +2150,10 @@ class App:
         name one of ours (IncidentStore.on_page). Returns the incident, or None."""
         inc = self.store.on_page(page.id, depts, d, at=page.start)
         if inc:
-            where = inc.geo["label"] if inc.geo else (inc.location or "location not found")
-            if inc.geo and inc.geo.get("confirmed") is False:
-                where = f"{inc.location or where} (location unconfirmed: {inc.geo.get('why') or 'not sure'}; best {where})"
-            log(f"INCIDENT {inc.incident_type} · {where} · {', '.join(inc.departments)}")
+            # (never its type, its address or its words in a log: an EMS type is a medical detail)
+            log(f"INCIDENT {inc.id} · {inc.category or 'call'} · "
+                f"{('location unconfirmed' if inc.geo.get('confirmed') is False else 'located') if inc.geo else 'no location'}"
+                f" · {', '.join(inc.departments)}")
             try:
                 ev = self.cad.from_monitor(inc)
                 if ev and tones_half is not None:       # its tones came as a transmission of their own
@@ -2287,6 +2295,8 @@ class App:
                                      # (#747) from while sizeup was down: logged, never told to what alerts
                                      "late": bool(getattr(t, "late", False)),
                                      "vocab_v": getattr(t, "vocab_v", "") or "",     # the term list that biased it
+                                     # (#879) its channel's terms put back, beside the raw text (_corr_put)
+                                     **{k: str(getattr(t, k, "") or "") for k in stt_correct.NO_CORR},
                                      "cut": getattr(t, "cut", "") or "",     # (#819) cut at a mid-call grant
                                      # #409: the P25 system it was heard on ("": the county's, or FM) and its tier
                                      **self._row_source(t)},
@@ -2898,6 +2908,10 @@ class App:
                 "the text it had stays")
             return False
         alt = self._screen_alt(item, alt)
+        # its channel's terms put back (#879), before the row is written; a page: never (its own parser reads it)
+        corr = None if page is not None else self._corr_of(self._corr_key(cid, item), text)
+        if isinstance(item, Traffic):
+            self._corr_put(item, corr)
         if page is not None:
             if page.raw != text and (page.raw or page.status not in ("pending", "remote")):
                 hist = list(getattr(page, "history", None) or [])
@@ -2921,7 +2935,8 @@ class App:
         late = late or bool(getattr(t, "late", False))
         try:
             self.cad.comms.retext(cid, text, status, model, alt, notify=not quiet, vocab_v=vocab_v, late=late,
-                                  quality=unclear.get("quality", ""), unclear_text=unclear.get("unclear_text", ""))
+                                  quality=unclear.get("quality", ""), unclear_text=unclear.get("unclear_text", ""),
+                                  corr=stt_correct.columns(corr))
         except Exception as e:  # the CAD must never stop the monitor
             log(f"CAD: could not update the communications log: {type(e).__name__}: {e}")
         if t is not None and (text or unclear) and not quiet:
@@ -2931,9 +2946,9 @@ class App:
             if not late and text:
                 self._atc(t, text)
         if changed:
-            # (another P25 system's words are never in a log, #419)
-            log(f"{why} {cid}: " + ("(text changed)" if self.clip_is_context(cid)
-                                    else text or ("(unclear)" if unclear else "(no speech)")))
+            # (no transcript's words are ever in a log: CloudWatch; #419 masked only another P25 system's)
+            log(f"{why} {cid}: text changed ({logscrub.said(text)}{', unclear' if unclear and not text else ''}, "
+                f"{model or '?'})")
         self._emit("retext", {"id": cid, "text": text, "status": status, "confidence": confidence, "model": model,
                               **({"stt_prompt_time": True} if prompted else {}),    # (whisper's prompt had its time, #727)
                               **({"alt": alt} if alt is not None else {}), **({"catchup": True} if quiet else {}),
@@ -2943,6 +2958,38 @@ class App:
                           quiet=quiet or late)
         return changed
 
+
+    # -- post-ASR vocabulary correction (#879, sizeup/stt_correct.py) ---------------------------------------
+    stt_correct = None
+
+    def _corr_of(self, key: str, text: str):
+        """The text of record's correction on its channel (a stt_correct.Result; v PENDING: its list's matcher not built
+        yet), None: off there, no list, no text. Never builds a matcher (Corrector.warm does, on the lists' thread)."""
+        c = self.stt_correct
+        if c is None or not text:
+            return None
+        return c.correct(text, key)
+
+    def _corr_key(self, cid: str, item) -> str:
+        """A transmission's channel key: its own, else its radio log row's (a row no longer held here)."""
+        if isinstance(item, Traffic):
+            return traffic_key(item)
+        if self.stt_correct is None:
+            return ""
+        try:
+            r = self.cad.store.one("SELECT channel, talkgroup, system FROM radio_traffic WHERE id = ?", (cid,))
+            return stt_correct.row_key(dict(r)) if r is not None else ""
+        except Exception:  # noqa: BLE001 - no key: no correction
+            return ""
+
+    def _corr_put(self, item, res) -> None:
+        """The correction kept on the transmission (corr_text, corr_rules, corr_v), what _to_cad writes beside the raw
+        text; the one before cleared (a new text). Nothing when this process corrects nothing (a station)."""
+        if self.stt_correct is None and not getattr(item, "corr_v", ""):
+            return
+        cols = stt_correct.columns(res)
+        for k in ("corr_text", "corr_rules", "corr_v"):      # (spelled out: tests/test_contracts_events.py reads them)
+            setattr(item, k, cols[k])
 
     # -- per-channel speech-to-text (Settings > Radios, sizeup/channels.py) --------------------------------
 
@@ -3361,7 +3408,7 @@ class App:
             try:
                 r.tick()
             except Exception as e:  # noqa: BLE001 - the aircraft layer goes on
-                log(f"atc vocabulary: {type(e).__name__}: {e}")
+                log(f"atc vocabulary: {type(e).__name__}")   # (never {e}: it can quote a term)
 
     def _intel_listen(self, intel):
         """The pre-alert pushes' "Listen" link (sizeup/intel/listen.py): the transmissions around it, stitched, behind a
@@ -3467,6 +3514,7 @@ class App:
         channel's own vocabulary) one Amazon Transcribe vocabulary, the own phrases first, made by the leader, used on
         those channels once READY; off, any made before are deleted (term_cleanup, once this task leads)."""
         self.stt_terms = None
+        self.stt_correct = None
         self.term_vocabs = None
         self.term_cleanup = None
         if self.aws is not None:                  # every AWS transcript says which vocabulary its stream used
@@ -3486,6 +3534,10 @@ class App:
         if files is None:
             return
         self.stt_terms = stt_terms.TermStore(files, log=log, on_read=self._terms_read)
+        # post-ASR vocabulary correction (#879, sizeup/stt_correct.py): the text of record corrected before its radio
+        # log row is written (_corr_put), each engine's run records its own (HubApp._vocab_fix)
+        self.stt_correct = stt_correct.Corrector(lambda: self.stt_terms, self._own_for_key,
+                                                 self.cfg.stt_correct_channels, self.cfg.stt_correct_towns, log=log)
         if self.cfg.stt_terms_aws and self.aws is not None:
             self.term_vocabs = tv
             self.aws.term_vocabulary = self._term_vocab_for
@@ -3515,6 +3567,8 @@ class App:
             self.term_vocabs.sync(store.sets())
         if changed:
             self.stt_terms_check()
+        if self.stt_correct is not None:            # (each list's matcher built here, never on a reader's request)
+            self.stt_correct.warm(self.cfg.stt_correct_channels)
 
     def stt_terms_check(self) -> None:
         """The hub sends the station the lists' top terms when its copy differs (HubApp)."""
@@ -3559,25 +3613,21 @@ class App:
 
     def _own_for_key(self, key: str) -> str | None:
         """Which list a channel key takes ("South 2", "HPN Tower", "tg:307", "p25:mrrs:9211"): a talkgroup's service from
-        its group where it is known here; a county incident talkgroup (307, 333) is fire dispatch."""
+        its group where it is known here; a county incident talkgroup (307, 333) is fire dispatch
+        (stt_terms.own_for_channel: tools/stt_correct_eval.py takes the same rule)."""
         key = str(key or "")
-        kind = self._kind.get(key, "")
-        service = ""
+        group, listed = None, ""
         got = sources.parse(key) if channels.is_tg(key) else None
         if got is not None:
             system, tg = got
             if system == sources.COUNTY:
                 group = (self.tg.info.get(tg) or {}).get("group") or ""
-                service = sources.service(group) if group else ("fire" if tg in self.cfg.p25_incident_talkgroups else "")
             else:
                 rt = getattr(self, "systems", {}).get(system)
                 info = (rt.system.talkgroups.get(tg) or {}) if rt is not None else {}
-                service = str(info.get("service") or "")
-            key = sources.p25(system, tg)
-        elif kind:
-            key = sources.fm(key, kind)                  # (an admin's service choice is kept under fm: / air:)
-            service = sources.service(kind=kind)
-        return stt_terms.own_for(key, service, kind)
+                listed = str(info.get("service") or "")
+        return stt_terms.own_for_channel(key, self._kind.get(key, ""), group, listed,
+                                         self.cfg.p25_incident_talkgroups)
 
     def _own_vocab(self, channel: str) -> str:
         """The channel's own AWS vocabulary (whether READY or not): airband sizeup-atc, a profiled police source sizeup-pd,
@@ -3748,8 +3798,7 @@ class App:
         if getattr(item, "status", "") in ("error", "skipped") and job.alt is None and (not job.rerun or job.catchup):
             log(f"aws transcribe: {job.kind} {job.id}: a late answer, and the fallback had none: it is the text")
             return self._aws_done(job, text, conf)
-        log(f"aws transcribe: {job.kind} {job.id}: a late answer, kept as the alternative"
-            + ("" if self.clip_is_context(job.id) else f": {text}"))
+        log(f"aws transcribe: {job.kind} {job.id}: a late answer, kept as the alternative ({logscrub.said(text)})")
         self._set_alt(job.id, text, f"{channels_model()} (late)")
 
     def _aws_changed(self) -> None:
@@ -5455,17 +5504,29 @@ class App:
         return None
 
     def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None,
-                      tier: str | None = None, system: str = "") -> str | None:
+                      tier: str | None = None, system: str = "", transcribe: bool | None = None,
+                      alerts: bool | None = None) -> str | None:
         """POST /api/talkgroup: record = keep its calls; main = main list + attach to our incident. Another system's
-        talkgroup (#409: `system`, "" = the county's): tier = alert | text | record | off | activity."""
+        talkgroup (#409: `system`, "" = the county's): tier = alert | text | record | off | activity, or the switches
+        transcribe / alerts (with record), written as the tier they make (tiers.from_switches). The county's
+        Transcribe is its channel choice (/api/cad/settings/channels) and it has no Alerts: refused here."""
         if not self.p25:
             return "no P25 configured"
         qualified = system == self.tg.county             # sent as the county's source ("p25:westchester:<n>"): no doubt
         system = "" if system == self.tg.county else str(system or "")
         if system and not self.tg.known(int(tg), system):
             return f"no talkgroup {tg} on {system}"
+        if tier is not None and (transcribe is not None or alerts is not None):
+            return tiers.BOTH
         if tier is not None:
             return self.set_talkgroup_tier(tg, tier, system)
+        if transcribe is not None or alerts is not None:
+            if not system:
+                return (tiers.COUNTY_ALERTS if alerts is not None
+                        else "the county's Transcribe is its channel choice: /api/cad/settings/channels")
+            t, why = tiers.from_switches(self.tg.tier(int(tg), system), bool(self.tg.info[(system, int(tg))].get(
+                "encrypted")), record, transcribe, alerts)
+            return why or self.set_talkgroup_tier(tg, t, system)
         if not system and not qualified and (owners := self.tg.elsewhere(int(tg))):
             # a bare number is the county's: this one is another system's talkgroup (its Main / Record would have
             # landed on a county talkgroup that doesn't exist, an "Unknown" card): never written

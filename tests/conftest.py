@@ -487,6 +487,9 @@ def any_hour(request, monkeypatch):
 # skipped, with the reason, when the local cache (~/.cache/sizeup-replay or $SIZEUP_REPLAY_DIR) has no data of its kind.
 from tests.replay import pytest_configure, replay_sets  # noqa: E402,F401
 
+# The log sentinel (tests/log_sentinel.py): every log path captured; a test fails when a sensitive string reaches one
+from tests.log_sentinel import log_sentinel  # noqa: E402,F401
+
 
 def pytest_collection_modifyitems(config, items):        # replay's skips, then every flaky mark names its issue
     from tests import replay

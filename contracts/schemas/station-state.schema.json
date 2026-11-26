@@ -708,6 +708,7 @@
               "additionalProperties": {"type": "integer", "minimum": 0}
             },
             "hub_takes": {"type": "boolean", "description": "The hub's last `caps` had `stt_input`."},
+            "wake_on_ack": {"type": "boolean", "description": "The lane is woken by the events' ack, so each input follows its own event at once (#678). The hub then waits for a pool job's input only its class's budget (sttpool.SRC_WAIT_S); a station without it gets the old 2 s wait."},
             "dropped_pre": {"type": "integer", "minimum": 0, "description": "Of the dropped, those of pre-alert channels."},
             "dropped_fire": {"type": "integer", "minimum": 0, "description": "Of the dropped, those of fire channels."},
             "encoder": {"type": "string", "description": "Where inputs are encoded: \"\" before the first, else `scope`, `process` or `thread (<why>)`."},
@@ -1150,6 +1151,14 @@
               "tier": {
                 "type": ["string", "null"],
                 "description": "Another system's talkgroup: its tier (`alert`, `text`, `record`, ...); null for the county system's own switches. The hub adds `tier_set` (tier is not null) when the row has none."
+              },
+              "transcribe": {
+                "type": "boolean",
+                "description": "Its Transcribe switch: another system's, its tier (`alert` or `text`); the county's, its channel choice. The hub adds it from the tier when the row has none."
+              },
+              "alerts": {
+                "type": ["boolean", "null"],
+                "description": "Its Alerts switch: another system's, its tier is `alert`; null for the county's (its pre-alerts are the intel packs'). The hub adds it from the tier when the row has none."
               }
             }
           }

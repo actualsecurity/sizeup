@@ -9,6 +9,10 @@ cadmap.js in node with the stand-in MapLibre (tests/test_unit_follow.py), on sta
 (tests/test_rig_route_motion.py page_state: the downtown OSM extract, made-up calls and statuses)."""
 
 
+import math
+
+import pytest
+
 from tests.test_rig_route_motion import OP, PRE, STATIC, metres, page_state
 from tests.test_unit_follow import needs_node, run
 
@@ -16,6 +20,12 @@ FOLLOW = PRE + r"""
 const center = () => [rm.map.center.lng, rm.map.center.lat];
 const click = (u) => chip(u).el.fire("click");
 """
+
+
+def budget(zoom, lat, v, step_px=0.75, lo=50, hi=250):
+    """cadmap.js frameMs: as often as a rig at v m/s moves STEP_PX at this zoom, FRAME_MS to MAX_FRAME_MS."""
+    mpp = 40075016.686 * math.cos(math.radians(lat)) / (512 * 2 ** zoom)
+    return max(lo, min(hi, 1000 * step_px / (v / mpp))) if v > 0 else hi
 
 
 def released(c, clock, uid, ago=10):
@@ -67,7 +77,8 @@ def test_the_camera_tracks_the_estimate_and_the_loop_wakes_while_following(tmp_p
 let ticks = 0; const t = L.tick.bind(L); L.tick = () => { ticks++; t(); };
 go(63, 16); out.alone = ticks;
 click("E61");
-ticks = 0; go(63, 16); out.followed = ticks;
+ticks = 0; frameRuns = 0; go(63, 16); out.followed = ticks; out.followedFrames = frameRuns;
+out.budget = [L.frameMs(), rm.map.zoom, rm.map.center.lat, L.estV];
 out.track = [center(), ll("E61")];
 // held (not moving): still frames while followed (the camera kept on it), none once let go
 const rt = IN.map.routes.find((r) => r.unit === "E61");
@@ -76,7 +87,11 @@ setMap(held); go(5, 16);
 out.heldMoving = L.moving(); frames.splice(0); go(3, 16); out.heldFrames = frameRuns;
 rm.fol.stop(); go(3, 16); out.after = L.moving();
 """, data)
-    assert o["followed"] >= 2.5 * o["alone"] and o["followed"] >= 15                 # smooth while followed (~20 Hz)
+    # followed: ticked each time it moves STEP_PX on screen (#887: at least as often as alone, never a frame between)
+    ms, z, lat, v = o["budget"]
+    assert ms == pytest.approx(budget(z, lat, v))
+    assert o["followed"] >= 1000 / ms * 0.7 and o["followed"] >= o["alone"] * 0.9
+    assert o["followedFrames"] <= 2 * o["followed"] + 2
     assert metres(o["track"][0], o["track"][1]) < 5                                  # the camera on the estimate (mapfollow pans every PAN_MS)
     assert o["heldMoving"] is True and o["after"] is False
 
@@ -201,12 +216,13 @@ def test_a_followed_rig_standing_still_lets_the_loop_sleep(tmp_path):
                                              for r in data["map"]["routes"]])
     o = run(tmp_path, FOLLOW + r"""
 click("E61"); go(10, 16);
-out.moving = [L.smooth(), L.frameMs()];
+out.moving = [L.smooth(), L.frameMs(), rm.map.zoom, rm.map.center.lat, L.estV];
 setMap(IN.held); go(100, 16);                  // let the glide and the pans finish
 frameRuns = 0; go(63, 16);
 out.held = [L.moving(), L.smooth(), L.frameMs(), frameRuns];
 """, data)
-    assert o["moving"][0] is True and o["moving"][1] == 50                       # moving: every frame (FRAME_MS)
+    smooth, ms, z, lat, v = o["moving"]
+    assert smooth is True and ms == pytest.approx(budget(z, lat, v))             # moving: each time it moves STEP_PX
     moving, smooth, ms, frames = o["held"]
     assert moving is True and smooth is False and ms == 250 and frames <= 8      # still: looked at every PAN_MS
 
