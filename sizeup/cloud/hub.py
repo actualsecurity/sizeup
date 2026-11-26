@@ -2574,6 +2574,8 @@ class HubApp(App):
     def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None,
                       tier: str | None = None, system: str = "", transcribe: bool | None = None,
                       alerts: bool | None = None) -> str | None:
+        if tier is not None and (transcribe is not None or alerts is not None):
+            return tiers.BOTH
         if tier is None and (transcribe is not None or alerts is not None):
             # the switches: written as the tier they make of the one the station last said (App.set_talkgroup), so a
             # station from before the switches takes them too

@@ -1295,14 +1295,14 @@ window.RadioControls = (() => {
     if (!r.ok || !j || j.ok === false) throw new Error((j && j.error) || `HTTP ${r.status}`);
   }
   const FIELD_NAME = { record: "Record", main: "Main", transcribe: "Transcribe", alerts: "Alerts", tier: "Activity only" };
-  async function setTalkgroup(r, field, value, also = []) {
+  async function setTalkgroup(r, field, value, also = [], extra = {}) {
     mark(r.src, field, value);
     for (const f of also) mark(r.src, f, value);         // what the chain turns on or off with it (another system's)
     st.error = "";
     renderTalkgroups();
     try {
       // by its source, never its number alone (a bare number is the county's: an "Unknown" card, #409)
-      await post("/api/talkgroup", r.source ? { source: r.source, [field]: value } : { tg: r.tg, [field]: value });
+      await post("/api/talkgroup", r.source ? { source: r.source, [field]: value, ...extra } : { tg: r.tg, [field]: value, ...extra });
     } catch (err) {
       for (const f of [field, ...also]) unmark(r.src, f);
       st.error = `Couldn't change ${FIELD_NAME[field] || field} for ${r.name}: ${err.message}`;
@@ -1311,14 +1311,16 @@ window.RadioControls = (() => {
   }
   // Another system's talkgroup: its switches are its tier (#409, sizeup/tiers.py from_switches, on the server). The
   // chain: Alerts needs Transcribe, Transcribe needs Record; turning one on turns on what it needs, turning one off
-  // turns off what needs it. Record on: its file's tier if that records, else Record only (TalkgroupPrefs.set).
-  // Encrypted: activity only (on) or off, never recorded.
+  // turns off what needs it. Record on is Record only (`record`): sent with Transcribe off, so its file's tier
+  // (TalkgroupPrefs.set restores it for Record alone: the API, a whole section) never turns on Transcribe or Alerts
+  // behind the tap. Encrypted: activity only (on) or off, never recorded.
   const CHAIN_ON = { alerts: ["transcribe", "record"], transcribe: ["record"], record: [] };
   const CHAIN_OFF = { record: ["transcribe", "alerts"], transcribe: ["alerts"], alerts: [] };
   function setOther(r, field) {
     if (field === "activity") return r.encrypted ? setTalkgroup(r, "tier", r.tier === "activity" ? "off" : "activity") : null;
     if (r.encrypted || !CHAIN_ON[field]) return null;
     const next = !r[field];
+    if (field === "record" && next) return setTalkgroup(r, "record", true, [], { transcribe: false });
     return setTalkgroup(r, field, next, (next ? CHAIN_ON : CHAIN_OFF)[field].filter((f) => r[f] !== next));
   }
   async function setChannel(key, field, value, label) {
@@ -1794,6 +1796,7 @@ window.RadioControls = (() => {
             mainB.title = other ? "Another system: never Main" : r.main ? "Main: up front in Radio, on our incident" : "Other: folded in Radio";
             show(mainB, !r.fm);
             setSwitch(alrB, !!r.alerts, "Alerts");
+            alrB.classList.toggle("na", !other);         // the county's: no Alerts of its own (no knob, the hover says why)
             alrB.title = !other ? "County: pre-alerts by the intel packs (Settings > System > Intel)"
               : sealed ? "Encrypted: never decoded" : r.alerts ? "May raise a pre-alert" : "No pre-alerts\nOn: Transcribe and Record too";
             show(alrB, !r.fm);
@@ -1989,5 +1992,5 @@ window.RadioControls = (() => {
   }
 
   return { mount, _rx: { rxDur, rxTargets, rxResult, rxHistRow, renderReception, st, rxSt },   // _rx, _tg: the tests
-           _tg: { render: renderTalkgroups, loadNames } };
+           _tg: { render: renderTalkgroups, loadNames, settle } };
 })();

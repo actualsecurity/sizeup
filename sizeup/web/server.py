@@ -13,7 +13,8 @@ POST /api/incident/<id>/close  close an incident by hand
 POST /api/talkgroup {"source": "p25:<system>:<tg>" | "tg": 307 (the county's), "record": bool?, "main": bool?, "tier": str?,
                      "transcribe": bool?, "alerts": bool?}
      per-talkgroup switches (state "talkgroups"; tier: #409); a bare number another system lists is refused.
-     Another system's transcribe / alerts are written as its tier (sizeup/tiers.py from_switches); the county's are refused
+     Another system's transcribe / alerts are written as its tier (sizeup/tiers.py from_switches); the county's are refused,
+     and so is a tier with them (400: one or the other)
 POST /api/talkgroup-group {"group": "County Police", "record": bool?, "main": bool?}  a whole section (the county's)
 POST /api/mode {"mode": ...}  one shared dongle: hand it to a channel or trunk-recorder (state "sdr")
 POST /api/adsb-receiver {"sdr": serial | "", "confirm": true}  admins: name (or unname) the station's ADS-B dongle
@@ -1130,6 +1131,9 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     sw = {k: body[k] for k in ("transcribe", "alerts") if body.get(k) is not None}
                     if any(not isinstance(v, bool) for v in sw.values()):
                         raise ValueError("transcribe / alerts: true or false")
+                    if sw and body.get("tier") is not None:     # never the tier silently over the switches
+                        from sizeup import tiers as _tiers
+                        raise ValueError(_tiers.BOTH)
                     if body.get("tier") is not None or body.get("system") or body.get("source"):
                         # another P25 system's talkgroup (#409): {"source": "p25:<system>:<tg>"} or {"tg", "system"}
                         from sizeup import sourcekeys as _sources

@@ -143,8 +143,14 @@ def test_the_switches_round_trip_through_the_station(two):
     assert app.set_talkgroup(PD_TAC, None, None, None, "mrrs", alerts=True) is None and app.tg.tier(PD_TAC, "mrrs") == "alert"
     assert app.set_talkgroup(PD, None, None, None, "mrrs", transcribe=False) is None and app.tg.tier(PD, "mrrs") == "record"
     assert app.set_talkgroup(PD, False, None, None, "mrrs") is None and app.tg.tier(PD, "mrrs") == "off"
-    # Record alone, as before: its file's tier when that records (PD dispatch: alert)
+    # the page's Record on (Transcribe off with it): Record only, never its file's alert behind the tap
+    assert app.set_talkgroup(PD, True, None, None, "mrrs", transcribe=False) is None and app.tg.tier(PD, "mrrs") == "record"
+    assert (row(PD)["record"], row(PD)["transcribe"], row(PD)["alerts"]) == (True, False, False)
+    assert app.set_talkgroup(PD, False, None, None, "mrrs") is None and app.tg.tier(PD, "mrrs") == "off"
+    # Record alone (the API, a whole section), as before: its file's tier when that records (PD dispatch: alert)
     assert app.set_talkgroup(PD, True, None, None, "mrrs") is None and app.tg.tier(PD, "mrrs") == "alert"
+    # a tier and the switches at once: refused, nothing changes (never the tier silently over the switches)
+    assert app.set_talkgroup(PD, None, None, "off", "mrrs", alerts=True) == tiers.BOTH and app.tg.tier(PD, "mrrs") == "alert"
     # never Main (as before: accepted, nothing changes)
     assert app.set_talkgroup(PD, None, True, None, "mrrs") is None and not row(PD)["main"]
     # encrypted: activity only
@@ -198,6 +204,7 @@ def test_the_endpoint_sends_the_switches_only_when_given():
         assert post({"tg": 307, "transcribe": True}) == 200
         assert post({"tg": 307, "main": True}) == 200
         assert post({"source": f"p25:mrrs:{PD}", "alerts": "yes"}) == 400
+        assert post({"source": f"p25:mrrs:{PD}", "tier": "off", "alerts": True}) == 400       # one or the other
     finally:
         srv.shutdown()
     assert calls == [((PD, None, None, None, "mrrs"), {"alerts": True}),
@@ -226,6 +233,7 @@ def test_the_hub_writes_the_switches_as_the_stations_tier(tmp_path):
     assert hub.set_talkgroup(PD_SECURE, None, None, None, "mrrs", transcribe=True) == tiers.ENCRYPTED
     assert hub.set_talkgroup(307, None, None, None, sourcekeys.COUNTY, alerts=True) == tiers.COUNTY_ALERTS
     assert "no talkgroup" in hub.set_talkgroup(4242, None, None, None, "mrrs", alerts=True)
+    assert hub.set_talkgroup(PD_TAC, None, None, "off", "mrrs", transcribe=True) == tiers.BOTH
     assert hub.set_talkgroup(PD_TAC, False, None, None, "mrrs") is None             # Record alone: as before
     assert sent == [("set_talkgroup", PD_TAC, None, None, "alert", "mrrs"),
                     ("set_talkgroup", PD_TAC, None, None, "off", "mrrs"),
@@ -255,9 +263,36 @@ const _el = global.el;
 global.el = (...a) => { const e = _el(...a); e.style.setProperty = () => {}; return e; };
 const IN = JSON.parse(fs.readFileSync(INF, "utf8"));
 const asked = [];
+// the server: what a POST makes of the state the next poll reads (App.set_talkgroup, tiers.from_switches; Record alone
+// restores the file's tier, TalkgroupPrefs.set), so a tap the server would turn into more than it showed is caught
+const SERVER = JSON.parse(JSON.stringify(IN.state));
+const FILE = { "p25:mrrs:9211": "alert", "p25:mrrs:9212": "text", "p25:mrrs:9570": "alert", "p25:mrrs:9564": "record" };
+const REC = ["alert", "text", "record"], TX = ["alert", "text"];
+function serve(b) {
+  const r = SERVER.talkgroups.find((x) => x.source === b.source || (b.tg !== undefined && x.tg === b.tg && x.system === "westchester"));
+  if (!r) return;
+  if (b.main !== undefined) r.main = b.main;
+  if (!r.tier) { if (b.record !== undefined) r.record = b.record; return; }          // the county's
+  let t = r.tier;
+  if (b.tier) t = b.tier;
+  else if (b.transcribe !== undefined || b.alerts !== undefined) {
+    let rec = REC.includes(t), tx = TX.includes(t), al = t === "alert";
+    if (b.record !== undefined) rec = b.record;
+    if (b.transcribe !== undefined) tx = b.transcribe;
+    if (b.alerts !== undefined) al = b.alerts;
+    if (b.alerts) tx = rec = true;
+    if (b.transcribe) rec = true;
+    if (b.record === false) tx = al = false;
+    if (b.transcribe === false) al = false;
+    t = al ? "alert" : tx ? "text" : rec ? "record" : "off";
+  } else if (b.record === true) t = REC.includes(FILE[r.source]) ? FILE[r.source] : "record";
+  else if (b.record === false) t = "off";
+  r.tier = t;
+  r.record = REC.includes(t);
+}
 global.fetch = async (url, o = {}) => {
   asked.push([url, o.body ? JSON.parse(o.body) : null]);
-  if (url === "/api/talkgroup") return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  if (url === "/api/talkgroup") { serve(JSON.parse(o.body)); return { ok: true, status: 200, json: async () => ({ ok: true }) }; }
   return { ok: false, status: 503, headers: { get: () => "" }, json: async () => ({}) };
 };
 eval(fs.readFileSync(RC, "utf8"));
@@ -279,16 +314,26 @@ const tick = () => new Promise((ok) => setImmediate(ok));
     return [f, vis(b) ? `${b.classList.contains("on") ? "on" : "off"}${b.disabled ? " disabled" : ""}` : "-"];
   }));
   out.rows = Object.fromEntries(groups.querySelectorAll("li.tg-row").map((li) => [li.dataset.source || li.dataset.nkey, look(li)]));
+  out.countyAlertsNa = sw(row("p25:westchester:307"), "alerts").classList.contains("na");
+  out.otherAlertsNa = sw(row("p25:mrrs:9212"), "alerts").classList.contains("na");
   out.order = row("p25:mrrs:9212").querySelector("div.tg-sw").children.map((c) => c.dataset.field || c.className);
   out.tierSelects = groups.querySelectorAll("select.tg-tier").length;
   out.titles = { otherMain: sw(row("p25:mrrs:9212"), "main").title, countyAlerts: sw(row("p25:westchester:307"), "alerts").title,
                  sealed: sw(row("p25:mrrs:9213"), "transcribe").title, activity: sw(row("p25:mrrs:9213"), "activity").title,
                  record: sw(row("p25:mrrs:9212"), "record").title };
+  // a tap: what is sent and shown at once (`now`, `pending`), then what the next poll shows from the server (`look`)
   const click = async (src, f) => { asked.length = 0; sw(row(src), f).click(); await tick(); await tick();
-    return { posted: asked.filter(([u]) => u === "/api/talkgroup").map(([, b]) => b),
-             pending: (st.pending.get(src) || { vals: {} }).vals, look: look(row(src)) }; };
+    const got = { posted: asked.filter(([u]) => u === "/api/talkgroup").map(([, b]) => b),
+                  pending: { ...(st.pending.get(src) || { vals: {} }).vals }, now: look(row(src)) };
+    st.state = JSON.parse(JSON.stringify(SERVER));                // the next poll (poll(): settle, render)
+    RadioControls._tg.settle();
+    RadioControls._tg.render();
+    return { ...got, look: look(row(src)) }; };
   out.alertsOn = await click("p25:mrrs:9212", "alerts");          // text -> alert
   out.recordOff = await click("p25:mrrs:9211", "record");         // alert -> off: the others off with it
+  out.recordOn = await click("p25:mrrs:9211", "record");          // off -> record only (its file says alert)
+  await click("p25:mrrs:9211", "record");                         // record -> off again
+  out.alertsFromOff = await click("p25:mrrs:9211", "alerts");     // off -> alert: Transcribe and Record with it
   out.transcribeOn = await click("p25:mrrs:9564", "record") && await click("p25:mrrs:9564", "transcribe");
   out.activity = await click("p25:mrrs:9213", "activity");        // activity -> off
   out.sealedRecord = await click("p25:mrrs:9213", "record");      // disabled: nothing sent
@@ -371,12 +416,34 @@ def test_the_chain_shows_at_once_and_is_sent_as_one_switch(page):
         "record": "off", "transcribe": "off", "alerts": "off", "activity": "-"}
     # Record on, then Transcribe on: each by itself (Transcribe has Record already)
     assert page["transcribeOn"]["posted"] == [{"source": "p25:mrrs:9564", "transcribe": True}]
-    assert page["transcribeOn"]["pending"] == {"record": True, "transcribe": True}
+    assert page["transcribeOn"]["pending"] == {"transcribe": True}
+    assert page["transcribeOn"]["look"] == {"record": "on", "transcribe": "on", "alerts": "off", "main": "off disabled",
+                                            "activity": "-"}
     assert page["activity"]["posted"] == [{"source": "p25:mrrs:9213", "tier": "off"}]
     assert page["activity"]["look"]["activity"] == "off"
     for k in ("sealedRecord", "otherMain", "countyAlerts"):
         assert page[k]["posted"] == [], k
     assert page["countyMain"]["posted"] == [{"source": "p25:westchester:307", "main": False}]
+
+
+def test_record_on_from_off_is_record_only_never_the_files_tier(page):
+    # PD Dispatch's file says alert: Record alone would bring Transcribe and Alerts back a poll later (TalkgroupPrefs.set)
+    r = page["recordOn"]
+    assert r["posted"] == [{"source": "p25:mrrs:9211", "record": True, "transcribe": False}]
+    want = {"record": "on", "transcribe": "off", "alerts": "off", "main": "off disabled", "activity": "-"}
+    assert r["now"] == want and r["look"] == want          # shown at once, and what the server made of it
+
+
+def test_alerts_on_from_off_shows_the_chain_at_once(page):
+    r = page["alertsFromOff"]
+    assert r["posted"] == [{"source": "p25:mrrs:9211", "alerts": True}]
+    assert r["pending"] == {"alerts": True, "transcribe": True, "record": True}
+    want = {"record": "on", "transcribe": "on", "alerts": "on", "main": "off disabled", "activity": "-"}
+    assert r["now"] == want and r["look"] == want
+
+
+def test_the_countys_alerts_has_no_knob(page):
+    assert page["countyAlertsNa"] and not page["otherAlertsNa"]
 
 
 def test_a_viewer_changes_nothing(page):

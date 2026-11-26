@@ -5473,6 +5473,8 @@ class App:
         system = "" if system == self.tg.county else str(system or "")
         if system and not self.tg.known(int(tg), system):
             return f"no talkgroup {tg} on {system}"
+        if tier is not None and (transcribe is not None or alerts is not None):
+            return tiers.BOTH
         if tier is not None:
             return self.set_talkgroup_tier(tg, tier, system)
         if transcribe is not None or alerts is not None:

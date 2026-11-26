@@ -80,6 +80,7 @@ SWITCHES = ("record", "transcribe", "alerts")
 NEVER_MAIN = "another system: never Main"
 COUNTY_ALERTS = "county: pre-alerts by the intel packs (Settings > System > Intel)"
 ENCRYPTED = "encrypted: activity only"
+BOTH = "send tier or switches, not both"
 
 
 def switches(tier) -> dict:
