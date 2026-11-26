@@ -101,11 +101,12 @@ def test_the_map_is_for_whoever_reads_the_list(site):
 def test_a_list_row_has_its_place_and_the_list_its_revision(site):
     cad, _clock = site
     save(cad, precision="address", lat=41.0, lon=-73.7, radius_m=25.0, label_full="12 Example Road, Rye")
-    save(cad, first_at=T0 - 5, precision="none", lat=None, lon=None)
+    save(cad, first_at=T0 - 5, precision="none", lat=None, lon=None, radius_m=50.0)
     d = listing(cad)
     a, b = d["events"]
     assert (a["lat"], a["lon"], a["radius_m"]) == (41.0, -73.7, 25.0) and (b["lat"], b["lon"]) == (None, None)
     rev = d["map_rev"]
+    assert (b["radius_m"], a["place"], b["place"]) == (0, "12 Example Road, Rye", "")       # unplaced: no radius
     assert call(CadApi(cad), f"/api/cad/intel/{a['id']}/feedback", {"verdict": "useful"}, VAL)[0] == 200
     cad.intel.events.delivered(a["id"], {"ok": True, "at": T0})
     assert listing(cad)["map_rev"] == rev                               # a vote, a delivery: the map as it was
@@ -371,3 +372,64 @@ def test_in_a_browser_a_pin_click_selects_its_row_and_a_row_its_pin(tmp_path, mo
             browser.close()
     finally:
         ws.shutdown()
+
+
+@needs_node
+def test_an_event_moved_on_another_page_reads_the_map_and_a_gone_pin_is_unselected(site):
+    """#941 review: render()'s early return (the page's rows unchanged) never skips the map's own key; a selection
+    whose pin a re-read no longer has, or a hidden map, leaves nothing selected."""
+    cad, _clock = site
+    old = save(cad, first_at=T0 - 60, precision="address", lat=41.0, lon=-73.7, label_full="12 Example Road, Rye")
+    save(cad, first_at=T0, precision="address", lat=41.01, lon=-73.71, label_full="40 Example Road, Rye")
+    d, m = listing(cad, size=1), pins(cad)                              # a page of one: the older event on page 2
+    save(cad, id=old.id, first_at=T0 - 60, precision="address", lat=41.02, lon=-73.72, label_full="12 Example Road, Rye")
+    d2, m2 = listing(cad, size=1), pins(cad)                            # it moved: page 1 the same, the map not
+    assert d2["events"] == d["events"] and d2["total"] == d["total"] and d2["map_rev"] != d["map_rev"]
+    assert call(CadApi(cad), f"/api/cad/intel/{old.id}/dismiss", {}, JORDAN)[0] == 200
+    d3, m3 = listing(cad, size=1, status="open"), pins(cad, status="open")      # dismissed: gone from an open view
+    script = f"""
+{MAPSTUB}
+{(STATIC / "map-style.js").read_text()}
+{(STATIC / "intel-map.js").read_text()}
+{(STATIC / "intel-page.js").read_text()}
+global.cad.scene.home = {{ center: [-73.66, 41.0], zoom: 13 }};
+let LIST = IN.d, MAPANS = IN.m;
+global.api = (meth, path) => {{ calls.get.push(path); return Promise.resolve(JSON.parse(JSON.stringify(path.includes("map=1") ? MAPANS : LIST))); }};
+const maps = () => calls.get.filter((p) => p.includes("map=1")).length;
+(async () => {{
+  IntelPage.open("");
+  await flush();
+  MAP.h.load.forEach((f) => f());
+  const g0 = maps();
+  LIST = IN.d2; MAPANS = IN.m2;
+  await IntelPage.run(true);
+  await flush();
+  const moved = {{ gets: maps() - g0, at: MAP.data.features.find((f) => f.properties.id === {old.id}).geometry.coordinates }};
+  // the older event's pin (another page) selected, then dismissed: the re-read has no pin for it
+  MAP.lh["click:il-pin"][0]({{ features: [{{ properties: {{ id: {old.id} }} }}] }});
+  const picked = {{ link: $("#il-map-sel").hidden, sel: calls.sel.slice(-1)[0] }};
+  LIST = IN.d3; MAPANS = IN.m3;
+  IntelPage.open("status=open");
+  await flush();
+  const gone = {{ link: $("#il-map-sel").hidden, sel: calls.sel.slice(-1)[0] }};
+  // a row selected, then the map hidden: no highlight left
+  const row = $("#il-rows").children[0];
+  row.on.click[0]();
+  const lit = row.classList.contains("il-sel");
+  $("#il-map-btn").on.click[0]();
+  console.log(JSON.stringify({{ moved, picked, gone, lit, hidden: row.classList.contains("il-sel"), sel: calls.sel.slice(-1)[0] }}));
+}})();
+"""
+    out = run_node(script, {"d": d, "m": m, "d2": d2, "m2": m2, "d3": d3, "m3": m3})
+    assert out["moved"] == {"gets": 1, "at": [-73.72, 41.02]}
+    assert out["picked"] == {"link": False, "sel": old.id}
+    assert out["gone"] == {"link": True, "sel": -1}
+    assert out["lit"] is True and out["hidden"] is False and out["sel"] == -1
+
+
+def test_the_maps_revision_starts_from_the_clock_so_a_restart_never_repeats_one(site):
+    import time
+    cad, _clock = site
+    from sizeup.intel.events import SqlEvents
+    before = int(time.time() * 1000)
+    assert SqlEvents(cad.store).map_rev >= before
