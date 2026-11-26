@@ -428,7 +428,7 @@ window.RadioViews = (() => {
 
   return {
     SEED, SERVICES, dims, matches, service, shows, resolve, prefsOf, all, list, moved, checked,
-    setShared, saveShared, setMine, find, editor, mountSettings,
+    setShared, saveShared, setMine, find, editor, mountSettings, badge,
     views: () => list(st.shared, st.p),
     every: () => all(st.shared, st.p),
     rev: () => st.rev,

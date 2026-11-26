@@ -242,13 +242,13 @@ def test_the_station_transcribes_a_promoted_talkgroup_like_ours_and_raises_what_
         t = Traffic("4031-1-call_1-t0", "Fire/EMS 31", 0.0, 1.0, "", talkgroup=TG31)
         st.tg.main = lambda tg, system="": False                          # heard as context: LOW, shed when behind
         assert st._stt_class(t, "tg:4031") == LOW and st._stt_lane(t, "tg:4031") == sttinput.LOW
-        assert st.stt_engine("tg:4031") == "local"
+        assert st.stt_engine("tg:4031") == "auto_bg"                      # (a context talkgroup: #896)
         raised = []
         st.stt.raise_channel = lambda key, prio, since: raised.append((key, prio, since)) or 1   # (SttQueue's own: below)
         word = {"ok": True, "why": "", "reserve": [], "promote": ["tg:4031"], "promote_since": {"tg:4031": 1000.0}}
         st.set_channel_prefs({}, word)
         assert st._stt_class(t, "tg:4031") == URGENT and st._stt_lane(t, "tg:4031") == sttinput.FIRE
-        assert st.stt_engine("tg:4031") == "aws"                          # AWS can take it: like Fire/EMS 15
+        assert st.stt_engine("tg:4031") == "auto"           # promoted: Auto · priority (a GPU, AWS, its whisper; #896)
         assert raised == [("tg:4031", URGENT, 1000.0)]                    # what waits since the move goes with it
         assert App._late_prio(st._stt_class(t, "tg:4031"), True) == RERUN  # a late call: after every live one (#753)
         applied = st.channels_applied()
@@ -259,9 +259,9 @@ def test_the_station_transcribes_a_promoted_talkgroup_like_ours_and_raises_what_
         st.set_channel_prefs({}, word)
         assert raised == [("tg:4031", URGENT, 1000.0)]
         st.set_channel_prefs({}, {"ok": False, "why": "the monthly limit", "reserve": ["tg:307"], "promote": ["tg:4031"]})
-        assert st.stt_engine("tg:4031") == "local" and st._stt_class(t, "tg:4031") == URGENT   # never the reserve
+        assert st._stt_way(st.stt_engine("tg:4031"), "tg:4031") == "local" and st._stt_class(t, "tg:4031") == URGENT   # never the reserve
         st.set_channel_prefs({}, {"ok": True, "why": "", "reserve": []})                     # the tail over: demoted
-        assert st._stt_class(t, "tg:4031") == LOW and st.stt_engine("tg:4031") == "local"
+        assert st._stt_class(t, "tg:4031") == LOW and st.stt_engine("tg:4031") == "auto_bg"
     finally:
         st.link.stop()
 

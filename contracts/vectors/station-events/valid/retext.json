@@ -11,7 +11,8 @@
         "text": "Engine 5 on location, investigating",
         "status": "done",
         "confidence": 0.8,
-        "model": "m.bin"
+        "model": "m.bin",
+        "engine": "station-whisper"
       },
       "audio": null,
       "audio_dropped": false

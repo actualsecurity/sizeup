@@ -71,6 +71,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from sizeup import sourcekeys as sources
 from sizeup.cad import airport
@@ -89,6 +90,9 @@ ACTIVITY_KEEP_S = 90 * 24 * 3600     # radio_activity: its per-minute counts kep
 # record like a clip on a CAD event (kept_for_events), while Settings > System > Transcript corrections > Keep corrected
 # clips is on (the default): the corrected audio with its text is the speech-to-text training set.
 CORRECTIONS_SECTION, CORRECTIONS_KEEP = "stt_corrections", "keep"
+# A noted radio intel event's transmissions (sizeup/intel/notes.py: intel_notes) are keepers too while the note exists:
+# a note's tags point at them (the speech-to-text side reads a garbled one's clips), so they never go stale.
+NOTED = ("SELECT j.value FROM intel_notes n JOIN intel_events e ON e.id = n.event_id, json_each(e.traffic_ids) j")
 KEEP_UNLINKED_S = 365 * 24 * 3600
 KEEP_RECORD_S = 400 * 24 * 3600
 MAX_ROWS = 500
@@ -150,6 +154,7 @@ CHANGES_RETRY_S = 60.0                # a broken change log is tried again after
 CHANGES_BUSY_MS = 200                 # the change log waits this long for the database's write lock, no more
 CHANGES_TRIM_EVERY = 500              # the change log is trimmed to CHANGES_KEPT every this many transmissions logged
 LANDED = ("done", "no_speech", "unclear")    # a transcript is in (unclear: sizeup/stt_quality.py, its text "")
+WAITING = ("pending", "remote")     # its transcript still to come (an engine has it): record() tells no text hook (#927)
 UNCLEAR_MAX = 20000                         # an unclear transcript's words kept, at most (radio_traffic.unclear_text)
 CUTS = ("grant",)    # why a P25 key-up starts where it does when its talker is not the voice channel's (radio_traffic.cut, #819)
 ID_NOTES = ("none", "undecoded", "weak")    # why an FG1 key-up has no radio ID (radio_traffic.id_note, #163)
@@ -244,6 +249,10 @@ class Comms:
         # "late"): only what keeps the record (the per-incident radio log), never on_text's consumers (status hints,
         # pre-alerts, possible incoming, the airport) nor on_context_text. Called after commit, like on_text.
         self.on_late_text = None
+        # traffic id -> None: one of our rows logged with its text still to come (#927: status pending / remote, no
+        # text): what needs no words (the per-incident radio log's rules: a fireground's links), never on_text's
+        # consumers, which hear it once its text comes (retext). Called after commit, like on_text.
+        self.on_keyup = None
         # (t, rigs) -> ({incident: (why, unit)}, {incident}): the operating channels' links for a transmission and the
         # "on this channel" links it must not keep (sizeup/cad/opchannel.py rule_links), asked before record()'s
         # transaction; None: none. on_pages_linked(iid, page ids): after link_pages committed.
@@ -305,10 +314,14 @@ class Comms:
             except Exception as e:  # noqa: BLE001 - the transmission is logged whatever this does
                 self.log(f"CAD: operating channel: {type(e).__name__}")
         with self.store.tx() as db:
-            have = db.execute("SELECT talkgroup, channel, system, EXISTS (SELECT 1 FROM radio_links WHERE traffic_id = ?) AS linked "
+            have = db.execute("SELECT talkgroup, channel, system, text, status, "
+                              "EXISTS (SELECT 1 FROM radio_links WHERE traffic_id = ?) AS linked "
                               "FROM radio_traffic WHERE id = ?", (tid, tid)).fetchone()
             if have and not replace:
                 return []
+            if have and (t.get("status") or "") in WAITING and not (t.get("text") or "").strip() \
+                    and ((have["text"] or "").strip() or have["status"] in LANDED):
+                return []       # (#927) a copy still "Transcribing" (sent again) never blanks the text it has now
             tones = json.dumps(t["tones"]) if t.get("tones") else ""
             seq = json.dumps(t["tone_seq"]) if t.get("tone_seq") else ""
             known = bool(rigs) or bool(t.get("radio_id")) or bool(talker)
@@ -404,6 +417,13 @@ class Comms:
         if self._logged[kind] >= CHANGES_TRIM_EVERY:
             self._logged[kind] = 0
             self._trim_changes(kind)
+        if (t.get("status") or "") in WAITING and not (t.get("text") or "").strip():
+            if self.on_keyup is not None:       # (#927) on the timeline, its text still to come: only what needs no
+                try:                            # words now; the text hooks hear it with its text (retext)
+                    self.on_keyup(tid)
+                except Exception as e:  # noqa: BLE001 - the radio log never stops the write
+                    self.log(f"CAD: key-up {tid}: {type(e).__name__}: {e}")
+            return out
         if late:
             self._heard_late(tid)
         else:
@@ -486,18 +506,21 @@ class Comms:
                               f"ours = 0 WHERE talkgroup IS NULL AND system != 'airband' AND channel IN "
                               f"({','.join('?' * len(labels))})", labels).rowcount
 
-    def retag(self, source: str, service: str, since: float, batch: int = RETAG_BATCH, pause: float = 0.0) -> int:
+    def retag(self, source: str, service: str, since: float, batch: int = RETAG_BATCH, pause: float = 0.0,
+              stop: Callable[[], bool] | None = None) -> int:
         """A source's rows since `since` given `service` (an admin chose it, or put it back to automatic): only the rows
         that differ, walked along radio_traffic_source_start `batch` at a time (each batch its own transaction, carrying
         on after the last (start, rowid): the store's lock is let go between them). Once done, the Radio page's readers
         who may know of that source ask afresh, once (another P25 system's: only those who may see it). The number
-        changed."""
+        changed. stop: asked before each batch; True ends the walk there (the CAD shutting down, #740)."""
         if not source or service not in sources.SERVICES:
             return 0
         got = sources.parse(source)
         system = got[0] if got else "airband" if source.startswith("air:") else "analog"
         total, after = 0, (float(since), -1)
         while True:
+            if stop is not None and stop():
+                break
             with self.store.tx() as db:
                 rows = db.execute("SELECT rowid, start FROM radio_traffic WHERE source = ? AND start >= ? "
                                   "AND (start, rowid) > (?, ?) ORDER BY start, rowid LIMIT ?",
@@ -825,6 +848,7 @@ class Comms:
                            (str(alt.get("text") or ""), str(alt.get("model") or ""), tid))
             n = db.execute("UPDATE radio_traffic SET text = ?, status = ?, model = ?, vocab_v = ?, updated_at = ?, "
                            "quality = ?, unclear_text = ?, corr_text = ?, corr_rules = ?, corr_v = ?, "
+                           "stt_route = '', "      # (#875: a new text's route, if it has one, follows: set_route)
                            "text_at = CASE WHEN text_at IS NULL AND ? IN ('done', 'no_speech', 'unclear') THEN ? "
                            "ELSE text_at END "
                            "WHERE id = ?", (text, status, model, str(vocab_v or "")[:80], self.clock(),
@@ -857,6 +881,16 @@ class Comms:
             if n:
                 self.rev += 1
                 self._quiet_unless_shown(db, tid)
+        return bool(n)
+
+    def set_route(self, tid: str, route: str) -> bool:
+        """The way its text of record went (#875, sizeup/sttroute.py: "auto·priority: gpu-pc → AWS (gpu-pc: gaming)"),
+        shown in the transcript's hover. Nothing else on the row changes (no change-log entry: not the words)."""
+        with self.store.tx() as db:
+            self.touch(tid)
+            n = db.execute("UPDATE radio_traffic SET stt_route = ? WHERE id = ?", (str(route or "")[:300], tid)).rowcount
+            if n:
+                self.rev += 1
         return bool(n)
 
     # -- shed clips caught up (sizeup/sttcatchup.py): read only; the re-run path writes ---------------------------
@@ -990,6 +1024,11 @@ class Comms:
             return False
         return bool(self.store.q("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'stt_corrections'"))
 
+    def noted_kept(self) -> bool:
+        """There are intel notes to keep transmissions for (NOTED; tables made by sizeup/intel/events.py)."""
+        return len(self.store.q("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('intel_notes', "
+                                "'intel_events')")) == 2
+
     def prune(self, pause_s: float = 0.0) -> int:
         """Transmissions on no event, once older than the longer of their transcripts' retention (Settings, per channel /
         talkgroup, 365 days by default) and their audio's: a transcript never goes before its audio. A record
@@ -1013,18 +1052,23 @@ class Comms:
         not_fixed = " AND id NOT IN (SELECT traffic_id FROM stt_corrections)" if fixed else ""
         still_not_fixed = (" AND NOT EXISTS (SELECT 1 FROM stt_corrections c WHERE c.traffic_id = radio_traffic.id)"
                            if fixed else "")
+        # a noted intel event's: kept while its note is. The ids read ONCE per prune into a set, skipped in Python: never
+        # a subquery per row under the write lock (#913 re-check: 3-9 ms a row with a few thousand notes); a note added
+        # between the look and the delete is a harmless race (its transmission was old enough to go anyway)
+        keep_ids = {r["value"] for r in self.store.q(NOTED)} if self.noted_kept() else set()
         n = 0
         noted = {True: 0, False: 0}                    # rows noted one by one, each kind; past CHANGES_MAX: that kind's reset
         for cond, params, days in self._groups(tpol, apol):
             cutoff, after = now - days * 86400, float("-inf")
             while True:
-                rows = self.store.q(
+                looked = self.store.q(
                     f"SELECT rowid AS r, id, system, start FROM radio_traffic WHERE {cond} AND start < ? AND start >= ? "
                     f"AND id NOT IN (SELECT l.traffic_id FROM radio_links l WHERE {SURE_LINK}){not_fixed} "
                     f"AND NOT (start >= ? AND ({record})) ORDER BY start LIMIT ?",
                     (*params, cutoff, after, now - KEEP_RECORD_S, self.PRUNE_BATCH))
-                if not rows:
+                if not looked:
                     break
+                rows = [r for r in looked if r["id"] not in keep_ids] if keep_ids else looked
                 with self.store.tx() as db:            # the conditions again: a link confirmed since the look keeps it
                     for r in rows:
                         gone = db.execute(f"DELETE FROM radio_traffic WHERE rowid = ? AND NOT EXISTS (SELECT 1 FROM "
@@ -1042,8 +1086,8 @@ class Comms:
                             # a big clear-out: the pages ask afresh; of another system's rows: only the readers who may
                             # see them (that reset is theirs, so how many went is never told to anyone else)
                             self.touch_reset() if kind else self.touch("reset", r["system"])
-                after = rows[-1]["start"]
-                if len(rows) < self.PRUNE_BATCH:
+                after = looked[-1]["start"]
+                if len(looked) < self.PRUNE_BATCH:
                     break
                 if pause_s:
                     time.sleep(pause_s)
@@ -1053,9 +1097,10 @@ class Comms:
     def kept_for_events(self, ids: list[str]) -> set[str]:
         """Of these clip ids, the ones whose audio is a record (the hub's audio retention, #251): on a CAD event
         (radio_links, any why but an unconfirmed mention / fireground one, #311), with an alarm, or with the emergency button or an emergency window's keep;
-        or hand-corrected (corrections_kept: the training set's audio)."""
+        or hand-corrected (corrections_kept: the training set's audio), or a noted intel event's (NOTED)."""
         out: set[str] = set()
         fixed = self.corrections_kept()
+        noted = self.noted_kept()
         for k in range(0, len(ids), 500):
             chunk = list(ids[k:k + 500])
             marks = ",".join("?" * len(chunk))
@@ -1065,6 +1110,8 @@ class Comms:
             if fixed:
                 out.update(r["id"] for r in self.store.q(
                     f"SELECT traffic_id AS id FROM stt_corrections WHERE traffic_id IN ({marks})", chunk))
+            if noted:
+                out.update(r["value"] for r in self.store.q(f"SELECT value FROM ({NOTED}) WHERE value IN ({marks})", chunk))
             try:
                 out.update(r["id"] for r in self.store.q(f"SELECT traffic_id AS id FROM alarms WHERE traffic_id IN ({marks})", chunk))
             except Exception:  # (a CAD without the alarms table yet)

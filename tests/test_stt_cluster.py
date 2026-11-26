@@ -163,9 +163,17 @@ def test_with_no_worker_idle_a_handed_over_clip_waits_for_the_catch_up_never_dro
     try:
         app = hub.app
         ctx_tier(app)
+        asked = []
+        from sizeup.cloud.hub import StationOffline
+
+        def offline(fn, args, *a, **k):                  # (#896: back to its own station's queue first; it's offline)
+            asked.append((fn, args))
+            raise StationOffline("station offline")
+        app.hub.remote = offline
         now = time.time()
         send(hub, ctx_event("9570-1794-call_90", 1, now))
         assert wait(lambda: row(hub, "9570-1794-call_90").get("status") == "skipped", 10), row(hub, "9570-1794-call_90")
+        assert asked == [("transcribe_now", ["9570-1794-call_90"])]
         assert SHED in row(hub, "9570-1794-call_90")["model"]                        # the catch-up's to run
         assert [r["id"] for r in app.cad.comms.shed_clips(now - 3600)[0]] == ["9570-1794-call_90"]
         # a station's whisper free now: the catch-up sends it to the pool and it is done
@@ -268,6 +276,9 @@ def test_a_restarting_station_hands_everything_waiting_to_the_pool_and_nothing_i
         st = station(station_cfg(tmp_path, hub.url), {3: "whisper heard this"})
         hold = Hold()
         st.stt.client = hold
+        assert call(hub.url + "/api/cad/settings/channels", "POST", {"action": "set", "key": "FG1", "engine": "local"},
+                    token=None)[0] == 200                   # (FG1 on the station's whisper, #896: its engine says so)
+        assert wait(lambda: st.channel_pref("FG1")["engine"] == "local", 15)
         st._hub_aws = {"ok": False}                         # (FG1 on the station's whisper: AWS can't)
         # the station has heard the hub's word that one GPU worker is idle and quick (the hand-over's budget is that
         # word, not the room for context clips: waiting for the room alone let it hand over none)

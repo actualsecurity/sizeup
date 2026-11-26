@@ -713,7 +713,7 @@ def test_a_fire_clip_that_goes_to_aws_restarts_the_quiet_spell(tmp_path):
     try:
         q = app.stt._q
         q._ours_at -= 1000
-        assert app.channel_pref("FG1")["engine"] == "aws" and q.stats()["ours_ago_s"] >= 1000
+        assert app.channel_pref("FG1")["engine"] == "pin:aws" and q.stats()["ours_ago_s"] >= 1000
         fm_segment(app)                                        # FG1 on AWS: never in the whisper queue
         assert q.qsize() == 0 and q.stats()["ours_ago_s"] < 5
     finally:
@@ -842,7 +842,7 @@ def test_a_restarted_station_catches_up_from_the_hubs_spec_and_the_clip_on_disk(
         assert got == {"queued": [tid], "refused": {}, "hold": ""}
         assert wait(lambda: [k for k, _ in out] == ["retext", "rerun"], 10), out
         assert out[0][1] == {"id": tid, "text": "Car 12 clear of the scene", "status": "done", "confidence": 0.9,
-                             "model": "m.bin", "catchup": True}
+                             "model": "m.bin", "engine": "station-whisper", "catchup": True}
         assert out[1][1]["result"] == "changed; catch-up" and w.calls == [("fast", 3)]
         assert prompts == [("FG1", "Car 12", start)]            # the spec's fields, as the live pass had them
     finally:
@@ -865,9 +865,10 @@ def test_the_hub_routes_police_to_its_own_aws_budget_and_never_ours(tmp_path):
     try:
         app = hub.app
         pd_alert(app)
-        assert app.channel_pref("FG1")["engine"] == "aws"           # ours on AWS: still never caught up on AWS
+        assert app.channel_pref("FG1")["engine"] == "pin:aws"           # ours on AWS: still never caught up on AWS
         assert app._catchup_route(PD) == "aws" and app._catchup_route("FG1") == "whisper"
-        assert app._catchup_route("tg:383") == "whisper"
+        assert app._catchup_route("tg:383") == "whisper"  # (#896: a county context talkgroup, Auto · background: the
+        #                                                    stations first)
         assert call(hub.url + "/api/cad/settings/stt", "POST", {"action": "set", "key": "aws_context_budget_usd",
                                                                  "value": 0}, token=None)[0] == 200
         assert app._catchup_route(PD) == "whisper"                  # its own budget used up: whisper, not ours

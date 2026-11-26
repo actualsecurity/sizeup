@@ -5,9 +5,17 @@ Tables (created IF NOT EXISTS here; no SCHEMA_VERSION bump):
 
     intel_events   one per event (sizeup/intel/model.py Event): no transcript text, ever; traffic_ids are references
     intel_hits     one per (traffic id, rule): every hit, shadow and below-threshold too (recall), 30 days
-    intel_feedback a person's verdict on an event (useful | noise | wrong_place | wrong_type | late | missed), a year
+    intel_feedback a person's verdict on an event (useful | noise | wrong_place | wrong_type | late | missed |
+                   should_push: the Intel page's "should have pushed", a held event that was worth a push; garbled |
+                   out_of_area | rule_to_add: a note's tags, sizeup/intel/notes.py, note_id its note), a year
+    intel_notes    people's notes on an event (sizeup/intel/notes.py): text, tags, corrections, "done / PR #"
+    intel_note_audit  every add, edit, delete and done of a note, before and after
 
-Events are kept 90 days (the radio log's own default for context traffic), hits 30.
+Events are kept 90 days (the radio log's own default for context traffic), hits 30; an event with a note is kept as
+long as its notes (a year: KEEP_NOTES_S), so the notes stay usable for tuning.
+
+intel_events.decided: rules | model | both | "" (decided_of: who raised it, the Intel page's filter), written by save();
+added by ALTER TABLE at start, and a row without it (an older release's) filled in then.
 
 intel_events.delivery: the last push's outcome at ntfy, JSON {ok, at, status, id} or {ok: false, at, status, error} ("":
 none yet), written by delivered() from the notify thread (sizeup/notify.py Notifier.send's done). Not an Event field:
@@ -19,6 +27,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import fields
 
@@ -27,7 +36,26 @@ from sizeup.intel.model import Event
 KEEP_EVENTS_S = 90 * 86400
 KEEP_HITS_S = 30 * 86400
 KEEP_FEEDBACK_S = 366 * 86400
-VERDICTS = ("useful", "noise", "wrong_place", "wrong_type", "late", "missed")
+KEEP_NOTES_S = 366 * 86400
+VERDICTS = ("useful", "noise", "wrong_place", "wrong_type", "late", "missed", "should_push", "garbled", "out_of_area",
+            "rule_to_add")
+MODEL_PREFIXES = ("model.", "infer.")      # a rule of the model's (backing.py, infer.py), not of a pack
+
+
+def decided_of(rules) -> str:
+    """rules | model | both | "" (none): who raised it, from its rules list (intel_events.decided, the Intel page)."""
+    ids = [str(r[0]) for r in rules or [] if r]
+    m = any(i.startswith(MODEL_PREFIXES) for i in ids)
+    o = any(not i.startswith(MODEL_PREFIXES) for i in ids)
+    return "both" if m and o else "model" if m else "rules" if o else ""
+
+
+BACKFILL_CHUNK = 5000              # intel_events.decided filled in at start: rows a transaction
+
+# a person's votes (vote()): one of each group per person and event; the same one again takes it back
+VOTE_PAIRS = {"useful": ("useful", "noise"), "noise": ("useful", "noise"), "should_push": ("should_push",)}
+VOTE_ROWS = "traffic_id IS NULL AND note_id IS NULL"     # (a vote is on the event: never one transmission,
+                                                         # never a note's tag, sizeup/intel/notes.py)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS intel_events (
@@ -57,6 +85,7 @@ CREATE TABLE IF NOT EXISTS intel_events (
 CREATE INDEX IF NOT EXISTS intel_events_status ON intel_events(status, until);
 CREATE INDEX IF NOT EXISTS intel_events_source ON intel_events(source_key, last_at);
 CREATE INDEX IF NOT EXISTS intel_events_cat ON intel_events(domain, category, first_at);
+CREATE INDEX IF NOT EXISTS intel_events_first ON intel_events(first_at);   -- the Intel page (eventlog.py): newest first
 CREATE TABLE IF NOT EXISTS intel_hits (
   traffic_id TEXT NOT NULL, rule_id TEXT NOT NULL, rule_rev INTEGER NOT NULL, weight REAL NOT NULL,
   category TEXT NOT NULL, pack TEXT NOT NULL, event_id INTEGER, at REAL NOT NULL,
@@ -74,6 +103,26 @@ CREATE TABLE IF NOT EXISTS intel_feedback (
   operator TEXT NOT NULL DEFAULT '', at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS intel_feedback_event ON intel_feedback(event_id);
+CREATE TABLE IF NOT EXISTS intel_notes (
+  id INTEGER PRIMARY KEY,
+  event_id INTEGER NOT NULL,
+  text TEXT NOT NULL DEFAULT '',
+  tags TEXT NOT NULL DEFAULT '[]',                   -- notes.TAGS
+  corrected_category TEXT NOT NULL DEFAULT '', corrected_place TEXT NOT NULL DEFAULT '',
+  corrected_level TEXT NOT NULL DEFAULT '',
+  author TEXT NOT NULL DEFAULT '', author_email TEXT NOT NULL DEFAULT '',
+  created_at REAL NOT NULL, updated_at REAL NOT NULL,
+  done TEXT NOT NULL DEFAULT '', done_by TEXT NOT NULL DEFAULT '', done_at REAL   -- acted on: "PR #123", "rule added"
+);
+CREATE INDEX IF NOT EXISTS intel_notes_event ON intel_notes(event_id);
+CREATE INDEX IF NOT EXISTS intel_notes_created ON intel_notes(created_at);
+CREATE TABLE IF NOT EXISTS intel_note_audit (
+  id INTEGER PRIMARY KEY, note_id INTEGER NOT NULL, event_id INTEGER NOT NULL,
+  action TEXT NOT NULL,                              -- add | edit | delete | done
+  operator TEXT NOT NULL DEFAULT '', at REAL NOT NULL,
+  before TEXT NOT NULL DEFAULT '', after TEXT NOT NULL DEFAULT ''     -- the note as JSON ('' none)
+);
+CREATE INDEX IF NOT EXISTS intel_note_audit_note ON intel_note_audit(note_id);
 """
 
 JSON_COLS = ("rules", "alts", "traffic_ids")
@@ -126,6 +175,12 @@ class MemoryEvents:
     def all(self) -> list[Event]:
         return sorted(self.rows.values(), key=lambda e: e.id or 0)
 
+    def bound(self, tid: str, pack: str, category: str) -> bool:
+        """This row is already one of an event's of this pack and category (SqlEvents.bound; never one withdrawn)."""
+        with self._lock:
+            return any(e.pack == pack and e.category == category and tid in e.traffic_ids
+                       and e.note != "source withdrawn" for e in self.rows.values())
+
     def delivered(self, eid: int, outcome: dict) -> None:
         self.delivery[int(eid)] = dict(outcome)
 
@@ -140,6 +195,10 @@ class SqlEvents:
     def __init__(self, store):
         self.store = store
         self.rev = 0                       # bumped on every intel write: the console's intel card reads by it
+        self.list_rev = 0                  # ... but a rule hit: what the Intel page lists (eventlog.py) changed
+        # ... an event saved or dismissed: what its map shows (#937; never a vote). From the start time in ms, so a
+        # page open across a hub restart never sees a value it already had
+        self.map_rev = int(time.time() * 1000)
         with store.lock:
             store.db.executescript(SCHEMA)
             cols = {r[1] for r in store.db.execute("PRAGMA table_info(intel_events)")}
@@ -147,9 +206,33 @@ class SqlEvents:
                 store.db.execute("ALTER TABLE intel_events ADD COLUMN delivery TEXT NOT NULL DEFAULT ''")
             if "fd" not in cols:                    # a table from before the FD check (engine._fire)
                 store.db.execute("ALTER TABLE intel_events ADD COLUMN fd TEXT NOT NULL DEFAULT ''")
+            fcols = {r[1] for r in store.db.execute("PRAGMA table_info(intel_feedback)")}
+            if "note_id" not in fcols:              # a note's tags as verdicts (sizeup/intel/notes.py)
+                store.db.execute("ALTER TABLE intel_feedback ADD COLUMN note_id INTEGER")
+                store.db.execute("CREATE INDEX IF NOT EXISTS intel_feedback_note ON intel_feedback(note_id)")
+            if "decided" not in cols:               # rules | model | both | '' (decided_of): the Intel page's filter
+                store.db.execute("ALTER TABLE intel_events ADD COLUMN decided TEXT")     # (eventlog.py); NULL: an older
+            todo = store.db.execute("SELECT id, rules FROM intel_events WHERE decided IS NULL LIMIT 200000").fetchall() \
+                if "rules" in cols else []          # release's row, read from its text until the next start fills it in
+            if todo:                                # (once: the rows from before the column, or an older release's)
+                def _d(raw):
+                    try:
+                        return decided_of(json.loads(raw or "[]"))
+                    except ValueError:
+                        return ""
+                for k in range(0, len(todo), BACKFILL_CHUNK):     # a transaction a chunk: never a commit a row
+                    part = todo[k:k + BACKFILL_CHUNK]
+                    store.db.execute("BEGIN IMMEDIATE")
+                    try:
+                        store.db.executemany("UPDATE intel_events SET decided = ? WHERE id = ?",
+                                             [(_d(r[1]), r[0]) for r in part])
+                    except BaseException:
+                        store.db.execute("ROLLBACK")
+                        raise
+                    store.db.execute("COMMIT")
 
     @contextmanager
-    def _w(self):
+    def _w(self, listed: bool = True, placed: bool = False):
         """One transaction under the store's lock WITHOUT store.rev (#492 review, H4: intel writes are not CAD changes;
         a police transmission must not rebuild every console's state), the way sizeup/cad/activity.py writes."""
         with self.store.lock:
@@ -162,6 +245,10 @@ class SqlEvents:
                 raise
             db.execute("COMMIT")
             self.rev += 1
+            if listed:
+                self.list_rev += 1
+            if placed:
+                self.map_rev += 1
 
     def recent_closed(self, pack: str, category: str, since: float) -> list[Event]:
         """The events of this pack and category ended or dismissed since then (the mute compares their places)."""
@@ -172,6 +259,12 @@ class SqlEvents:
     def open_events(self) -> list[Event]:
         return [row_event(r) for r in self.store.q("SELECT * FROM intel_events WHERE status = 'open'")]
 
+    def bound(self, tid: str, pack: str, category: str) -> bool:
+        """This row already has a hit of this pack and category bound to an event (a re-feed after a restart: never a
+        second event from it)."""
+        return self.store.one("SELECT 1 FROM intel_hits WHERE traffic_id = ? AND pack = ? AND category = ? AND "
+                              "event_id IS NOT NULL LIMIT 1", (tid, pack, category)) is not None
+
     def get(self, eid: int) -> Event | None:
         r = self.store.one("SELECT * FROM intel_events WHERE id = ?", (eid,))
         return row_event(r) if r else None
@@ -181,13 +274,14 @@ class SqlEvents:
         for k in EVENT_COLS:
             v = getattr(ev, k)
             vals.append(json.dumps(v) if k in JSON_COLS else int(v) if isinstance(v, bool) else v)
-        with self._w() as db:
+        cols = (*EVENT_COLS, "decided")                 # (+ who raised it: the Intel page's filter, decided_of)
+        vals.append(decided_of(ev.rules))
+        with self._w(placed=True) as db:
             if ev.id is None:
-                cur = db.execute(f"INSERT INTO intel_events ({', '.join(EVENT_COLS)}) VALUES ({', '.join('?' * len(EVENT_COLS))})",
-                                 vals)
+                cur = db.execute(f"INSERT INTO intel_events ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", vals)
                 ev.id = int(cur.lastrowid)
             else:
-                db.execute(f"UPDATE intel_events SET {', '.join(k + ' = ?' for k in EVENT_COLS)} WHERE id = ?", (*vals, ev.id))
+                db.execute(f"UPDATE intel_events SET {', '.join(k + ' = ?' for k in cols)} WHERE id = ?", (*vals, ev.id))
         return ev
 
     def rows(self, where: str = "1", args=(), limit: int = 200) -> list[dict]:
@@ -206,7 +300,7 @@ class SqlEvents:
             db.execute("UPDATE intel_events SET delivery = ? WHERE id = ?", (json.dumps(keep), int(eid)))
 
     def dismiss(self, eid: int, operator: str, now: float) -> bool:
-        with self._w() as db:
+        with self._w(placed=True) as db:
             return bool(db.execute("UPDATE intel_events SET status = 'dismissed', dismissed_by = ?, updated_at = ? "
                                    "WHERE id = ? AND status = 'open'", (operator[:120], now, eid)).rowcount)
 
@@ -220,8 +314,34 @@ class SqlEvents:
                               json.dumps(ev.rules if ev else []), ev.ruleset_hash if ev else "", operator[:120], now))
             return int(cur.lastrowid)
 
-    def hit(self, h) -> None:
+    def ensure_vote(self, eid: int, verdict: str, operator: str, now: float) -> int | None:
+        """This person's vote is this one (a Dismiss is a Noise vote): set when it isn't, never taken back."""
+        return self.vote(eid, verdict, operator, now, toggle=False)[0]
+
+    def vote(self, eid: int, verdict: str, operator: str, now: float, toggle: bool = True) -> tuple[int | None, bool]:
+        """A person's vote on an event (the Intel page's and the card's buttons; #906 review M1), one each: Useful and
+        Noise exclusive (the other one replaced), Should have pushed on its own; the same one again takes it back.
+        (id of the vote, or None; True when it was taken back). By operator: who signed in (the API sets it)."""
+        ev = self.get(eid)
+        pair = VOTE_PAIRS.get(verdict, (verdict,))
+        op = operator[:120]
+        marks = ",".join("?" * len(pair))
         with self._w() as db:
+            had = {r[0]: r[1] for r in db.execute(f"SELECT verdict, id FROM intel_feedback WHERE event_id = ? AND operator = ? "
+                                                  f"AND verdict IN ({marks}) AND {VOTE_ROWS}", (eid, op, *pair))}
+            if not toggle and verdict in had:
+                return int(had[verdict]), False
+            db.execute(f"DELETE FROM intel_feedback WHERE event_id = ? AND operator = ? AND verdict IN ({marks}) AND {VOTE_ROWS}",
+                       (eid, op, *pair))
+            if verdict in had:
+                return None, True
+            cur = db.execute("INSERT INTO intel_feedback (event_id, traffic_id, verdict, corrected, corrected_category, rules, "
+                             "ruleset_hash, operator, at) VALUES (?, NULL, ?, '', '', ?, ?, ?, ?)",
+                             (eid, verdict, json.dumps(ev.rules if ev else []), ev.ruleset_hash if ev else "", op, now))
+            return int(cur.lastrowid), False
+
+    def hit(self, h) -> None:
+        with self._w(listed=False) as db:
             db.execute("INSERT INTO intel_hits (traffic_id, rule_id, rule_rev, weight, category, pack, event_id, at) "
                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(traffic_id, rule_id) DO UPDATE SET rule_rev = excluded.rule_rev, "
                        "weight = excluded.weight, category = excluded.category, pack = excluded.pack, "
@@ -230,7 +350,7 @@ class SqlEvents:
 
     def clear_hits(self, tid: str, keep: set[str]) -> None:
         """A re-transcription: the rules that no longer hit this transmission go (idempotent per traffic id)."""
-        with self._w() as db:
+        with self._w(listed=False) as db:
             if keep:
                 db.execute(f"DELETE FROM intel_hits WHERE traffic_id = ? AND rule_id NOT IN ({','.join('?' * len(keep))})",
                            (tid, *sorted(keep)))
@@ -252,7 +372,10 @@ class SqlEvents:
 
     def prune(self, now: float) -> int:
         with self._w() as db:
-            n = db.execute("DELETE FROM intel_events WHERE last_at < ? AND status != 'open'", (now - KEEP_EVENTS_S,)).rowcount
+            n = db.execute("DELETE FROM intel_notes WHERE updated_at < ?", (now - KEEP_NOTES_S,)).rowcount
+            n += db.execute("DELETE FROM intel_note_audit WHERE at < ?", (now - KEEP_NOTES_S,)).rowcount
+            n += db.execute("DELETE FROM intel_events WHERE last_at < ? AND status != 'open' AND id NOT IN "
+                            "(SELECT event_id FROM intel_notes)", (now - KEEP_EVENTS_S,)).rowcount   # (a note keeps it)
             n += db.execute("DELETE FROM intel_hits WHERE at < ?", (now - KEEP_HITS_S,)).rowcount
             n += db.execute("DELETE FROM intel_feedback WHERE at < ?", (now - KEEP_FEEDBACK_S,)).rowcount
         return n

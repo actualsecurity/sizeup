@@ -269,6 +269,29 @@ def station(tmp_path):
     return repo, u
 
 
+def test_the_updater_says_its_build_and_its_switch_apart(station):
+    """state.json's phase while "updating": "build" while it builds (the radios keep running), "switch" from the switch
+    until its result (services restart); last.switch_at. The hub holds its dispatch coverage alert only for the switch
+    (sizeup/cloud/health.py _switch_window)."""
+    repo, u = station
+    new = repo.commit("two")
+    u.want(new)
+    seen = []
+    stage, activate = u.stage, u.activate
+
+    def look(step):
+        rep = Watch(own="", run_dir="", state_path=str(u.p.state)).state()      # as the station reports it
+        seen.append((step, rep.get("state"), rep.get("phase")))
+
+    u.stage = lambda sha: (look("stage"), stage(sha))[1]
+    u.activate = lambda name, leaving="": (look("activate"), activate(name, leaving))[1]
+    assert u.run() == 0
+    assert seen == [("stage", "updating", "build"), ("activate", "updating", "switch")]
+    st = u.load()
+    assert st["state"] == "current" and "phase" not in st
+    assert st["last"]["at"] <= st["last"]["switch_at"] <= st["last"]["at"] + st["last"]["seconds"]
+
+
 def test_the_station_moves_to_the_hubs_build_side_by_side(station):
     repo, u = station
     new = repo.commit("two")

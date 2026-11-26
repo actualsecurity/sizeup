@@ -115,7 +115,7 @@ def restored(tmp_path):
         db.execute("UPDATE incidents SET status = 'dismissed' WHERE id = ?", (gone,))   # dismissed: never a label
     county(cad, "A8", T0 + 5000, "ALARM", 41.0, -73.66, subtype="COMM")          # a plain fire alarm: unlabelled
     county(cad, "A9", T0 + 5100, "ALARM", 41.0, -73.66, subtype="CO-RESD")       # CO: hazmat
-    cad.store.db.close()
+    cad.shutdown()
     return tmp_path / "cad.sqlite"
 
 
@@ -164,7 +164,7 @@ def test_a_copy_with_a_wal_is_read_through_it_and_never_written(tmp_path):
         con.execute("DELETE FROM radio_traffic")
     con.close()
     assert path.read_bytes() == before
-    cad.store.db.close()
+    cad.shutdown()
 
 
 def test_the_clock_is_each_rows_start(restored):
@@ -181,7 +181,7 @@ def test_settings_from_the_copy_turn_the_engine_off(restored, tmp_path):
     cad = make_cad(tmp_path)                                                 # the same file, written as the hub would
     with cad.store.tx() as db:
         db.execute("INSERT INTO settings_overrides (section, key, value, updated_at) VALUES ('intel', 'enabled', 'false', 0)")
-    cad.store.db.close()
+    cad.shutdown()
     con = rp.open_ro(restored)
     rows, settings = rp.load_rows(con), rp.read_settings(con)
     con.close()
@@ -720,7 +720,7 @@ def test_an_admins_service_choice_in_the_copy_scopes_rows_stored_without_a_servi
     assert rows["old-1"]["service"] == "fire" and rows["old-2"]["service"] == "ems"
     assert rows["kept-1"]["service"] == "transit" and fire == {"old-1"}
     assert sourcekeys.service_overrides() == {"p25:mrrs:9122": "police"} and sourcekeys._service_from_hub
-    cad.store.db.close()
+    cad.shutdown()                       # (the re-tag the choice started: joined before the store closes, #740)
 
 
 def test_without_a_choice_in_the_copy_the_file_says_and_the_process_choices_stay_out(tmp_path):
@@ -737,7 +737,7 @@ def test_without_a_choice_in_the_copy_the_file_says_and_the_process_choices_stay
         con.close()
     assert r["service"] == "transit"
     assert sourcekeys.service_overrides() == {"p25:mrrs:9121": "fire"}
-    cad.store.db.close()
+    cad.shutdown()
 
 
 def test_the_process_choices_are_never_changed_while_rows_load(tmp_path, monkeypatch):
@@ -776,7 +776,7 @@ def test_the_process_choices_are_never_changed_while_rows_load(tmp_path, monkeyp
         con.close()
     assert r["service"] == "fire"
     assert seen == [mine] * 3 and sets == [] and sourcekeys._service_over is held and sourcekeys._service_from_hub
-    cad.store.db.close()
+    cad.shutdown()
 
 
 def test_talkgroup_groups_with_a_map_in_place_of_the_process_choices():

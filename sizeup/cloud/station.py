@@ -3,8 +3,9 @@
     App._emit(kind, data, clip)  -> outbox.sqlite (outbox.py), in order, durable
         page        a page off the air (paging channel), with its clip      (App._segment)
         page_text   its transcript (the hub parses the dispatch itself)     (App._transcribed)
-        traffic     a finished, transcribed transmission, with its clip     (App._transcribed)
-        retext      a re-run's new text for a page or transmission          (App._retext)
+        traffic     a finished transmission, with its clip: transcribed, or (a hub with traffic_pending, #927) at its
+                    close, "Transcribing", its text following as a retext with fill   (App._transcribed, _land_pending)
+        retext      a re-run's new text for a page or transmission          (App._retext); a fill (App._fill_pending)
         rerun       a re-run is over: changed | same | failed: why          (App._rerun_finish)
         alt_text    "both" re-run: whisper's text as the alternative        (App._set_alt)
         heard       a radio ID (and P25 alias) heard on the air             (App._heard)
@@ -68,6 +69,7 @@ import json
 import tempfile
 import threading
 import time
+import uuid
 import wave
 from pathlib import Path
 from typing import Callable
@@ -108,7 +110,9 @@ CALLS = ("set_mode", "set_talkgroup", "set_talkgroup_group", "retranscribe", "se
          "reception_sample_b64",      # ... and a call it captured, to listen to (never stored on the hub)
          "set_stt_alert_keys",        # the sources the hub's pre-alerts push from: HIGH at least in whisper (#639 ph. 2)
          "set_stt_terms",             # the private term lists' top for whisper's prompt (sizeup/stt_terms.py)
-         "quarantine_dismiss")        # Health's Dismiss: the stuck / late events the hub refused (outbox.py dismiss)
+         "quarantine_dismiss",        # Health's Dismiss: the stuck / late events the hub refused (outbox.py dismiss)
+         "stt_withdraw",              # the hub's pool took these clips: this whisper skips them (#927; status caps)
+         "stt_held")                  # after this process started again: which waiting clips it still has (#927)
 # A call's arguments that must be given, never left to the function's default: a default that means "everything"
 # (retranscribe's ids=None: every recording on the disk). Given as null, it is asked for; left out, it is refused. The
 # parameters without a default are required anyway.
@@ -175,6 +179,12 @@ def source_rows(runner) -> list[dict]:
 
 
 POOL_CAP = "stt_pool"      # the hub takes clips handed to its pool (sizeup/cloud/hub.py POOL_CAP, #639 phase 2)
+# what this station takes from the hub (its status' "caps", station-state status.caps): the hub's pool withdrawing clips
+# from its whisper (the stt_withdraw call, App.stt_withdraw), and the hub asking which it still has (stt_held), #927
+STATION_CAPS = ("stt_withdraw", "stt_held")
+# this process's own id (#927): a new one in the state post tells the hub sizeup started again (boot_id says only the
+# machine's boot), so it asks which clips still waiting for their text this process has (stt_held)
+PROC_ID = uuid.uuid4().hex
 RESTART_S = (1.0, 30.0)    # a link thread that raised starts again after this long (doubling, at most the second)
 STT_LANE_LOOK_S = 2.0      # the STT lane looks again this often while it waits (an event's ack, or a new input, wakes it)
 
@@ -201,7 +211,8 @@ OTHER = {"answer": (None, "an object"), "jobs": (None, "a list of objects"), "jo
 # ... and the pool's word (#639 phase 2), each of its fields so
 POOL = {"on": (lambda v: isinstance(v, bool), "true or false"), "worker": (lambda v: isinstance(v, bool), "true or false"),
         "ready": (_is_int, "an integer"), "max_s": (_is_num, "a number"),
-        "gpu_idle": (lambda v: isinstance(v, bool), "true or false"), "gpu_idle_n": (_is_int, "an integer")}
+        "gpu_idle": (lambda v: isinstance(v, bool), "true or false"), "gpu_idle_n": (_is_int, "an integer"),
+        "gpu_ready": (_is_int, "an integer"), "gpu_bg": (lambda v: isinstance(v, bool), "true or false")}
 
 
 def _cpu_pct() -> float | None:
@@ -464,6 +475,22 @@ class StationLink:
             return 0
         n = self.pool.get("gpu_idle_n")
         return max(0, n) if _is_int(n) else int(self.pool.get("gpu_idle") is True)
+
+    def pool_gpu_ready(self) -> bool:
+        """The hub's last word, heard lately: a GPU worker is ready for an Auto · priority clip (sizeup/sttroute.py):
+        such a clip goes to the hub at once (a GPU worker there, else AWS, else back to this station's whisper)."""
+        n = self.pool.get("gpu_ready")
+        return self.connected() and _is_int(n) and n > 0
+
+    def pool_takes_bg(self) -> bool:
+        """The hub takes an Auto · background clip handed over (#896: it places it on another station, a GPU, AWS, or
+        sends it back here): a hub with handed-over clips, heard lately."""
+        return POOL_CAP in self.hub_caps and self.connected() and bool(self.pool.get("on"))
+
+    def pool_gpu_bg(self) -> bool:
+        """The hub's last word, heard lately: a GPU worker would take an Auto · background clip now (it holds nothing
+        and no priority work waits: #878). Only to a hub that takes handed-over clips."""
+        return POOL_CAP in self.hub_caps and self.connected() and self.pool.get("gpu_bg") is True
 
     def stt_input(self, item, audio, prio: int = sttinput.NORMAL) -> None:
         """App._stt: this transmission / page goes to speech-to-text now with `audio`. Queued (a reference, nothing
@@ -947,6 +974,7 @@ class StationLink:
                "stt_input": self.stt_stats(),                # (each clip's STT input: waiting, sent, dropped by reason)
                "pool_worker": dict(self.pool_worker.stats),  # (its whisper as a pool worker, #639 phase 2)
                "stt_alert_rev": app.stt_alert_rev,           # (the alert sources' revision it has: the hub resends on a change)
+               "caps": list(STATION_CAPS),                   # (what it takes from the hub: stt_withdraw, #927)
                "version": self.version()}
         try:
             out["logship"] = self.logs.stats()
@@ -977,7 +1005,7 @@ class StationLink:
             now = time.time() if at is None else at
             talking = self.app.live.state()
             paging = self.app.paging_state()            # a page going out now (a hub before #63 ignores it)
-            body: dict = {"at": now, "boot_id": self.wall.post_boot_id, "wall_steps": steps,
+            body: dict = {"at": now, "boot_id": self.wall.post_boot_id, "wall_steps": steps, "proc": PROC_ID,
                           "talking": talking, "paging": paging}
             if self._status_now or now - last_status >= STATUS_S:
                 tgs = self.app.tg.state() if self.app.p25 else []

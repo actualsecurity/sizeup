@@ -106,7 +106,9 @@ def test_the_layers_box_keeps_scroll_focus_and_folds_on_a_toggle():
     assert "cb.dataset.key = gisKey(l);" in g and "renderPanel" not in g                 # the control redraws, nothing here does
     css = (STATIC / "cadmap.css").read_text()
     assert re.search(r"\.ml-panel > \.ml-head \{ position: sticky; inset-block-start: calc\(-1 \* var\(--s-2\)\);", css)
-    assert "max-block-size: min(70vh, calc(100% - var(--ctl-sm) - var(--s-6)))" in css
+    # sized to its map, not the page (the Overview at a desk: tests/test_overview_fit.py); one scroll area when it must
+    assert "max-block-size: calc(100% - var(--ctl-sm) - var(--s-6)); overflow: auto;\n    overscroll-behavior: contain;" in css
+    assert "70vh" not in re.search(r"\.ml-panel, \.ml-info \{(.*?)\}", css, re.S).group(1)
 
 
 
