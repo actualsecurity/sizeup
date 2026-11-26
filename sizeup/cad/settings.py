@@ -81,6 +81,9 @@ Reset to default = drop the override (one item, or a whole section).
                                    sizeup/datasources.py); not set: the source's default
     station_logs                   key "on" | "level" | "include" | "exclude" | "retention_days": the station's logs into
                                    CloudWatch (sizeup/cloud/cwlogs.py; Settings > Station > Logs, admins)
+    dongle_swap                    key "auto_critical" -> true | false (default false): a gone dongle's Fire/EMS 15 or
+                                   paging job moved by itself to a new dongle only when the station marks the swap "auto"
+                                   (App._auto_ok; sizeup/cloud/dongleswap.py; Settings > Radios > Receivers, admins)
     hydrant_display                key "assume_c" -> true | false (default true): an untested hydrant drawn as Class C,
                                    always marked assumed ("C*"; #840, sizeup/cad/hydrants.py; Settings > Hydrants, admins)
     reminders                      key "<rule>_on" -> true | false, "<rule>_min" -> minutes (rules: pending, dispatched,
@@ -156,6 +159,13 @@ PAGE_SECTION[ATC_SECTION] = "system"
 # How the hydrants are drawn (#840, sizeup/cad/hydrants.py): Settings > Hydrants, audited as System.
 HYD_SECTION, HYD_KEYS = "hydrant_display", {"assume_c": "Untested hydrants: assume Class C"}
 PAGE_SECTION[HYD_SECTION] = "system"
+# A dongle swapped for a new one (sizeup/radio/replace.py, sizeup/cloud/dongleswap.py): Settings > Radios > Receivers,
+# audited as Radios. key "auto_critical" -> true: the county's and paging's jobs move by themselves to a new dongle,
+# 60 s after their dongle went, only when the station marks the swap "auto" (App._auto_ok: one new dongle fits, in the
+# old one's USB port, first seen after it went, the job running nowhere, the same tuner; a push says so). Off by
+# default: a person's "Use it" only.
+SWAP_SECTION, SWAP_KEYS = "dongle_swap", {"auto_critical": "Auto-replace a gone dongle for Fire/EMS 15 and paging"}
+PAGE_SECTION[SWAP_SECTION] = "radios"
 # What flashes when a call or a unit is left too long (sizeup/cad/reminders.py): Settings > Dispatch, audited as Dispatch.
 REM_SECTION = reminders.SECTION
 PAGE_SECTION[REM_SECTION] = "dispatch"
@@ -612,6 +622,7 @@ class Editor:
         self.cad.hydrants_assume_c = bool((ov.get(HYD_SECTION) or {}).get("assume_c", True))   # #840: on by default
         if was != self.cad.hydrants_assume_c and getattr(self.cad, "hydrants", None) is not None:
             self.cad.hydrants.display_changed()          # the layer drawn again, every page
+        self.cad.dongle_auto_replace = (ov.get(SWAP_SECTION) or {}).get("auto_critical") is True   # off by default
         self.cad.map_display = mapview.display_zooms(ov.get(MAPD_SECTION))     # the maps' rigs by zoom (#376)
         self.cad.premise_visible = dict(ov.get(PREMISE_SECTION) or {})     # premise notes by category (#403)
         self.cad.em_prominent = em_prominent(ov.get(EM_SECTION))          # the Radio page's loud emergencies
@@ -801,6 +812,7 @@ class Editor:
         out["camera_wall"] = self.wall_page()
         out["atc"] = self.atc_page(ov)
         out["hub_errors"] = self.errors_page(ov)
+        out["dongle_swap"] = self.swap_page(ov)
         out["map_display"] = self.mapd_page(ov)
         out["premise_visibility"] = self.premise_page(ov)
         out["radio_emergencies"] = self.em_page(ov)
@@ -1296,6 +1308,31 @@ class Editor:
                            [("system", f"{HYD_SECTION}/{key}", "on" if cur else "off", "on" if v else "off")])
         return {**out, HYD_SECTION: {key: v}}
 
+    def swap_page(self, ov: dict | None = None) -> dict:
+        """Settings > Radios > Receivers: auto-replace for critical channels (off by default)."""
+        a = (self.section(SWAP_SECTION) if ov is None else (ov.get(SWAP_SECTION) or {}))
+        return {k: {"label": lab, "value": a.get(k) is True, "default": False, "edited": k in a} for k, lab in SWAP_KEYS.items()}
+
+    def _swap_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key: auto_critical, value: true | false} | reset {key}: admins."""
+        key = body.get("key")
+        if key not in SWAP_KEYS:
+            raise CadError("key: auto_critical")
+        cur = (self.overrides().get(SWAP_SECTION) or {}).get(key) is True
+        if action == "reset":
+            v = False
+        elif action == "set":
+            v = body.get("value")
+            if not isinstance(v, bool):
+                raise CadError(f"{key}: true or false")
+        else:
+            raise CadError("action: set or reset")
+        if v == cur:                                     # as it is: nothing written, nothing audited
+            return {"ok": True, "dongle_swap": self.swap_page()}
+        out = self._commit([(SWAP_SECTION, key, v if v else REMOVE)], op,
+                           [("radios", f"{SWAP_SECTION}/{key}", "on" if cur else "off", "on" if v else "off")])
+        return {**out, "dongle_swap": self.swap_page()}
+
     def _rem_op(self, action: str, body: dict, op: str) -> dict:
         """set {key, value} | reset {key} | reset_section: admins (Settings > Dispatch > Reminders)."""
         cur = self.section(REM_SECTION)
@@ -1511,7 +1548,7 @@ class Editor:
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
               channels_mod.SQUELCH_SECTION: self._squelch_op,
               "places": self._places_op, COMMON_SECTION: self._common_op, ADDR_SECTION: self._addresses_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
-              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, HYD_SECTION: self._hyd_op, REM_SECTION: self._rem_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, SIGNAL_SECTION: self._signal_op, FOLDERS_SECTION: self._folders_op, SVC_SECTION: self._services_op, RET_SECTION: self._retention_op,
+              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, HYD_SECTION: self._hyd_op, SWAP_SECTION: self._swap_op, REM_SECTION: self._rem_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, SIGNAL_SECTION: self._signal_op, FOLDERS_SECTION: self._folders_op, SVC_SECTION: self._services_op, RET_SECTION: self._retention_op,
               TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, LOGS_SECTION: self._logs_op, DEPT_SECTION: self._dept_op, FT_SECTION: self._feed_types_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o),
               "intel": lambda a, b, o: self.cad.intel_admin.settings_op(a, b, o),
               FIX_SECTION: lambda a, b, o: self.cad.stt_fix.settings_op(a, b, o)}.get(section)

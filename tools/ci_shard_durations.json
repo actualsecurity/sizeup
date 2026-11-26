@@ -84,6 +84,7 @@
  "tests/test_dispatch_modes_review.py": 8.19,
  "tests/test_dispatch_rigs.py": 0.25,
  "tests/test_dongle_noaudio.py": 35.17,
+ "tests/test_dongle_swap.py": 11.5,
  "tests/test_dvr.py": 0.14,
  "tests/test_dvr_index.py": 2.49,
  "tests/test_dvr_parked.py": 13.83,

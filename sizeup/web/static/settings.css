@@ -239,6 +239,7 @@
   .sdr-row > .sdr-err { grid-column: 2; margin: 0; }
   @media (max-width: 40rem) { .sdrs .sdr-row { grid-template-columns: minmax(0, 1fr); } .sdr-row > .sdr-err { grid-column: 1; } }
   .sdr-err { color: var(--warn); font-size: var(--fs-xs); margin-inline-start: var(--s-2); }
+  .sdrs .sdr-row.focus { outline: var(--focus-w) solid var(--warn); outline-offset: var(--focus-off); }   /* an alert's link */
   .sdr-err:empty { display: none; }
   /* antenna groups (radio-controls.js renderGroups): a lock badge on a grouped dongle's row; one line per group,
      the editor inline */

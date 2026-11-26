@@ -611,6 +611,7 @@ Settings > Station > Health (`static/health.js`), top to bottom. A row with noth
 
 | Row | Shows | Look here when |
 |---|---|---|
+| New dongles | "New dongle *serial* seen — use it for *jobs*?": Use it, Not now ([A dongle swapped for a new one](#a-dongle-swapped-for-a-new-one)) | a dongle was replaced |
 | Alerts now | each alert that is on: severity, since when, where, pushed or muted | anything is red |
 | Hints | a channel quiet for longer than usual, a squelch opening on noise, context clips shed, the police budget used up | never pushed: read with the Channels row |
 | Incident sources | each source's tier, state (ok, backing off, failing, stale), reason, last report, which one is the acting primary; each source's lead over paging; reports a feed no longer lists | the console pill says "Paging primary" |
@@ -642,6 +643,38 @@ hour, then "Hub errors back to normal" once it has been at or under its threshol
 in `hub.sqlite` (meta "errwatch"), so a redeploy doesn't push a running fault again. Settings → System → **Hub error
 alerts** (admins, the hub): on / off and the two numbers; Settings → Station → Health: **Hub errors**, the rate and
 the top signatures with their last message (admins only). The access log (`http ...` lines) is not counted.
+
+### A dongle swapped for a new one
+
+New dongles (new serials) put in for old ones leave the jobs on the old serials: nothing moves them by itself
+(2026-11-25: hours without coverage). The station now says so (`sizeup/radio/replace.py`, `App.replace_offers`):
+a dongle with a job, or in an antenna group, gone 60 s, and a new dongle plugged in with no job, in no group, not
+switched Off by a person, not another app's (the shared claims), not out for no audio, that **fits** the gone one's
+jobs: each frequency in its tuner's range (R820T / R828D / E4000 / FC0012 / FC0013 / FC2580: the tuner rtl_fm reported
+on it, else its USB product, else taken as an R820T), HF only with direct sampling (Blog V3/V4), the sample rate the
+job takes. Several gone and several new: paired by the same tuner, then the same product, then the USB port (or bus)
+the gone one was on (`sdr_seen.json`); when that can't tell, each new dongle that fits is offered and a person picks.
+
+- **Health** (New dongles) and **the console** (under the radio, like the new radio IDs): "New dongle *serial* seen —
+  use it for Fire/EMS 15?". **Use it** (admins, `POST /api/sdr-replace`, in their activity) moves the gone dongle's
+  job there, and its place in its antenna group (replaced, never added beside it). **Not now**: asked again in 6 h.
+- **"SDR *x* gone"** names its job, says when a new dongle fits, and links to the dongle's row in Settings > Radios >
+  Receivers (the push too). When the dongle leaves the station's config (Use it, a group saved without it) the alert
+  clears as "SDR *x* removed from config (jobs now on *y*)", never "Recovered".
+- A group's dongle missing for a day: a Health hint "*serial* missing 1 d: remove from group?" with **Remove**.
+- **No question left**: a gone dongle whose job already runs on another dongle as that dongle's own (auto-assign gave
+  it a replacement, or a person picked it) is not offered. A group's stand-in only covers: its gone dongle is offered.
+- **Use it** that fails (the new dongle doesn't start the job) puts everything back: the job stays the gone dongle's,
+  and an antenna group and its file are only changed once the job runs on the new dongle.
+- **Auto-replace** (Settings > Radios > Receivers, *New dongles*, off by default): 60 s after the old one went, the
+  hub moves it (`sizeup/cloud/dongleswap.py`), audits it ("auto-replace", Radios) and pushes "Auto-replaced SDR *x*"
+  to the status topic, only when the station marks the offer `auto` (`App._auto_ok`), which needs all of:
+  Fire/EMS 15 or paging; exactly one new dongle fits, and it fits no other gone dongle with a job (however long gone,
+  Not now included); it is on exactly the USB port the gone one last used (no ports known, as on macOS: never; the
+  port is a path, not the dongle: a hub moved or renumbered can put another new dongle on the old path, so this rule
+  is only as good as the ports staying put); it first appeared after the gone one was last seen (`sdr_seen.json`
+  `first`: an old idle spare never); the job runs on no dongle now (no stand-in, no auto-assigned replacement); the
+  same tuner when both are known. The station checks it again before it moves anything. Anything less is asked.
 
 ### The alert and status topics (ntfy)
 

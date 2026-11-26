@@ -326,6 +326,10 @@ class Cad:
         self.sources.on_page_swept = self._page_swept       # ... and enriches it as a page that joined does
         # FG1 radio IDs nobody has named yet (#163): "Radio 1234 (MDC) on FG1: who is this?" on the console.
         self.newids = NewIds(self)
+        # A dongle swapped for a new one (sizeup/radio/replace.py): the app sets where the offers are read (the station's
+        # sdr state); the console asks "New SDR <serial>: use it for <jobs>?" (static/dongle-swaps.js)
+        self.dongle_swaps_source: Callable[[], list] | None = None
+        self.dongle_auto_replace = False      # Settings: dongle_swap/auto_critical (sizeup/cloud/dongleswap.py)
         # The emergency button and a mayday heard on our fire channels (sizeup/cad/alarms.py, #128): the app feeds it
         # transmissions on the CAD of record; every console and wall board shows them until acknowledged.
         self.alarms = Alarms(self, lambda m: self.log(m))
@@ -550,7 +554,7 @@ class Cad:
                     talking=self._talking(), paging=self.paging(), cloud=self.cloud(), prealert=self.prealert_state(now),
                     airport_alerts=self.airport_alerts_state(now), intel=self.intel_state(now),
                     status_hints=self.status_hints(), oos_notices=self.oos_notices(), alarms=self.alarms_state(now), radio_ids=self.radio_ids(now),
-                    sources=self.sources_state(now), trains_rev=self._trains_rev())
+                    dongle_swaps=self.dongle_swaps(), sources=self.sources_state(now), trains_rev=self._trains_rev())
 
     def _trains_rev(self) -> int | None:
         try:
@@ -670,6 +674,17 @@ class Cad:
         except Exception as e:  # noqa: BLE001
             self.log(f"CAD: new radio IDs: {type(e).__name__}: {e}")
             return []
+
+    def dongle_swaps(self) -> list[dict]:
+        """The new dongles offered for gone ones (sizeup/radio/replace.py), for the console's question; a fault never
+        breaks the console."""
+        try:
+            rows = self.dongle_swaps_source() if self.dongle_swaps_source is not None else []
+        except Exception as e:  # noqa: BLE001
+            self.log(f"CAD: dongle swaps: {type(e).__name__}: {e}")
+            return []
+        return [{k: o.get(k) for k in ("missing", "name", "jobs", "group", "pick", "choices")}
+                for o in (rows if isinstance(rows, list) else []) if isinstance(o, dict)][:8]
 
     def name_radio(self, body: dict) -> dict:
         """POST /api/cad/radio-id {system, radio_id, unit? | label? | ignore?, operator}: who a new FG1 radio is."""
