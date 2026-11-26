@@ -10,7 +10,8 @@
 // metrics suggest (sizeup/cloud/metricsinsight.py), its numbers on hover; Apply sets Open and Close (keeping the
 // hysteresis) like an edit here, audited the same. Paging: the numbers only (advisory).
 // Paging (South 2): Open / Close set by admins inside a guard the hub checks (sizeup/cad/settings.py _paging_guard:
-// over the idle max + 2 dB, 6 dB under the pages); Min stays the receiver's. Open within 6 dB of the pages: amber.
+// over the idle max + 2 dB, under the pages' weak tail, +3 dB a day); Min stays the receiver's. Open within 6 dB of the
+// pages: amber.
 //   SquelchPanel.mount(box)   when its tab opens (settings.js)
 "use strict";
 
@@ -136,7 +137,8 @@ window.SquelchPanel = (() => {
   // paging: the pages' level and the idle max (the hub's metrics, admins), for the guard's hover and the warning
   function guard(c) {
     const s = st.sugg && st.sugg[c.key];
-    return s ? { idle: s.idle_max ?? null, page: s.page_db ?? null } : { idle: null, page: null };
+    return s ? { idle: s.idle_max ?? null, page: s.page_db ?? null, p10: s.page_p10 ?? null, ceil: s.open_ceiling ?? null }
+      : { idle: null, page: null, p10: null, ceil: null };
   }
 
   async function save(c, field, raw) {
@@ -185,8 +187,9 @@ window.SquelchPanel = (() => {
     i.title = `${help}\nDefault ${dflt ?? "—"} ${unit}` + (run !== undefined && run !== null ? ` · running ${run} ${unit}` : "")
       + (locked ? (paging(c) ? "\nPaging: stays at the default" : `\nRead-only: ${c.kind || "not a traffic"} channel`)
         : "\nEmpty: the default")
-      + (g && key === "open_db" ? `\nGuard: idle max ${g.idle ?? "?"} + 2 dB to pages ${g.page ?? "?"} − ${PAGE_GAP_DB} dB`
-        + (g.page === null ? " (no pages: default + 6 dB at most)" : "") : "")
+      + (g && key === "open_db" ? `\nGuard: idle max ${g.idle ?? "?"} + 2 dB to `
+        + (g.ceil !== null ? `${g.ceil} dB (pages: p10 ${g.p10}, median ${g.page})` : `${(dflt ?? 10) + 6} dB (under 10 pages)`)
+        + "; +3 dB a day at most" : "")
       + (near ? `\nWithin ${PAGE_GAP_DB} dB of the pages: pages could be missed` : "");
     i.setAttribute("aria-label", `${c.key} ${f[1]}`);
     i.addEventListener("change", () => save(c, key, i.value.trim()));

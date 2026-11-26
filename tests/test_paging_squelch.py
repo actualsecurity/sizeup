@@ -43,6 +43,15 @@ def keyed(audio, ctcss=156.7):
     return (audio + 0.1 * np.sin(2 * np.pi * ctcss * t) + 0.02 * rng.standard_normal(len(audio))).astype(np.float32)
 
 
+def weak(audio, q=12.0):
+    """audio on a weak carrier: its discriminator noise q dB under the hiss, rising with frequency as FM's does (little
+    of it in the voice band), so the squelch reads about q dB of quieting."""
+    x = hiss(len(audio) / RATE, 0.4 * 10 ** (-q / 20))
+    F = np.fft.rfft(x)
+    F *= np.clip(np.fft.rfftfreq(len(x), 1 / RATE) / 4000.0, 0, 1)
+    return (np.asarray(audio, np.float32) + np.fft.irfft(F, len(x))).astype(np.float32)
+
+
 def squelch_segments(app, audio, t0=2_000_000_000.0):
     """audio through a fresh copy of South 2's own squelch (its hang and continuation window): the segments."""
     sq = app._receiver("South 2").new_squelch()
@@ -105,11 +114,44 @@ def test_a_real_tone_page_at_30_db_still_passes(app):
     assert [p.kind for p in app.pages] == ["page"] and app.pages[0].tones
 
 
-def test_a_short_tone_burst_still_passes(app):
-    """Tones decide: a short, weak transmission with a tone in it is never static."""
-    a = (0.5 * np.sin(2 * np.pi * 1000.0 * np.arange(int(1.6 * RATE)) / RATE)).astype(np.float32)
-    s = seg(1.6, 11.0, audio=a)
-    assert app._static_open("South 2", s, []) and not app._static_open("South 2", s, ["a tone"])
+def test_g1_a_short_weak_spoken_disregard_is_kept(app):
+    """A 1.6 s "disregard" at ~12 dB (peak ~13-14, Open 10) has speech in it: a page, never static."""
+    [s1] = squelch_segments(app, np.concatenate([hiss(3.0), weak(voice(1.6)), hiss(3.0)]))
+    assert s1.end - s1.start < 2.0 and s1.q_max < 14.0
+    app._segment(SOUTH, s1)
+    assert app.metrics_seen == [("South 2", "page")] and not app._static_n and [p.kind for p in app.pages] == ["voice"]
+
+
+def test_s3_a_pages_last_weak_voice_after_a_dead_carrier_is_kept(app):
+    """A dead carrier (no content: no continuation window after it), then the page's last words, weak: kept."""
+    audio = np.concatenate([hiss(3.0), weak(np.zeros(int(RATE * 2.5), np.float32), 26), hiss(0.6), weak(voice(1.2)),
+                            hiss(3.0)])
+    segs = squelch_segments(app, audio)
+    assert len(segs) == 2 and not segs[1].cont and segs[1].end - segs[1].start < 2.0
+    for s1 in segs:
+        app._segment(SOUTH, s1)
+    assert not app._static_n and len(app.pages) == 2
+    assert app.metrics_seen == [("South 2", "noise"), ("South 2", "page")]   # (the dead carrier: no page level)
+
+
+def test_g2_a_lone_tone_before_a_fade_is_kept(app):
+    """Tone A alone (1 s at ~12 dB, its B lost in a fade): no pair, but a tone was heard: kept, with its audio."""
+    [s1] = squelch_segments(app, np.concatenate([hiss(3.0), weak(tone(349.1, 1.0)), hiss(3.0)]))
+    decoded = __import__("sizeup.radio.page", fromlist=["decode_tones"]).decode_tones(s1.audio, app.plan)
+    assert not decoded[0] and decoded[1]                             # no pair; a tone heard
+    app._segment(SOUTH, s1)
+    assert not app._static_n and len(app.pages) == 1 and app.clip(app.pages[0].id)
+
+
+def test_g3_raising_the_open_never_widens_the_gate(app):
+    """Open 20: the line is min(20 + 4, 15) = 15, so a silent 1.8 s carrier at ~17 dB (and any voice) is kept."""
+    app._receiver("South 2").set_squelch(20.0, 16.0, None)
+    assert channels.static_db(20.0) == 15.0 and channels.static_db(10.0) == 14.0
+    assert not app._static_open("South 2", seg(1.8, 17.0), ([], []))
+    assert app._static_open("South 2", seg(1.8, 14.5), ([], []))
+    [s1] = squelch_segments(app, np.concatenate([hiss(3.0), weak(voice(1.8), 23.5), hiss(3.0)]))
+    app._segment(SOUTH, s1)
+    assert not app._static_n and len(app.pages) == 1
 
 
 @pytest.mark.parametrize("dur, q_max, why", [(6.0, 30.0, "long voice page at 30 dB"),
@@ -124,27 +166,69 @@ def test_voice_pages_that_are_not_static_still_pass(app, dur, q_max, why):
 
 def test_a_continuation_or_a_key_up_piece_is_never_static(app):
     for kw in ({"cont": True}, {"split": "level"}):
-        assert not app._static_open("South 2", seg(0.8, 11.0, **kw), [])
+        assert not app._static_open("South 2", seg(0.8, 11.0, **kw), ([], []))
     burst = seg(0.8, 11.0)
     burst.bursts = [np.zeros(800, np.float32)]
-    assert not app._static_open("South 2", burst, [])
-    assert app._static_open("South 2", seg(0.8, 11.0), [])
+    assert not app._static_open("South 2", burst, ([], []))
+    assert app._static_open("South 2", seg(0.8, 11.0), ([], []))
 
 
 def test_the_gate_follows_the_running_open(app):
-    s = seg(1.0, 15.0)
-    assert not app._static_open("South 2", s, [])                    # 15 >= 10 + 4
-    app._receiver("South 2").set_squelch(14.0, 10.0, None)
-    assert app._static_open("South 2", s, [])                        # 15 < 14 + 4
+    s1 = seg(1.0, 13.0)
+    assert app._static_open("South 2", s1, ([], []))                 # 13 < 10 + 4
+    app._receiver("South 2").set_squelch(8.0, 4.0, None)
+    assert not app._static_open("South 2", s1, ([], []))             # 13 >= 8 + 4
+    app._receiver("South 2").set_squelch(12.0, 8.0, None)
+    assert app._static_open("South 2", s1, ([], []))                 # 13 < min(12 + 4, 15)
+    assert not app._static_open("South 2", seg(1.0, 15.5), ([], []))
+
+
+# -- #973: a tone pair none of ours, nothing said: its own kind ------------------------------------------------------------
+
+def test_an_unknown_pair_alone_is_tones_other_kept_and_learned(app):
+    """A weak transmitter's long tone (an A=B code none of ours, ~4.7 s at ~13 dB) and nothing said: never dropped, its
+    clip and the unknown-pair learning kept, its metric "tones_other" (never a page's level)."""
+    [s1] = squelch_segments(app, np.concatenate([hiss(3.0), weak(tone(1050.0, 4.7), 13), hiss(3.0)]))
+    app._segment(SOUTH, s1)
+    app._release_pages(now=2_100_000_000.0)
+    assert app.metrics_seen == [("South 2", channels.TONES_OTHER)] and not app._static_n
+    [p] = app.pages
+    assert p.tones and not p.tones[0].names and app.clip(p.id)        # kept, unnamed: for learning
+
+
+def test_our_pair_is_a_page(app):
+    [s1] = squelch_segments(app, np.concatenate([hiss(3.0), weak(np.concatenate([tone(349.1, 1.0), tone(311.1, 3.0)]), 13),
+                                                 hiss(3.0)]))
+    app._segment(SOUTH, s1)
+    assert app.metrics_seen == [("South 2", "page")]
+
+
+def test_tones_other_never_sets_the_page_level():
+    floor = floor_minutes(NOW - 7 * DAY, 7 * 1440, q90=lambda k, r: r.gauss(5.0, 0.4), kind="paging")
+    pages = [dict(d, pc=1) for d in transmissions(NOW - 7 * DAY, 7 * DAY, [30.0] * 12, kind="page")]
+    other = [dict(d, pc=1, dur=4.7) for d in transmissions(NOW - 7 * DAY, 7 * DAY, [13.0] * 300, kind="tones_other", seed=9)]
+    out = mi.suggest(floor, pages + other, CFG, NOW)
+    assert out["pages"] == 12 and out["page_db"] == 30.0 and out["page_p10"] == 30.0
+    assert mi.check_levels(pages, pages + other, CFG, paging=True) == []
+    from sizeup.cloud.metricstore import METRICS
+    assert not METRICS["tx_q_open"][1]({"kind": "tones_other"}) and METRICS["tx_q_open"][1]({"kind": "page"})
 
 
 # -- the guard ---------------------------------------------------------------------------------------------------------
 
-class Levels:
-    """Stands in for the hub's metric insight (Insight.paging_levels)."""
+def paging_suggestion(qos, extra=(), idle_q90=5.0, classified=True):
+    """mi.suggest over 7 days of a paging channel's floor and pages at open `qos` (at close: 5 dB under)."""
+    floor = floor_minutes(NOW - 7 * DAY, 7 * 1440, q90=lambda k, r: r.gauss(idle_q90, 0.3), kind="paging")
+    pages = [dict(d, pc=1) if classified else d for d in transmissions(NOW - 7 * DAY, 7 * DAY, list(qos), kind="page")]
+    return mi.suggest(floor, pages + list(extra), CFG, NOW)
 
-    def __init__(self, idle_max=9.0, page_db=30.0, pages=6):
-        self.lv = {"idle_max": idle_max, "page_db": page_db, "pages": pages}
+
+class Levels:
+    """Stands in for the hub's metric insight (Insight.paging_levels): the numbers of a suggestion."""
+
+    def __init__(self, sugg=None, **lv):
+        keys = ("idle_max", "page_db", "page_p10", "open_ceiling", "close_ceiling")
+        self.lv = {**{k: (sugg or {}).get(k) for k in keys}, "pages": (sugg or {}).get("pages", 0), **lv}
         self.forgot = []
 
     def paging_levels(self, key):
@@ -158,46 +242,104 @@ def post(app, **body):
     return app.cad.settings.post("squelch", {"action": "set", "key": "South 2", "operator": ADMIN, **body})
 
 
-def test_open_is_guarded_by_the_idle_max_and_the_pages(app):
-    app.cad.station_metrics_insight = Levels(idle_max=9.0, page_db=30.0)
+def test_u1_one_strong_page_is_not_enough_to_raise_far():
+    """One 35 dB page: no page level (under GUARD_PAGES): the blind limit, default + 6."""
+    out = paging_suggestion([35.0])
+    assert out["page_db"] is None and out["open_ceiling"] is None and out["close_ceiling"] is None
+    assert paging_suggestion([30.0] * mi.GUARD_PAGES)["open_ceiling"] == 21.0      # min(30, 30 - 6) - 3
+
+
+def test_u2_the_ceiling_follows_the_weak_tail_not_the_median(app):
+    """6 pages at 30 and 4 at 18: the median says 30, the tail 18: Open at most 15."""
+    out = paging_suggestion([30.0] * 6 + [18.0] * 4)
+    assert out["page_db"] == 30.0 and out["page_p10"] == 18.0 and out["open_ceiling"] == 15.0
+    app.cad.station_metrics_insight = Levels(out, idle_max=9.0)
+    with pytest.raises(CadError, match="pages could be missed"):
+        post(app, open_db=15.5)
+    post(app, open_db=13)
+    assert app._receiver("South 2").squelch.params[0] == 13.0
+
+
+def test_open_is_guarded_by_the_idle_max_and_the_ceiling(app):
+    app.cad.station_metrics_insight = Levels(paging_suggestion([30.0] * 12), idle_max=9.0)
     with pytest.raises(CadError, match="idle max 9"):
         post(app, open_db=10.5)                                     # 9 + 2 = 11 at least
-    with pytest.raises(CadError, match="pages could be missed"):
-        post(app, open_db=24.5)                                     # 30 - 6 = 24 at most
     with pytest.raises(CadError, match="under open"):
-        post(app, open_db=14, close_db=14)
+        post(app, open_db=12, close_db=12)
     assert app.cad.settings.squelch_overrides() == {} and app._receiver("South 2").squelch.params == (10.0, 6.0, 6)
-    out = post(app, open_db=24)
-    assert out["guard"] == {"idle_max": 9.0, "page_db": 30.0, "pages": 6}
-    r = post(app, open_db=13.5)                                     # Close: Open less the default hysteresis
-    assert app.cad.settings.squelch_overrides() == {"South 2": {"open_db": 13.5, "close_db": 9.5}}
-    assert app._receiver("South 2").squelch.params == (13.5, 9.5, 6)    # live, the Min the receiver's
-    assert r["guard"]["page_db"] == 30.0 and "South 2" in app.cad.station_metrics_insight.forgot
+    r = post(app, open_db=12.5)                                     # Close: Open less the default hysteresis
+    assert app.cad.settings.squelch_overrides() == {"South 2": {"open_db": 12.5, "close_db": 8.5}}
+    assert app._receiver("South 2").squelch.params == (12.5, 8.5, 6)    # live, the Min the receiver's
+    assert r["guard"]["open_ceiling"] == 21.0 and "South 2" in app.cad.station_metrics_insight.forgot
+
+
+def test_u3_a_raise_is_at_most_3_db_a_day(app):
+    """The metrics only hold the pages that opened the squelch: steps a day apart, each at most 3 dB over the lowest
+    Open of the last 24 h, so a raise can't hide the weak tail it would be checked against."""
+    app.cad.station_metrics_insight = Levels(paging_suggestion([30.0] * 12), idle_max=6.0)
+    clock = {"t": app.cad.store.clock()}
+    app.cad.store.clock = lambda: clock["t"]
+    with pytest.raises(CadError, match="13 dB at most today"):
+        post(app, open_db=14)
+    post(app, open_db=12)
+    post(app, open_db=13)                                           # 13 <= 10 (the lowest today) + 3
+    with pytest.raises(CadError, match="13 dB at most today"):
+        post(app, open_db=13.5)
+    post(app, open_db=11)                                           # lower: always (over the idle max)
+    clock["t"] += 25 * 3600
+    with pytest.raises(CadError, match="14 dB at most today"):
+        post(app, open_db=15)
+    post(app, open_db=14)
+    assert app._receiver("South 2").squelch.params[0] == 14.0
+
+
+def test_u4_close_stays_under_the_pages_tails_and_is_kept_on_an_open_edit(app):
+    out = paging_suggestion([30.0] * 6 + [16.0] * 4)                # at close: 25 and 11 (transmissions(): q - 5)
+    assert out["close_ceiling"] == 8.0 and out["open_ceiling"] == 13.0
+    app.cad.station_metrics_insight = Levels(out, idle_max=6.0)
+    with pytest.raises(CadError, match="the pages' tails"):
+        post(app, open_db=12, close_db=9)
+    post(app, open_db=12, close_db=7)
+    post(app, open_db=11.5)                                         # Open alone: the Close set stays (it still fits)
+    assert app.cad.settings.squelch_overrides() == {"South 2": {"open_db": 11.5, "close_db": 7.0}}
+    app.cad.settings.post("squelch", {"action": "reset", "key": "South 2", "operator": ADMIN})
+    post(app, open_db=12.5)                                         # none set: Open - 4, never over the tails
+    assert app.cad.settings.squelch_overrides()["South 2"]["close_db"] == 8.0
+
+
+def test_u5_polluted_history_never_counts_once_the_station_sorts_its_pages():
+    """Long "pages" from before the sorting (an unknown tone, a silent carrier, ~12 dB) would drag the level down; once
+    GUARD_PAGES sorted pages are there, only those count."""
+    old = [dict(d, dur=4.7) for d in transmissions(NOW - 7 * DAY, 7 * DAY, [12.0] * 40, kind="page", seed=11)]
+    mixed = paging_suggestion([30.0] * 12, extra=old)
+    assert mixed["pages"] == 12 and mixed["page_p10"] == 30.0 and mixed["open_ceiling"] == 21.0
+    unsorted = paging_suggestion([30.0] * 12, extra=old, classified=False)          # (a station from before)
+    assert unsorted["page_p10"] == 12.0
 
 
 def test_without_numbers_it_stays_near_the_default(app):
-    """No idle numbers: never under the default; no pages: at most 6 dB over it."""
+    """No idle numbers: never under the default; under GUARD_PAGES pages: at most 6 dB over it (and 3 a day)."""
     with pytest.raises(CadError, match="no idle numbers"):
         post(app, open_db=9.5)
-    with pytest.raises(CadError, match="no recent pages"):
+    with pytest.raises(CadError, match="16 dB at most"):
         post(app, open_db=16.5)
-    post(app, open_db=16, close_db=11)
-    assert app._receiver("South 2").squelch.params == (16.0, 11.0, 6)
+    post(app, open_db=13, close_db=9)
+    assert app._receiver("South 2").squelch.params == (13.0, 9.0, 6)
 
 
 def test_a_change_is_audited_who_when_old_and_new_and_reset_goes_back(app):
-    app.cad.station_metrics_insight = Levels()
-    post(app, open_db=14, close_db=10)
+    app.cad.station_metrics_insight = Levels(paging_suggestion([30.0] * 12), idle_max=9.0)
+    post(app, open_db=12, close_db=8)
     a = app.cad.settings.audit_log("radios")[0]
     assert a["key"] == "squelch/South 2" and a["operator"] == ADMIN and a["at"]
-    assert (json.loads(a["old"]), json.loads(a["new"])) == ({"open_db": 10.0, "close_db": 6.0}, {"open_db": 14.0, "close_db": 10.0})
-    post(app, open_db=15)
+    assert (json.loads(a["old"]), json.loads(a["new"])) == ({"open_db": 10.0, "close_db": 6.0}, {"open_db": 12.0, "close_db": 8.0})
+    post(app, open_db=13, close_db=9)
     a = app.cad.settings.audit_log("radios")[0]
-    assert (json.loads(a["old"]), json.loads(a["new"])) == ({"open_db": 14.0, "close_db": 10.0}, {"open_db": 15.0, "close_db": 11.0})
+    assert (json.loads(a["old"]), json.loads(a["new"])) == ({"open_db": 12.0, "close_db": 8.0}, {"open_db": 13.0, "close_db": 9.0})
     app.cad.settings.post("squelch", {"action": "reset", "key": "South 2", "operator": ADMIN})
     assert app._receiver("South 2").squelch.params == (10.0, 6.0, 6) and app.cad.settings.squelch_overrides() == {}
     assert app.cad.settings.audit_log("radios")[0]["new"] == "default"
-    post(app, open_db=14)
+    post(app, open_db=12)
     post(app, open_db=None)                                         # null: the default too
     assert app.cad.settings.squelch_overrides() == {} and app._receiver("South 2").squelch.params[0] == 10.0
 
@@ -208,15 +350,15 @@ def test_only_admins_may_set_it():
 
 
 def test_an_import_keeps_a_paging_squelch_only_inside_its_guard(app):
-    app.cad.station_metrics_insight = Levels(idle_max=9.0, page_db=30.0)
+    app.cad.station_metrics_insight = Levels(paging_suggestion([30.0] * 12), idle_max=9.0)
     data = app.cad.settings.export()
-    data["overrides"]["squelch"] = {"South 2": {"open_db": 27.0, "close_db": 20.0}}
+    data["overrides"]["squelch"] = {"South 2": {"open_db": 22.0, "close_db": 18.0}}
     r = app.cad.settings.post("import", {"action": "apply", "settings": data, "operator": ADMIN})
     assert any("South 2" in n and "skipped (paging" in n for n in r["notes"]) and app._sq_ov == {}
-    data["overrides"]["squelch"] = {"South 2": {"open_db": 14.0, "close_db": 10.0, "min_open_s": 1.0}}
+    data["overrides"]["squelch"] = {"South 2": {"open_db": 13.0, "close_db": 9.0, "min_open_s": 1.0}}
     app.cad.settings.post("import", {"action": "apply", "settings": data, "operator": ADMIN})
-    assert app._sq_ov == {"South 2": {"open_db": 14.0, "close_db": 10.0}}
-    assert app._receiver("South 2").squelch.params == (14.0, 10.0, 6)
+    assert app._sq_ov == {"South 2": {"open_db": 13.0, "close_db": 9.0}}
+    assert app._receiver("South 2").squelch.params == (13.0, 9.0, 6)
 
 
 # -- hub -> station -----------------------------------------------------------------------------------------------------
@@ -231,9 +373,9 @@ def test_the_hub_sends_the_paging_squelch_and_the_station_applies_it_live(tmp_pa
         assert wait(lambda: any(c["key"] == "South 2" and c["editable"]
                                 for c in hub.get("/api/cad/squelch")["channels"]), 10)
         fg1 = st._receiver("FG1").squelch.params
-        code, _ = hub_post(hub, "squelch", {"action": "set", "key": "South 2", "open_db": 14, "close_db": 10})
+        code, _ = hub_post(hub, "squelch", {"action": "set", "key": "South 2", "open_db": 13, "close_db": 9})
         assert code == 200
-        assert wait(lambda: st._receiver("South 2").squelch.params == (14.0, 10.0, 6), 10)
+        assert wait(lambda: st._receiver("South 2").squelch.params == (13.0, 9.0, 6), 10)
         assert st._receiver("FG1").squelch.params == fg1                # the other channels untouched
         assert st.cad.settings.audit_log("radios")[0]["operator"] == "hub"
         assert wait(lambda: hub.get("/api/state")["channels"]["sync"]["state"] == "applied", 10)
@@ -316,12 +458,21 @@ def test_static_never_counts_as_pages_and_frequent_static_suggests_a_raise():
 
 def test_the_guard_numbers_come_before_a_day_of_data():
     floor = floor_minutes(NOW - 3 * 3600, 180, q90=lambda k, r: r.gauss(9.0, 0.3), kind="paging")
-    out = mi.suggest(floor, transmissions(NOW - 3 * 3600, 3 * 3600, [30.0, 31.0, 29.0], kind="page"), CFG, NOW)
+    out = mi.suggest(floor, transmissions(NOW - 3 * 3600, 3 * 3600, [30.0, 31.0, 29.0] * 4, kind="page"), CFG, NOW)
     assert out["state"] == "short" and out["idle_max"] is not None and 9.5 <= out["idle_max"] <= 11.0
-    assert out["page_db"] == 30.0                                    # the pages' median at open
+    assert out["page_db"] == 30.0 and out["open_ceiling"] == 21.0    # the pages' median at open; min(29, 24) - 3
 
 
 def test_page_level_shift_ignores_static_recorded_as_pages():
     before = transmissions(NOW - 2 * DAY, DAY, [30.0] * 6, kind="page")
     after = transmissions(NOW - DAY, DAY, [30.0] * 6, kind="page", seed=4) + static_pages(40)
     assert mi.check_levels(before, after, CFG, paging=True) == []
+
+
+def test_tones_other_has_its_own_colour_on_the_signal_chart():
+    from pathlib import Path
+    static_dir = Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static"
+    js = (static_dir / "signal-panel.js").read_text()
+    css = (static_dir / "settings.css").read_text() + (static_dir / "style.css").read_text()
+    assert '["tones_other", "Tones (not ours)", "sg-tones"]' in js
+    assert ".sg-tones { fill: var(--viz-5); }" in css and "--viz-5:" in css

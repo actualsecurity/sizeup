@@ -293,7 +293,8 @@ def test_paging_open_and_close_are_editable_for_an_admin_with_the_guard_on_hover
     out = run(tmp_path, PAGING_ROW, data)
     o, c, m = out["inputs"]
     assert (o["l"], o["disabled"], c["disabled"], m["disabled"]) == ("South 2 Open", False, False, True)
-    assert o["warn"] and "Guard: idle max" in o["title"] and "pages 22 − 6 dB" in o["title"]
+    assert o["warn"] and "Guard: idle max" in o["title"] and "to 13 dB (pages: p10 22, median 22)" in o["title"]
+    assert "+3 dB a day at most" in o["title"]
     assert "pages could be missed" in o["title"] and not c["warn"]
     assert out["posted"] == [["/api/cad/settings/squelch", {"action": "set", "key": "South 2", "close_db": 13,
                                                             "open_db": 17, "operator": "KM"}]]

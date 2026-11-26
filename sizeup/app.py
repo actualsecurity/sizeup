@@ -96,7 +96,7 @@ from sizeup.radio import systems as p25_systems
 from sizeup.radio import groups as antenna
 from sizeup.radio import usbreset
 from sizeup.radio import replace as swap
-from sizeup.radio.page import Page, PageHold, assemble, decode_tones, page_from_dict, recording_note
+from sizeup.radio.page import VOICE_GUARD_S, Page, PageHold, assemble, decode_tones, page_from_dict, recording_note
 from sizeup.radio.tap import LiveTap
 from sizeup.cad import tonelist
 from sizeup.radio.tones import ToneEvent, TonePlan, base_name
@@ -1447,14 +1447,15 @@ class App:
         except OSError:
             pass
 
-    def _metric_tx(self, label: str, kind: str, seg: Segment, ids: bool = False, am: bool = False) -> None:
+    def _metric_tx(self, label: str, kind: str, seg: Segment, ids: bool = False, am: bool = False,
+                   classified: bool = False) -> None:
         """A transmission's numbers for the hub's signal metrics (sizeup/cloud/metrics.py): a dict queued, nothing else;
-        never in the way of the transmission."""
+        never in the way of the transmission. classified: a paging channel's, sorted by _page_metric_kind."""
         m = self.metrics
         if m is None:
             return
         try:
-            m.tx(label, kind, seg, ids=ids, am=am)
+            m.tx(label, kind, seg, ids=ids, am=am, **({"classified": True} if classified else {}))
         except Exception:  # noqa: BLE001 - a metric, never the radio path's problem
             pass
 
@@ -1559,11 +1560,11 @@ class App:
         window has passed (PageHold, GitHub #61), or at once when there is none. Static (_static_open): a "noise"
         metric only, as on a traffic channel: no page, no Radio row, no speech-to-text."""
         decoded = decode_tones(seg.audio, self.plan)
-        if self._static_open(ch.label, seg, decoded[0]):
-            self._metric_tx(ch.label, "noise", seg)
+        if self._static_open(ch.label, seg, decoded):
+            self._metric_tx(ch.label, "noise", seg, classified=True)
             self._static_dropped(ch.label, seg)
             return
-        self._metric_tx(ch.label, "page", seg)
+        self._metric_tx(ch.label, self._page_metric_kind(seg, decoded), seg, classified=True)
         if not self.channel_pref(ch.label)["record"]:   # Settings > Radios: not recorded (receiver keeps running)
             log(f"{ch.label}: {assemble(ch.label, ch.mhz, seg, self.plan, *decoded).kind} not recorded "
                 "(Record is off in Settings > Radios)")
@@ -1591,18 +1592,39 @@ class App:
         for page in done:
             self._page_done(page)
 
-    def _static_open(self, label: str, seg: Segment, tones: list) -> bool:
-        """A paging squelch open that is static, not a page (sizeup/channels.py PAGING_STATIC_MAX_S): no tone pair or
-        long tone, shorter than PAGING_STATIC_MAX_S, and its strongest quieting under the running Open +
-        PAGING_STATIC_OVER_DB. Never a continuation (a page back after a fade), a piece cut at a key-up, or one with
-        an ID burst: those stay what they were."""
-        if tones or seg.cont or seg.split or seg.bursts or seg.end - seg.start >= channels.PAGING_STATIC_MAX_S:
+    def _static_open(self, label: str, seg: Segment, decoded: tuple) -> bool:
+        """A paging squelch open that is static, not a page (sizeup/channels.py PAGING_STATIC_MAX_S): no tone heard at
+        all (decoded: decode_tones' pairs and every tone heard: a lone tone before a fade counts), under PAGING_SPEECH_S
+        of speech, shorter than PAGING_STATIC_MAX_S, and its strongest quieting under channels.static_db(the running
+        Open): Open + 4 dB, never over 15. Never a continuation (a page back after a fade), a piece cut at a key-up, or
+        one with an ID burst: those stay what they were."""
+        tones, heard = decoded
+        if tones or heard or seg.cont or seg.split or seg.bursts or seg.end - seg.start >= channels.PAGING_STATIC_MAX_S:
             return False
         r = self._receiver(label)
         sq = getattr(r, "squelch", None)
         open_db = sq.params[0] if sq is not None and hasattr(sq, "params") else self.squelch_defaults(label)["open_db"]
         peak = seg.q_max if getattr(seg, "q_max", None) is not None else seg.quieting_db
-        return peak < open_db + channels.PAGING_STATIC_OVER_DB
+        if peak >= channels.static_db(open_db):
+            return False
+        return speech_seconds(seg.audio) < channels.PAGING_SPEECH_S      # (last: the costliest look)
+
+    def _page_metric_kind(self, seg: Segment, decoded: tuple) -> str:
+        """A paging transmission's kind in the signal metrics (the station's page level, sizeup/cloud/metricsinsight.py):
+        "tones_other" when its only content is a tone pair none of ours names (no speech after the last tone: a weak
+        transmitter's periodic tone, #973, kept for learning, is no weak page); "noise" when it has no tone and no
+        speech (a carrier or static kept as a row: 2 s or longer, or strong); else "page". A continuation is "page"."""
+        tones, heard = decoded
+        if seg.cont:
+            return "page"
+        if tones:
+            if self.paging.is_ours([n for t in tones for n in t.names]):
+                return "page"
+            after = seg.audio[int(min(len(seg.audio), (max(t.end for t in tones) + VOICE_GUARD_S) * RATE)):]
+            return channels.TONES_OTHER if speech_seconds(after) < channels.PAGING_SPEECH_S else "page"
+        if not heard and not seg.bursts and speech_seconds(seg.audio) < channels.PAGING_SPEECH_S:
+            return "noise"
+        return "page"
 
     def _static_dropped(self, label: str, seg: Segment) -> None:
         """A static open dropped: counted, and said in the log at most every STATIC_LOG_S (static comes in bursts)."""

@@ -13,7 +13,8 @@ Records (one small JSON object each; "k" its kind, "s" its subject, "at" its tim
             "mhz", "kind", "state", "am") when they changed and every FULL_EVERY minutes (the hub carries them forward
             when read: half the bytes)
     tx      each transmission as the squelch closed it (App._segment): kind voice | page | burst (only a radio-ID burst)
-            | noise (kept, no speech, no ID), its start, length ("dur"), quieting / carrier over the floor ("q"), at
+            | noise (kept, no speech, no ID; a paging channel's static) | tones_other (a paging channel's tone pair none
+            of ours, nothing said after it: #973; "pc" 1 marks a paging channel's sorted this way), its start, length ("dur"), quieting / carrier over the floor ("q"), at
             open and close ("qo", "qc"), its strongest ("qx"), the hiss it was measured against ("hiss"; AM: "floor" dBFS, "cf" the carrier
             dBFS, "snr" the voice's SNR), a background carrier ("bg"), why it ended ("why"), an ID decoded ("id")
     cc      each P25 system's control channel, each minute ("s": "p25" the county's, "p25:<system>" another's): the
@@ -130,8 +131,9 @@ class Collector:
         self.add({"k": "ev", "s": str(subject)[:80], "at": round(self.clock() if at is None else at, 3),
                   "ev": ev, "d": str(detail)[:300]})
 
-    def tx(self, label: str, kind: str, seg, ids: bool = False, am: bool = False) -> None:
-        """One transmission as its squelch closed it (radio/fm.py / radio/am.py Segment): numbers only, never audio."""
+    def tx(self, label: str, kind: str, seg, ids: bool = False, am: bool = False, classified: bool = False) -> None:
+        """One transmission as its squelch closed it (radio/fm.py / radio/am.py Segment): numbers only, never audio.
+        classified: a paging channel's, its kind from App._page_metric_kind ("pc": 1; one without it is from before)."""
         r: dict = {"k": "tx", "s": str(label)[:80], "at": round(float(seg.start), 3),
                    "dur": round(float(seg.end - seg.start), 2), "kind": kind, "q": _r1(seg.quieting_db)}
         for key, attr in (("qo", "q_open"), ("qc", "q_close"), ("qx", "q_max"), ("floor" if am else "hiss", "hiss_db"),
@@ -147,6 +149,8 @@ class Collector:
             r["weak"] = 1
         if getattr(seg, "cont", False):
             r["cont"] = 1
+        if classified:
+            r["pc"] = 1
         self.add(r)
 
 

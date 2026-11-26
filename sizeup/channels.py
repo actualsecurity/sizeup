@@ -70,12 +70,19 @@ SQUELCH_SECTION = "squelch"
 SQUELCH = {"open_db": (4.0, 30.0, 0.5), "close_db": (2.0, 28.0, 0.5), "min_open_s": (0.1, 2.0, 0.05)}
 CHATTER_PER_MIN = 2.0      # short opens (nothing kept) per minute, over 5 min: the squelch chattering on noise (a hint)
 PAGING_FIELDS = ("open_db", "close_db")   # what a paging channel's squelch takes (min_open_s stays the receiver's)
-# A paging squelch open that is static, not a page (App._static_open): no tone pair or long tone, shorter than
-# PAGING_STATIC_MAX_S, its strongest quieting under the running Open + PAGING_STATIC_OVER_DB. A real page carries tones,
-# runs 10-60 s and sits ~20 dB over the Open; a voice-only transmission of 2 s or more, or one quieted 4 dB past the
-# Open, is kept as a page as before. Conservative both ways: only short, weak, tone-less opens are dropped.
+# A paging squelch open that is static, not a page (App._static_open): no tone heard at all (no pair, no lone tone),
+# under PAGING_SPEECH_S of speech, shorter than PAGING_STATIC_MAX_S, and its strongest quieting under the running Open +
+# PAGING_STATIC_OVER_DB, never over PAGING_STATIC_MAX_DB (raising the Open never widens the gate). A real page carries
+# tones, runs 10-60 s and sits ~20 dB over the Open; anything with a tone or speech in it, 2 s or longer, or quieted past
+# that line is kept as a page as before. Conservative both ways: only short, weak, silent, tone-less opens are dropped.
+# (Synthetic static measures 0.0 s of speech; a short spoken "disregard" ~0.6 s.)
 PAGING_STATIC_MAX_S = 2.0
 PAGING_STATIC_OVER_DB = 4.0
+PAGING_STATIC_MAX_DB = 15.0
+PAGING_SPEECH_S = 0.3
+# A paging open whose only content is a tone pair none of ours (no speech after it): its own metric kind (#973: a weak
+# transmitter's periodic tone, kept for learning, would otherwise read as a weak page). Never a page's level.
+TONES_OTHER = "tones_other"
 
 
 def tg_key(tg: int) -> str:
@@ -274,7 +281,12 @@ def real_page(d: dict, open_db: float | None = None) -> bool:
     dur, q = d.get("dur"), d.get("qx") if d.get("qx") is not None else d.get("q")
     if not isinstance(dur, (int, float)) or not isinstance(q, (int, float)) or d.get("cont"):
         return True
-    return not (dur < PAGING_STATIC_MAX_S and q < (10.0 if open_db is None else open_db) + PAGING_STATIC_OVER_DB)
+    return not (dur < PAGING_STATIC_MAX_S and q < static_db(open_db))
+
+
+def static_db(open_db: float | None) -> float:
+    """The static gate's line: the running Open + PAGING_STATIC_OVER_DB, never over PAGING_STATIC_MAX_DB."""
+    return min((10.0 if open_db is None else open_db) + PAGING_STATIC_OVER_DB, PAGING_STATIC_MAX_DB)
 
 
 def check_squelch(m) -> dict:
