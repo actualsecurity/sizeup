@@ -287,7 +287,8 @@ class Choices:
     def tries(self, services: dict | None = None, want: list | None = None) -> list[str]:
         """The challengers (#869): the models a worker loads only on demand, never in its resident plan (want): only while
         idle, only beside the champions AND the LLM, unloaded under pressure (the worker's stt_models.try). Fire's
-        first; none that is a champion already."""
+        first. One that is also a champion (or the primary) is kept: the worker runs it on a separate try instance of
+        the same files, never on its live server."""
         services = services or {}
         want = self.want(services) if want is None else want
         order = {s: i for i, s in enumerate(SERVICE_ORDER)}
@@ -295,7 +296,7 @@ class Choices:
                         for k, v in self.settings().items() if v.get("challenger")), key=lambda x: (x[0], x[1]))
         out: list[str] = []
         for _o, _k, m in chall:
-            if isinstance(m, str) and m in self.catalog and m not in out and m not in want:
+            if isinstance(m, str) and m in self.catalog and m not in out:
                 out.append(m)
         return out[:WANT_MAX]
 

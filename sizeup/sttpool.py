@@ -61,6 +61,8 @@ CHALL_CAP_CHANNEL_H = 30       # challenger runs an hour per channel at most ...
 CHALL_CAP_WORKER_H = 60        # ... and per worker
 CHALL_QUEUE_MAX = 20           # challengers waiting at most (a sample less beyond)
 CHALL_CAP = "challenger"       # a worker's caps word: it takes challenger jobs (greedy, the watch, try models: #964)
+CHALL_SAME_CAP = "challenger_same_model"   # ... and runs one for a model it serves live on a separate try instance of
+                                           # the same files (never on the live server: whisper-server can't abort)
 PER_AUDIO_S = 0.25        # each lease (and cap) this much longer per second of audio (never a pre-alert class's: its
                           # deadline is absolute, so a long page can't hold a dead worker's clip for longer)
 READY_S = 15.0            # a worker seen this recently (or in a claim now) is ready ...
@@ -255,6 +257,7 @@ class Worker:
     last_job: float | None = None
     leases: set = field(default_factory=set)
     caps: frozenset = frozenset()               # what it says it can do: "challenger" (#869: watch, greedy, try models)
+    try_models: frozenset = frozenset()         # its try instances that answer now (#869: try_loaded / models.stt_try)
     models: list = field(default_factory=list)  # a GPU worker's models loaded now: its whisper_server's, then the
                                                 # catalog's that answer (its claim and heartbeat say)
     stt_state: dict = field(default_factory=dict)   # each model it was asked for: ready, downloading, no room ...
@@ -380,7 +383,8 @@ class Pool:
     def seen(self, wid: str, state: str | None = None, model: str | None = None, gpu: dict | None = None,
              version: str | None = None, kind: str | None = None, load: dict | None = None,
              update: dict | None = None, keep_awake: dict | None = None, reason: str | None = None,
-             models: list | None = None, stt_state: dict | None = None, caps: list | None = None) -> Worker:
+             models: list | None = None, stt_state: dict | None = None, caps: list | None = None,
+             try_models: list | None = None) -> Worker:
         """A worker's request (hello, state, claim): its state and when it was last seen. A worker that is no longer
         online hands its pre-alert and Auto · normal jobs back at once (a normal clip has the stations and AWS still
         ahead of it; the rest run to their lease: it may finish them). None: a worker
@@ -419,6 +423,8 @@ class Pool:
                 w.models = [str(m)[:48] for m in models[:16] if isinstance(m, str)]
             if isinstance(caps, list):
                 w.caps = frozenset(str(c)[:24] for c in caps[:16] if isinstance(c, str))
+            if isinstance(try_models, list):
+                w.try_models = frozenset(str(m)[:48] for m in try_models[:16] if isinstance(m, str))
             if isinstance(stt_state, dict):
                 w.stt_state = {str(k)[:48]: str(v)[:60] for k, v in list(stt_state.items())[:16]}
             if isinstance(gpu, dict):
@@ -588,7 +594,7 @@ class Pool:
         """(lock held) A challenger on this worker now (#869): a GPU worker with its model loaded, in a claim and holding
         nothing, no LLM work held or queued, no other job waiting, no other clip for CHALL_QUIET_S, and under the
         hourly caps (its channel's, the worker's)."""
-        if w.kind != "gpu" or j.model not in w.models or w.polling <= 0 or w.leases or not self._ready(w, now):
+        if w.kind != "gpu" or w.polling <= 0 or w.leases or not self._ready(w, now):
             return False
         if CHALL_CAP not in w.caps or not self._chall_model_ok(w, j.model):
             return False
@@ -603,9 +609,12 @@ class Pool:
             return False
 
     def _chall_model_ok(self, w: Worker, model: str) -> bool:
-        """(lock held) A challenger's model never one live traffic decodes on this worker: its primary (whisper_server's)
-        nor a champion (resident): a server decodes one clip at a time, so a live clip would wait behind it."""
-        return model not in self.resident and model != model_id(w.model)
+        """(lock held) A challenger never on a SERVER live traffic decodes on (whisper-server can't abort a decode): a
+        model this worker serves live (its primary, a champion: resident) only on a separate try instance of the same
+        files (it says CHALL_SAME_CAP and lists it in try_loaded); any other only once it is loaded."""
+        if model in self.resident or model == model_id(w.model):
+            return CHALL_SAME_CAP in w.caps and model in w.try_models
+        return model in w.models or model in w.try_models
 
     def _chall_room(self, channel: str, wid: str = "", now: float | None = None) -> bool:
         """(lock held) Under the hourly caps: CHALL_CAP_CHANNEL_H for the channel, CHALL_CAP_WORKER_H for the worker."""
@@ -624,7 +633,7 @@ class Pool:
         if seconds <= 0 or seconds > CHALL_MAX_S:
             return False, "too long"
         with self._cv:
-            if not any(w.kind == "gpu" and model in w.models and self._ready(w, now) and CHALL_CAP in w.caps
+            if not any(w.kind == "gpu" and self._ready(w, now) and CHALL_CAP in w.caps
                        and self._chall_model_ok(w, model) for w in self.workers.values()):
                 return False, "no worker has the model loaded"
             if not self._chall_room(channel, "", now):
@@ -909,12 +918,12 @@ class Pool:
 
     def claim(self, wid: str, wait: float = 0.0, state: str | None = None, model: str | None = None,
               kind: str | None = None, load: dict | None = None, models: list | None = None,
-              caps: list | None = None) -> Job | None:
+              caps: list | None = None, try_models: list | None = None) -> Job | None:
         """A worker's long poll: the best job (leased to it) or None after `wait`. Only an online worker gets one.
         models: the models it has loaded now (a job for one of them goes to it first: _fits)."""
         wait = max(0.0, min(CLAIM_WAIT_MAX_S, float(wait)))
         end = time.monotonic() + wait
-        w = self.seen(wid, state, model, kind=kind, load=load, models=models, caps=caps)
+        w = self.seen(wid, state, model, kind=kind, load=load, models=models, caps=caps, try_models=try_models)
         if w is None:
             return None
         with self._cv:
