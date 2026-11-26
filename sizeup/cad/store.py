@@ -631,6 +631,9 @@ class Store:
         for col in ("quality", "unclear_text"):           # status "unclear": why, and the engine's words kept apart from the
             if tcols and col not in tcols:                # text (sizeup/stt_quality.py: a loop, noise), 2026-11-25
                 self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+        for col in ("corr_text", "corr_rules", "corr_v"):  # the text of record's vocabulary correction beside the raw
+            if tcols and col not in tcols:                 # text (#879, sizeup/stt_correct.py), 2026-11-25: old rows ''
+                self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
         # Every row's source, qualified by its system (#409, #415: talkgroup numbers repeat between P25 systems), 2026-11-10.
         # "group" is the talkgroup file's; ours: in "Our calls"; dept / safety: for #412 / #411 (nothing writes them yet).
         for col, kind in (("source", "TEXT NOT NULL DEFAULT ''"), ("system", "TEXT NOT NULL DEFAULT ''"),

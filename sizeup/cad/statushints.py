@@ -59,7 +59,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from sizeup import sourcekeys
+from sizeup import sourcekeys, stt_correct
 from sizeup.cad.feed import load_cfg, unit_forms
 from sizeup.cad.lists import ListsError
 from sizeup.cad.statusrepair import repair
@@ -442,16 +442,19 @@ class StatusHints:
             self._for = L
 
     def decorate(self, rows: list[dict]) -> list[dict]:
-        """Each row on our fire channels whose status words were put back (statusrepair.py): "fixed_text" (shown) and
-        "fixes" [{heard, to}] (on hover); the row's own text stays what speech-to-text wrote."""
+        """Each row whose channel's terms were put back as it was written (#879: corr_text, sizeup/stt_correct.py), and
+        each row on our fire channels whose status words were put back after them (statusrepair.py): "fixed_text"
+        (shown) and "fixes" [{heard, to}] (on hover); the row's own text stays what speech-to-text wrote."""
         self._refresh()
-        if not self.cfg.enabled:
-            return rows
         dispatched: dict[str, bool] = {}
         for r in rows:
             if r.get("kind", "radio") != "radio" or not r.get("text"):
                 continue
-            if r.get("channel") in self.cfg.channels or (r.get("talkgroup") is not None and r["talkgroup"] in self.cfg.talkgroups):
+            text = stt_correct.shown_text(r)       # COALESCE(NULLIF(corr_text, ''), text)
+            vfixes = stt_correct.stored_fixes(r) if text != r["text"] else []
+            fixed, fixes = text, []
+            if self.cfg.enabled and (r.get("channel") in self.cfg.channels or (r.get("talkgroup") is not None and
+                                                                              r["talkgroup"] in self.cfg.talkgroups)):
                 rigs = [x.strip() for x in (r.get("rig") or "").split(",") if x.strip()]
                 talker = rigs[0] if len(rigs) == 1 and rigs[0] in self.phrases.codes else ""
                 heard_fine: list[set[str]] = []  # looked up only when the repair asks (a "fine" after our callsign)
@@ -464,9 +467,9 @@ class StatusHints:
                     if code not in dispatched:
                         dispatched[code] = self.fine_ok(code)
                     return code in heard_fine[0] or dispatched[code]
-                fixed, fixes = self.phrases.repair(r["text"], talker, ok, bool(r.get("dispatcher")))
-                if fixes:
-                    r["fixed_text"], r["fixes"] = fixed, fixes
+                fixed, fixes = self.phrases.repair(text, talker, ok, bool(r.get("dispatcher")))
+            if fixes or fixed != r["text"]:
+                r["fixed_text"], r["fixes"] = fixed, vfixes + fixes
         return rows
 
     # -- what a status phrase means, in this department's codes ----------------------------------------------------
@@ -537,7 +540,9 @@ class StatusHints:
         rigs = [r.strip() for r in (t["rig"] or "").split(",") if r.strip()]
         talker = rigs[0] if len(rigs) == 1 and rigs[0] in self.phrases.codes else ""
         disp = bool(t["dispatcher"])
-        text, fixes = self.phrases.repair(t["text"], talker, fine_ok, disp)
+        # the text as shown: its channel's terms put back as it was written (#879),
+        # COALESCE(NULLIF(corr_text, ''), text)
+        text, fixes = self.phrases.repair(stt_correct.shown_text(t), talker, fine_ok, disp)
         known_other = disp or (bool(rigs) and not talker)
         caller = "" if known_other or talker else self.phrases.caller(text)
         out: dict[str, tuple[Found, str]] = {}

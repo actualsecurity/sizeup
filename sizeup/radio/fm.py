@@ -1139,6 +1139,7 @@ class NfmReceiver:
         self.state, self.detail, self.restarts = "starting", "", 0
         self.last_heard: float | None = None   # end of the last transmission
         self._stderr: deque[str] = deque(maxlen=20)
+        self.tuner = ""                         # the tuner rtl_fm reported on its dongle ("Rafael Micro R820T")
         self._stop = threading.Event()
         self._proc: subprocess.Popen | None = None
         self.clock: Callable[[], float] = time.time
@@ -1286,7 +1287,10 @@ class NfmReceiver:
 
     def _drain(self, proc: subprocess.Popen) -> None:
         for line in iter(proc.stderr.readline, b""):
-            self._stderr.append(line.decode(errors="replace").strip())
+            text = line.decode(errors="replace").strip()
+            self._stderr.append(text)
+            if text.startswith("Found ") and text.endswith(" tuner"):
+                self.tuner = text[6:-6]          # "Rafael Micro R820T": the dongle's tuner (sizeup/radio/replace.py)
 
     def _run(self) -> None:
         backoff = 2.0

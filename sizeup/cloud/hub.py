@@ -1155,6 +1155,11 @@ class HubApp(App):
         from sizeup.notify import STATUS
         notifier = self.pushes.notifier(STATUS)
         self.health = self.hub.health_ = StationHealth(self.hub, cfg, self.mdb, notifier, log)
+        # a dongle swapped for a new one (sizeup/radio/replace.py): the station's offers on the console, and the
+        # optional auto-replace for Fire/EMS 15 and paging (sizeup/cloud/dongleswap.py; Settings, off by default)
+        from sizeup.cloud.dongleswap import AutoReplace
+        self.cad.dongle_swaps_source = lambda: (self.hub.sdr() or {}).get("replace") or []
+        self.swaps = AutoReplace(self.hub, self.cad, notifier, log, public_url=cfg.cloud_public_url or "")
         # The incident sources (#297): paging is a tier only while the station is connected; Settings > Station > Health shows them.
         self.cad.sources.paging_ok = self.hub.connected
         self.cad.sources.trigger = self._sources_poll_now      # a pre-alert here: the station's adapters poll now
@@ -2385,6 +2390,7 @@ class HubApp(App):
             now = time.time()
             if not self._may_write_audio():      # a standby (or a lease running out) writes nothing (#501)
                 return
+            corr = self._vocab_fix(key, text)
             if vocab_v is None:                  # (the item's own: whisper's prompt or AWS's stream, sizeup/stt_terms.py)
                 vocab_v = str(getattr(item, "vocab_v", "") or "")
             route = ""
@@ -2405,7 +2411,8 @@ class HubApp(App):
                               run_s=run_s if run_s is not None else (now - engine_start if engine_start else None),
                               keyup=getattr(item, "keyup", None),     # (a cut transmission's piece, the radio's split)
                               call_id=str(getattr(item, "call_id", "") or ""), turn=getattr(item, "turn", None),
-                              check=check, input=sttruns.engine_input(engine) if stt_input is None else stt_input)
+                              check=check, corr=corr,
+                              input=sttruns.engine_input(engine) if stt_input is None else stt_input)
             if role == "text" and clip_end is not None:
                 self.stt_latency.add(key, engine, now - clip_end, target=cls in sttruns.TARGET_CLASSES)
         except Exception as e:  # noqa: BLE001 - bookkeeping
@@ -2435,6 +2442,14 @@ class HubApp(App):
         except Exception as e:  # noqa: BLE001 - bookkeeping
             self.hub.log(f"stt runs: trailing time: {type(e).__name__}: {e}")
             return None
+
+    def _vocab_fix(self, key: str, text: str):
+        """The post-ASR vocabulary correction of an engine's raw text on its channel (#879, sizeup/stt_correct.py):
+        kept with the run, the raw text never changed (the text of record's is on its radio log row: App._corr_put).
+        None: not on there (or no list); v PENDING: its list's matcher not built yet. Never on a standby."""
+        if not self._may_write_audio():
+            return None
+        return self._corr_of(key, text)
 
     def _prompt_time(self, cid: str, d: dict) -> None:
         """The station's retext says whether whisper's prompt carried the clip's own time: kept on the transmission
@@ -2966,6 +2981,11 @@ class HubApp(App):
         return self._switch("set_antenna_groups", groups, str(confirm)) if confirm else \
             self._switch("set_antenna_groups", groups)
 
+    def replace_sdr(self, missing: str, new: str = "", action: str = "use", by: str = "person") -> str | None:
+        """Health / the console here: a gone dongle's jobs to a new one, Not now, or a gone dongle out of its group,
+        done on the station (App.replace_sdr, sizeup/radio/replace.py); who asked is audited here (server.py)."""
+        return self._switch("replace_sdr", str(missing or ""), str(new or ""), str(action or "use"), by)
+
     def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None,
                       tier: str | None = None, system: str = "", transcribe: bool | None = None,
                       alerts: bool | None = None) -> str | None:
@@ -3386,6 +3406,7 @@ class HubApp(App):
         threading.Thread(target=self._audio_uploader, name="audio-uploader", daemon=True).start()
         threading.Thread(target=self._metrics_backup, name="metrics-backup", daemon=True).start()
         threading.Thread(target=self.health.run, args=(self._stopping,), name="station-health", daemon=True).start()
+        threading.Thread(target=self.swaps.run, args=(self._stopping,), name="dongle-swap", daemon=True).start()
         threading.Thread(target=self.error_watch.run, args=(self._stopping,), name="hub-errors", daemon=True).start()
         threading.Thread(target=self._aws_watch, name="aws-sweep", daemon=True).start()
         self.sttpool.start()                      # the GPU workers' queue (#639): empty, nothing written

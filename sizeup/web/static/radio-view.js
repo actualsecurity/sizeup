@@ -213,7 +213,8 @@ window.RadioView = (() => {
     const pcfd = new Set(d.pcfd || []);
     keep(f("unit"), (d.rigs || []).slice().sort((a, b) => (pcfd.has(b) - pcfd.has(a)) || a.localeCompare(b, undefined, { numeric: true }))
       .map((u) => [u, pcfd.has(u) ? u : `${u} (not PCFD)`]), "Any unit");
-    keep(f("channel"), (d.channels || []).map((x) => [x, x]), "Any channel");
+    // (the value: the real label, what the hub filters on; the text: its one name, radio-names.js)
+    keep(f("channel"), (d.channels || []).map((x) => [x, typeof chName === "function" ? chName({ channel: x }) : x]), "Any channel");
     keep(f("event"), (d.events || []).map((e) => [e.number || String(e.id), `${e.number || "#" + e.id} ${e.type || ""} ${e.address || ""}`.trim()]),
          "Any incident");
   }
@@ -237,10 +238,8 @@ window.RadioView = (() => {
   }
   function row(t) {
     if (t.kind === "note") return noteRow(t);
-    const li = radioRow(t, { scope: "rv" });       // cad.js: play, time, rig, channel, chips, the ⋯ menu, text
-    const meta = li.querySelector(".meta");
-    if (t.talkgroup !== null && t.talkgroup !== undefined) meta.querySelector(".chip.src").title = `TG ${t.talkgroup}`;
-    return li;
+    // cad.js: play, time, rig, channel (its one name, the system, name and talkgroup on hover), chips, the ⋯ menu, text
+    return radioRow(t, { scope: "rv" });
   }
   const rowSig = (t) => JSON.stringify([t.text, t.fixed_text, t.atc_text, t.atc_weak, t.atc_snaps, t.status, t.model, t.alt_text, t.alt_model, t.rig, t.has_audio,
                                        (t.events || []).map((e) => [e.id, e.why]), t.rerun_at, talkSig(t.rig), cad.txRev,
@@ -264,7 +263,7 @@ window.RadioView = (() => {
     const by = new Map();
     for (const t of rows) {
       const k = String(t.talkgroup ?? t.channel);
-      if (!by.has(k)) by.set(k, { key: k, name: t.channel, tg: t.talkgroup, calls: [] });
+      if (!by.has(k)) by.set(k, { key: k, name: (typeof chName === "function" ? chName(t) : t.channel), tg: t.talkgroup, calls: [] });   // its one name (radio-names.js)
       by.get(k).calls.push(t);
     }
     const groups = [...by.values()];
@@ -318,7 +317,7 @@ window.RadioView = (() => {
     let rest = rows.filter((t) => t.main === false);
     if (lim) { main = main.slice(0, lim.main); rest = rest.slice(0, lim.other); }   // each section its own newest N
     setText($("#rv-count"), st.error ? `Load failed: ${st.error}` : countText(rows, main, rest, lim));
-    const chans = [...new Set(main.filter((t) => t.kind !== "note").map((t) => t.channel))];
+    const chans = [...new Set(main.filter((t) => t.kind !== "note").map((t) => (typeof chName === "function" ? chName(t) : t.channel)))];
     setText($("#rv-main-sum"), chans.join(" · "));
     syncList($("#rv-main"), main, { key: (t) => t.id, sig: rowSig, make: () => el("li"), fill: fillRow,
                                     empty: active() ? "None match" : "None" });
@@ -504,7 +503,7 @@ window.RadioView = (() => {
     pickOption(f("event"), b.dataset.event);
     changed();
   });
-  RadioLive.button($("#rv-live"), "Live");
+  // (#rv-live: the console's live player, live-player.js: it plays on every view, not only here)
   let drawnRev = -1;
   cad.hooks.push(() => { if (st.open && drawnRev !== cad.txRev) { drawnRev = cad.txRev; render(); } });   // a row's own state
   cad.hooks.push(() => { if (st.open) renderPaging(); });          // each tone pair as it decodes (the state push)

@@ -102,6 +102,7 @@ CALLS = ("set_mode", "set_talkgroup", "set_talkgroup_group", "retranscribe", "se
          "catch_up",                  # shed clips caught up (sizeup/sttcatchup.py): whisper, under every other clip
          "set_adsb_receiver",         # Settings > Radios on the hub: the dongle reserved for ADS-B (#235)
          "set_antenna_groups",        # ... the antenna groups: dongles locked to jobs (sizeup/radio/groups.py)
+         "replace_sdr",               # Health / the console: a gone dongle's jobs to a new one (sizeup/radio/replace.py)
          "sources_poll_now",          # a pre-alert on the hub: the CAD feed adapters here poll now (#297)
          "reception_post",            # Settings > Radios on the hub: a reception test here (#410)
          "reception_sample_b64",      # ... and a call it captured, to listen to (never stored on the hub)

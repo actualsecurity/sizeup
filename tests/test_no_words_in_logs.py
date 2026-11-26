@@ -4,12 +4,14 @@ station's journal to /sizeup/station; the words stay in the hub's database, behi
 A marker word is put in every text, and each path that handles words is run with it: the station's whisper
 (_transcribed_one on the station and the hub), Amazon Transcribe, the GPU worker pool (a transmission, a page, a shed
 clip caught up), a re-run, every _retext, a page with our tones (the INCIDENT line), the CAD's alarms, status hints,
-possible incoming and the dispatch voice with transmit off. Everything written while it runs is read: stdout and stderr
-at the file-descriptor level (every thread: the hub's and the station's log(), print, a traceback), the logging
-module, and the log hooks handed to the CAD. The marker must be in none of it.
+possible incoming and the dispatch voice with transmit off. Everything written while it runs is read through the shared
+log sentinel (tests/log_sentinel.py: stdout and stderr at the file-descriptor level, so every thread's log(), print
+and traceback, the logging module, a thread's uncaught exception) and the log hooks handed to the CAD. The marker
+must be in none of it.
 
 A guard for any new log line: a path that logs its words fails here. Invented words and places only."""
 
+import logging
 import time
 
 import numpy as np
@@ -20,6 +22,7 @@ from sizeup.cad.service import Cad, Settings
 from sizeup.radio.fm import RATE, Channel, Segment
 from sizeup.stt import CATCHUP, URGENT
 from tests.fake_transcribe import FakeTranscribe
+from tests.log_sentinel import Captured, assert_no_sensitive
 from tests.test_app import tone, voice, wait
 from tests.test_channels import aws_cfg, fake_aws  # noqa: F401 (the fixture: test credentials, 127.0.0.1 only)
 from tests.test_cloud import HubRun, fm_segment, hub_cfg, station, station_cfg
@@ -34,13 +37,12 @@ PAGE = ("Port Chester Fire Department, respond to a reported structure fire. 12 
 
 
 class Logs:
-    """Everything logged while a test runs: stdout and stderr (capfd: the file descriptors, so every thread), the
-    logging module (caplog) and the log hooks a test hands out (hook)."""
+    """Everything logged while a test runs: the shared log sentinel's capture (tests/log_sentinel.py) and the log hooks
+    a test hands out (hook)."""
 
-    def __init__(self, capfd, caplog):
-        self.capfd, self.caplog = capfd, caplog
+    def __init__(self, captured: Captured):
+        self.captured = captured
         self.hooked: list[str] = []
-        self.out = ""
         self.forbidden = [MARK]
 
     def hook(self, msg) -> None:
@@ -50,23 +52,23 @@ class Logs:
         """More words that must never be logged (a status hint's phrase: the transmission's words, not the marker)."""
         self.forbidden += [w for w in words if w]
 
+    def lines(self) -> list[str]:
+        return [*self.captured.lines(), *self.hooked]
+
     def text(self) -> str:
-        out, err = self.capfd.readouterr()
-        self.out += out + err
-        return "\n".join([self.out, *self.hooked, self.caplog.text])
+        return "\n".join(self.lines())
 
     def leaks(self) -> list[str]:
         words = [w.casefold() for w in self.forbidden]
-        return [line for line in self.text().splitlines() if any(w in line.casefold() for w in words)]
+        return [line for line in self.lines() if any(w in line.casefold() for w in words)]
 
     def check(self) -> None:
-        leaked = self.leaks()
-        assert not leaked, f"{len(leaked)} log line(s) with a transcript's words:\n" + "\n".join(leaked[:20])
+        assert_no_sensitive(self.lines(), self.forbidden)
 
 
 @pytest.fixture
-def logs(capfd, caplog):
-    g = Logs(capfd, caplog)
+def logs(log_sentinel):
+    g = Logs(log_sentinel)
     yield g
     g.check()                       # and what came after the test's own check (threads finishing, a close)
 
@@ -81,18 +83,24 @@ def test_the_guard_sees_a_leak_in_the_output_the_logging_module_and_the_hooks():
             return out, ""
 
     class Caplog:
-        text = ""
-    g = Logs(Fd, Caplog)
+        records: list = []
+
+        @staticmethod
+        def clear():
+            Caplog.records = []
+    g = Logs(Captured(Fd, Caplog))
     assert g.leaks() == []
     Fd.text = "12:00:00 FG1: transmission FG1-1 (done, 4 words)\n"
     assert g.leaks() == []
     Fd.text = f"12:00:01 FG1: Engine 64 {MARK.lower()} on location\n"
     assert len(g.leaks()) == 1                      # (any case)
     g.hook(f"alarms: {MARK}")
-    Caplog.text = f"WARNING x: {MARK}"
+    Caplog.records = [logging.makeLogRecord({"msg": f"x: {MARK}", "levelname": "WARNING", "name": "x"})]
     assert len(g.leaks()) == 3
     g.forbid("transmission")
     assert len(g.leaks()) == 4
+    with pytest.raises(AssertionError, match="reached a log line"):
+        g.check()
 
 
 def test_a_thread_writing_through_log_is_captured(logs):

@@ -23,14 +23,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from sizeup import polly, sourcekeys, tiers
-from sizeup.cad import airport, commonplaces, dispatcher, eta, export, feedtypes, mapview, radiofolders, runcards
+from sizeup import polly, radionames, sourcekeys, tiers
+from sizeup.cad import airport, commonplaces, dispatcher, eta, export, feedtypes, mapview, radiofolders, radioviews, runcards
 from sizeup.cad.activity import Activity
 from sizeup.cad.prefs import Prefs
 from sizeup.cad.alarms import Alarms
 from sizeup.cad.automode import AutoDispatch
 from sizeup.cad.comms import (COUNT_MINUTES, MAIN_LIMIT, MAX_ROWS, MUTE_MAX, OTHER_LIMIT, PAGE, PAGE_MAX, SOURCES_MAX,
-                              VIEWS, Comms)
+                              UNITS_MAX, VIEWS, Comms)
 from sizeup.cad.history import AddressHistory
 from sizeup.cad.premise import Premise
 from sizeup.cad.sttfix import SttCorrections
@@ -65,8 +65,10 @@ from sizeup.tts import voices as tts_voices
 AUDIO_NAME = re.compile(r"[0-9a-f]{20}")
 COMMS_CACHE_S, COMMS_CACHE_N = 10.0, 32     # GET /api/cad/comms: an answer reused this long, at most this many kept (#284)
 # GET /api/cad/comms: any of these asks for a page of a view (#415, Cad._comms_page), none: Main and Other as before
-COMMS_PAGE_PARAMS = ("view", "system", "group", "source", "service", "tier", "dept", "safety", "mute", "before", "changed", "at")
-COMMS_UNSENT = ("call_id", "turn", "updated_at")   # radio_traffic columns the Radio view never reads (#284: smaller answer)
+COMMS_PAGE_PARAMS = ("view", "system", "group", "source", "service", "tier", "dept", "safety", "mute", "before", "changed", "at",
+                     "linked")
+# radio_traffic columns the Radio view never reads (#284: smaller answer); corr_*: sent as fixed_text / fixes (#879)
+COMMS_UNSENT = ("call_id", "turn", "updated_at", "corr_text", "corr_rules", "corr_v")
 FIRE_KINDS = ("chief", "engine", "ladder", "tower", "rescue", "utility", "marine")
 PREVIEW_KEEP_S = 24 * 3600
 RETAG_DAYS = 30            # a source's service changed: its rows this recent re-tagged (Cad.retag_services)
@@ -246,6 +248,7 @@ class Cad:
         self.map_display = mapview.display_zooms()           # the rigs' zooms on the maps (Settings > System, #376)
         self.em_prominent = list(settings_mod.EM_DEFAULT)    # the Radio page's loud emergencies (Settings > Radios)
         self.radio_folders: dict | None = None               # the Radio page's folders (#607): None the default
+        self.radio_views: list | None = None                 # ... and its views (radioviews.py): None the coded ones
         self.radio_services: dict[str, str] = {}             # the admins' service per source (Settings > Radios)
         self._retag_lock = threading.Lock()                  # one re-tag at a time (retag_services)
         self.retag_thread: threading.Thread | None = None    # the last one started
@@ -325,6 +328,10 @@ class Cad:
         self.sources.on_page_swept = self._page_swept       # ... and enriches it as a page that joined does
         # FG1 radio IDs nobody has named yet (#163): "Radio 1234 (MDC) on FG1: who is this?" on the console.
         self.newids = NewIds(self)
+        # A dongle swapped for a new one (sizeup/radio/replace.py): the app sets where the offers are read (the station's
+        # sdr state); the console asks "New SDR <serial>: use it for <jobs>?" (static/dongle-swaps.js)
+        self.dongle_swaps_source: Callable[[], list] | None = None
+        self.dongle_auto_replace = False      # Settings: dongle_swap/auto_critical (sizeup/cloud/dongleswap.py)
         # The emergency button and a mayday heard on our fire channels (sizeup/cad/alarms.py, #128): the app feeds it
         # transmissions on the CAD of record; every console and wall board shows them until acknowledged.
         self.alarms = Alarms(self, lambda m: self.log(m))
@@ -534,10 +541,15 @@ class Cad:
                 # the Radio page's folders (#607): only their rev ("" the default); the rail asks its sources again when
                 # it moves (the folders themselves come with them, GET /api/cad/comms/sources)
                 "radio_folders": radiofolders.rev(self.radio_folders),
+                # ... and its views (sizeup/cad/radioviews.py): their rev ("" the default), the views with the sources
+                "radio_views": radioviews.rev(self.radio_views),
+                # one name per source (sizeup/radionames.py): only its rev ("" none); every page asks the names again
+                "radio_names": radionames.rev(),
                 # the admins' service per source: only their rev ("" none); both pages ask again when it moves
                 "radio_services": services_rev(self.radio_services),
                 # the county talkgroups an incident may be moved to ("+ channel", sizeup/cad/opchannel.py)
-                "op_channels": [{"tg": tg, "name": n} for tg, n in sorted(self.opchan.names().items())],
+                "op_channels": [{"tg": tg, "name": radionames.name({"talkgroup": tg, "channel": n})}
+                                for tg, n in sorted(self.opchan.names().items())],
             })
         st = self._state[1]
         now = self.clock()
@@ -549,7 +561,7 @@ class Cad:
                     talking=self._talking(), paging=self.paging(), cloud=self.cloud(), prealert=self.prealert_state(now),
                     airport_alerts=self.airport_alerts_state(now), intel=self.intel_state(now),
                     status_hints=self.status_hints(), oos_notices=self.oos_notices(), alarms=self.alarms_state(now), radio_ids=self.radio_ids(now),
-                    sources=self.sources_state(now), trains_rev=self._trains_rev())
+                    dongle_swaps=self.dongle_swaps(), sources=self.sources_state(now), trains_rev=self._trains_rev())
 
     def _trains_rev(self) -> int | None:
         try:
@@ -669,6 +681,17 @@ class Cad:
         except Exception as e:  # noqa: BLE001
             self.log(f"CAD: new radio IDs: {type(e).__name__}: {e}")
             return []
+
+    def dongle_swaps(self) -> list[dict]:
+        """The new dongles offered for gone ones (sizeup/radio/replace.py), for the console's question; a fault never
+        breaks the console."""
+        try:
+            rows = self.dongle_swaps_source() if self.dongle_swaps_source is not None else []
+        except Exception as e:  # noqa: BLE001
+            self.log(f"CAD: dongle swaps: {type(e).__name__}: {e}")
+            return []
+        return [{k: o.get(k) for k in ("missing", "name", "jobs", "group", "pick", "choices")}
+                for o in (rows if isinstance(rows, list) else []) if isinstance(o, dict)][:8]
 
     def name_radio(self, body: dict) -> dict:
         """POST /api/cad/radio-id {system, radio_id, unit? | label? | ignore?, operator}: who a new FG1 radio is."""
@@ -2164,14 +2187,17 @@ class Cad:
         except ValueError:
             raise CadError("limit: a number") from None
         changed, at = one("changed") or None, when("at")       # changed: a page's cursor, as it was given
+        units = [x.strip() for v in q.get("unit") or [] for x in v.split(",") if x.strip()]    # a view's units: any of them
+        if len(units) > UNITS_MAX or any(len(x) > 60 for x in units):
+            raise CadError(f"unit: at most {UNITS_MAX} units")
         got = self.comms.page(
             main_tgs, self.s.airband, view=view, system=one("system"), group=one("group"), source=keys("source", SOURCES_MAX),
             service=service, tier=one("tier").lower(), dept=one("dept"), safety=one("safety") in ("1", "true", "on"),
             mute=keys("mute", MUTE_MAX), before=before, changed=changed, at=at, limit=limit,
-            unit=one("unit"), channel=one("channel"), event=one("event"),
+            unit=units[0] if len(units) == 1 else units, channel=one("channel"), event=one("event"),
             pcfd=pcfd if one("pcfd") in ("1", "true", "on") else None, since=when("since"), until=when("until"),
             kind={"radio": "radio", "notes": "notes"}.get(one("type"), ""), text=one("q"),
-            emergency=one("emergency") in ("1", "true", "on"), context=context)
+            emergency=one("emergency") in ("1", "true", "on"), context=context, linked=one("linked") in ("1", "true", "on"))
         self._comms_rows(got["rows"])
         out = {**got, "rev": now_rev, "view": view or "all", "pcfd": pcfd}
         if changed is None and before is None:           # a first page: the choices for the filters too
@@ -2193,13 +2219,14 @@ class Cad:
         on it not yet cleared (Comms.emergencies). In the tree's order: system, group, name. Nothing of what
         was said. A reader who may not see another system's traffic (sourcekeys.may_see_context) gets none of its
         sources. folders: the admins' folders for the tree (#607, sizeup/cad/radiofolders.py; null: the automatic
-        grouping), without another system's keys for such a reader."""
+        grouping), without another system's keys for such a reader. views: the rail's views ({rev, custom, views},
+        sizeup/cad/radioviews.py; the coded ones while none are set), without another system's keys or systems."""
         context = self.comms._sees_context()
         now = self.clock()
         minute = int(now // 60)
         folders = self.radio_folders
         rev = (f"{self.comms.rev_for(context)}.{minute}.{int(bool(context))}.{services_rev(self.radio_services)}"
-               f".{radiofolders.rev(folders)}")
+               f".{radioviews.rev(self.radio_views)}.{radiofolders.rev(folders)}")
         live = set()
         for e in self._talking():
             if e.get("ended"):
@@ -2273,6 +2300,8 @@ class Cad:
                 "folders": radiofolders.for_viewer(folders, sees_context=bool(context),
                                                    hidden_labels=self.context_labels()),
                 "services": self.settings.services_page(),
+                # the rail's views: the department's ({rev, custom, views}; the coded ones while none are set)
+                "views": radioviews.for_viewer(self.radio_views, sees_context=bool(context), sources=hit[1]),
                 # a source's re-tag waiting for the station's talkgroups (its automatic service not known yet)
                 "retag_waiting": sorted(k for k in self.retag_waiting if context or not radiofolders.context_key(k))}
 
@@ -2364,6 +2393,16 @@ class Cad:
         except Exception:  # noqa: BLE001
             return None
         return self.retag_services()
+
+    def radio_names(self) -> dict:
+        """GET /api/cad/radio-names: the names, shorts, system labels and frequencies every label on the page is made from
+        (sizeup/radionames.py), as this reader may know them."""
+        try:
+            radionames.use(systems={"analog": "Analog", "airband": "Airband", **{str(k): str(v) for k, v in self.source_systems().items()}},
+                           freqs=self.source_freqs())
+        except Exception:  # noqa: BLE001 - a hover's detail, never in the way of the names
+            pass
+        return radionames.for_viewer(bool(self.comms._sees_context()), hidden_labels=self.context_labels())
 
     def context_labels(self) -> list[str]:
         """The other P25 systems' labels ("Metro"): a heading named so is not shown to a reader who may not see them."""

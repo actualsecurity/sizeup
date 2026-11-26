@@ -263,6 +263,7 @@ def every_job_the_hub_makes(lv, st, wire, tmp_path, monkeypatch) -> dict[str, tu
     groups = [{"name": "roof", "sdrs": ["00000101", "00000102"], "jobs": ["Paging 1", "Fireground 1"]}]
     one("set_antenna_groups", lambda: app.set_antenna_groups(groups))
     one("set_antenna_groups-confirmed", lambda: app.set_antenna_groups(groups, "Stop Fireground 1 to save this?"))
+    one("replace_sdr", lambda: app.replace_sdr("00000102", "", "not_now"))     # (#903) a gone dongle: Not now
     one("sources_poll_now", lambda: app._sources_poll_now("radio pre-alert"))
     one("reception_post", lambda: app.reception_post({"action": "start", "system": "east", "jobs": ["East 1"],
                                                       "sdr": "00000105", "minutes": 15}, "admin@example.org"))
@@ -307,9 +308,9 @@ def every_job_the_hub_makes(lv, st, wire, tmp_path, monkeypatch) -> dict[str, tu
 
 FORMS = ("catch_up", "retranscribe", "retranscribe-all", "retranscribe-as-alt", "transcribe_now", "set_mode",
          "set_mode-confirmed", "set_talkgroup", "set_talkgroup-tier", "set_talkgroup_group", "emergency_all_clear",
-         "set_adsb_receiver", "set_antenna_groups", "set_antenna_groups-confirmed", "sources_poll_now", "reception_post",
-         "reception_sample_b64", "set_stt_alert_keys", "set_stt_terms", "set_channel_prefs", "tts", "sources_reset",
-         "quarantine_dismiss")
+         "set_adsb_receiver", "set_antenna_groups", "set_antenna_groups-confirmed", "replace_sdr", "sources_poll_now",
+         "reception_post", "reception_sample_b64", "set_stt_alert_keys", "set_stt_terms", "set_channel_prefs", "tts",
+         "sources_reset", "quarantine_dismiss")
 
 
 def scrub(doc, tmp=""):
@@ -490,7 +491,7 @@ def test_the_functions_and_their_argument_names_are_the_codes():
     the signatures: every parameter, in order; the list is closed at the last one; `minItems` is the number of
     parameters without a default."""
     defs = c.load(JOBS)["$defs"]
-    assert defs["call"]["properties"]["fn"]["x-known"] == list(station_mod.CALLS) and len(station_mod.CALLS) == 16
+    assert defs["call"]["properties"]["fn"]["x-known"] == list(station_mod.CALLS) and len(station_mod.CALLS) == 17
     assert [b["if"]["properties"]["fn"]["const"] for b in defs["call"]["allOf"]] == list(station_mod.CALLS)
     assert {k for k in defs if k.startswith("call.")} == {f"call.{fn}" for fn in station_mod.CALLS}
     results = c.load(RESULT)["$defs"]

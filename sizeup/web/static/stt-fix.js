@@ -75,7 +75,7 @@ window.SttFix = (() => {
     h.id = "sttfix-title";
     head.append(h);
     const body = el("form", "dialog-body");
-    body.append(el("p", "dim small", `${fmtTime(d.start, true)} · ${d.channel}${d.talker ? ` · ${d.talker}` : ""}`));
+    body.append(el("p", "dim small", `${fmtTime(d.start, true)} · ${(typeof chName === "function" ? chName(d) : d.channel)}${d.talker ? ` · ${d.talker}` : ""}`));
     if (c && c.stale) body.append(el("p", "warnbox small", "Re-transcribed since"));
     for (const [text, model] of [[d.text, d.model], [d.alt_text, d.alt_model]]) {
       if (!text) continue;
