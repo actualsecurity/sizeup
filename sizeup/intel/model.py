@@ -168,12 +168,25 @@ def heard(e) -> bool:
     return (_get(e, "precision") or "none") != "none"
 
 
+def handoff_town(e) -> str:
+    """The town of the console a call was handed to (#961's handoff record: a dict with "to_town", or a list whose
+    third item is it; the last handoff when there are several), "" none. Read only when no place was heard."""
+    h = _get(e, "handoff")
+    if isinstance(h, list) and h and isinstance(h[-1], (list, dict)):
+        h = h[-1]                         # several handoffs: the last
+    if isinstance(h, dict):
+        return str(h.get("to_town") or "")
+    if isinstance(h, (list, tuple)) and len(h) > 2 and isinstance(h[2], str):
+        return h[2]
+    return ""
+
+
 def resolved_town(e) -> str:
-    """The one town an event is in (an Event or a stored row): its heard place's; else, with no place heard, its own
-    town (a handed-off call's: the console that took it), else its talker town; "" when none."""
+    """The one town an event is in (an Event or a stored row): its heard place's; else, with no place heard, the town
+    of the console a handed-off call went to, else its own town, else its talker town; "" when none."""
     if heard(e):
         return _get(e, "town") or ""
-    return _get(e, "town") or _get(e, "talker_town") or ""
+    return handoff_town(e) or _get(e, "town") or _get(e, "talker_town") or ""
 
 
 def shown_place(e) -> dict:

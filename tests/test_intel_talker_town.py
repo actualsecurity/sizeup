@@ -10,6 +10,8 @@ from __future__ import annotations
 import sqlite3
 import threading
 
+import pytest
+
 
 from sizeup.intel import engine as engine_mod
 from sizeup.intel import rules as rules_mod
@@ -348,3 +350,12 @@ def test_search_shows_a_town_only_event_as_its_town(site):  # noqa: F811
     d = cad.intel_admin.eventlog.search({})
     [r] = [x for x in d["events"] if x["id"] == ev.id]
     assert (r["place"], r["precision"], r["town"]) == ("Rye (talker)", "town", RYE)
+
+
+@pytest.mark.parametrize("handoff", [{"to_town": "Rye Brook"}, ["Port Chester PD dispatch", "Rye Brook PD dispatch", "Rye Brook"],
+                                     [["a", "b", PC], {"to_town": "Rye Brook"}]])
+def test_a_handoffs_to_town_wins_over_the_talker_town(handoff):
+    """#961's handoff record (its shape to be settled when it lands): the town of the console that took the call."""
+    r = {"precision": "none", "town": "", "talker_town": PC, "handoff": handoff}
+    assert resolved_town(r) == "Rye Brook" and shown_place(r)["place"] == "Rye Brook (talker)"
+    assert resolved_town({**r, "precision": "address", "town": RYE}) == RYE      # a heard place still wins
