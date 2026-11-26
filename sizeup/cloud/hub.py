@@ -1469,6 +1469,90 @@ class HubApp(App):
         if str(d.get("stt") or "") == "both" and page.status in LANDED:
             self._aws_from_clip(page, self.audio.get(pid), page.label, both=True)
 
+    def _shown_traffic(self, item) -> Traffic | None:
+        """(#931 x #954) The transmission already on the timeline under this one's id: the row in memory (its row shown
+        at its close, or by an earlier step of its route), or the item itself when it was read back from the radio log
+        (log_only: a row no longer in memory, #927's fill by id). None: not shown yet."""
+        if not isinstance(item, Traffic):
+            return None
+        if getattr(item, "log_only", False):
+            return item
+        return next((t for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]
+                     if t.id == item.id), None)
+
+    def _late_fill(self, end) -> bool:
+        """(#927) Words this long after air (LATE_FILL_S): their alarm is labelled late, and past the alarms' age a
+        notice, never pushed (sizeup/cad/alarms.py)."""
+        clip_end = self._hub_time(end)
+        return clip_end is not None and time.time() - clip_end > LATE_FILL_S
+
+    def _retext(self, cid: str, text: str, status: str, confidence, model: str, *a, **kw) -> bool:
+        """App._retext, and the first words of a transmission whatever engine wrote them (the station's fill, the
+        pool's, AWS's): labelled late when they came long after air (_late_fill), in one place. A transmission no longer
+        in memory (#927: its row in the radio log only) still reaches the alarms and ATC with its new words, rebuilt
+        from its row, as one in memory does."""
+        quiet = bool(kw.get("quiet"))
+        t = next((x for x in list(self.store.loose) + [x for i in self.store.incidents for x in i.traffic]
+                  if x.id == cid), None)
+        before = None
+        if t is None and not quiet:
+            before = self.cad.store.one("SELECT text, status, end FROM radio_traffic WHERE id = ?", (cid,))
+        mine = t is not None and "late_fill" not in t.__dict__ and not str(t.text or "").strip()
+        if mine:                                  # (its first words: late when long after air)
+            t.late_fill = self._late_fill(t.end)  # type: ignore[attr-defined]
+        try:
+            changed = super()._retext(cid, text, status, confidence, model, *a, **kw)
+        finally:
+            if mine:
+                t.__dict__.pop("late_fill", None)
+        if before is not None:
+            row = self.cad.store.one("SELECT * FROM radio_traffic WHERE id = ?", (cid,)) or {}
+            new = str(row.get("text") or "")
+            words = new or (str(row.get("unclear_text") or "") if row.get("status") == stt_quality.UNCLEAR else "")
+            if words and (new != str(before.get("text") or "") or not new):
+                late = bool(kw.get("late"))
+                tr = self._traffic_of_row(row)
+                tr.late = late                                    # type: ignore[attr-defined]
+                first = not str(before.get("text") or "").strip()
+                tr.late_fill = first and self._late_fill(row.get("end"))      # type: ignore[attr-defined]
+                self._alarm(tr, words)
+                if not late and new:
+                    self._atc(tr, new)
+        return changed
+
+    @staticmethod
+    def _log_item(item) -> dict:
+        """A pool job's extra for a transmission no longer in memory (log_only): the job keeps it, so its fallback still
+        finds it by its id (the text itself goes to the radio log's row by id)."""
+        return {"item": item} if getattr(item, "log_only", False) else {}
+
+    def _job_item(self, job):
+        """A pool job's transmission: the row in memory, else the one it was routed with from the radio log."""
+        return self._find(job.id)[0] or job.extra.get("item")
+
+    def _transcribed(self, item) -> None:
+        """A row on the timeline once, whatever way its clip goes (#931 x #954): a transmission already shown (a re-route:
+        Auto · normal's GPU -> stations -> AWS, a pool hand-over of a row shown at its close, the pool refusing it after
+        all) is updated in place: its engine (status, model) on the same row, or its words as a retext; the traffic
+        event, the CAD's row, the alarm and ATC hooks never run a second time for it."""
+        have = self._shown_traffic(item)
+        if have is None:
+            return super()._transcribed(item)
+        item.__dict__.pop("transcript_pending", None)
+        if have is not item:                      # (another object for the same id: the shown one takes its engine)
+            for k in ("status", "model", "stt", "raw", "confidence"):
+                if k in item.__dict__:
+                    setattr(have, k, item.__dict__[k])
+        words = str(getattr(item, "raw", "") or getattr(item, "text", "") or "")
+        if words or item.status not in ("pending", "remote"):
+            alt = ({"text": str(getattr(item, "alt_text", "") or ""), "model": str(getattr(item, "alt_model", "") or "")}
+                   if getattr(item, "alt_text", None) is not None else None)
+            self._retext(item.id, words, item.status, getattr(item, "confidence", None),
+                         str(getattr(item, "model", "") or ""), alt=alt, why="speech-to-text",
+                         vocab_v=str(getattr(item, "vocab_v", "") or "")[:80])
+        else:
+            self._stt_row(item.id, item.status, str(getattr(item, "model", "") or ""))
+
     def _traffic_of(self, d: dict) -> Traffic:
         """The station's transmission as sent, its rig from the hub's radio registry (edited here)."""
         t = Traffic.from_dict({k: v for k, v in d.items() if EXTRA.fullmatch(str(k))})
@@ -1581,9 +1665,7 @@ class HubApp(App):
         waiting = not have_text and ((self.mdb.is_waiting(pid) and have_status in ("pending", "remote", "skipped", "error"))
                                      or (have_status in ("pending", "remote")
                                          and have_model.startswith(WHISPER_FALLBACK_STATION)))
-        end = getattr(t, "end", None) if t is not None else row["end"]
-        clip_end = self._hub_time(end)
-        late_fill = clip_end is not None and time.time() - clip_end > LATE_FILL_S     # (its words long after air)
+        late_fill = self._late_fill(getattr(t, "end", None) if t is not None else row["end"])  # (words long after air)
         if d.get("authoritative") is False or not waiting:
             if status in LANDED:
                 self._stt_ran(pid, self._engine_of(d), model, text, status, conf, key=key, item=t, role="late",
@@ -1603,6 +1685,7 @@ class HubApp(App):
         held = t is not None                                  # (in memory: _retext reaches it, its alarm and ATC too)
         if t is None:
             t = self._traffic_of_row(row)
+            t.log_only = True                                 # type: ignore[attr-defined]  (shown: never added again)
             key = traffic_key(t)
         t.flagged = False                                     # type: ignore[attr-defined]
         if d.get("transcript_pending") == "pool":
@@ -1614,21 +1697,11 @@ class HubApp(App):
             return
         self._prompt_time(pid, d)                            # (#727: whisper's prompt had the clip's own time)
         late = bool(d.get("late")) or bool(getattr(t, "late", False))
-        t.late_fill = late_fill                               # type: ignore[attr-defined]  (the alarm: labelled late)
-        try:
-            self._retext(pid, text, status, conf, model, why="speech-to-text", vocab_v=vocab_v, late=late)
-        finally:
-            if held:
-                t.__dict__.pop("late_fill", None)
-        if not held:                                         # (by its id: the alarm's words and ATC from the row)
-            now = self.cad.store.one("SELECT text, status, unclear_text FROM radio_traffic WHERE id = ?", (pid,)) or {}
-            words = str(now.get("text") or "") or (str(now.get("unclear_text") or "")
-                                                   if now.get("status") == stt_quality.UNCLEAR else "")
+        # (its alarm labelled late when its words came long after air: _retext, for every engine's first words)
+        self._retext(pid, text, status, conf, model, why="speech-to-text", vocab_v=vocab_v, late=late)
+        if not held:                     # (by its id: its alarm's words and ATC came from the row, in _retext)
+            now = self.cad.store.one("SELECT text, status FROM radio_traffic WHERE id = ?", (pid,)) or {}
             t.text, t.late = str(now.get("text") or ""), late   # type: ignore[attr-defined]
-            if words:
-                self._alarm(t, words)
-                if not late and t.text:
-                    self._atc(t, t.text)
             t.status = str(now.get("status") or status)
         if status in LANDED:                                  # the station's whisper's text (#639), as it came
             self._stt_ran(pid, self._engine_of(d), model, text, status, conf, key=key, item=t,
@@ -1843,16 +1916,25 @@ class HubApp(App):
     def _aws_recover(self) -> int:
         """After a restart (a redeploy, a crash) nothing that waited for Amazon Transcribe is left
         "Transcribing": less than RECOVER_S old with its clip here, to AWS again when it can take it; the
-        rest (and all of it when AWS can't: the breaker, the limit, not set up) to the station's whisper."""
+        rest (and all of it when AWS can't: the breaker, the limit, not set up) to the station's whisper. An Auto · normal
+        clip goes its own way again (_norm_first: AWS only under its budget)."""
         from sizeup.transcribe import wav_pcm
         now = time.time()
-        again = whisper = 0
+        again = whisper = norm = 0
         for item, key, kind in self._aws_pending():
             # each item's own pool (a police source's budget is its own, radio-intel PR 3)
             ok, why = self.aws.available(key) if self.aws is not None else (False, "Amazon Transcribe isn't set up on the hub")
             page = item if kind == "page" else None
             wav = self.audio.get(item.id)
             pcm = wav_pcm(wav, getattr(item, "voice_offset_s", 0.0) if page is not None else 0.0) if wav else None
+            if pcm is not None and item.end > now - RECOVER_S and self._hub_engine(key) == sttroute.AUTO_NORM:
+                # an Auto · normal clip by its own rules: a GPU after the priority work, the stations, AWS only under
+                # its budget (CATCHUP_AWS_PCT), else its own station: never AWS at full budget
+                self._aws_since.pop(item.id, None)
+                self._norm_first(item, pcm, key, self._pool_class(item, key),
+                                 str(getattr(item, "origin_station", "") or self.clip_origin), handed=True)
+                norm += 1
+                continue
             if ok and pcm is not None and item.end > now - RECOVER_S:
                 self._aws_since[item.id] = now
                 self._stt_state(item, item.id, "pending", channels_model())    # the log says AWS again
@@ -1862,10 +1944,10 @@ class HubApp(App):
             reason = why if not ok else "no clip on the hub" if pcm is None else f"waiting over {RECOVER_S / 60:.0f} min"
             self._aws_failed(AwsJob(kind, item.id, key, page=page, recovered=True), f"the hub restarted ({reason})")
             whisper += 1
-        if again or whisper:
+        if again or whisper or norm:
             self.hub.log(f"hub: after the restart, {again} waiting for Amazon Transcribe sent to it again, "
-                         f"{whisper} to the station's whisper")
-        return again + whisper
+                         f"{whisper} to the station's whisper, {norm} Auto · normal routed again")
+        return again + whisper + norm
 
     def _aws_sweep(self, now: float | None = None) -> int:
         """Anything still pending "aws" past its deadline (+ SWEEP_GRACE_S) is failed over, whatever became of
@@ -2207,9 +2289,12 @@ class HubApp(App):
         job = sttpool.Job(item.id, cls, key, "page" if page is not None else "traffic", len(pcm) / 8000.0,
                           audio_wait=True, audio=self._pool_audio_of(item.id, page, pcm), on_done=self._pool_done,
                           on_fallback=self._pool_fallback, prompt=prompt, clip_end=self._hub_time(getattr(item, "end", None)),
-                          extra={"pcm": pcm, "page": page, "vocab_v": vocab_v, **(more or {})}, **kw)
+                          extra={"pcm": pcm, "page": page, "vocab_v": vocab_v, **self._log_item(item),
+                                 **(more or {})}, **kw)
         item.status, item.raw, item.confidence, item.model = "pending", "", None, sttpool.PENDING_MODEL
-        item.stt = "aws"                          # (still waiting for the AWS path: the sweep and a restart know it)
+        # (still waiting for the AWS path: the sweep and a restart know it; an Auto · normal clip is the pool's: a restart
+        # routes it by its own rules, _pool_recover, never to AWS at full budget)
+        item.stt = "pool" if kw.get("norm") else "aws"
         if page is None:
             item.__dict__.pop("transcript_pending", None)
             self._transcribed(item)
@@ -2454,6 +2539,7 @@ class HubApp(App):
                           on_fallback=self._pool_fallback, prompt=prompt, clip_end=self._hub_time(getattr(item, "end", None)),
                           forced=bg, bg=bg, gpu_only=place[0] == "gpu",
                           extra={"pcm": pcm, "page": page, "handed": True, "origin": origin, "vocab_v": vocab_v,
+                                 **self._log_item(item),
                                  **({"station_only": True, "claim_wait": budget} if place[0] == "station" else {}),
                                  **({"overflow": True} if place[0] == "gpu" else {})})
         if place[0] != "station":
@@ -2567,11 +2653,13 @@ class HubApp(App):
                 prompt, vocab_v = self._pool_prompt_v(item)
             except Exception:  # noqa: BLE001 - no prompt is still a transcript
                 prompt, vocab_v = "", ""
+            item.stt = "pool"                     # (another station's: a restart routes it again, _pool_recover)
             job = sttpool.Job(item.id, cls, key, "page" if page is not None else "traffic", len(pcm) / 8000.0,
                               audio_wait=True, audio=self._pool_audio_of(item.id, page, pcm), on_done=self._pool_done,
                               on_fallback=self._pool_fallback, prompt=prompt,
                               clip_end=self._hub_time(getattr(item, "end", None)), forced=True, norm=True,
                               extra={"pcm": pcm, "page": page, "handed": True, "origin": origin, "vocab_v": vocab_v,
+                                     **self._log_item(item),
                                      "station_only": True, "claim_wait": sttroute.NORM_STATION_BUDGET_S})
             if self.sttpool.submit(job):
                 self._bg_count(item.id, "station", "norm")
@@ -2607,7 +2695,7 @@ class HubApp(App):
         shed, so the catch-up runs it once there is room. Nothing is dropped."""
         from sizeup.stt import HIGH, LIVE, SHED, URGENT
         page = job.extra.get("page")
-        item = page if job.kind == "page" else self._find(job.id)[0]
+        item = page if job.kind == "page" else self._job_item(job)
         if item is None or getattr(item, "raw", "") or getattr(item, "text", "") or \
                 getattr(item, "status", "") not in ("pending", "remote"):
             return
@@ -2741,13 +2829,13 @@ class HubApp(App):
             self._rerun_note.pop(job.id, None)
             self.catchup.forget(job.id)
             return
-        if job.worker and job.extra.get("kind") == "gpu" and not job.bg and not job.norm and job.extra.get("fell") in (
+        if job.worker and job.extra.get("kind") == "gpu" and sttpool.priority(job) and job.extra.get("fell") in (
                 "lease", "error", "released") and not re.search(r"went (gaming|paused)|shutdown|stopping", why):
             self.stt_engines.add(job.worker, None, ok=False, gpu=True,      # (the latency guard's failures: #878)
                                  priority=job.cls in sttruns.TARGET_CLASSES + (LIVE_CLS,))
         if job.norm:                               # Auto · normal: its GPU (or its station placement) didn't: on its way
             page = job.extra.get("page")
-            item = page if job.kind == "page" else self._find(job.id)[0]
+            item = page if job.kind == "page" else self._job_item(job)
             if item is None or getattr(item, "raw", "") or getattr(item, "text", ""):
                 return
             self.stt_routes.note(job.id, "stations" if job.extra.get("station_only") else job.worker or "GPU",
@@ -2767,7 +2855,7 @@ class HubApp(App):
         """The AWS path for a clip that was the pool's (its row already says it is transcribing): AWS if it can take
         it, else _aws_failed (the station's whisper, or "transcription failed")."""
         page = job.extra.get("page")
-        item = page if job.kind == "page" else self._find(job.id)[0]
+        item = page if job.kind == "page" else self._job_item(job)
         if item is None:
             return
         if (getattr(item, "raw", "") or getattr(item, "text", "")
