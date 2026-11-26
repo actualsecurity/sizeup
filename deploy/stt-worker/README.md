@@ -401,15 +401,23 @@ a new `worker.py`, through the self-update's checks above.
    off.
 2. **Unpack beside the running build:** into `runtimes\llama\b12728\` (or `runtimes\whisper\b5454\`) next to
    `worker.toml`, never over the folder in use. A zip with a path outside its folder, or a link, is refused whole.
-3. **Switch only when idle:** no clip, no LLM job, not gaming or paused, no gaming for 2 minutes. The worker takes no
-   new jobs (`paused: updating`), stops the servers that run that program and starts them from the new folder.
+3. **Switch only when idle:** no clip, no LLM job, not gaming or paused, no gaming for 2 minutes, and no other switch
+   (one lock for every switch: a runtime, the LLM's model, the self-update). The worker takes no new jobs
+   (`paused: updating`), stops the servers that run that program and starts them from the new folder.
    `worker.toml` keeps its paths (`llama\llama-server.exe`, `whisper\Release\whisper-server.exe`): the worker runs
    the active build's program in their place.
-4. **Test:** whisper-server must decode a second of silence; llama-server's `--version` must name the build, then it
-   must give a 1-token constrained answer. All within 3 minutes.
-5. **Rollback:** any failure starts the build before again (its folder is kept) and tests it. The new build is tried
-   again after 30 minutes, then 60; after 3 failures in a row it is marked bad for a day. Gaming during the test
-   doesn't count as a failure. A worker stopped mid-switch goes back to the build before at its next start.
+4. **Test:** whisper-server must decode a second of silence. For llama.cpp, `--version` must name the build, and
+   llama-server must give a 1-token completion on its own 1.2 MB test model (`stories260K.gguf`, pinned in
+   `worker.py`, in `runtimes\test\`), whatever the LLM and the speech models are doing. When the LLM runs, it must
+   also give its 1-token constrained answer. Then one wanted speech model of that kind, if its files are there, must
+   decode a second of silence. Each part has 3 minutes. A whisper.cpp build is downloaded only when `worker.toml` has
+   its own `whisper_server` to test it with.
+5. **Rollback:** any failure makes the build before active again (its folder is kept), restarts it and checks it.
+   While gaming or paused it only stops the servers; the worker starts them again once the PC is free. The new
+   build is tried again after 30 minutes, then 60; after 3 failures in a row it is marked bad for a day. Gaming
+   during the test doesn't count as a failure. A worker stopped mid-switch goes back to the build before at its next
+   start. For 30 minutes after a switch, a speech model of that kind that fails to load rolls the build back (a
+   failure of the build, not of the model).
 6. **Prune:** only the running build and the one before it stay in `runtimes\`. The installer's own `llama\` and
    `whisper\` folders are never deleted.
 
@@ -498,7 +506,7 @@ whether it needs `--reasoning off`). Nothing in `worker.toml` changes.
 - **Another one:** its GGUF is downloaded to `models\managed` through the same path as the speech models and the
   [runtime builds](#runtime-updates-llamacpp-whispercpp) (allowed hosts, exact size and SHA-256, a disk-space check,
   resumed, never while gaming or paused). Then, with no LLM job in hand or being claimed, not gaming, and no
-  llama.cpp switch under way, llama-server is stopped and started again with that `-m` and its `--reasoning` (every
+  other switch under way (the one lock every switch takes), llama-server is stopped and started again with that `-m` and its `--reasoning` (every
   other option as `llm_server` says), its hash checked before its first start. It gets LLM jobs only after the same
   1-token test answer a new llama.cpp build passes. Health shows its id and hash; its `vram_mb` is the LLM's share
   in the VRAM plan.

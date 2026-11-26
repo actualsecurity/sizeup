@@ -442,3 +442,35 @@ def test_a_runtime_switch_waits_for_the_llms_model_switch(tmp_path, monkeypatch)
     assert r.w._llm_new is not None
     monkeypatch.setattr(W, "UPDATE_QUIET_S", 0.0)
     assert r.w.runtime_busy() == "the LLM's model switching"
+
+
+def test_the_llms_model_switch_takes_the_one_idle_switch_lock(tmp_path, monkeypatch):
+    """Never during another switch (a llama.cpp build, the self-update, the hub's config): it waits, no new LLM
+    claim meanwhile; then it switches, holding only the LLM's lane (the clips go on)."""
+    import threading
+    r = Rig(tmp_path, monkeypatch)
+    w = r.w
+    w.verify_llm()
+    r.code[0] = 200
+    r.tick(2)
+    r.name("small-llm")
+    r.models_step()
+    inside, leave = threading.Event(), threading.Event()
+
+    def hold():
+        with w.idle_switch("llama", drain_s=0.0, force=True):
+            inside.set()
+            leave.wait(5)
+    t = threading.Thread(target=hold)
+    t.start()
+    assert inside.wait(5)
+    r.tick(3)
+    assert len(r.procs) == 1 and r.procs[0].code is None and w.llm_err == "switching models"   # waited
+    leave.set()
+    t.join(5)
+    seen = []
+    real = w.llm_proc.stop
+    w.llm_proc.stop = lambda: (seen.append((w.llm_switching, w.switching)), real())[1]
+    r.tick(2)
+    assert seen and seen[0] == ("the LLM's model", "") and model_of(r.procs[-1].argv).endswith("small.gguf")
+    assert w.llm_switching == "" and w._switch_mx.acquire(blocking=False)
