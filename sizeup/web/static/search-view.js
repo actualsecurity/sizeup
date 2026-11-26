@@ -6,6 +6,13 @@
 // the box's words (number, street, asset id, OOS, class C, untested, town) as typed (GET /api/cad/hydrants/search, the
 // first HY_LIMIT), each row's Show on map (hydrants.js); #search?where=...&tab=hydrants.
 //
+// Intel events (#937): opt-in (the Intel button, off unless turned on; the person's, on the hub: me-prefs.js "search",
+// localStorage IKEY this browser's copy), only for whoever the state gives intel to (the Intel page's readers). Search's
+// time, area and words over the events kept (GET /api/cad/intel/search, sizeup/intel/eventlog.py: bounded and on its
+// index); with a type, unit or disposition, none (calls only). Their own table, marked Intel with the level, category
+// and why it didn't push; their pins (intel-map.js) on the same map; a row or pin opens its More info
+// (/cad#prealert/intel/<id>). Drawn again only when the answer changed.
+//
 // Filters live in the URL hash, like the Radio view's, so Back goes to the last search. Uses cad.js's helpers (el,
 // setText, show, api, operator, L, typeLabel, typeColor, nameOf, canDo, openFromRecords) and addr-history.js's
 // noteForm: loaded after both.
@@ -15,7 +22,9 @@ window.SearchView = (() => {
   const KEYS = ["where", "text", "type", "unit", "disposition", "from", "to"];
   const INPUT = { where: "#sv-where", text: "#sv-text", type: "#sv-type", unit: "#sv-unit", disposition: "#sv-disp",
                   from: "#sv-from", to: "#sv-to" };
-  const st = { q: {}, page: 0, tab: "calls", seq: 0, data: null, map: null, mapReady: false, listsSig: "", notes: null, hyTimer: null };
+  const st = { q: {}, page: 0, tab: "calls", seq: 0, data: null, map: null, mapReady: false, listsSig: "", notes: null, hyTimer: null,
+               intel: false, iseq: 0, idata: null, isig: "", ipins: null, iq: null, paging: false };
+  const IKEY = "sizeup.searchIntel";
   const TABS = ["notes", "preplan", "hydrants"];
   const HY_LIMIT = 50;
   const WHERE_PH = { hydrants: "Number, street, asset id, OOS, class C, untested, town" };
@@ -62,9 +71,10 @@ window.SearchView = (() => {
     }
     tab(st.tab);
   }
-  function close() { st.seq++; if (window.Preplan) Preplan.closeSearch(); }
+  function close() { st.seq++; st.iseq++; if (window.Preplan) Preplan.closeSearch(); }
 
-  function submit(page = 0) {
+  function submit(page = 0, paging = false) {
+    st.paging = paging;                        // Newer / Older: the calls paged, the intel search as it is
     const q = Object.fromEntries(KEYS.map((k) => [k, $(INPUT[k]).value.trim()]));
     const h = "#search" + (params(q, page).toString() ? `?${params(q, page)}` : "");
     if (location.hash === h) { st.q = q; st.page = page; return run(); }
@@ -91,12 +101,16 @@ window.SearchView = (() => {
       else if (id !== "#sv-csv") show($(id), true);
     }
     if (name !== "preplan" && window.Preplan) Preplan.closeSearch();
+    intelButton();
+    if (name !== "calls") st.iseq++;           // (an intel answer still on its way: not drawn on another tab)
     if (name === "calls") run(); else if (name === "notes") runNotes(); else if (name === "hydrants") runHydrants();
     else if (window.Preplan) Preplan.search(st.q.where);   // #456
   }
 
   // ---- calls ----------------------------------------------------------------------------------------------------
   async function run() {
+    runIntel(st.paging);
+    st.paging = false;
     const seq = ++st.seq;
     const p = params(st.q, st.page);
     setText($("#sv-count"), "Searching…");
@@ -187,19 +201,23 @@ window.SearchView = (() => {
   function pins(rows) {
     const pts = rows.filter((r) => r.lat != null && r.lon != null);
     show($("#sv-nomap"), !pts.length);
-    if (!window.maplibregl || typeof buildMapStyle !== "function" || !cad.scene || !cad.scene.home) return;
+    if (!window.maplibregl || typeof plainMap !== "function" || !cad.scene || !cad.scene.home) return;
     if (!st.map) {
-      st.map = new maplibregl.Map({ container: $("#sv-map"), style: buildMapStyle(cad.scene), center: cad.scene.home.center,
-                                    zoom: cad.scene.home.zoom, attributionControl: { compact: true }, maxPitch: 0, dragRotate: false });
-      st.map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+      st.map = plainMap($("#sv-map"), cad.scene);
       st.map.on("load", () => {
         st.map.addSource("sv-calls", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
         st.map.addLayer({ id: "sv-calls", type: "circle", source: "sv-calls", paint: {
           "circle-radius": 7, "circle-color": ["get", "c"], "circle-stroke-width": 2, "circle-stroke-color": "#0B0F14" } });
-        st.map.on("click", "sv-calls", (e) => { const f = e.features && e.features[0]; if (f) openFromRecords(f.properties.id); });
+        st.map.on("click", "sv-calls", (e) => {
+          const f = e.features && e.features[0];
+          if (!f || (st.ipins && st.map.queryRenderedFeatures(e.point, { layers: ["sv-intel-pin"] }).length)) return;   // an intel pin on top: its own
+          openFromRecords(f.properties.id);
+        });
         st.map.on("mouseenter", "sv-calls", () => { st.map.getCanvas().style.cursor = "pointer"; });
         st.map.on("mouseleave", "sv-calls", () => { st.map.getCanvas().style.cursor = ""; });
+        if (window.IntelMap) st.ipins = IntelMap.attach(st.map, "sv-intel", { pick: openIntel });
         st.mapReady = true;
+        intelPins();
         pins(st.data ? st.data.rows : []);
       });
       return;
@@ -208,10 +226,119 @@ window.SearchView = (() => {
     st.map.resize();
     st.map.getSource("sv-calls").setData({ type: "FeatureCollection", features: pts.map((r) => ({ type: "Feature",
       properties: { id: r.id, c: typeColor(r.type) || "#9AA3AD" }, geometry: { type: "Point", coordinates: [r.lon, r.lat] } })) });
-    if (pts.length) {
-      const b = new maplibregl.LngLatBounds();
-      for (const r of pts) b.extend([r.lon, r.lat]);
-      st.map.fitBounds(b, { padding: 40, maxZoom: 16.5, duration: 0 });
+    fit();
+  }
+  // the calls' pins and the intel events' (when on) in view
+  function fit() {
+    const pts = [...(st.data ? st.data.rows : []), ...intelPts()].filter((r) => r.lat != null && r.lon != null);
+    show($("#sv-nomap"), !pts.length);
+    if (!st.mapReady || !pts.length) return;
+    const b = new maplibregl.LngLatBounds();
+    for (const r of pts) b.extend([r.lon, r.lat]);
+    st.map.fitBounds(b, { padding: 40, maxZoom: 16.5, duration: 0 });
+  }
+
+  // ---- Intel events (#937): opt-in, for the Intel page's readers -------------------------------------------------------
+  const intelOk = () => !!(cad.state && cad.state.intel);
+  const intelOn = () => st.intel && intelOk();
+  function intelButton() {
+    const b = $("#sv-intel");
+    show(b, intelOk() && st.tab === "calls");
+    b.setAttribute("aria-pressed", String(st.intel));
+  }
+  function keepIntel(on) {
+    st.intel = !!on;
+    try { localStorage.setItem(IKEY, on ? "1" : "0"); } catch (_) { /* this page view only */ }
+    intelButton();
+  }
+  function openIntel(id) { location.hash = window.PrealertInfo ? PrealertInfo.href("intel", id) : `#prealert/intel/${id}`; }
+  const CALL_ONLY = ["type", "unit", "disposition"];
+  function intelQuery() {
+    const p = new URLSearchParams();
+    for (const k of ["where", "text", "from", "to"]) if (st.q[k]) p.set(k, st.q[k]);
+    return p.toString();
+  }
+  async function runIntel(paging = false) {
+    if (paging && st.idata && !st.idata.calls_only && intelOn() && st.tab === "calls" && intelQuery() === st.iq) return;
+    const seq = ++st.iseq;
+    const box = $("#sv-intel-box");
+    if (!intelOn() || st.tab !== "calls") {
+      show(box, false);
+      st.idata = null;
+      st.isig = "";
+      intelPins();
+      return;
+    }
+    show(box, true);
+    if (CALL_ONLY.some((k) => st.q[k])) { renderIntel({ events: [], total: 0, calls_only: true }); return; }
+    const p = intelQuery();
+    if (p !== st.iq || !st.idata) setText($("#sv-intel-n"), "Searching…");    // (the same search: as it is)
+    st.iq = p;
+    try {
+      const d = await api("GET", `/api/cad/intel/search?${p}`);
+      if (seq === st.iseq) renderIntel(d);
+    } catch (e) {
+      if (seq !== st.iseq) return;
+      st.isig = "";
+      st.idata = null;                         // never the last search's pins under the error
+      intelPins();
+      setText($("#sv-intel-n"), "");
+      $("#sv-intel-rows").replaceChildren(row0(`Intel: ${e.message}`, 5));
+    }
+  }
+  function renderIntel(d) {
+    const sig = JSON.stringify([d.events, d.total, d.more, d.capped, d.calls_only]);    // (never its clock's range)
+    st.idata = d;
+    if (sig === st.isig) return;               // the same answer: nothing redrawn
+    st.isig = sig;
+    const n = $("#sv-intel-n");
+    setText(n, d.calls_only ? "Not with a type, unit or disposition" : d.total
+      ? `${d.total}${d.more || d.capped ? "+" : ""} event${d.total === 1 ? "" : "s"}`
+        + (d.total > d.events.length ? ` · newest ${d.events.length}` : "") : "None");
+    n.title = d.capped ? `The newest ${d.scanned} events of the range looked through` : d.more ? "Counted to past the newest shown" : "";
+    const body = $("#sv-intel-rows");
+    if (!d.events.length) body.replaceChildren(row0(d.calls_only ? "Calls only" : "No intel events", 5));
+    else body.replaceChildren(...d.events.map(intelRow));
+    intelPins();
+  }
+  function intelRow(e) {
+    const tr = el("tr", "ev sv-irow");
+    tr.tabIndex = 0;
+    tr.dataset.id = String(e.id);
+    if ((e.matched || []).length) {
+      tr.title = `Words in: ${e.matched.join(", ")}`
+        + (e.matched.includes("radio") ? " (radio: any of its transmissions or their corrected text; More info lists the last 12)" : "");
+    }
+    tr.addEventListener("click", () => openIntel(e.id));
+    tr.addEventListener("keydown", (ev) => { if (ev.key === "Enter" && ev.target === tr) openIntel(e.id); });
+    const cat = el("td", "il-cat");
+    cat.append(el("span", "chip sv-ichip", "Intel"), " ", e.label || e.category);
+    cat.title = `${e.pack_label} · ${e.category}`;
+    const lv = el("span", `chip il-lv il-lv-${e.level}`, e.level);
+    const loc = e.place ? el("td", "loc", e.confirmed ? e.place : `${e.place} ?`) : el("td", "loc dim", "unplaced");
+    if (e.place && !e.confirmed) loc.title = "Unconfirmed";
+    const why = e.held ? el("td", "il-why") : el("td", "il-why dim", "—");
+    if (e.held) { why.append(el("span", "chip il-held", e.held.label)); why.title = e.held.tip || ""; }
+    const lvc = el("td", "il-level");
+    lvc.append(lv);
+    tr.append(el("td", "t", when(e.at)), cat, lvc, loc, why);
+    return tr;
+  }
+  const intelPts = () => (st.idata && intelOn() ? st.idata.events.filter((e) => e.lat != null && e.lon != null) : []);
+  function intelPins() {                       // drawn only when they differ (intel-map.js); the view fitted then
+    if (!st.ipins || !st.mapReady) return;
+    if (st.ipins.set(intelPts())) fit();
+  }
+  {
+    try { st.intel = localStorage.getItem(IKEY) === "1"; } catch (_) { st.intel = false; }
+    if (window.MePrefs) {
+      let had = false;
+      try { had = localStorage.getItem(IKEY) !== null; } catch (_) { /* none */ }
+      MePrefs.register("search", { get: () => ({ intel: st.intel }), hadLocal: had, apply: (v) => {
+        const was = intelOn();
+        keepIntel(!!(v && v.intel));
+        if (intelOn() !== was && cad.search && st.tab === "calls") runIntel();
+      } });
     }
   }
 
@@ -315,12 +442,23 @@ window.SearchView = (() => {
     st.hyTimer = setTimeout(() => { if (st.tab !== "hydrants") return; st.q.where = $("#sv-where").value.trim(); runHydrants(); }, 200);
   });
   $("#sv-clear").addEventListener("click", () => { for (const k of KEYS) $(INPUT[k]).value = ""; submit(0); });
-  $("#sv-prev").addEventListener("click", () => submit(Math.max(0, st.page - 1)));
-  $("#sv-next").addEventListener("click", () => submit(st.page + 1));
+  $("#sv-intel").addEventListener("click", () => {
+    keepIntel(!st.intel);
+    if (window.MePrefs) MePrefs.changed("search");             // the person's, on the hub (#823)
+    if (st.tab === "calls") runIntel();
+  });
+  $("#sv-prev").addEventListener("click", () => submit(Math.max(0, st.page - 1), true));
+  $("#sv-next").addEventListener("click", () => submit(st.page + 1, true));
   for (const b of document.querySelectorAll("#sv-tabs button")) b.addEventListener("click", () => tab(b.dataset.tab));
   $("#sv-notes-all").addEventListener("change", runNotes);
   $("#sv-note-add").addEventListener("click", () => window.AddrHistory.noteForm($("#sv-note-form"), { where: $("#sv-where").value.trim() }, runNotes));
-  cad.hooks.push(() => { if (cad.search) fillLists(); });     // the lists and units, once the state has them
+  cad.hooks.push(() => {                                     // the lists and units, once the state has them
+    if (cad.search) fillLists();
+    if (!!$("#sv-intel").hidden === (intelOk() && st.tab === "calls")) {     // intel given or taken away: its button
+      intelButton();
+      if (cad.search && st.tab === "calls") runIntel();
+    }
+  });
 
   return { open, close, clampH, H_KEY, H_MIN, H_MAX_VH };
 })();

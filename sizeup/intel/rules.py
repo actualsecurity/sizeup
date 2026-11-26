@@ -69,8 +69,9 @@ phrases are context ("a bat in her bedroom", "a contractor has a hammer"), and i
 
 "describe": a category's one-line definition (at most DESCRIBE_MAX characters), given to the local model behind the
 rules (sizeup/intel/backing.py) beside its label; a category without one is offered by its label alone. "model_cues":
-phrases (the grammar above) one of which the trigger transmission (or two of its context transmissions) must say before
-that model's answer of the category raises anything (water_rescue: "water", "boat", "drowning" ...).
+phrases (the grammar above) one of which the trigger transmission (or the dispatch just before it, or two of its context
+transmissions) must say before that model's answer of the category raises anything (water_rescue: "water", "boat",
+"drowning" ...; the police pack's categories but aided and alarm each have theirs).
 
 A category with "fire_related": true (the police pack's fire_report, fire_call, hazmat, alarm) is checked for the FD
 already being there before it pushes (engine.py _fire): one of our fire incidents at its place (dispatched: held at

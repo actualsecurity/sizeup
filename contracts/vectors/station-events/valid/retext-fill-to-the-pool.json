@@ -1,0 +1,23 @@
+{
+  "epoch": "0123456789abcdef",
+  "station": "st-north",
+  "events": [
+    {
+      "seq": 1,
+      "at": 1794990001.0,
+      "type": "retext",
+      "data": {
+        "id": "Fireground1-1794990000000",
+        "text": "",
+        "status": "remote",
+        "confidence": null,
+        "model": "pool",
+        "engine": "station-whisper",
+        "fill": true,
+        "transcript_pending": "pool"
+      },
+      "audio": null,
+      "audio_dropped": false
+    }
+  ]
+}

@@ -193,6 +193,21 @@ class GuardedConnection(sqlite3.Connection):
         self.skipped = self.refused = 0
         self.tainted = False
         self._said = -1e18
+        self.close_lock: threading.RLock | None = None
+
+    def close(self) -> None:
+        """Closed under close_lock when its owner set one (the CAD store's lock, #740). CPython's sqlite3 isn't safe
+        against close() on one thread while another runs a statement on the same connection (check_same_thread=False):
+        close() drops the statement cache, then finalizes the statements with the GIL let go, and an execute on the
+        other thread in that window calls into the dropped cache: a SIGSEGV, not an exception. Under the owner's lock a
+        close waits for the statement (or transaction) of whoever holds it; one after the close raises
+        ProgrammingError ("closed database"), which a worker's own error handling takes."""
+        lock = self.close_lock
+        if lock is None:
+            super().close()
+            return
+        with lock:
+            super().close()
 
     def _refuse(self, sql: str, end: bool = False) -> bool:
         """Not ours: True for a bookkeeping write (skipped), else FencedWrite (counted on this thread too). end: a

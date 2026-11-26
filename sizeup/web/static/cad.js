@@ -1392,6 +1392,8 @@ function radioRow(t, ctx = {}) {
     txt.title = `Heard (${t.model || "unknown"}): ${w.length > 300 ? w.slice(0, 299) + "…" : w}`;
   }
   if (!txt.title && t.model && t.status !== "off") txt.title = (shown ? "Transcribed by " : "Speech-to-text: ") + t.model;
+  // the way its text went (#875, sizeup/sttroute.py): "auto·priority: gpu-pc → AWS (gpu-pc: went gaming)"
+  if (t.stt_route && shown) txt.title += `${txt.title ? "\n" : ""}Route: ${t.stt_route}`;
   if (t.atc_weak) {                      // a marginal AM carrier (#257): transcribed, but the words may be wrong
     const w = el("span", "atc-weak", "weak signal");
     w.title = `Carrier ${t.carrier_db} dB over the noise floor: transcribed, but the words may be wrong`;

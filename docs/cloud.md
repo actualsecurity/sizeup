@@ -1695,6 +1695,105 @@ The sources the radio pre-alerts push alerts from are HIGH at least, in the stat
 - The catch-up takes the rows a stopped station left before other shed clips.
 - Health lists every worker, GPU or station, with its state, load, jobs/h and losses.
 
+### The engine selector (#875, #878)
+
+Settings > Radios > Channels picks each channel's engine (a group heading's "Engine: all…" sets a whole group).
+`sizeup/sttroute.py` is the vocabulary; the hub routes, the pool (`sizeup/sttpool.py`) leases.
+
+| engine | order |
+|---|---|
+| Auto · priority (`auto`) | an idle GPU worker → AWS (budget, reserve) → the station's whisper |
+| Auto · normal (`auto_norm`) | a GPU worker that can start it within 25 s (queued after every priority clip, before background work; FIFO within its class) → its own station's whisper, or a pooled station that can start it within 90 s → AWS within its budget (under 80% of its month) → else back to its own station's queue. A GPU gaming, offline, cooling or kept off by the guard is skipped at once. Never dropped |
+| Auto · background (`auto_bg`) | the stations first: its own station's whisper, or (when its estimated wait is over the class's budget: 90 s for context talkgroups, 60 s for context alert classes) another pooled station's that can start it in time → an idle GPU as overflow (no priority work on it) → AWS within its budget (under 80% of its month) → else back to its own station's queue. Never dropped. The default of every context or neighbour talkgroup (another system's, or a county one not Main) |
+| pinned (`pin:gpu-pc`, `pin:station:<id>`, `pin:aws`) | that engine → Auto · priority's order; pinned AWS uses a GPU worker only when AWS can't take the clip |
+| this station (`local`) | today's Local |
+| Compare (`both`) | today's Both |
+
+- **The engine alone decides (#896):** the pool's per-class switches (Settings > Station > STT workers) are gone, and
+  no worker-side class opt-out replaces them. A clip a station hands over when its whisper is behind goes its channel's
+  way; the catch-up goes Auto · background's way. The pool's on/off switch holds for all of it.
+- **Migration (once, audited):** on the CAD of record's first start with it (`Editor.migrate_engines`, cad meta
+  `channels_engine_896`), a stored `aws` becomes `pin:aws`, and the `[stt] aws_channels` default is `pin:aws`. A
+  context or neighbour talkgroup on its station's whisper (stored `local`, or the default) goes to Auto · background,
+  its default now.
+- **Background overflow on Health:** the last hour's hand-overs by where they went (station, GPU, AWS, back) and each
+  pooled station's estimated wait (queue x its measured time per clip). Overflow to the GPU or AWS often means more
+  stations are needed; each new station in the pool takes its share by itself. Each
+  channel is in the Radios audit (operator "system: engine selector (#896)"); the log line has the counts. `aws` is
+  never stored again (a Settings write of it is `pin:aws`); a station from before the selector is still sent it.
+- **The station:** on Auto · priority or a pinned GPU worker it skips its whisper and sends the clip at once, as for
+  AWS, while the hub's pool word says a GPU worker is ready (`gpu_ready`) or AWS can take it. Otherwise it runs its own
+  whisper at once. On Auto · background it hands a clip over only while the hub says a GPU is free for it (`gpu_bg`).
+  A station without `engine_select_ok` is sent the nearest old engine (`aws`, or `local` for background), and the hub
+  still routes its clips by the channel's own choice.
+- **Priority first (#878):** background and catch-up jobs come after every other job. They go to a GPU worker only
+  while it holds nothing and no other job waits. A pre-alert clip never queues behind them: with the GPU busy it goes
+  to AWS at once, and its route says "busy (background)".
+- **Latency guard (#878):** Health lists each engine's live latency (transmission end to text) and failures. A GPU
+  worker trips when its priority clips' p50 is over 5 s, or a third of its priority jobs fail (at least 4 clips in
+  10 min; RERUN, LOW and background failures never count). Every Auto and pinned channel (a channel pinned to it too)
+  then goes to AWS and says so on the route, and the dropdown shows "guard". After the hold (5 min, doubling for each
+  trip within an hour, up to 1 h) it gets one probe a minute: a shadow copy of a priority clip, pinned to it, its text
+  never used (never a live clip). 3 probes decoded within 3 s in a row clear it. Its state is kept in hub.sqlite (meta
+  `stt_guard`) across a restart.
+- **The pool's pre-alert speed gate** (a worker slow on pre-alert clips lately gets none) holds for Auto and pinned
+  channels too. Only when AWS can't take the clip either may a pre-alert clip wait for a slow or busy GPU, rather than
+  go back to the station.
+- **A worker decodes one clip at a time:** one holding background work is busy for every priority class, LIVE
+  included (the clip goes to AWS, never behind it).
+- **Route:** each transcript records the way it went in `stt_runs.route` and on its row (`stt_route`), for example
+  "auto·priority: gpu-pc → AWS (gpu-pc: went gaming)". The Radio page shows it in the transcript's hover.
+- **Later:** the shadow-evidence summary (a channel's GPU candidates against AWS on the same clips), so an admin can
+  move a channel off AWS on evidence. Nothing switches a channel by itself.
+
+### Whisper clips on the radio timeline at their close (#927)
+
+A transmission that waits for the station's whisper goes to the hub at its close, not once its text is in. The row is
+then on the radio timeline at air time, with its audio, talker, radio IDs, emergency flags, call and key-up, and late
+flag. It shows "Transcribing on the station (whisper)", and the text fills the same row later.
+
+- **At the close:** a `traffic` event with `status: "pending"`, `transcript_pending: "station"` and its clip
+  (`App._land_pending`). The station's own store and radio log get the row the same way.
+- **The text:** a `retext` with `fill: true` (`App._fill_pending`). It carries the words, status, model, `engine` and
+  whisper's wait and run. It covers whatever whisper made of the clip: words, no speech, an error, shed (`skipped`), or
+  handed to the pool (`transcript_pending: "pool"`). It is never a second `traffic`, because the hub drops a resent id.
+  A second answer for the same clip (a stop handing on a clip whisper finished) is dropped on the station.
+- **Once, on the text:** the text hooks (intel, status hints, possible incoming, the airport), the alarms' words, the
+  ATC watch, the unclear check and the run in `stt_runs`. `Comms.record` tells no hook about a row still `pending` or
+  `remote` with no text. The emergency button still alarms at the close (the `alarm` event), and the words update that
+  same alarm. A late call (#747) is late on both events.
+- **First text wins:** a fill for a row whose text came another way first is kept as a `late` run, not the text.
+- **Durable:** the rows waiting for their text are in hub.sqlite (`station_wait`), not only in memory. A fill for a
+  row that has left memory (1000 newer rows, a hub restart) fills the radio log by its id, and its mayday still
+  alarms. A fill that comes before its transmission (that event held back and sent again later) is kept
+  (`early_fill`, 6 h) and applied when the transmission comes. A copy still "Transcribing" that is sent again never
+  blanks a row that has its text.
+- **Never stuck, never shed early:** a row is marked shed (`skipped`, so the catch-up runs it from the hub's clip)
+  only on evidence that its text isn't coming. When sizeup on the station starts again (a new `proc` in its state
+  post: a crash, a kill, an update, a reboot), the hub asks the new process which waiting clips it still has
+  (`stt_held`, again 2 min later) and sheds the ones it doesn't know. The backstop, for an older station too: a row
+  older than whisper ever keeps a clip waiting (`MAX_WAIT_S`, 3 h) + 15 min. A station that is only offline is never
+  shed: its queue lives on and its fills come when it is back. Its text still fills a shed row if it comes. A clip
+  saved at a stop keeps `landed` in `stt-queue.json`, so after the restart its text is a fill too, and the new
+  process says it holds it. The station refuses a catch-up of a clip still waiting for its first text.
+- **Late words still alarm:** a fill whose row has a text already (another engine's, the catch-up's) is a run, not
+  the text, but its words still reach the alarms (deduped by id). Words that come over 2 min after air alarm labelled
+  late ("raised N min late", at the transmission's own time); past the alarms' age (30 min + 10 %) they are a notice,
+  never pushed.
+- **Writes:** a loose row at its close is written to the station's `incidents.json` with its fill, and the station
+  coalesces those writes (at most one each 1.5 s). The radio log's rules that need no words (a fireground's links)
+  run at the close.
+- **Gated:** only for a hub whose caps say `traffic_pending`. An older hub gets the one `traffic` after the text. Pages
+  keep their own way (PageHold, `page_text`).
+- **Withdraw (for the pool, #896):** `HubApp.stt_withdraw_station(ids)` calls the station's `stt_withdraw`. It is
+  sent only to a connected station whose status `caps` has `stt_withdraw`, and returns None otherwise. The station takes
+  a waiting landed clip out of whisper's queue and sends nothing for it, not even a `skipped`. A clip whisper has begun
+  runs on, and its text goes up as a fill with `authoritative: false`: the hub keeps it as a run, never as the text by
+  itself. The answer is `{withdrawn, running, sent, unknown}` (sent: its text went up already or is about to; unknown:
+  the station doesn't know it, as after its restart). A withdrawn or running one no longer waits for the station.
+- **Volume:** one more event per whisper clip (about 7–10k a day), each a `retext` of about 350 bytes with no audio.
+  The audio moves to the event at the close.
+
 ## Phone pre-alert (Tapout)
 
 > "can we bake in the ntfy.sh feed from tapout into this? lets receive that feed as a possible

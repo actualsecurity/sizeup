@@ -174,7 +174,8 @@ def test_station_traffic_shows_on_the_hub_with_its_audio_and_on_the_cad_event(tm
         st = station(station_cfg(tmp_path, hub.url), {3: "Engine 63 on location nothing showing"})
         from sizeup.radio.mdc1200 import encode as mdc_encode
         tid = fm_segment(st, bursts=[mdc_encode(0x01, 0x00, 0x6301).astype(np.float32)])     # E63's post-ID (#163)
-        assert wait(lambda: any(t["id"] == tid for t in all_traffic(hub.get("/api/state"))), 15)
+        # (#927: the row is there at its close, "Transcribing"; its text fills it)
+        assert wait(lambda: any(t["id"] == tid and t["text"] for t in all_traffic(hub.get("/api/state"))), 15)
         t = next(t for t in all_traffic(hub.get("/api/state")) if t["id"] == tid)
         assert t["text"] == "Engine 63 on location nothing showing" and t["has_audio"] and t["source"] == "FG1"
         # The CAD of record: on the event, from E63's radio (its MDC ID, named by the hub's registry).

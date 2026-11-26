@@ -264,7 +264,9 @@
             "reception_sample_b64",
             "set_stt_alert_keys",
             "set_stt_terms",
-            "quarantine_dismiss"
+            "quarantine_dismiss",
+            "stt_withdraw",
+            "stt_held"
           ]
         },
         "args": {
@@ -612,6 +614,46 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "fn": {
+                "const": "stt_withdraw",
+                "description": "The job calls stt_withdraw."
+              }
+            },
+            "required": [
+              "fn"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/call.stt_withdraw"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "fn": {
+                "const": "stt_held",
+                "description": "The job calls stt_held."
+              }
+            },
+            "required": [
+              "fn"
+            ]
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/call.stt_held"
+              }
+            }
+          }
         }
       ]
     },
@@ -830,11 +872,14 @@
               },
               "engine": {
                 "type": "string",
-                "description": "Which engine reads it.",
+                "description": "Which engine reads it. Also `pin:<engine id>` (a GPU worker, `station:<id>`, `aws`): sizeup/sttroute.py. A station without `engine_select_ok` is sent only `local`, `aws` or `both`.",
                 "x-known": [
                   "local",
                   "aws",
-                  "both"
+                  "both",
+                  "auto",
+                  "auto_bg",
+                  "auto_norm"
                 ]
               }
             }
@@ -1358,6 +1403,48 @@
           "type": "string",
           "pattern": "^[a-z][a-z0-9_]{0,39}$",
           "description": "kind: an event `type` (station-events), as the quarantine's status lists it under `kinds`. The hub sends only a word of this pattern (else 400 before any job); the station takes any string and matches it exactly."
+        }
+      ]
+    },
+    "call.stt_withdraw": {
+      "description": "App.stt_withdraw(ids): the hub's pool took these clips (#927, HubApp.stt_withdraw_station): the station's whisper skips them. Sent only to a connected station whose status `caps` has `stt_withdraw`. Only a transmission the station sent at its close (`transcript_pending` `station`) is taken: one still waiting leaves whisper's queue and nothing goes up for it (no `skipped` over the pool's text); one whisper has begun runs on and its text goes up as a fill with `authoritative: false`. Result: {withdrawn, running, sent, unknown}.",
+      "x-names": [
+        "ids"
+      ],
+      "x-forms": [
+        1
+      ],
+      "minItems": 1,
+      "maxItems": 1,
+      "prefixItems": [
+        {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "$ref": "station-events.schema.json#/$defs/clip_id"
+          },
+          "description": "ids: the clip ids (at most 500; the hub sends only ids of the clip id pattern). More than 500, or no list of strings, is refused (ValueError); an id of another shape is answered `unknown`."
+        }
+      ]
+    },
+    "call.stt_held": {
+      "description": "App.stt_held(ids), read only (#927, HubApp._station_held_check): after the station's `proc` changed (sizeup started again), which of the transmissions still waiting for their text the new process has. Sent only to a connected station whose status `caps` has `stt_held`, as soon as the new process is heard and again RESTART_RECHECK_S later. Nothing is withdrawn. The hub marks the `unknown` ones shed. Result: {held, sent, unknown}.",
+      "x-names": [
+        "ids"
+      ],
+      "x-forms": [
+        1
+      ],
+      "minItems": 1,
+      "maxItems": 1,
+      "prefixItems": [
+        {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "$ref": "station-events.schema.json#/$defs/clip_id"
+          },
+          "description": "ids: the clip ids the hub still waits on (at most 500 a call). More than 500, or no list of strings, is refused (ValueError)."
         }
       ]
     }

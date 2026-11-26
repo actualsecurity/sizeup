@@ -122,6 +122,12 @@ class IncidentStore:
         self.loose: deque[Traffic] = deque(maxlen=1000)  # traffic with no active incident / other talkgroups
         # Saved on every change and reloaded on start, so a restart doesn't wipe the screen.
         self.path, self.keep_s = (Path(path) if path else None), keep_s
+        # (#927) > 0: saves coalesced, one write at most this often (a station writes each transmission twice: at its
+        # close and on its text); flush() writes what waits at once
+        self.save_delay = 0.0
+        self._save_timer: threading.Timer | None = None
+        self._save_lock = threading.Lock()
+        self.writes = 0                     # how many times the file was written (the coalescing's measure)
         self._load()
 
     def _load(self) -> None:
@@ -156,6 +162,27 @@ class IncidentStore:
     def save(self) -> None:
         if not self.path:
             return
+        if self.save_delay > 0:
+            with self._save_lock:
+                if self._save_timer is None:
+                    self._save_timer = threading.Timer(self.save_delay, self.flush)
+                    self._save_timer.daemon = True
+                    self._save_timer.start()
+            return
+        self._write()
+
+    def flush(self) -> None:
+        """What a coalesced save() still holds, written now (the timer's own call, and a stop's)."""
+        with self._save_lock:
+            t, self._save_timer = self._save_timer, None
+        if t is not None:
+            t.cancel()
+            self._write()
+
+    def _write(self) -> None:
+        if not self.path:
+            return
+        self.writes += 1
         with self._lock:
             d = {"incidents": [i.to_json() for i in self.incidents], "loose": [t.as_dict() for t in self.loose]}
         try:
@@ -237,8 +264,9 @@ class IncidentStore:
     def _geocode(self, d: Dispatch, tone_departments: list[str]) -> dict | None:
         return self.geocode(d, list(tone_departments)) if self._geo_tones else self.geocode(d)
 
-    def on_traffic(self, t: Traffic, attach: bool = True) -> Incident | None:
-        """attach=False: context traffic (another battalion's talkgroup) goes to the loose list."""
+    def on_traffic(self, t: Traffic, attach: bool = True, save: bool = True) -> Incident | None:
+        """attach=False: context traffic (another battalion's talkgroup) goes to the loose list. save=False: a loose one
+        is written with the next save (#927: a station's row at its close, saved with its text), one on an incident now."""
         inc = self.active() if attach else None
         with self._lock:
             if inc is not None:
@@ -246,7 +274,8 @@ class IncidentStore:
                 inc.updated = max(inc.updated, t.end)
             else:
                 self.loose.append(t)
-        self.save()
+        if save or inc is not None:
+            self.save()
         return inc
 
     def retext(self, tid: str, text: str, status: str, confidence: float | None = None,

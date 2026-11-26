@@ -223,3 +223,12 @@ function firehouseIcon() {
   g.beginPath(); g.arc(0, 0, 4.5, 0, 2 * Math.PI); g.fill();
   return g.getImageData(0, 0, s, s);
 }
+
+// The Search page's map (search-view.js), and the Intel page's (intel-page.js): the base style, the home view, no
+// pitch or rotation, the zoom buttons.
+function plainMap(container, scene) {
+  const map = new maplibregl.Map({ container, style: buildMapStyle(scene), center: scene.home.center, zoom: scene.home.zoom,
+                                   attributionControl: { compact: true }, maxPitch: 0, dragRotate: false });
+  map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+  return map;
+}

@@ -17,10 +17,10 @@
     },
     "caps": {
       "type": "array",
-      "description": "Capability strings: what this hub understands. Each answer replaces the station's whole set, and the station keeps the last set on disk across restarts. An answer without `caps` clears the set. A station must ignore a string it does not know. Today: `p25_systems` (the hub files rows of other P25 systems: without it the station sends none), `stt_input` (the hub takes POST /api/station/stt), `stt_pool` (the hub takes clips handed to its speech-to-text pool).",
+      "description": "Capability strings: what this hub understands. Each answer replaces the station's whole set, and the station keeps the last set on disk across restarts. An answer without `caps` clears the set. A station must ignore a string it does not know. Today: `p25_systems` (the hub files rows of other P25 systems: without it the station sends none), `stt_input` (the hub takes POST /api/station/stt), `stt_pool` (the hub takes clips handed to its speech-to-text pool), `traffic_pending` (#927: the hub takes a transmission waiting for the station's whisper at its close, `transcript_pending` `station`, and its text later as a `retext` with `fill`; without it the station sends one `traffic` after the text).",
       "items": {"type": "string", "description": "One capability name, lower case with underscores."},
       "uniqueItems": true,
-      "x-known": ["p25_systems", "stt_input", "stt_pool"]
+      "x-known": ["p25_systems", "stt_input", "stt_pool", "traffic_pending"]
     },
     "pool": {
       "title": "The pool's word",
@@ -40,7 +40,9 @@
           "description": "The longest clip one of them would take, seconds of audio (0 when none is ready; 3600 stands for no limit)."
         },
         "gpu_idle": {"type": "boolean", "description": "A GPU worker is idle and quick on pre-alert clips now."},
-        "gpu_idle_n": {"type": "integer", "minimum": 0, "description": "How many are."}
+        "gpu_idle_n": {"type": "integer", "minimum": 0, "description": "How many are."},
+        "gpu_ready": {"type": "integer", "minimum": 0, "description": "GPU workers an Auto · priority clip could go to now (sizeup/sttroute.py; none the latency guard keeps off). A hub from before it sends none: taken as 0."},
+        "gpu_bg": {"type": "boolean", "description": "A GPU worker would take an Auto · background clip now (it holds nothing and no priority work waits). A hub from before it sends none: taken as false."}
       }
     },
     "services": {

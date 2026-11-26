@@ -235,7 +235,15 @@ class IntelAdmin:
         """GET /api/cad/intel/list: the Intel page (sizeup/intel/eventlog.py), anyone signed in."""
         if not sourcekeys.may_see_context(self.cad.comms.context_broadcast) or not hasattr(self.engine.events, "rows"):
             raise CadError("intel needs a sign-in")
+        if str((q.get("map") or [""])[0]) == "1":             # the page's map (#937): its pins, every page
+            return self.eventlog.map(q)
         return self.eventlog.list(q, operator)
+
+    def search(self, q: dict) -> dict:
+        """GET /api/cad/intel/search: Search's opt-in Intel events (#937, sizeup/intel/eventlog.py), as the list."""
+        if not sourcekeys.may_see_context(self.cad.comms.context_broadcast) or not hasattr(self.engine.events, "rows"):
+            raise CadError("intel needs a sign-in")
+        return self.eventlog.search(q)
 
     def shown(self, e: dict) -> dict:
         """An event as the console and the map read it (no transcript text: the rows play from their ids)."""
