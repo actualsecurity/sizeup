@@ -14,8 +14,8 @@
 
     engine.feed(row)      one radio_traffic row {id (str), start, end, source, system, service, dept, tier, talkgroup,
                           channel, talker, rig, radio_id, text, alt_text, model, status, late}: synchronous
-    engine.consider(tid, late=False)   live: queue the id (never waits on rules or the gazetteer); the thread loads the
-                          row (its corrected text when there is one, #901's corr_text), feed()s it
+    engine.consider(tid)  live: queue the id (never waits on rules or the gazetteer); the thread loads the row (its
+                          corrected text when there is one, #901's corr_text; its #747 late flag), feed()s it
     engine.tick(now)      expires events past their until, sends a due digest, forgets old windows
     engine.ruleset_hash()
     engine.counts(now)    what it did with what it was handed, per pack (sizeup/intel/counters.py): Settings > System >
@@ -134,9 +134,11 @@ How a row becomes an event, per pack whose scope it is in:
      the engine. Air-time order (FIFO): speech-to-text runs on several engines, so a source's transcripts can arrive
      out of air-time order, and a row's text can change later (a correction, an "unclear" re-ask, a catch-up). A row
      is read with the rows that AIRED within window_s of it (Window.around; a source's rows are kept max_age_min +
-     window_s by air time, and window_s after they were read), whenever it arrives; a new event's first_at is its
-     first row's air time. An event whose newest row aired over LATE_S ago is never pushed a first time ("late", at
-     log; a row logged late by #747, row["late"], never pushes at all), and a row read over LATE_S late, or a
+     window_s by air time, and as long again after they were read), whenever it arrives; a new event's first_at is its
+     first row's air time. A row read over LATE_S after it aired, older than max_age_min, or logged late by #747
+     (radio_traffic.late) is LATE (Entry.late): context and corroboration, never a push's origin, never asked of the
+     model. An event is pushed a first time only while its newest row aired within LATE_S and its rows read in time
+     reach the threshold on their own (_fresh); else it is recorded at log ("late"). A late row, or a
      re-text of a row already in the event, never pushes it again. A re-text replaces the row's hits in place; one
      that no longer says an event's category scores that event again without it (_unsupport). A row whose text
      goes empty or "unclear" is withdrawn (_withdraw): its hits, its window entry and its model context go, and an
@@ -159,6 +161,7 @@ import json
 import math
 import re
 import queue
+import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
@@ -206,7 +209,6 @@ LATE_S = RELEASE_S                     # air-time order (FIFO): an event whose n
                                        # pushes an event again (speech-to-text's HIGH class sheds a clip after 300 s too)
 WITHDRAWN = "source withdrawn"         # the note on an event whose only support was a row withdrawn since (_unsupport)
 IGNORE_S = 24 * 3600.0                 # a row older than this (or max_age_min if longer) is never read at all
-UNCLEAR = "unclear"                    # a transcript's status (#890: a loop, noise): withdrawn like an emptied text
 # a read-back of a held call: the address and these words only ("copy, that's going to be 40 Example Place"; "the
 # house is 40 Example Place"; "40 Example Place, the caller's house"). The building's nouns are read-back filler; any
 # other content word ("suspicious", "vehicle", "also ... when you clear") makes the row another job's.
@@ -256,7 +258,8 @@ class Entry:
     units: frozenset = frozenset()     # the units it names or its radio is ("car 3"), lower case
     dispatcher: bool = False           # the dispatcher / HQ voices every job: never a tie by talker alone
     place: object = None               # the place in its own words (model.Place), or None
-    late: bool = False                 # logged late (#747, row["late"]): context and a record, never a push
+    late: bool = False                 # logged late (#747, row["late"]; older than max_age_min) or read over LATE_S
+                                       # after it aired: context and a record, never the origin of a push
     read: float = 0.0                  # when it was read (the clock): kept as context a while after, whenever it aired
 
 
@@ -365,7 +368,6 @@ class IntelEngine:
         self.dropped = 0
         self.stale = 0                        # rows too old to be a pre-alert (a backfill, a late re-record): skipped
         self._row_q: str | None = None        # ROW_SQL for this database (_row_sql)
-        self._late: dict[str, bool] = {}      # traffic ids consider()ed as late (#747)
         self.unclear = 0                      # unclear transcripts (a loop, noise: sizeup/stt_quality.py): skipped
         self._seen: dict[str, int] = {}
         self.errors = 0
@@ -489,18 +491,13 @@ class IntelEngine:
 
     # -- the live queue ---------------------------------------------------------------------------------------------
 
-    def consider(self, tid, late: bool = False) -> None:
+    def consider(self, tid) -> None:
         """A transcript arrived or changed (Cad._on_text for our channels, Comms.on_context_text for context ones):
         queued, never waits. It runs on the caller's thread (transcription, the station-apply thread, the AWS
         callback): no rules, gazetteer, model or push here, and nothing written; the "intel" thread does all of that
-        (through store.tx(), never under the caller's store.lock). Without a thread (replay): feed() rows directly.
-        late: a row #747 logged late (a P25 call from while sizeup was down): read as feed()'s row["late"]."""
+        (through store.tx(), never under the caller's store.lock). Without a thread (replay): feed() rows directly."""
         if not self.threaded or not self.enabled or not self.active():
             return
-        if late:
-            self._late[str(tid)] = True
-            while len(self._late) > SEEN_MAX:
-                self._late.pop(next(iter(self._late)))
         try:
             self._q.put_nowait(str(tid))
         except queue.Full:
@@ -567,9 +564,13 @@ class IntelEngine:
     def _one(self, tid: str) -> None:
         if not self.leader():                 # a standby, a fenced hub: the leader does it
             return
-        row = self.store.one(self._row_sql(), (tid,)) if self.store is not None else None
-        if row and tid in self._late:
-            row = dict(row, late=True)
+        if self.store is None:
+            return
+        try:
+            row = self.store.one(self._row_sql(), (tid,))
+        except sqlite3.OperationalError:
+            self._row_q = None                # a column gone since it was looked up: looked up again, once
+            row = self.store.one(self._row_sql(), (tid,))
         if row:
             self.feed(row)
 
@@ -718,9 +719,6 @@ class IntelEngine:
         now = self.clock()
         # counted first (counters.py): in whose scope it is, so "nothing matched" and "nothing in scope" read apart
         scoped = self._count_row(row, now)
-        if not text.strip() or str(row.get("status") or "") == UNCLEAR:
-            # a text read before and emptied or marked unclear since (#890's re-ask): withdrawn, whatever its age
-            return self._withdraw(row, tid) if tid in self._seen else []
         max_age = float(self.policy.cfg.get("max_age_min", 15)) * 60
         if start and now - start > max(IGNORE_S, max_age):
             self.stale += 1                   # a backfill of days: never read (it can't flood the engine)
@@ -729,11 +727,14 @@ class IntelEngine:
             return []
         # an unclear transcript (sizeup/stt_quality.py: a repetition loop, more words than the clip holds, whisper's
         # stock phrase) is never read: the CAD of record stores it with no text, and words that reach here some other
-        # way (a replay, an old row) are checked again; an unclear alternative is left out alike
+        # way (a replay, an old row) are checked again; an unclear alternative is left out alike. A row read before
+        # whose text is now unclear or empty (#890's re-ask) is withdrawn, whatever its age
         secs = max(0.0, float(row.get("end") or 0.0) - start) if start else None
-        if str(row.get("status") or "") == stt_quality.UNCLEAR or (text and stt_quality.assess(text, secs)):
-            self.unclear += 1
-            return []
+        unclear = str(row.get("status") or "") == stt_quality.UNCLEAR or bool(text and stt_quality.assess(text, secs))
+        if unclear or not text.strip():
+            if unclear:
+                self.unclear += 1
+            return self._withdraw(row, tid) if self._read_before(tid) else []
         if row.get("alt_text") and stt_quality.assess(str(row["alt_text"]), secs):
             row = dict(row, alt_text="")
         sig = hash((text, str(row.get("alt_text") or "")))
@@ -789,8 +790,8 @@ class IntelEngine:
         disp = bool(row.get("dispatcher")) or bool(talker and (DISPATCH_WORDS.search(talker) or talker in self._hq(row)))
         if talker and not disp and UNIT_MENTION.fullmatch(talker):
             units.add(talker.lower())
-        entry = Entry(at, hits, text, who, suppressed, talker, frozenset(units), disp, late=bool(row.get("late")),
-                      read=self.clock())
+        entry = Entry(at, hits, text, who, suppressed, talker, frozenset(units), disp,
+                      late=bool(row.get("late")) or self.clock() - at > LATE_S, read=self.clock())
         # a re-text (#901's correction, a re-ask, a catch-up): the categories its old words said
         was = ({r.category for r, w in win.entries[tid].hits if w > 0 and not r.id.startswith(("model.", "infer."))}
                if known else set())
@@ -857,6 +858,7 @@ class IntelEngine:
                     if up is not None:
                         changed.append(up)
         if (self.infer is not None and hits and not suppressed and pack.src.get("infer", True)   # ("infer": false: rules only)
+                and not win.entries[tid].late                                        # (a late row: context only)
                 and not (self.backing is not None and self.backing.owns(pack))):     # one model per row (backing.py)
             try:
                 changed += self._inference(pack, row, key, tid, win, at, cats, mine, event_of, hits)
@@ -971,6 +973,23 @@ class IntelEngine:
         its last_at: a row that aired before it never undoes what that row said (air-time order)."""
         win = self.windows.get((pack.name, ev.source_key))
         return max([ev.last_at, *(win.entries[t].at for t in ev.traffic_ids if win is not None and t in win.entries)])
+
+    def _fresh(self, pack, ev: Event) -> bool:
+        """The event may be pushed a first time: its newest row aired within LATE_S, and its rows read in time (never
+        late, Entry.late) reach the threshold of its category on their own. A late row corroborates (a place, a
+        read-back, the score shown), it never makes a fresh row's event push."""
+        if self.clock() - ev.last_at > LATE_S:
+            return False
+        rows = {t: e for (p, _k), w in self.windows.items() if p == pack.name
+                for t, e in w.entries.items() if t in ev.traffic_ids and not e.late}
+        got = self._scores(pack, Window(rows)).get(ev.category)
+        cd = pack.category(ev.category)
+        thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
+        return got is not None and got[0] >= thr
+
+    def _read_before(self, tid: str) -> bool:
+        """This row was read (since the start; or before a restart: it is in an open event)."""
+        return tid in self._seen or any(tid in e.traffic_ids for e in self.events.open_events())
 
     def _withdraw(self, row: dict, tid: str) -> list[Event]:
         """A row read before whose text is empty or "unclear" now (#890's re-ask of a loop or noise): its hits go
@@ -1243,9 +1262,9 @@ class IntelEngine:
         only there or in a "place": true category (unplaced, _unplaced). An event already pushed is never held
         (its mode never goes down: it stays on the map and the console). mode: what the rules say now, given back when
         a hold ends (a moving event leaving our incident's place)."""
-        if ev.pushed_at is None and self.clock() - ev.last_at > LATE_S:
-            ev.suppressed, ev.mode = "late", lowest(ev.mode, "log")   # its newest row aired over LATE_S ago (read
-            return                                                    # late): recorded, never a first push now
+        if ev.pushed_at is None and not self._fresh(pack, ev):
+            ev.suppressed, ev.mode = "late", lowest(ev.mode, "log")   # late rows are context, never a push's origin:
+            return                                                    # recorded at log
         cat = pack.category(ev.category)
         if cat.get("highway"):
             self._hw_hold(pack, ev, mode)

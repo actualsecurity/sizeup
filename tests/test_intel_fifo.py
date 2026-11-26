@@ -298,6 +298,9 @@ def test_a_row_with_a_corrected_text_scores_it_and_a_database_without_the_column
     with cad2.store.lock:
         cad2.store.db.execute("UPDATE radio_traffic SET corr_text = ? WHERE id = 'c2-t0'", (SHOTS,))
     cad2.intel.drain()
+    assert cad2.intel._row_sql() == (                                  # the shape #901 writes for
+        "SELECT id, start, end, source, system, service, dept, tier, talkgroup, channel, talker, rig, radio_id, "
+        "COALESCE(NULLIF(corr_text, ''), text) AS text, alt_text, model, status FROM radio_traffic WHERE id = ?")
     cad2.comms.on_context_text("c2-t0")
     cad2.intel.drain()
     [ev] = cad2.intel.events.open_events()
@@ -348,7 +351,66 @@ def test_a_late_column_is_read_where_the_database_has_one(live, tmp_path):
     cad2.intel.drain()
     with cad2.store.lock:
         cad2.store.db.execute("UPDATE radio_traffic SET late = 1, text = ? WHERE id = 'c3-t0'", (SHOTS,))
+    assert cad2.intel._row_sql().endswith("alt_text, model, status, late FROM radio_traffic WHERE id = ?")
     cad2.comms.on_context_text("c3-t0")
     cad2.intel.drain()
     [ev] = cad2.intel.events.open_events()
     assert ev.suppressed == "late" and ev.mode == "log" and n.sent == []
+
+
+# -- review: a late row is context, never a push's origin; the model is never asked about one --------------------------
+
+def test_a_late_rows_hits_never_make_a_fresh_rows_event_push():
+    t = 5000.0
+    clock = Clock(t + 310)
+    e, sink = engine(clock=clock)
+    e.feed(row("l", SMELL, t))                                         # read 310 s after it aired: late
+    [ev] = e.feed(row("f", FD, t + 110))                               # in time, 0.4 alone: only the late row lifts it
+    assert sorted(ev.traffic_ids) == ["f", "l"] and ev.what_score >= 0.6                  # corroborated: one event,
+    assert (ev.suppressed, ev.mode) == ("late", "log") and pushed(sink) == []             # but never pushed from it
+
+
+def test_a_fresh_row_with_its_own_hit_pushes_with_a_late_row_as_context():
+    t = 5000.0
+    clock = Clock(t + 310)
+    e, sink = engine(clock=clock)
+    e.feed(row("l", "respond to 100 Example Ave", t))                  # late: a dispatch cue and the place
+    [ev] = e.feed(row("f", "shots fired", t + 110))                    # in time, over the threshold on its own
+    assert ev.category == "weapons" and [x.id for x, _d in pushed(sink)] == [ev.id]
+
+
+def test_a_late_row_is_never_sent_to_the_model():
+    from tests.test_intel_backing import MACHETE, answer, setup
+    t = 5000.0
+    clock = Clock(t + LATE_S + 60)
+    e, sink, b = setup(B.FakeBackend(answer()), clock=clock)
+    assert e.feed(row("l", MACHETE, t)) == [] and b.asked == []        # read late: context only
+    e.feed(row("l2", MACHETE, clock.t - 20, late=1))                   # flagged late (#747): the same
+    assert b.asked == []
+    e.feed(row("f", MACHETE + " again", clock.t - 2))                  # fresh: asked, the late ones its context
+    [u] = [m[1]["content"] for m in b.asked]
+    assert u.count("machete") >= 2
+
+
+def test_a_row_read_before_a_restart_is_still_withdrawn():
+    e, sink = clearing()
+    [ev] = e.feed(row("t1", SHOTS, 1000))
+    e._seen.clear()                                                    # a restart: nothing in memory but the event
+    [w] = e.feed(row("t1", "", 1000, status="unclear"))
+    assert w.id == ev.id and w.note == WITHDRAWN and e.unclear == 1
+
+
+def test_a_text_that_reads_unclear_now_is_withdrawn_too():
+    e, sink = clearing()
+    [ev] = e.feed(row("t1", SHOTS, 1000))
+    loop = " ".join(["thank you"] * 8)                                 # a loop: stt_quality.assess
+    [w] = e.feed(row("t1", loop, 1000))
+    assert w.id == ev.id and w.note == WITHDRAWN and e.unclear == 1
+
+
+def test_a_cached_row_query_naming_a_missing_column_is_looked_up_again(live):
+    cad, n = live
+    cad.intel._row_q = cad.intel._row_sql().replace("status", "status, corr_text")   # as if a column went away
+    cad.comms.record(ctx_row("c9-t0", SHOTS, cad.clock()))
+    cad.intel.drain()
+    assert len(n.sent) == 1 and "corr_text" not in cad.intel._row_q

@@ -537,7 +537,8 @@ class ModelBacking:
             elif text.strip():
                 src.append({"tid": tid, "at": at, "text": text})
         out = self._due(engine, at)
-        if (suppressed or changed or ruled or tid in self.asked or any(r.category == "routine" for r, _w in hits)
+        late = row.get("late") or getattr(win.entries.get(tid), "late", False)      # context only, never asked
+        if (suppressed or changed or ruled or late or tid in self.asked or any(r.category == "routine" for r, _w in hits)
                 or len(rules_mod.words(text)) < int(c["infer_pd_min_words"]) or not self.needs(pack, text)
                 or any(tid in e.traffic_ids for e in engine.events.open_events()
                        if e.pack == pack.name and e.source_key == key)):      # a re-feed of a row already in an event
