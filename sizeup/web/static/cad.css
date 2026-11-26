@@ -908,9 +908,9 @@
   .il-table tr.il-row { cursor: pointer; }
   .il-table td { vertical-align: top; }
   .il-table td.t { white-space: nowrap; font-variant-numeric: tabular-nums; }
-  .il-table td.loc { overflow-wrap: anywhere; }
-  .il-cat, .il-src { overflow-wrap: anywhere; }
-  .il-level, .il-why { white-space: nowrap; }
+  .il-table td.loc { overflow-wrap: break-word; }
+  .il-cat, .il-src { overflow-wrap: break-word; }
+  .il-level, .il-why > .chip { white-space: nowrap; }
   .il-lv { font-variant-numeric: tabular-nums; }
   .il-lv-push { border-color: var(--accent-text); color: var(--accent-text); }
   .il-lv-held { border-color: var(--warn); color: var(--warn); }
@@ -922,8 +922,8 @@
   .il-sl.high { color: var(--accent-text); font-weight: 700; }
   .il-sl.medium { color: var(--warn); }
   .il-sl.low { color: var(--dim); }
-  .il-parts { overflow-wrap: anywhere; font-family: var(--mono); }
-  .il-acts { white-space: nowrap; }
+  .il-parts { overflow-wrap: break-word; font-family: var(--mono); }
+  .il-acts { min-inline-size: calc(var(--ctl-sm) * 2); }
   .il-vote[aria-pressed="true"] { color: var(--accent-text); border-color: var(--accent-text); }
   .il-n { margin-inline-start: var(--s-0); font-size: var(--fs-2xs); line-height: var(--lh-2xs); font-variant-numeric: tabular-nums; }
   .q-intel-all { margin-inline-start: auto; }
