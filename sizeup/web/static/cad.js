@@ -938,6 +938,7 @@ function renderDetail() {
   else { since(elapsed, null); setText(elapsed, fmtDur((inc.closed_at || 0) - inc.created_at)); }
   if (window.Incoming) Incoming.facts($("#d-feed"), inc, { api, operator, readonly: BOARD || !canDo("dispatch") });
   if (window.AddrHistory) AddrHistory.card(inc, { readonly: BOARD || !canDo("dispatch") });   // notes, History here (#403)
+  if (window.IntelNotes && !BOARD) IntelNotes.incident(inc);        // the notes on its intel events (intel-notes.js)
   const viaFeed = inc.source === "CAD feed" && inc.feed;              // received from the feed itself (#297)
   show($("#d-via-w"), !!inc.received_via || !!viaFeed);
   setText($("#d-via"), viaFeed ? inc.feed.label : inc.received_via ? nameOf("received_via", inc.received_via) : "");

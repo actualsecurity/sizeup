@@ -130,7 +130,8 @@ def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
                                   ("/api/cad/stt/corrections.jsonl", '"/api/cad/stt/corrections.jsonl"', "stt-fix.js"),
                                   ("/api/cad/intel", '"/api/cad/intel"', "intel.js"),      # the pre-alert rules (#411)
                                   ("/api/cad/hydrants", "`/api/cad/hydrants?", "hydrants.js"),            # Settings > Hydrants (#799)
-                                  ("/api/cad/hydrants.csv", "`/api/cad/hydrants.csv?", "hydrants.js")):
+                                  ("/api/cad/hydrants.csv", "`/api/cad/hydrants.csv?", "hydrants.js"),
+                                  ("/api/cad/intel/export.csv", "`/api/cad/intel/export.${f}", "intel-page.js")):
         assert literal in js(script), f"{script} doesn't read {path}"
         assert path in ADMIN_READS, path
     # ... and a reception test's captured audio (#410: served by server.py, played in Settings > Radios)
@@ -144,7 +145,8 @@ def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
                                 "/api/cad/stt/corrections", "/api/cad/stt/corrections.jsonl",
                                 "/api/cad/stations",         # stations and their tokens (sizeup/cloud/stations.py)
                                 "/api/cad/stt-workers",      # GPU workers and their tokens (sizeup/cloud/sttworkers.py)
-                                "/api/cad/metrics"}          # the station's signal metrics (#605; graphs: #606)
+                                "/api/cad/metrics",          # the station's signal metrics (#605; graphs: #606)
+                                "/api/cad/intel/export.csv", "/api/cad/intel/export.jsonl"}   # notes, transcripts at once
     # #606: the Signal tab, the Squelch card's suggestions and Health's sparks read it, nothing else
     assert '"/api/cad/metrics"' in js("signal-panel.js") and '"/api/cad/metrics?view=squelch"' in js("squelch-panel.js")
     assert '"/api/cad/metrics?view=spark"' in js("health.js")

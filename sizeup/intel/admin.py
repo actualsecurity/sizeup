@@ -113,9 +113,11 @@ def _model_status(eng) -> dict:
 class IntelAdmin:
     def __init__(self, cad, engine):
         from sizeup.intel.eventlog import IntelLog
+        from sizeup.intel.notes import IntelNotes
         self.cad, self.engine = cad, engine
         self._state = None
         self.eventlog = IntelLog(cad, engine)
+        self.notes = IntelNotes(cad, engine)            # notes and tags per event (sizeup/intel/notes.py)
 
     # -- reading ----------------------------------------------------------------------------------------------------
 

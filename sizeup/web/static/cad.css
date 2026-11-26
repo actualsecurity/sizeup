@@ -927,6 +927,25 @@
   .il-vote[aria-pressed="true"] { color: var(--accent-text); border-color: var(--accent-text); }
   .il-n { margin-inline-start: var(--s-0); font-size: var(--fs-2xs); line-height: var(--lh-2xs); font-variant-numeric: tabular-nums; }
   .q-intel-all { margin-inline-start: auto; }
+  /* notes and tags (intel-notes.js): the row's chip, More info's notes, the incident's */
+  .il-filters #il-q { flex: 1 1 10rem; }
+  .nt-count { cursor: pointer; }
+  .nt-review { border-color: var(--warn); color: var(--warn); }
+  .nt-notes { margin: 0; }
+  .nt-note { display: flex; flex-direction: column; gap: var(--s-1); padding-block: var(--s-1); }
+  .nt-note-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s-1) var(--s-2); min-inline-size: 0; }
+  .nt-tag[aria-pressed="true"] { border-color: var(--accent-text); color: var(--accent-text); }
+  .nt-done { color: var(--ok); }
+  .nt-text { overflow-wrap: anywhere; white-space: pre-wrap; }
+  .nt-fix { overflow-wrap: anywhere; }
+  .nt-acts { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); }
+  .nt-done-in { inline-size: 10rem; }
+  .nt-form { display: flex; flex-direction: column; gap: var(--s-2); }
+  .nt-ta { inline-size: 100%; resize: vertical; }
+  .nt-tags { flex-wrap: wrap; }
+  .nt-fixrow { flex-wrap: wrap; gap: var(--s-2); }
+  .nt-fixrow input { flex: 1 1 10rem; }
+  .d-intel { display: flex; flex-direction: column; gap: var(--s-1); margin-block: var(--s-2); }
 
   /* ---- the incident card's address notes and History here (addr-history.js, #403) ------------------------- */
   .premise { display: flex; flex-direction: column; gap: var(--s-1); margin-block: var(--s-2); }

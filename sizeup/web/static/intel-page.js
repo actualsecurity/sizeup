@@ -1,4 +1,4 @@
-// The Intel page (/cad#intel?level=&category=&source=&system=&decided=&held=&status=&from=&to=&page=): every radio intel
+// The Intel page (/cad#intel?level=&category=&source=&system=&decided=&held=&status=&q=&tag=&review=&from=&to=&page=): every radio intel
 // event at every level and status, pushed or not, and why one wasn't pushed (GET /api/cad/intel/list,
 // sizeup/intel/eventlog.py: filtered and paged on the hub, 50 a page, newest first; the last 24 h unless a date is
 // set). Admin decision, 2026-11-25: "a page in the app where we can view these intel events even if they do not
@@ -8,6 +8,9 @@
 // score and its parts (rule weights; the model's as "model 95%") · why it didn't push · Useful / Noise / Should
 // have pushed (POST /api/cad/intel/<id>/feedback: intel_feedback, what tuning reads). A click opens its More info
 // (/cad#prealert/intel/<id>, prealert-info.js). Terse: what a label means is in its hover.
+// Notes (intel-notes.js, sizeup/intel/notes.py): a count chip on the row; filters by the notes' words (q), a tag, and
+// the review queue (review=1: tagged for a rule or model change, not done; every date kept). Admins: the export of
+// what the filters select, CSV or JSONL (GET /api/cad/intel/export.*: notes, scores, rule hits, transcripts).
 //
 // Light on the console: nothing per second. The list is read on open, on a filter or page change, after a vote, and
 // every POLL_MS while it shows the newest page; render() draws only what changed (a row is rebuilt only when its
@@ -17,7 +20,7 @@
 "use strict";
 
 window.IntelPage = (() => {
-  const KEYS = ["level", "category", "source", "system", "decided", "held", "status", "from", "to"];
+  const KEYS = ["level", "category", "source", "system", "decided", "held", "status", "q", "tag", "review", "from", "to"];
   const POLL_MS = 30000;
   const st = { q: {}, page: 0, seq: 0, data: null, sig: "", rows: new Map(), facetSig: "", timer: null, busy: new Set() };
   const LEVELS = { push: "pushed", held: "at push, not pushed", map: "on the card and the map", log: "logged only",
@@ -44,12 +47,14 @@ window.IntelPage = (() => {
     const p = new URLSearchParams(qs || "");
     st.q = Object.fromEntries(KEYS.map((k) => [k, p.get(k) || ""]));
     st.page = Math.max(0, Number(p.get("page")) || 0);
-    for (const k of ["level", "decided", "held", "status", "from", "to"]) {
+    for (const k of ["level", "decided", "held", "status", "q", "tag", "from", "to"]) {
       const n = $(`#il-${k}`);
       if (n.tagName === "SELECT" && st.q[k] && ![...n.options].some((o) => o.value === st.q[k])) n.append(new Option(st.q[k], st.q[k]));
       n.value = st.q[k];
     }
     srcValue();
+    $("#il-review").setAttribute("aria-pressed", String(st.q.review === "1"));
+    exports();
     const c = $("#il-category");
     if (st.q.category && ![...c.options].some((o) => o.value === st.q.category)) c.append(new Option(st.q.category, st.q.category));
     c.value = st.q.category;
@@ -72,9 +77,20 @@ window.IntelPage = (() => {
     s.value = v;
   }
 
+  // the export of what the filters select (admins: ADMIN_READS on the hub; the links show only for an admin)
+  function exports() {
+    const admin = typeof canDo !== "function" || canDo("admin");
+    const qs = params(st.q, 0).toString();
+    for (const f of ["csv", "jsonl"]) {
+      const a = $(`#il-${f}`);
+      show(a, admin);
+      a.href = `/api/cad/intel/export.${f}${qs ? `?${qs}` : ""}`;
+    }
+  }
   function submit(page = 0) {
     const q = {};
-    for (const k of ["level", "category", "decided", "held", "status", "from", "to"]) q[k] = $(`#il-${k}`).value.trim();
+    for (const k of ["level", "category", "decided", "held", "status", "q", "tag", "from", "to"]) q[k] = $(`#il-${k}`).value.trim();
+    q.review = $("#il-review").getAttribute("aria-pressed") === "true" ? "1" : "";
     const s = $("#il-source").value;
     q.source = s.startsWith("s:") ? s.slice(2) : "";
     q.system = s.startsWith("y:") ? s.slice(2) : "";
@@ -125,6 +141,8 @@ window.IntelPage = (() => {
     fill($("#il-source"), "Any source", [...(f.systems || []).map((s) => [`y:${s.key}`, `${s.key}: all (${s.n})`]),
       ...(f.sources || []).map((s) => [`s:${s.key}`, `${s.name} (${s.n})`, `${s.key}`])]);
     fill($("#il-held"), "Any reason", (d.held || []).map((h) => [h.key, h.label, h.tip]));
+    const tl = window.IntelNotes ? IntelNotes.TAGS : {};
+    fill($("#il-tag"), "Any tag", (d.tags || []).map((t) => [t, tl[t] || t]));
   }
 
   // ---- the rows ----------------------------------------------------------------------------------------------------
@@ -205,7 +223,8 @@ window.IntelPage = (() => {
       why.title = [h.tip, h.detail].filter(Boolean).join("\n");
       if (h.detail) why.append(el("div", "dim small", h.detail));
     }
-    tr.append(t, c, lvc, s, pl, sc, why, cell("act il-acts", ...votes(e)));
+    const nc = window.IntelNotes ? IntelNotes.chip(e.notes) : null;
+    tr.append(t, c, lvc, s, pl, sc, why, cell("act il-acts", nc, ...votes(e)));
     return tr;
   }
 
@@ -244,9 +263,14 @@ window.IntelPage = (() => {
     const form = $("#il-filters");
     if (!form) return;
     form.addEventListener("submit", (ev) => { ev.preventDefault(); submit(0); });
-    for (const k of ["level", "category", "source", "decided", "held", "status", "from", "to"]) {
+    for (const k of ["level", "category", "source", "decided", "held", "status", "q", "tag", "from", "to"]) {
       $(`#il-${k}`).addEventListener("change", () => submit(0));
     }
+    $("#il-review").addEventListener("click", () => {
+      const b = $("#il-review");
+      b.setAttribute("aria-pressed", String(b.getAttribute("aria-pressed") !== "true"));
+      submit(0);
+    });
     $("#il-clear").addEventListener("click", () => { location.hash = "#intel"; });
     $("#il-prev").addEventListener("click", () => submit(Math.max(0, st.page - 1)));
     $("#il-next").addEventListener("click", () => submit(st.page + 1));

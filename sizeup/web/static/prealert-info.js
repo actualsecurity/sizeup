@@ -35,6 +35,7 @@ window.PrealertInfo = (() => {
     const p = parse(rest);
     const key = p ? `${p.kind}/${p.id}` : "";
     if (key !== st.key) { st.key = key; st.data = null; st.sigs = {}; st.framed = ""; clear(); }
+    if (window.IntelNotes) IntelNotes.mount($("#pi-notes"), p && p.kind === "intel" ? p.id : null);   // read on a new id only
     if (!p) return fail("No such pre-alert");
     const seq = ++st.seq;
     try {
