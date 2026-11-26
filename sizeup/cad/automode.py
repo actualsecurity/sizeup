@@ -45,7 +45,9 @@ record (the hub, or all-in-one), on top of the incident sources (sizeup/cad/sour
                there (ever; units merely dispatched don't count), and never after a person freed it
       units    each unit the feed newly lists that is ours is dispatched at the feed's dispatched time: matched exactly
                against the board's codes and spoken names (spaces and dashes aside), or the data file's
-               "feed_unit_aliases" {feed code: board code}; codes that match none are listed on the timeline, never
+               "feed_unit_aliases" {feed code: board code}. Another department's are assigned as outside units
+               (mutual aid, sizeup/cad/outside.py: never board units, in either mode); the codes left (another
+               agency's, a request code, our own unknown) are "<feed> units not assigned: ..." once, never
                dispatched. Never a unit out of service (the store refuses it: a notice instead, sizeup/cad/oos.py), on
                another open call (noted), or that was on this incident before (a cleared assignment stays cleared)
       statuses per unit, only for a unit on this incident now: the feed's unit_times (responding, on location, in
@@ -429,6 +431,7 @@ class AutoDispatch:
                                              if at else "dispatched (named on the page)")
         except Exception as e:  # noqa: BLE001
             self.log(f"CAD: dispatch mode: {type(e).__name__}")
+        self.cad.outside.sync(iid)                       # accepted by the page: the feed's outside units (mutual aid)
 
     def _aliases(self) -> dict[str, str]:
         """The data file's "feed_unit_aliases": {feed code: board code} (optional), read where the incident sources read
@@ -519,7 +522,9 @@ class AutoDispatch:
         uts, outs = new.get("unit_times") or {}, old.get("unit_times") or {}
         had = set() if self._upgraded(iid, op) else set(old.get("units") or [])   # left off as a notification: new now
         fresh = [n for n in units if n not in had]
-        unknown = [n for n in fresh if _key(n) not in ours and _key(n) not in depts and not is_placeholder(n)]
+        oc = self.cad.outside.context()                  # another department's: assigned as outside units (outside.py)
+        unknown = [n for n in fresh if _key(n) not in ours and _key(n) not in depts and not is_placeholder(n)
+                   and not self.cad.outside.is_outside(n, oc)]
         for name in fresh:                               # a department entry: that department paged, never a unit
             if _key(name) in depts:
                 t = (uts.get(name) or {}).get("dispatched") or times.get("dispatched")
@@ -528,7 +533,7 @@ class AutoDispatch:
                                       op, at=t or self.clock())
         if unknown:
             with self.store.tx() as db:
-                self.store._event(db, iid, "auto", f"{label} units not on our boards (not dispatched): {', '.join(unknown)}", op)
+                self.store._event(db, iid, "auto", f"{label} units not assigned: {', '.join(unknown)}", op)
         L = self.store.lists
         kept = {n for d in others or [] if not self._over(d) for n in d.get("units") or []}   # another live run's
         held = {_key(n) for n in kept}                   # (a co-run's: never released while another run lists it)

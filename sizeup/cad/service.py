@@ -47,6 +47,7 @@ from sizeup.cad.statushints import StatusHints
 from sizeup.cad.sources import PAGING, PAGING_RANK, Sources, proper_case
 from sizeup.cad.radiolog import RadioLog
 from sizeup.cad.opchannel import OpChannels
+from sizeup.cad.outside import OutsideUnits
 from sizeup.cad import scope as scope_mod
 from sizeup.cad.scope import Scope
 from sizeup.cad import radios as radios_mod
@@ -319,6 +320,9 @@ class Cad:
         # both (sizeup/cad/radiolog.py): transmissions naming its units, address or place, or on its fireground channel.
         self.auto = AutoDispatch(self, clock=clock, log=log)
         self.sources.on_possibly = self.auto.possibly
+        # Another department's units on our calls (mutual aid, sizeup/cad/outside.py): from the feed's unit lists and the
+        # radio, assigned beside ours, never board units
+        self.outside = OutsideUnits(self, clock=clock)
         self.radiolog = RadioLog(self)
         # The county talkgroup an incident is worked on when it isn't ours (sizeup/cad/opchannel.py): from dispatch's
         # words, the feed, its units' radios or a person; its traffic goes on the incident, promoted in speech-to-text
@@ -602,6 +606,7 @@ class Cad:
             self.opchan.heard(tid)
         except Exception as e:  # noqa: BLE001 - the log never stops the transcript
             self.log(f"CAD: radio log: {type(e).__name__}")
+        self.outside.heard(tid)                           # a mutual-aid unit's radio on one of our calls
         try:
             self.auto.on_hints(self.hints.consider(tid))
         finally:
@@ -624,6 +629,7 @@ class Cad:
             self.opchan.heard(tid)
         except Exception as e:  # noqa: BLE001 - the log never stops the transcript
             self.log(f"CAD: radio log: {type(e).__name__}")
+        self.outside.heard(tid)                           # a mutual-aid unit's radio on one of our calls
 
     def _display_incs(self, incs: list[dict]) -> None:
         """A page's transcript in an event's remarks and timeline as shown: vocabulary phrases without AWS's hyphens
@@ -651,6 +657,10 @@ class Cad:
             self.scope.decorate(incs)                     # #370: full department or specific units
         except Exception as e:  # noqa: BLE001
             self.log(f"CAD: dispatch scope: {type(e).__name__}")
+        try:
+            self.outside.decorate(incs)                   # another department's units on it (mutual aid)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"CAD: outside units: {type(e).__name__}")
         return incs
 
     def source_event(self, d: dict) -> int | None:
@@ -661,6 +671,7 @@ class Cad:
         except Exception as e:  # noqa: BLE001 - the report stands whatever this does
             self.log(f"CAD: dispatch scope: {type(e).__name__}")
         self.auto.on_feed(iid)
+        self.outside.sync(iid)                            # another department's units it lists (mutual aid)
         try:
             self.opchan.scan_feed(iid)                    # the feed names the talkgroup it is worked on (opchannel.py)
         except Exception as e:  # noqa: BLE001
@@ -1195,6 +1206,7 @@ class Cad:
                 self.sources.mark_manual(iid, ["type"], op)
         out = self.store.accept(iid, op)
         self.auto.accepted(iid)                               # #311: listed units dispatched, nothing replayed
+        self.outside.sync(iid)                                # another department's units its feeds list
         return out
 
     def dismiss(self, iid: int, body: dict) -> dict:
@@ -2531,6 +2543,8 @@ class Cad:
         r = self.comms.link(_text(body, "traffic_id", 200, required=True), iid, _text(body, "operator", OPERATOR_MAX))
         if r.get("error"):
             raise CadError(r["error"])
+        if r.get("linked"):
+            self.outside.heard(_text(body, "traffic_id", 200, required=True))   # a mutual-aid unit's radio on it
         return dict(r, incident_id=iid, number=inc["number"])
 
     def keep_traffic(self, iid: int, body: dict) -> dict:

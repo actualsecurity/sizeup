@@ -1855,7 +1855,7 @@ function renderRadio(inc) {
   const items = [...rows.map((t) => ({ kind: "radio", at: t.start, key: `r:${t.id}`, units: (t.rig || "").split(/,\s*/).filter(Boolean), t })),
                  ...notes.map((e) => ({ kind: "note", at: e.at, key: `n:${e.id}`, units: tagsOf(e), e }))]
     .sort((a, b) => b.at - a.at);
-  const assigned = (inc.assignments || []).map((a) => a.name);
+  const assigned = [...(inc.assignments || []).map((a) => a.name), ...(inc.outside || []).map((o) => o.code)];
   const all = [...new Set([...assigned, ...items.flatMap((x) => x.units)])];
   const u = cad.radioUnit;
   renderChannels(inc);
@@ -2131,17 +2131,45 @@ function talkSig(name) {
   return t ? `${t.key}|${t.ended ? 1 : 0}` : "";
 }
 
+// Another department's unit on the call (mutual aid, sizeup/cad/outside.py), after ours: never one of ours (no status
+// buttons, reminders, map or follow). "MA · <department>"; "radio" when only heard, not on the county's list.
+function outsideRow(li, a) {
+  li.className = "ou other" + (a.cleared_at ? " cleared" : "");
+  li._rig = "";
+  delete li.dataset.remUnit; delete li.dataset.remChip; delete li.dataset.rem;
+  const head = el("div", "ouh");
+  head.append(el("b", "", a.name));
+  const ma = el("span", "chip dept", a.department ? `MA · ${a.department}` : "MA");
+  ma.title = `Mutual aid${a.department ? ` · ${a.department}` : ""}${a.name !== a.code ? ` (${a.code})` : ""}: not on our boards`;
+  head.append(ma);
+  if (a.via === "radio") {
+    const r = el("span", "chip radio", "radio");
+    r.title = `From radio ${fmtTime(a.assigned_at, true)}: heard on this call, not on the county's list`;
+    head.append(r);
+  }
+  const times = el("span", "dim small times");
+  times.append(...[["Disp", a.dispatched_at], ["Resp", a.enroute_at], ["OnLoc", a.onscene_at], ["Cmd", a.command_at],
+    ["Clr", a.cleared_at]].filter(([, t]) => t).map(([k, t]) => el("span", "", `${k} ${fmtTime(t, true)}`)));
+  head.append(times, el("span", "spacer"));
+  const talk = !a.cleared_at && Radio.talkingFor(a.code);
+  if (talk) head.append(el("span", "talk-badge", `${talk.ended ? "Ended" : "TX"} ${chName(talk)}`));
+  li.replaceChildren(head);
+}
 function renderOnUnits(inc) {
-  const rows = (inc.assignments || []).slice().sort((a, b) => (!!a.cleared_at - !!b.cleared_at));
-  const cmd = rows.filter((a) => !a.cleared_at && a.status === L().command_status).map((a) => a.name).join(", ");
+  const gone = (a, b) => (!!a.cleared_at - !!b.cleared_at);
+  const rows = [...(inc.assignments || []).slice().sort(gone),
+                ...(inc.outside || []).slice().sort(gone).map((o) => ({ ...o, outside: true }))];
+  const cmd = rows.filter((a) => !a.outside && !a.cleared_at && a.status === L().command_status).map((a) => a.name).join(", ");
   setText($("#d-cmd"), cmd ? `Command: ${cmd}` : "");
   syncList($("#d-units"), rows, {
-    key: (a) => String(a.id),
-    sig: (a) => JSON.stringify([a.status, a.dispatched_at, a.enroute_at, a.onscene_at, a.cleared_at, cad.listSig.length, cmd,
+    key: (a) => (a.outside ? `o${a.id}` : String(a.id)),
+    sig: (a) => (a.outside ? JSON.stringify(["o", a.name, a.department, a.via, a.dispatched_at, a.enroute_at, a.onscene_at,
+      a.command_at, a.cleared_at, talkSig(a.code)]) : JSON.stringify([a.status, a.dispatched_at, a.enroute_at, a.onscene_at, a.cleared_at, cad.listSig.length, cmd,
       (a.next || []).join(), (a.return || []).join(), talkSig(a.name), window.DispatchMode ? DispatchMode.sig(inc, a) : "",
-      cad.ask && cad.ask.uid === a.unit_id && cad.ask.where === "inc" ? cad.ask.status : null, !a.cleared_at && onMap(a.name)]),
+      cad.ask && cad.ask.uid === a.unit_id && cad.ask.where === "inc" ? cad.ask.status : null, !a.cleared_at && onMap(a.name)])),
     make: () => { const li = el("li", "ou"); hoverRig(li); return li; },
     fill: (li, a) => {
+      if (a.outside) { outsideRow(li, a); return; }
       li.className = "ou" + (a.cleared_at ? " cleared" : "");
       li._rig = a.cleared_at ? "" : a.name;
       if (a.cleared_at) { delete li.dataset.remUnit; delete li.dataset.remChip; delete li.dataset.rem; }
