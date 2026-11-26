@@ -16,6 +16,7 @@ Namespaces, each a known shape (anything else is refused, not trimmed):
     preplan      {layer: bool} (static/preplan.js: the Pre-plan layer on every map)
     reminders    {sound: bool, board_sound: bool} (static/reminders.js: a short chime when a reminder starts flashing,
                  on the console; board_sound: on /monitor, the wall board. Both off unless turned on)
+    search       {intel: bool} (static/search-view.js: Search's Intel events, #937; off unless turned on)
 
 An event's own layer set (incidents.map_layers, POST /api/cad/incident/<id>) is the event's, not here.
 
@@ -120,6 +121,14 @@ def _reminders(v) -> dict:
     return dict(v)
 
 
+def _search(v) -> dict:
+    if not isinstance(v, dict) or set(v) - {"intel"}:
+        raise PrefsError("search: {intel: true | false}")
+    if "intel" in v and not isinstance(v["intel"], bool):
+        raise PrefsError("search.intel: true or false")
+    return dict(v)
+
+
 def _listen_target(k) -> bool:
     if not isinstance(k, str):
         return False
@@ -179,7 +188,7 @@ def _radio_views(v) -> dict:
 
 
 NAMESPACES = {"map_layers": _map_layers, "preplan": _preplan, "reminders": _reminders, "listen": _listen,
-              "radio_views": _radio_views}
+              "radio_views": _radio_views, "search": _search}
 
 
 def validate(ns: str, value) -> str:

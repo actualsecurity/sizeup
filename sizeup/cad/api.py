@@ -399,6 +399,10 @@ GET  /api/cad/intel/list?from=&to=&level=&category=&source=&system=&decided=&hel
                                           ?map=1: the page's map, every placed event of the filters (at most 2,000)
                                           as {pins: [{id, lat, lon, precision, level, category, held ...}], placed,
                                           unplaced}
+GET  /api/cad/intel/search?where=&text=&from=&to=
+                                          Search's opt-in Intel events (#937): the time, area and words over the events
+                                          kept (the newest 5,000 of the range looked through, 100 returned), each with
+                                          where the words were; never the words heard; anyone signed in
 GET  /api/cad/intel/<id>/notes            its notes (sizeup/intel/notes.py), oldest first; the audit for an admin;
                                           anyone signed in
 POST /api/cad/intel/<id>/notes            {text?, tags?: [...], corrected_category?, corrected_place?, corrected_level?}:
@@ -1456,12 +1460,15 @@ class CadApi:
                 if m:
                     return _json(200, n.of_event(int(m.group(1)), who.email if who is not None else "", self._admin(who)))
                 return _json(200, n.of_incident(int(mi.group(1))))
-            if path in ("/api/cad/intel", "/api/cad/intel/events", "/api/cad/intel/list"):    # radio pre-alerts: signed in
+            if path in ("/api/cad/intel", "/api/cad/intel/events", "/api/cad/intel/list",
+                        "/api/cad/intel/search"):                                   # radio pre-alerts: signed in
                 if not sourcekeys.may_see_context(self.cad.comms.context_broadcast):
                     return _json(403, {"error": "radio pre-alerts need a sign-in (Cloudflare Access)"})
                 ia = self.cad.intel_admin
                 if path == "/api/cad/intel/list":       # the Intel page (sizeup/intel/eventlog.py)
                     return _json(200, ia.listing(parse_qs(query), self._operator(who)))
+                if path == "/api/cad/intel/search":     # Search's opt-in Intel events (#937)
+                    return _json(200, ia.search(parse_qs(query)))
                 return _json(200, ia.page() if path == "/api/cad/intel" else ia.events(parse_qs(query), self._admin(who)))
             if m := PREALERT_INFO.fullmatch(path):
                 return self._prealert_info(m.group(1), int(m.group(2)), who)

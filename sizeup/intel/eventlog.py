@@ -14,6 +14,14 @@ gate); names and PII as the events have them; nothing here leaves the hub.
         the Intel page's map (#937): every placed event of the filters, all pages, newest first, at most MAP_MAX;
         {pins: [{id, lat, lon, precision, radius_m, confirmed, level, category, label, held}], placed, unplaced,
         limit, since, until}. held: the reason's short label ("" pushed). Unplaced events are counted, never pinned.
+    GET /api/cad/intel/search?where=&text=&from=&to=
+        Search's opt-in Intel events (#937, static/search-view.js): Search's time, area and words. where: each word in
+        the place or town (a street type either way: "road" / "rd"); text: each word (a prefix) in the category's
+        label, the place or a transcript of the event (only the scanned events' transmissions, by id). The range's
+        newest SEARCH_SCAN events looked through (intel_events_first; none given: every event kept), the newest
+        SEARCH_MAX matches returned. {events: [{id, at, status, category, label, pack_label, level, held, place,
+        precision, confirmed, town, lat, lon, radius_m, matched}], total, limit, scanned, capped, since, until}.
+        matched: where the words were (category, place, radio); never the words heard.
 
 A row (terse; the page shows it as is):
 
@@ -47,12 +55,16 @@ import re
 from datetime import datetime, timedelta
 
 from sizeup.cad.store import TZ, CadError
+from sizeup.geo.normalize import EXPAND, STREET_TYPES
 from sizeup.intel.events import MODEL_PREFIXES, VOTE_ROWS, decided_of
 from sizeup.intel.model import lowest, mode_rank
 
 PAGE_SIZE = 50
 PAGE_MAX = 100
 MAP_MAX = 2000                     # the map's pins: the newest of the filters (the rest counted)
+SEARCH_MAX = 100                   # Search's intel matches returned (the rest counted)
+SEARCH_SCAN = 5000                 # ... out of the range's newest this many events
+SEARCH_WORDS = 8
 DEFAULT_S = 24 * 3600
 FACET_S = 300                      # the filters' choices: read again when the range moved this far (or the events changed)
 SPAN_MAX_S = 92 * 86400            # events are kept 90 days (events.py KEEP_EVENTS_S)
@@ -140,6 +152,42 @@ COLS = ("id, pack, category, source_key, system, first_at, last_at, status, what
         "label_full, town, confirmed, mode, pushed_at, suppressed, near_incident, incident_id, traffic_ids, lat, lon, "
         "radius_m")
 PLACED = "precision != 'none' AND lat IS NOT NULL AND lon IS NOT NULL"     # (on the listing's own columns)
+
+
+def _words(text: str) -> list[str]:
+    """What was typed, as lower-case words ("&", "and", "at" dropped: an intersection's)."""
+    return [w for w in re.findall(r"[a-z0-9]+", (text or "").lower()) if w not in ("and", "at")]
+
+
+def _wordset(text: str) -> set[str]:
+    """A label's words, each street type in both forms ("road" and "rd")."""
+    out = set()
+    for w in re.findall(r"[a-z0-9]+", (text or "").lower()):
+        out.add(w)
+        ab = STREET_TYPES.get(w)
+        if ab:
+            out.add(ab)
+            if ab in EXPAND:
+                out.add(EXPAND[ab])
+    return out
+
+
+def _area_sql(words: list[str]) -> tuple[str, dict]:
+    """Search's area box over an event's place and town: each word whole, a street type in either form."""
+    col = ("(' ' || lower(replace(replace(replace(replace(e.label_full || ' ' || e.town, ',', ' '), '&', ' '), '.', ' '), "
+           "'#', ' ')) || ' ')")
+    conds, args = ["e.precision != 'none'"], {}
+    for i, w in enumerate(words[:SEARCH_WORDS]):
+        alts = {w}
+        ab = STREET_TYPES.get(w)
+        if ab:
+            alts |= {ab, EXPAND.get(ab, ab)}
+        ors = []
+        for j, a in enumerate(sorted(alts)):
+            args[f"aw{i}_{j}"] = f"% {a} %"
+            ors.append(f"{col} LIKE :aw{i}_{j}")
+        conds.append("(" + " OR ".join(ors) + ")")
+    return " AND ".join(conds), args
 
 
 def is_model(rule_id) -> bool:
@@ -405,6 +453,111 @@ class IntelLog:
                          "held": "" if pushed else held_label(r["held"] or "", r["mode"])[0]})
         return {"pins": pins, "placed": n["placed"], "unplaced": n["unplaced"], "limit": MAP_MAX, "since": f["since"],
                 "until": f["until"], "rev": self._rev()}
+
+    # -- Search's Intel events (#937) ---------------------------------------------------------------------------------
+
+    def search(self, q: dict) -> dict:
+        """GET /api/cad/intel/search (the module doc): Search's time, area and words over the events kept."""
+        def one(k: str, n: int) -> str:
+            return str((q.get(k) or [""])[0] or "").strip()[:n]
+        now = self.cad.clock()
+        until = _when(one("to", 40), True)
+        since = _when(one("from", 40), False)
+        until = now + 60 if until is None else until
+        if since is None or until - since > SPAN_MAX_S:
+            since = until - SPAN_MAX_S
+        if until <= since:
+            raise CadError("to: after from")
+        args = {"since": since, "until": until, **self.classes(), "scan": SEARCH_SCAN + 1}
+        where = "e.first_at >= :since AND e.first_at < :until"
+        area = _words(one("where", 120))
+        if area:
+            sql, a = _area_sql(area)
+            where += f" AND {sql}"
+            args.update(a)
+        rows = self.cad.store.q(
+            "SELECT e.id, e.pack, e.category, e.first_at, e.status, e.mode, e.pushed_at, e.precision, e.lat, e.lon, "
+            f"e.radius_m, e.confirmed, e.label_full, e.town, e.traffic_ids, {HELD_SQL} AS held FROM intel_events e "
+            f"WHERE {where} ORDER BY e.first_at DESC, e.id DESC LIMIT :scan", args)
+        capped = len(rows) > SEARCH_SCAN
+        rows = rows[:SEARCH_SCAN]
+        packs = {p.name: p for p in getattr(self.engine, "packs", []) or []}
+        from sizeup.intel.push import category_label
+        labels: dict = {}
+        for r in rows:
+            k = (r["pack"], r["category"])
+            if k not in labels:
+                p = packs.get(r["pack"])
+                labels[k] = category_label(p.category(r["category"]) if p else {}, p.label if p else "", r["category"])
+        matched: dict[int, set] = {r["id"]: set() for r in rows}
+        words = _words(one("text", 200))[:SEARCH_WORDS]
+        if words:
+            heard = self._heard(rows, words)
+            keep = []
+            for r in rows:
+                cat = _wordset(f"{labels[(r['pack'], r['category'])]} {r['category'].replace('_', ' ')}")
+                place = _wordset(f"{r['label_full']} {r['town']}") if r["precision"] != "none" else set()
+                ok = True
+                for w in words:
+                    hit = False
+                    if any(x.startswith(w) for x in cat):
+                        matched[r["id"]].add("category")
+                        hit = True
+                    if any(x.startswith(w) for x in place):
+                        matched[r["id"]].add("place")
+                        hit = True
+                    if r["id"] in heard.get(w, ()):
+                        matched[r["id"]].add("radio")
+                        hit = True
+                    if not hit:
+                        ok = False
+                        break
+                if ok:
+                    keep.append(r)
+            rows = keep
+        out = []
+        for r in rows[:SEARCH_MAX]:
+            p = packs.get(r["pack"])
+            pushed = r["pushed_at"] is not None
+            held = None
+            if not pushed:
+                label, tip = held_label(r["held"] or "", r["mode"])
+                held = {"key": r["held"] or "", "label": label, "tip": tip}
+            placed = r["precision"] != "none" and r["lat"] is not None and r["lon"] is not None
+            out.append({"id": r["id"], "at": r["first_at"], "status": r["status"], "category": r["category"],
+                        "label": labels[(r["pack"], r["category"])], "pack_label": p.label if p else r["pack"],
+                        "level": "push" if pushed else "held" if r["mode"] == "push" else r["mode"], "held": held,
+                        "place": r["label_full"] if r["precision"] != "none" else "", "precision": r["precision"],
+                        "confirmed": bool(r["confirmed"]), "town": r["town"],
+                        "lat": r["lat"] if placed else None, "lon": r["lon"] if placed else None,
+                        "radius_m": round(r["radius_m"] or 0), "matched": sorted(matched.get(r["id"], ()))})
+        return {"events": out, "total": len(rows), "limit": SEARCH_MAX, "scanned": min(len(matched), SEARCH_SCAN),
+                "capped": capped, "since": since, "until": until}
+
+    def _heard(self, rows: list[dict], words: list[str]) -> dict[str, set]:
+        """{word: the event ids one of whose transmissions has a word starting so}: the scanned events' transmissions
+        only, read by rowid (never the whole log). Not fts_radio: another system's transcripts are never indexed there
+        (history.py, #419), and these are mostly theirs; this is for the Intel page's readers only (the API's gate)."""
+        owner: dict[str, set] = {}
+        for r in rows:
+            try:
+                tids = json.loads(r["traffic_ids"] or "[]")
+            except ValueError:
+                continue
+            for t in tids:
+                owner.setdefault(str(t), set()).add(r["id"])
+        out: dict[str, set] = {w: set() for w in words}
+        pats = {w: re.compile(rf"(?<![a-z0-9]){re.escape(w)}") for w in words}
+        keys = list(owner)
+        for i in range(0, len(keys), 500):
+            part = keys[i:i + 500]
+            for t in self.cad.store.q("SELECT id, lower(text || ' ' || COALESCE(alt_text, '') || ' ' || "
+                                      f"COALESCE(corr_text, '')) AS t FROM radio_traffic WHERE id IN "
+                                      f"({','.join('?' * len(part))})", part):
+                for w, pat in pats.items():
+                    if pat.search(t["t"] or ""):
+                        out[w] |= owner[t["id"]]
+        return out
 
     def _notes(self, ids: list[int]) -> dict:
         n = getattr(self.cad.intel_admin, "notes", None) if hasattr(self.cad, "intel_admin") else None
