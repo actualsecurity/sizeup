@@ -479,11 +479,3 @@ def test_an_officers_own_read_back_still_ties_past_the_console():
     [ev] = e.feed(row("k", "respond for a male with a knife", t, radio_id=f"{OFFICER_A}, {SAMPLE_CTRL}"))
     [up] = e.feed(row("r", "copy, 100 Example Ave", t + 14, radio_id=OFFICER_A))
     assert up.id == ev.id and up.traffic_ids == ["k", "r"]
-
-
-def test_is_console_is_one_radio_ids_label():
-    t = T.Talkers(FakeRadios({SAMPLE_CTRL: "Sampletown PD ctrl", **TOWNS_LABELS}))
-    assert t.is_console("mrrs", SAMPLE_CTRL) and t.is_console("mrrs", f" {SAMPLE_CTRL} ")
-    assert not t.is_console("mrrs", OFFICER_A) and not t.is_console("mrrs", "7709")
-    assert not t.is_console("westchester", SAMPLE_CTRL) and not t.is_console("", SAMPLE_CTRL)
-    assert not T.Talkers(None).is_console("mrrs", SAMPLE_CTRL)

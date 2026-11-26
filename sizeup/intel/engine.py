@@ -906,7 +906,7 @@ class IntelEngine:
             units.add(talker.lower())
         end = max(at, float(row.get("end") or at))
         entry = Entry(at, hits, text, who, suppressed, talker, frozenset(units), disp, end=end,
-                      ties=_talker_ties(row, talker, self.talkers.is_console),
+                      ties=_talker_ties(row, talker),
                       label=tk.label if tk else "", town=self._talker_town(pack, key, tk),
                       late=bool(row.get("late") or row.get("aged")) or self.clock() - end > pack.late_s,
                       read=self.clock())
@@ -2396,17 +2396,18 @@ _GENERIC_ONE = r"(?:unknown(?: \w+)? radio|unknown|unk|unidentified)(?: caller)?
 GENERIC_TALKER = re.compile(rf"{_GENERIC_ONE}(?:\s*[,/&+]\s*{_GENERIC_ONE})*", re.I)
 
 
-def _talker_ties(row: dict, talker: str, console=None) -> frozenset:
+def _talker_ties(row: dict, talker: str) -> frozenset:
     """Who keyed up, as a tie by talker reads it: each of the row's radio IDs as "<system>:<id>" ("a,b": one per
-    key-up), never an unknown one (p25.UNKNOWN_SRC: "-1", "0") nor a dispatch console's (console(system, id): the
-    registry's label, talkers.py; it answers every job); a row with no known radio ID, its talker text (an alias heard
-    on the channel), never a generic one ("unknown MRRS radio"). Never a radio's label: every unlabelled radio has the
-    same text, and a department's or a range's label is many radios' (the admin labels by department and role, not
-    per car)."""
+    key-up), never an unknown one (p25.UNKNOWN_SRC: "-1", "0"); a row with no known radio ID, its talker text (an
+    alias heard on the channel), never a generic one ("unknown MRRS radio"). Never a radio's label: every unlabelled
+    radio has the same text, and a department's or a range's label is many radios' (the admin labels by department
+    and role, not per car). A console's IDs stay: _same_job never ties a dispatcher's row by talker, and a held call's
+    own console repeating the address places it (_may_place); _ties_with keeps two officers one console answered
+    apart."""
     system = str(row.get("system") or "")
     ids = [x.strip() for x in str(row.get("radio_id") or "").split(",") if x.strip() not in UNKNOWN_SRC]
     if ids:
-        return frozenset(f"{system}:{x}" for x in ids if console is None or not console(system, x))
+        return frozenset(f"{system}:{x}" for x in ids)
     t = str(talker or "").strip()
     return frozenset({t}) if t and not GENERIC_TALKER.fullmatch(t) else frozenset()
 
