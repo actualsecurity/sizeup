@@ -586,7 +586,7 @@ def test_a_pre_alert_job_gets_the_stt_input_that_comes_in_time_and_never_waits_2
             assert f.getframerate() == 16000 and f.getnframes() == samples + 16000
         assert wait(lambda: hub.app.stt_runs.of("FG1-30"), 5)
         assert hub.app.stt_runs.of("FG1-30")[0]["input"] == "stt-src"
-        assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)     # (the worker in its next claim, as before the first)
+        assert wait(lambda: hub.app.sttpool.ready(URGENT)[0], 5)     # (the worker in its next claim, as before)
         send(hub, pending_event("FG1-31", seq=2))                     # its STT input never comes
         assert wait(lambda: row(hub, "FG1-31").get("text") == GPU_TEXT, 30), row(hub, "FG1-31")
         assert wait(lambda: hub.app.stt_runs.of("FG1-31"), 5)
