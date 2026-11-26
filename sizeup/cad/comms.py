@@ -802,6 +802,7 @@ class Comms:
                 db.execute("UPDATE radio_traffic SET alt_text = ?, alt_model = ? WHERE id = ?",
                            (str(alt.get("text") or ""), str(alt.get("model") or ""), tid))
             n = db.execute("UPDATE radio_traffic SET text = ?, status = ?, model = ?, vocab_v = ?, updated_at = ?, "
+                           "stt_route = '', "      # (#875: a new text's route, if it has one, follows: set_route)
                            "text_at = CASE WHEN text_at IS NULL AND ? IN ('done', 'no_speech') THEN ? ELSE text_at END "
                            "WHERE id = ?", (text, status, model, str(vocab_v or "")[:80], self.clock(), status,
                                             self.clock(), tid)).rowcount
@@ -832,6 +833,15 @@ class Comms:
             if n:
                 self.rev += 1
                 self._quiet_unless_shown(db, tid)
+        return bool(n)
+
+    def set_route(self, tid: str, route: str) -> bool:
+        """The way its text of record went (#875, sizeup/sttroute.py: "auto·priority: gpu-pc → AWS (gpu-pc: gaming)"),
+        shown in the transcript's hover. Nothing else on the row changes (no change-log entry: not the words)."""
+        with self.store.tx() as db:
+            n = db.execute("UPDATE radio_traffic SET stt_route = ? WHERE id = ?", (str(route or "")[:300], tid)).rowcount
+            if n:
+                self.rev += 1
         return bool(n)
 
     # -- shed clips caught up (sizeup/sttcatchup.py): read only; the re-run path writes ---------------------------

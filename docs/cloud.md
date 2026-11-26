@@ -1606,6 +1606,42 @@ The sources the radio pre-alerts push alerts from are HIGH at least, in the stat
 - The catch-up takes the rows a stopped station left before other shed clips.
 - Health lists every worker, GPU or station, with its state, load, jobs/h and losses.
 
+### The engine selector (#875, #878)
+
+Settings > Radios > Channels picks each channel's engine (a group heading's "Engine: all…" sets a whole group).
+`sizeup/sttroute.py` is the vocabulary; the hub routes, the pool (`sizeup/sttpool.py`) leases.
+
+| engine | order |
+|---|---|
+| Auto · priority (`auto`) | an idle GPU worker → AWS (budget, reserve) → the station's whisper |
+| Auto · background (`auto_bg`) | a GPU worker holding nothing, no priority work waiting, none in the last 3 s → the station's whisper (an idle one elsewhere when behind) → AWS last (the catch-up, within its budget) |
+| pinned (`pin:gpu-pc`, `pin:station:<id>`, `pin:aws`) | that engine → Auto · priority's order; pinned AWS uses a GPU worker only when AWS can't take the clip |
+| this station (`local`) | today's Local |
+| AWS · GPU by class (`aws`, legacy) | today's AWS: a GPU worker first where the pool's class switch is on, else AWS, else whisper |
+| Compare (`both`) | today's Both |
+
+- **Migration:** nothing is rewritten and nothing changes live. A channel on `aws` keeps today's behaviour and is
+  shown as the legacy option until an admin picks another.
+- **Precedence:** a channel's engine (Auto, pinned) wins over the pool's per-class switches. The class switches still
+  gate the legacy `aws` channels, the clips a station hands over when its whisper is behind, and the catch-up. The
+  pool's on/off switch holds for all of it.
+- **The station:** on Auto · priority or a pinned GPU worker it skips its whisper and sends the clip at once, as for
+  AWS, while the hub's pool word says a GPU worker is ready (`gpu_ready`) or AWS can take it. Otherwise it runs its own
+  whisper at once. On Auto · background it hands a clip over only while the hub says a GPU is free for it (`gpu_bg`).
+  A station without `engine_select_ok` is sent the nearest old engine (`aws`, or `local` for background), and the hub
+  still routes its clips by the channel's own choice.
+- **Priority first (#878):** background and catch-up jobs come after every other job. They go to a GPU worker only
+  while it holds nothing and no other job waits. A pre-alert clip never queues behind them: with the GPU busy it goes
+  to AWS at once, and its route says "busy (background)".
+- **Latency guard (#878):** Health lists each engine's live latency (transmission end to text) and failures. A GPU
+  worker trips when its priority clips' p50 is over 5 s, or a third of them fail (at least 4 clips in 10 min). Every
+  Auto and pinned channel then goes to AWS and says so on the route, and the dropdown shows "guard". After 5 min it
+  gets one probe clip a minute; 3 quick probes in a row clear it.
+- **Route:** each transcript records the way it went in `stt_runs.route` and on its row (`stt_route`), for example
+  "auto·priority: gpu-pc → AWS (gpu-pc: went gaming)". The Radio page shows it in the transcript's hover.
+- **Later:** the shadow-evidence summary (a channel's GPU candidates against AWS on the same clips), so an admin can
+  move a channel off AWS on evidence. Nothing switches a channel by itself.
+
 ## Phone pre-alert (Tapout)
 
 > "can we bake in the ntfy.sh feed from tapout into this? lets receive that feed as a possible

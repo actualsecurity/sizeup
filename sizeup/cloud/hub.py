@@ -122,9 +122,9 @@ from sizeup.cloud.sttworkers import API as STT_API, STATION_PREFIX, WorkerApi, W
 from sizeup.incidents import Traffic
 from sizeup.radio.page import page_from_dict
 from sizeup.sources import SourceError
-from sizeup import stt_time, sttpool, sttruns
+from sizeup import stt_time, sttpool, sttroute, sttruns
 from sizeup.cloud import infer as infer_mod
-from sizeup.stt import CATCHUP, CATCHUP_NOTE, judge, wav_bytes
+from sizeup.stt import CATCHUP, CATCHUP_NOTE, LIVE as LIVE_CLS, judge, wav_bytes
 from sizeup.transcribe import RESERVE_CHANNELS, deadline_for
 
 JSON = "application/json"
@@ -1043,6 +1043,12 @@ def _where(d: dict) -> dict:
     return {"channel": str(d.get("source") or ""), "talkgroup": tg if isinstance(tg, int) and not isinstance(tg, bool) else None}
 
 
+def _short_why(why: str, worker: str = "") -> str:
+    """A pool fallback's reason as a route says it: "went gaming", "no text in time (its lease ran out)"."""
+    why = re.sub(r"^GPU worker \S+:?\s*", "", str(why or "")) if why.startswith("GPU worker ") else str(why or "")
+    return why[:80]
+
+
 class HubApp(App):
     """App with no radios: the station's events go through the same code (apply), the station's
     switches through jobs, and the state lives in SQLite (hubstore.py)."""
@@ -1062,6 +1068,7 @@ class HubApp(App):
         self._catchup_refused_until = 0.0              # the station refused catch_up (an older build): not asked before
         self._aws_since: dict[str, float] = {}         # id -> when Amazon Transcribe got it (the sweep's clock)
         self._aws_asked: dict[str, float] = {}         # id -> when the station's whisper was asked instead
+        self._bg_asked: dict[str, float] = {}          # id -> when its station's whisper was asked for background work
         self._aws_late_wait: set[str] = set()          # timed out, not a priority channel: AWS's late answer is the text
         self._pending_seen: dict[str, float] = {}      # page id -> when the sweep first saw it waiting for whisper
         self._aws_was_ok: bool | None = None           # AWS could take audio at the last sweep (_aws_resend)
@@ -1097,7 +1104,12 @@ class HubApp(App):
         # workers). Every transcript is kept as written (sizeup/sttruns.py), its latency per channel on Health.
         reg = self.hub.workers
         self.sttpool = sttpool.Pool(enabled=reg.enabled, log=log, allowed=lambda wid: (
-            reg.stations_on(wid.removeprefix(STATION_PREFIX)) if wid.startswith(STATION_PREFIX) else reg.active(wid)))
+            reg.stations_on(wid.removeprefix(STATION_PREFIX)) if wid.startswith(STATION_PREFIX) else reg.active(wid)),
+            on=lambda: bool(reg.pool_settings()["on"]))
+        # the engine selector (#875, sizeup/sttroute.py): each clip's way while its text is coming, and each engine's
+        # live latency with the GPU workers' guard (#878)
+        self.stt_routes = sttroute.Routes()
+        self.stt_engines = sttroute.EngineBook(log=log)
         # a station's whisper is a pool worker under its own station identity (#639 phase 2): no token more to issue,
         # rotate or revoke; revoking the station ends its worker too
         self.stt_api = WorkerApi(reg, self.sttpool, self._may_write_audio, log, station=self.hub.station_of)
@@ -1283,7 +1295,8 @@ class HubApp(App):
                 return
             alt = d.get("alt") if isinstance(d.get("alt"), dict) else None
             # (standing in for AWS: the text of record; else a person's re-run, or the catch-up's)
-            role = "catchup" if d.get("catchup") else "text" if pid in self._aws_asked else "rerun"
+            role = "catchup" if d.get("catchup") else "text" if pid in self._aws_asked or \
+                self._bg_asked.pop(pid, None) is not None else "rerun"
             self._prompt_time(pid, d)               # (#727: whisper's prompt had the clip's own time)
             self._retext(pid, str(d.get("text") or ""), str(d.get("status") or "done"),
                          d.get("confidence"), str(d.get("model") or ""), alt=alt,
@@ -1500,6 +1513,8 @@ class HubApp(App):
             return
         if job.alt is not None:                    # "both": the station's text stays
             return
+        if not why.startswith(("GPU worker: ", "pool: ")):     # (said on its route already)
+            self.stt_routes.note(job.id, "AWS", why)
         self._aws_asked[job.id] = time.time()      # (the sweep: no text from the station either -> failed)
         self._stt_state(job.page if job.kind == "page" and job.page is not None else self._find(job.id)[0], job.id,
                         "pending", f"{WHISPER_FALLBACK_STATION} (AWS failed: {why[:80]})")
@@ -1664,7 +1679,7 @@ class HubApp(App):
         todo = [(it, key, kind) for it, key, kind in items
                 if it.end > now - RESEND_S and (it.status == "pending" or (it.status in ("error", "skipped") and not getattr(it, "text", "")
                                                                            and not getattr(it, "raw", "")))
-                and self.channel_pref(key)["engine"] == "aws"
+                and (self.channel_pref(key)["engine"] in ("aws", sttroute.AUTO) or sttroute.is_pin(self.channel_pref(key)["engine"]))
                 and self.aws.available(key)[0]
                 and (it.id not in self._aws_since or it.id in self._aws_asked)     # (not one AWS is doing now)
                 and not self.sttpool.has(it.id)                                     # (nor one a GPU worker has)
@@ -1729,11 +1744,39 @@ class HubApp(App):
             from sizeup.stt import LIVE
             return LIVE
 
+    def _hub_engine(self, key: str) -> str:
+        """The channel's engine as the hub routes a clip the station handed over (sizeup/sttroute.py): its choice, a
+        promoted channel's (sizeup/cad/opchannel.py, an intel pre-alert's) Auto · background as Auto · priority and its
+        Local as AWS (App.stt_engine)."""
+        try:
+            eng = str(self.channel_pref(key).get("engine") or "local")
+        except Exception:  # noqa: BLE001 - a channel the hub can't place: AWS, as before
+            return "aws"
+        if eng in ("local", sttroute.AUTO_BG) and key in self.promoted_keys():
+            return "aws" if eng == "local" else sttroute.AUTO
+        return eng
+
+    def _guard_avoid(self) -> dict:
+        """{GPU worker: why} the latency guard keeps priority clips off now (#878; a probe due: not in it)."""
+        out = {}
+        for wid in list(self.sttpool.workers):
+            why = self.stt_engines.tripped(wid)
+            if why:
+                out[wid] = why
+        return out
+
     def _pool_first(self, item, pcm, key: str) -> bool:
         """An AWS-channel clip to a GPU worker first (it is shown as transcribing; AWS, then the station's whisper, if
         no worker gives its text in time). False: the pool can't take it now (no worker ready, off for its class, too
-        busy to beat its wait): the caller goes the AWS way, nothing changed."""
-        if pcm is None or getattr(self, "sttpool", None) is None:
+        busy to beat its wait): the caller goes the AWS way, nothing changed. A channel on the engine selector's own
+        engines (Auto, pinned: sizeup/sttroute.py) goes its own order (_engine_first)."""
+        if getattr(self, "sttpool", None) is None:
+            return False
+        eng = self._hub_engine(key)
+        if sttroute.is_new(eng):
+            return pcm is not None and self._engine_first(item, pcm, key, eng)
+        self.stt_routes.start(item.id, sttroute.mode_label("aws"))
+        if pcm is None:
             return False
         cls = self._pool_class(item, key)
         if not self.sttpool.ready(cls, gpu_only=True)[0]:     # (an AWS channel's: never a station's slower whisper)
@@ -1757,6 +1800,121 @@ class HubApp(App):
                           gpu_only=True, extra={"pcm": pcm, "page": page, "vocab_v": vocab_v})
         if not self.sttpool.submit(job):          # not ready any more in between: the AWS way, the row shown already
             self._pool_to_aws(job, "the GPU pool couldn't take it")
+        self.sync()
+        return True
+
+    def _engine_first(self, item, pcm, key: str, eng: str) -> bool:
+        """A clip of a channel on Auto · priority or a pinned engine (sizeup/sttroute.py), handed over by its station:
+        the pinned engine first, then a GPU worker (the priority order: one that holds nothing for a pre-alert class,
+        never behind background work, none the latency guard keeps off), whatever the pool's class switches. Taken
+        (True): shown as transcribing, and when no text comes in its class's time, AWS, then the station's whisper
+        (_pool_fallback). False: none can take it now, each one passed over noted on its route: the caller goes on to
+        AWS (its budget and reserve rules), then the station's whisper. Never dropped."""
+        cls = self._pool_class(item, key)
+        self.stt_routes.start(item.id, sttroute.mode_label(eng))
+        pin = sttroute.pinned(eng)
+        if sttroute.strict_aws(eng):              # pinned AWS: AWS while it can take it; the GPU only once it can't
+            ok, why = self.aws.available(key) if self.aws is not None else (False, "not set up on the hub")
+            if ok:
+                return False
+            self.stt_routes.note(item.id, "AWS", why)
+            pin = ""
+        if eng == sttroute.AUTO_BG:               # (a station's stale map: background's own way, never AWS first)
+            return self._bg_first(item, pcm, key, cls)
+        avoid = self._guard_avoid()
+        # a tripped worker due a probe (#878) gets this clip, pinned to it (its answer is the probe's); any other
+        # tripped worker stays aside
+        due = "" if pin and pin in avoid else pin if pin and self.stt_engines.due(pin) else \
+            next((w for w in avoid if not pin and self.stt_engines.due(w)), "")
+        aws_ok = self.aws is not None and self.aws.available(key)[0]
+        # (a pinned engine, then any GPU worker: Auto · priority's order; AWS out: a busy GPU may still be waited for
+        # its class's claim time rather than the clip going back to the station)
+        tries = ([(due, True)] if due else []) + ([(pin, False)] if pin and pin != due else []) + [("", False)] + \
+            ([("", "queue")] if not aws_ok else [])
+        seconds = len(pcm) / 8000.0
+        for p, how in tries:
+            gpu_job = not p.startswith(STATION_PREFIX)
+            aside = {w: why for w, why in avoid.items() if w != p} if gpu_job else {}
+            ok, why = self.sttpool.ready_forced(cls, pin=p, avoid=aside, seconds=seconds, origin=self.clip_origin,
+                                                queue_ok=how == "queue")
+            if not ok:
+                self.stt_routes.note(item.id, p.removeprefix(STATION_PREFIX) or "GPU", why)
+                continue
+            extra = {"probe": p} if how is True else {}
+            if how == "queue":
+                extra["queue_ok"] = True
+            if self._pool_submit(item, pcm, key, cls, forced=True, pin=p, gpu_only=gpu_job, avoid=aside, more=extra):
+                if how is True:
+                    self.stt_engines.probe(p)
+                    self.hub.log(f"stt guard: {p}: a probe clip ({item.id})")
+                return True
+            self.stt_routes.note(item.id, p.removeprefix(STATION_PREFIX) or "GPU", "couldn't take it")
+        return False
+
+    def _bg_first(self, item, pcm, key: str, cls) -> bool:
+        """An Auto · background clip that came the AWS way (a station's map from before the change): a GPU free for
+        background work, else back to its station's whisper; never AWS first. True: on its way."""
+        if self._pool_submit(item, pcm, key, cls, forced=True, bg=True, more={"handed": True,
+                                                                             "origin": self.clip_origin}):
+            return True
+        self.stt_routes.note(item.id, "GPU", "busy with priority work")
+        item.status, item.raw, item.model = "pending", "", WHISPER_FALLBACK_STATION
+        item.stt = ""
+        if isinstance(item, Traffic):
+            item.__dict__.pop("transcript_pending", None)
+            self._transcribed(item)
+        else:
+            self._save_page(item)
+        self._bg_to_station(item.id, key)
+        return True
+
+    def _bg_to_station(self, cid: str, key: str) -> None:
+        """Background work back to its station's whisper (at its own class: transcribe_now runs a clip at its channel's
+        class, never ahead of fire traffic), off the caller's thread. Its text comes as a retext (the text of record:
+        _bg_asked). The station can't: left for the catch-up (skipped, never dropped)."""
+        from sizeup.stt import SHED
+        self._bg_asked[cid] = time.time()
+        while len(self._bg_asked) > 2000:
+            self._bg_asked.pop(next(iter(self._bg_asked)))
+
+        def ask() -> None:
+            err = ""
+            try:
+                n = int(self.hub.remote("transcribe_now", [cid], timeout=CALL_WAIT_S) or 0)
+            except (StationOffline, RuntimeError, TypeError, ValueError) as e:
+                n, err = 0, str(e)
+            if n:
+                return
+            item = self._find(cid)[0]
+            if item is None or getattr(item, "raw", "") or getattr(item, "text", ""):
+                return
+            self.hub.log(f"stt: background {cid}: the station's whisper can't ({err or 'no recording'}): the catch-up")
+            self._stt_state(item, cid, "skipped", f"{sttpool.PENDING_MODEL} ({SHED}: background; the catch-up runs it)")
+            self.sync()
+        threading.Thread(target=ask, name="stt-bg-station", daemon=True).start()
+
+    def _pool_submit(self, item, pcm, key: str, cls, more: dict | None = None, **kw) -> bool:
+        """A clip to the pool, shown as transcribing first (as _pool_first does: its text may come back at once).
+        False: the pool refused it after all (the caller goes on: the AWS path writes its own row)."""
+        page = None if isinstance(item, Traffic) else item
+        try:                                      # (its vocab_v: the term list in this very prompt, or none)
+            prompt, vocab_v = self._prompt_v(item)
+        except Exception:  # noqa: BLE001 - no prompt is still a transcript
+            prompt, vocab_v = "", ""
+        job = sttpool.Job(item.id, cls, key, "page" if page is not None else "traffic", len(pcm) / 8000.0,
+                          audio_wait=True, audio=self._pool_audio_of(item.id, page, pcm), on_done=self._pool_done,
+                          on_fallback=self._pool_fallback, prompt=prompt, clip_end=self._hub_time(getattr(item, "end", None)),
+                          extra={"pcm": pcm, "page": page, "vocab_v": vocab_v, **(more or {})}, **kw)
+        item.status, item.raw, item.confidence, item.model = "pending", "", None, sttpool.PENDING_MODEL
+        item.stt = "aws"                          # (still waiting for the AWS path: the sweep and a restart know it)
+        if page is None:
+            item.__dict__.pop("transcript_pending", None)
+            self._transcribed(item)
+        else:
+            self._save_page(item)
+            self._stt_row(item.id, "pending", sttpool.PENDING_MODEL)
+        if not self.sttpool.submit(job):
+            return False
         self.sync()
         return True
 
@@ -1786,7 +1944,7 @@ class HubApp(App):
         context clip now (a station hands one over at once only when one could)."""
         reg = self.hub.workers
         try:
-            word = self.sttpool.word(sid)
+            word = self.sttpool.word(sid, avoid=self._guard_avoid())
         except Exception:  # noqa: BLE001 - none
             word = {"ready": 0, "max_s": 0.0, "gpu_idle": False, "gpu_idle_n": 0}
         return {"on": reg.enabled(sttpool.LOW), "worker": reg.stations_on(sid), **word}
@@ -1813,14 +1971,20 @@ class HubApp(App):
         except Exception:  # noqa: BLE001 - no prompt is still a transcript
             prompt, vocab_v = "", ""
         seconds = len(pcm) / 8000.0 if pcm is not None else max(0.0, float(item.end) - float(item.start))
+        # Auto · background (sizeup/sttroute.py): a GPU only while no priority work is there, else an idle station's
+        # whisper elsewhere, whatever the class switches; its fallback is the catch-up's way (AWS last, in its budget)
+        bg = self._hub_engine(key) == sttroute.AUTO_BG
+        if bg:
+            self.stt_routes.start(item.id, sttroute.mode_label(sttroute.AUTO_BG))
         job = sttpool.Job(item.id, cls, key, "page" if page is not None else "traffic", seconds,
                           audio_wait=True, audio=self._pool_audio_of(item.id, page, pcm), on_done=self._pool_done,
                           on_fallback=self._pool_fallback, prompt=prompt, clip_end=self._hub_time(getattr(item, "end", None)),
+                          forced=bg, bg=bg,
                           extra={"pcm": pcm, "page": page, "handed": True,
                                  "origin": str(getattr(item, "origin_station", "") or self.clip_origin),
                                  "vocab_v": vocab_v})
         if not self.sttpool.submit(job):
-            return self._pool_elsewhere(job, "no pool worker could take it now")
+            return self._pool_elsewhere(job, "busy with priority work" if bg else "no pool worker could take it now")
         self.sync()
 
     def _pool_elsewhere(self, job: sttpool.Job, why: str) -> None:
@@ -1833,6 +1997,13 @@ class HubApp(App):
         if item is None or getattr(item, "raw", "") or getattr(item, "text", "") or \
                 getattr(item, "status", "") not in ("pending", "remote"):
             return
+        self.stt_routes.note(job.id, job.worker or "GPU", _short_why(why, job.worker))
+        if job.bg:                                 # Auto · background: its station's whisper next (AWS last: the catch-up)
+            self.hub.log(f"stt pool: background {job.kind} {job.id}: {why}: the station's whisper")
+            item.stt = ""
+            self._stt_state(item, job.id, "pending", WHISPER_FALLBACK_STATION)
+            self._bg_to_station(job.id, job.channel)
+            return self.sync()
         if job.cls in (URGENT, HIGH, LIVE):         # (a context class never at live priority, never past the
                                                    # catch-up's own AWS cap: the catch-up takes it, CATCHUP_AWS_PCT)
             item.stt = "aws"                       # (the AWS path's sweep and a hub restart know it from here)
@@ -1900,7 +2071,8 @@ class HubApp(App):
                       prompted=stt_time.prompted(job.prompt, job.clip_end),     # (#727)
                       wait_s=job.claimed_at - job.queued_at if job.claimed_at else None,
                       run_s=done_at - job.claimed_at if job.claimed_at else None,
-                      prompt_v=sttruns.prompt_version(job.prompt), cls=job.cls, clip_end=job.clip_end, vocab_v=vocab_v)
+                      prompt_v=sttruns.prompt_version(job.prompt), cls=job.cls, clip_end=job.clip_end, vocab_v=vocab_v,
+                      bg=job.bg, probe=bool(job.worker) and job.extra.get("probe") == job.worker)
 
     def _pool_fallback(self, job: sttpool.Job, why: str) -> None:
         """No text from the pool in time: an AWS-channel clip the AWS way (and the station's whisper if AWS can't). A
@@ -1915,8 +2087,13 @@ class HubApp(App):
             self._rerun_note.pop(job.id, None)
             self.catchup.forget(job.id)
             return
+        if job.worker and job.extra.get("kind") == "gpu" and not job.bg and job.extra.get("fell") in (
+                "lease", "error", "released") and not re.search(r"went (gaming|paused)|shutdown|stopping", why):
+            self.stt_engines.add(job.worker, None, ok=False, gpu=True,      # (the latency guard's failures: #878)
+                                 probe=job.extra.get("probe") == job.worker)
         if job.extra.get("handed"):               # a station handed it over (busy, or restarting): the next way on
             return self._pool_elsewhere(job, why)
+        self.stt_routes.note(job.id, job.worker or job.pin.removeprefix(STATION_PREFIX) or "GPU", _short_why(why, job.worker))
         self.hub.log(f"stt pool: {job.kind} {job.id}: {why}: Amazon Transcribe")
         self._pool_to_aws(job, why)
 
@@ -1934,6 +2111,7 @@ class HubApp(App):
         ok, awhy = self.aws.available(job.channel) if self.aws is not None else \
             (False, "Amazon Transcribe isn't set up on the hub")
         if not ok:
+            self.stt_routes.note(job.id, "AWS", awhy)
             self._aws_failed(aws_job, f"GPU worker: {why[:80]}; {awhy}")
             return self.sync()
         self._aws_since[job.id] = time.time()
@@ -1970,6 +2148,7 @@ class HubApp(App):
                           on_done=self._pool_done, on_fallback=self._pool_fallback, prompt=prompt,
                           clip_end=self._hub_time(float(end) + float(row.get("seconds") or 0.0))
                           if isinstance(end, (int, float)) else None,
+                          bg=True,       # (#878: on a GPU only while no priority work is there)
                           extra={"pcm": pcm, "catchup": True, "origin": self.clip_origin, "vocab_v": vocab_v})
         self._rerun_note[cid] = CATCHUP_NOTE
         if not self.sttpool.submit(job):
@@ -1980,9 +2159,13 @@ class HubApp(App):
     def _stt_ran(self, cid: str, engine: str, model: str, text: str, status: str, conf, *, key: str = "", item=None,
                  prompted: bool | None = None,
                  role: str = "text", words=None, queued_at=None, engine_start=None, worker: str = "", prompt_v: str = "",
-                 cls=None, clip_end=None, wait_s=None, run_s=None, vocab_v: str | None = None) -> None:
+                 cls=None, clip_end=None, wait_s=None, run_s=None, vocab_v: str | None = None, bg: bool = False,
+                 probe: bool = False) -> None:
         """A transcript as an engine wrote it, kept (sizeup/sttruns.py), and its latency (transmission end -> text
-        here) counted for Health when it is the text of record. Never in the way of the transcript."""
+        here) counted for Health when it is the text of record, per channel and per engine (the GPU workers' latency
+        guard: sizeup/sttroute.py; bg: background work, never the guard's). The text of record's way (its route:
+        "auto·priority: gpu-pc → AWS (gpu-pc: gaming)") goes with the run and on its row. Never in the way of the
+        transcript."""
         try:
             if item is None:
                 item = self._find(cid)[0]
@@ -1998,8 +2181,18 @@ class HubApp(App):
                 return
             if vocab_v is None:                  # (the item's own: whisper's prompt or AWS's stream, sizeup/stt_terms.py)
                 vocab_v = str(getattr(item, "vocab_v", "") or "")
+            route = ""
+            if role == "text":
+                name = sttroute.engine_name(engine, worker or (f"{STATION_PREFIX}{self.clip_origin}"
+                                                               if engine == "station-whisper" and self.clip_origin else ""))
+                route = self.stt_routes.finish(cid, name)
+                if clip_end is not None:
+                    self.stt_engines.add(name, now - clip_end, ok=True, gpu=engine == "gpu-worker", probe=probe,
+                                         priority=not bg and cls is not None and cls in sttruns.TARGET_CLASSES + (LIVE_CLS,))
+                if route:
+                    self._stt_route_row(cid, route)
             self.stt_runs.add(cid, engine, text=text, status=status, model=model, worker=worker, prompt_v=prompt_v,
-                              vocab_v=vocab_v,
+                              vocab_v=vocab_v, route=route,
                               role=role, confidence=conf if isinstance(conf, (int, float)) else None, words=words,
                               channel=key, cls=sttpool.class_key(cls) if cls is not None else "", clip_end=clip_end,
                               queued_at=queued_at, engine_start=engine_start, done_at=now, wait_s=wait_s,
@@ -2011,6 +2204,13 @@ class HubApp(App):
                 self.stt_latency.add(key, engine, now - clip_end, target=cls in sttruns.TARGET_CLASSES)
         except Exception as e:  # noqa: BLE001 - bookkeeping
             self.hub.log(f"stt runs: {cid}: {type(e).__name__}: {e}")
+
+    def _stt_route_row(self, cid: str, route: str) -> None:
+        """Its route on its log row (the transcript's hover); never in the way of the transcript."""
+        try:
+            self.cad.comms.set_route(cid, route)
+        except Exception as e:  # noqa: BLE001 - bookkeeping
+            self.hub.log(f"stt route: {cid}: {type(e).__name__}: {e}")
 
     def _time_check(self, key: str, item, text: str, clip_end, engine: str = "",
                     prompted: bool | None = None) -> stt_time.Check | None:
@@ -2095,6 +2295,7 @@ class HubApp(App):
             if wl is not None and w.get("kind") != "station":
                 w["logs"] = wl.view(w["id"])          # its last log batch in CloudWatch, or why none goes
         return {"active": active, "settings": self.hub.workers.pool_settings(), **stats,
+                "engines": self.stt_engines.table(),          # (#878: each engine's live latency, the GPU guard)
                 "infer": self.infer_lane.stats() if self.infer_lane.any_llm() else None,
                 "latency": lat, "target": {"p50_s": sttruns.TARGET_P50_S, "p95_s": sttruns.TARGET_P95_S},
                 "copies": self.stt_runs.health()}      # (stt.sqlite's copies in the bucket: unsettled since, last copy)
@@ -2104,6 +2305,89 @@ class HubApp(App):
     def channels_changed(self) -> None:
         super().channels_changed()
         self.channels_check(force=True)
+
+    def channels_state(self) -> dict:
+        """Settings > Radios > Channels, and the engine selector's dropdown (#875): each engine a channel can be set to,
+        by its real id, with its live state (sizeup/sttroute.py)."""
+        out = super().channels_state()
+        try:
+            out["engines"] = self.engine_options()
+        except Exception as e:  # noqa: BLE001 - the static list then (radio-controls.js)
+            self.hub.log(f"stt engines: {type(e).__name__}: {e}")
+        return out
+
+    def engine_options(self) -> dict:
+        """{options: [{value, label, state, ok, title}], station, select_ok}: Auto · priority and Auto · background
+        (where a clip goes now), this station (its whisper's queue), each GPU worker and each other station in the
+        pool (its state: online, gaming, paused, cooling, offline, the latency guard), AWS (what is left of its month)
+        and Compare. ok False: greyed, still selectable (the choice is kept; its fallbacks run meanwhile)."""
+        pool, now = self.sttpool, self.sttpool.clock()
+        sid = self.clip_origin or ""
+        avoid = self._guard_avoid()
+        on = bool(self.hub.workers.pool_settings()["on"])
+        workers = {w.id: w for w in list(pool.workers.values())}
+        gpus = sorted({*[w for w, x in workers.items() if x.kind == "gpu"],
+                       *[r["id"] for r in self.hub.workers.rows() if r.get("revoked") is None]})
+        aws_ok, aws_why = self.aws_ok()
+        if self.aws is not None:
+            b = self.aws.budget()
+            left = max(0.0, float(b.get("limit_usd") or 0.0) - float(b.get("usd") or 0.0))
+            aws_state = f"${left:.0f} left" if aws_ok else "off"
+            aws_title = f"Amazon Transcribe: ${float(b.get('usd') or 0):.2f} of ${float(b.get('limit_usd') or 0):.0f} this month" \
+                        + ("" if aws_ok else f"\nOff: {aws_why}")
+        else:
+            aws_state, aws_title = "not set up", "Amazon Transcribe isn't set up on the hub"
+        q = (_part(self.hub.status, "health") or {}).get("stt_queue") if self.hub.connected() else None
+        waiting = int(q.get("queued") or 0) if isinstance(q, dict) else None
+        st_state = "offline" if not self.hub.connected() else f"{waiting} waiting" if waiting is not None else "online"
+        opts = []
+
+        def gpu_state(wid: str) -> tuple[str, bool]:
+            w = workers.get(wid)
+            if w is None:
+                return "offline", False
+            st = pool.state_of(w, now)
+            if st == "online" and wid in avoid:
+                return "guard", False
+            return st, st == "online" and on
+        ready = [w for w in gpus if gpu_state(w)[1]]
+        first = ready[0] if ready else "AWS" if aws_ok else (sid or "station")
+        opts.append({"value": sttroute.AUTO, "label": "Auto · priority", "state": first, "ok": True,
+                     "title": "Idle GPU worker → AWS (budget, reserve) → station whisper. Never dropped"
+                              + (f"\nNow: {first}" if first else "")})
+        word = pool.word(sid, avoid=avoid)
+        bg_now = next((w for w in ready if word.get("gpu_bg")), "") or (sid or "station")
+        opts.append({"value": sttroute.AUTO_BG, "label": "Auto · background", "state": bg_now, "ok": True,
+                     "title": "GPU only with no priority work on it → station whisper → AWS last (catch-up, its budget)"
+                              + f"\nNow: {bg_now}"})
+        opts.append({"value": "local", "label": sid or "Station", "state": st_state, "ok": self.hub.connected(),
+                     "title": f"Pinned: this station's whisper{f' ({sid})' if sid else ''}"
+                              + (f"\n{waiting} clips waiting" if waiting is not None else "")})
+        for wid in gpus:
+            st, ok = gpu_state(wid)
+            opts.append({"value": f"{sttroute.PIN}{wid}", "label": wid, "state": st, "ok": ok,
+                         "title": f"Pinned: GPU worker {wid}, then Auto · priority's order"
+                                  + (f"\n{avoid[wid]}" if wid in avoid else "") + ("" if on else "\nThe pool is off")})
+        for wid, w in sorted(workers.items()):
+            if w.kind != "station" or wid == f"{STATION_PREFIX}{sid}":
+                continue
+            st = pool.state_of(w, now)
+            other = wid.removeprefix(STATION_PREFIX)
+            opts.append({"value": f"{sttroute.PIN}{wid}", "label": other, "state": st, "ok": st == "online" and on,
+                         "title": f"Pinned: station {other}'s whisper (the pool), then Auto · priority's order"})
+        opts.append({"value": sttroute.PIN_AWS, "label": "AWS", "state": aws_state, "ok": aws_ok,
+                     "title": "Pinned: Amazon Transcribe; a GPU worker only once AWS can't take the clip, then the "
+                              "station's whisper\n" + aws_title})
+        # today's "AWS" (legacy): kept as it was, shown only on a channel still on it (radio-controls.js)
+        opts.append({"value": "aws", "label": "AWS · GPU by class", "state": aws_state, "ok": aws_ok, "legacy": True,
+                     "title": "Legacy AWS, as before the selector: a GPU worker first where the pool's switch for the "
+                              "clip's class is on (Settings > Station > STT workers), else AWS, else the station's "
+                              "whisper. Pick AWS (pinned) for AWS only, or Auto\n" + aws_title})
+        opts.append({"value": "both", "label": "Compare", "state": "station + AWS", "ok": True,
+                     "title": "The station's whisper and AWS on every clip: AWS's text shown, whisper's kept (⇄)"})
+        st_ch = _part(self.hub.status, "channels") or {}
+        return {"options": opts, "station": sid, "select_ok": bool(st_ch.get("engine_select_ok")),
+                "guard": self.stt_engines.guard()}
 
     def channel_desired(self) -> dict:
         ok, why = self.aws_ok()
@@ -2115,7 +2399,11 @@ class HubApp(App):
             # a station from before deny would never echo it in its signature (a push every 10 s): it isn't sent; that
             # station runs its police channel on our pool's word until it updates
             deny = []
-        prefs = channels.for_station(self._chan_ov, self.cfg.stt_record_only)   # + the hub's record_only (#201)
+        st_ch = _part(self.hub.status, "channels") or {}
+        # + the hub's record_only (#201); the engine selector's engines only to a station that takes them (#875: one
+        # from before refuses the whole map with one: it gets the nearest old engine, sizeup/sttroute.py legacy)
+        prefs = channels.for_station(self._chan_ov, self.cfg.stt_record_only,
+                                     select_ok=bool(st_ch.get("engine_select_ok")))
         if "p25_systems" not in (self.hub.status or {}):
             # a station from before #409 refuses a whole map with a "p25:<system>:<tg>" key in it: left out for it
             prefs = {k: v for k, v in prefs.items() if not k.startswith("p25:")}
@@ -2126,7 +2414,6 @@ class HubApp(App):
             sq = channels.fit_squelch(self._sq_ov, kinds, self.squelch_defaults)[0]
         # the county talkgroups an incident of ours is worked on now (sizeup/cad/opchannel.py): only to a station that
         # takes them (one from before would never echo them in its signature: a push every 10 s)
-        st_ch = _part(self.hub.status, "channels") or {}
         promote = sorted((k for k in self.promoted_keys()
                           if k.startswith("tg:") or (k.startswith("p25:") and st_ch.get("promote_p25_ok"))),
                          key=lambda k: (not k.startswith("tg:"), k))[:channels.AWS_KEYS_MAX] if st_ch.get("promote_ok") else []

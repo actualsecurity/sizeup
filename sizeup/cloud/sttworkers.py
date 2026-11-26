@@ -399,6 +399,8 @@ class WorkerRegistry:
         wid = str(wid or "").strip()
         if not ID.fullmatch(wid):
             raise WorkerError("id: lower case letters, digits, - and _ (at most 40), e.g. \"gpu-1\"")
+        if wid == "aws":                   # (the engine selector's pinned AWS is "pin:aws": sizeup/sttroute.py)
+            raise WorkerError("id: \"aws\" is Amazon Transcribe's")
         return wid
 
     @staticmethod

@@ -66,7 +66,7 @@ import numpy as np
 
 from sizeup.api.v1.switches import Switches
 from sizeup.config import P25_JOB, Config, ConfigError, airband_owner, load
-from sizeup import janitor, tz
+from sizeup import janitor, sttroute, tz
 from sizeup.cad import Cad
 from sizeup.cad.alarms import STUCK_WITHIN_S
 from sizeup.cad.api import CadApi
@@ -1565,7 +1565,8 @@ class App:
         """A paging recording is complete: save it, send it to the hub, transcribe it."""
         log(recording_note(page))
         heard = self._page_heard(page)
-        eng = self.stt_engine(page.label) if heard else ""
+        eng = self._stt_way(self.stt_engine(page.label), page.label) if heard else ""
+        eng = "local" if eng == "pool_bg" else eng          # (a page is never handed over as background work)
         page.stt = eng if eng in ("aws", "both") else ""  # type: ignore[attr-defined]
         if eng == "aws" and self.forwarding():
             page.status = "remote"          # the hub transcribes it (Amazon Transcribe)
@@ -2473,6 +2474,8 @@ class App:
         for cid in dict.fromkeys(ids):
             item, key = self._find(cid)
             eng = self.channel_pref(key)["engine"] if item is not None else ""
+            if sttroute.hub_aws(eng) and eng != "both" and not sttroute.pinned(eng).startswith(sttroute.STATION_PIN):
+                eng = "aws"                     # (Auto, pinned AWS or a GPU worker: a person's re-run on AWS, as "aws")
             if eng not in ("aws", "both"):
                 local.append(cid)
                 continue
@@ -2631,7 +2634,8 @@ class App:
         p = self.channel_pref(key)
         if not p.get("transcribe", True):
             return ""
-        if (p.get("engine") in ("aws", "both") and is_context(key) and self.aws is not None
+        if ((p.get("engine") in ("aws", "both", sttroute.AUTO_BG) or sttroute.hub_aws(p.get("engine", "")))
+                and is_context(key) and self.aws is not None
                 and self.aws.available(key)[0] and self.aws.context_budget()["pct"] < CATCHUP_AWS_PCT):
             return "aws"
         return "whisper"
@@ -2888,13 +2892,39 @@ class App:
         return self.aws.available(key)
 
     def stt_engine(self, key: str) -> str:
-        """off | local | aws | both: what runs for this channel now ("aws" falls back to local without AWS). A county
-        talkgroup an incident of ours is worked on now (sizeup/cad/opchannel.py) is transcribed, and by Amazon Transcribe
-        while AWS can take it (within the monthly limit: never its reserve), like Fire/EMS 15."""
+        """off | local | aws | both | auto | auto_bg | pin:<id>: what runs for this channel now ("aws" falls back to local
+        without AWS; the selector's own engines have their own order: _stt_way). A county talkgroup an incident of ours
+        is worked on now (sizeup/cad/opchannel.py) is transcribed, and by Amazon Transcribe while AWS can take it
+        (within the monthly limit: never its reserve), like Fire/EMS 15; one on Auto · background goes Auto · priority."""
         p = self.channel_pref(key)
         if key in _promoted(self):
-            p = dict(p, transcribe=True, engine="aws" if p.get("engine", "local") == "local" else p["engine"])
+            eng = p.get("engine", "local")
+            p = dict(p, transcribe=True, engine="aws" if eng == "local" else sttroute.AUTO if eng == sttroute.AUTO_BG
+                     else eng)
         return channels.effective(p, self.aws_ok(key)[0])
+
+    def _stt_way(self, eng: str, key: str) -> str:
+        """What this process does with a clip of a channel on `eng` now, as an engine of before the selector (#875,
+        sizeup/sttroute.py): the old ones as they are. A station: Auto · priority, a pinned GPU worker or another
+        station "aws" (the hub routes it by the channel's choice: a GPU worker, AWS, then this station's whisper) while
+        the hub said lately a GPU worker is ready or AWS can take it, else "local" at once (no round trip for nothing);
+        pinned to this station "local"; Auto · background "pool_bg" (handed to the hub's pool) while the hub said a GPU
+        would take background work now, else "local" (this station's whisper; behind, an idle one elsewhere: #639
+        phase 2; AWS last: the catch-up). No hub (all-in-one): AWS when it can take it (never for background), else
+        local."""
+        if not sttroute.is_new(eng):
+            return eng
+        pin = sttroute.pinned(eng)
+        if not self.forwarding():
+            return "aws" if eng != sttroute.AUTO_BG and self.aws_ok(key)[0] else "local"
+        link = self.link
+        if pin.startswith(sttroute.STATION_PIN) and pin.removeprefix(sttroute.STATION_PIN) == getattr(link, "station_id", None):
+            return "local"
+        if eng == sttroute.AUTO_BG:
+            return "pool_bg" if link is not None and hasattr(link, "pool_gpu_bg") and link.pool_gpu_bg() else "local"
+        gpu = link is not None and hasattr(link, "pool_gpu_ready") and link.pool_gpu_ready()
+        return "aws" if gpu or pin.startswith(sttroute.STATION_PIN) or self.aws_ok(key)[0] else "local"
+        # (pinned AWS: "aws" too: the hub runs AWS, a GPU worker only when AWS can't take it)
 
     _promo_cache: tuple = (0.0, frozenset())
 
@@ -2936,6 +2966,10 @@ class App:
         """One transmission or page to speech-to-text the way its channel says (audio: whisper's 16 kHz input). late: a
         P25 key-up from while sizeup was down with no emergency (#747): whisper's RERUN class at the highest (_late_prio),
         so the live fire traffic after a restart never waits behind up to REPLAY_S of it."""
+        eng = self._stt_way(eng, key)           # (the selector's engines as this process runs them now: #875)
+        if eng == "pool_bg" and (late or not isinstance(item, Traffic)
+                                 or float(item.end) - float(item.start) > sttroute.BG_GPU_MAX_S):
+            eng = "local"                       # (a long one: the GPU is never held long by background work)
         item.stt = eng if eng in ("aws", "both") else ""
         if self._late_prio(self._stt_priority(item, key), late) in (URGENT, HIGH, LIVE):
             self.stt.ours_heard()              # ours, whichever engine takes it (AWS too): the catch-up's quiet spell
@@ -2944,6 +2978,10 @@ class App:
             item.model = ""
             return self._transcribed(item)
         self._stt_input(item, audio, key)      # (station) the same audio for the hub's engines, queued, never made here
+        if eng == "pool_bg":                   # Auto · background, a GPU free for it (the hub said): handed over now
+            if self._stt_offload(item, key, self._stt_priority(item, key), "background: a GPU worker is free", bg=True):
+                return
+            eng = "local"
         if eng == "aws" and self.forwarding():
             # The hub runs Amazon Transcribe on the clip it gets: no whisper here.
             item.raw, item.confidence, item.status, item.model = "", None, "remote", channels_model()
@@ -2982,13 +3020,17 @@ class App:
         st = self.stt.stats()
         return int(st.get("queued") or 0) * float(st.get("service_s") or 16.0) > OFFLOAD_WAIT_S
 
-    def _stt_offload(self, item, key: str, prio, why: str) -> bool:
+    def _stt_offload(self, item, key: str, prio, why: str, bg: bool = False) -> bool:
         """(station) A transmission to the hub's pool instead of this station's whisper (#639 phase 2): sent as
         transcript_pending "pool" with its clip (its STT input went up on its own lane already); the hub transcribes it
-        on a pool worker, else AWS or this station's whisper later (the catch-up). False: the hub doesn't take them."""
+        on a pool worker, else AWS or this station's whisper later (the catch-up). False: the hub doesn't take them.
+        bg: an Auto · background channel's while the hub said a GPU would take it (whatever the pool's class switches:
+        the channel's choice routes it on the hub)."""
         link = self.link
-        if not isinstance(item, Traffic) or link is None or not self.forwarding() or not hasattr(link, "pool_takes") \
-                or not link.pool_takes():
+        if not isinstance(item, Traffic) or link is None or not self.forwarding():
+            return False
+        if not (link.pool_gpu_bg() if bg and hasattr(link, "pool_gpu_bg") else
+                not bg and hasattr(link, "pool_takes") and link.pool_takes()):
             return False
         item.raw, item.confidence, item.status, item.model = "", None, "remote", "pool"
         item.transcript_pending = "pool"                       # type: ignore[attr-defined]
@@ -3191,7 +3233,7 @@ class App:
 
     def _aws_fallback(self, key: str) -> bool:
         """A channel set to AWS (or both) that AWS can't take now: whisper is all it gets."""
-        return self.channel_pref(key).get("engine") in ("aws", "both") and not self.aws_ok(key)[0]
+        return sttroute.hub_aws(self.channel_pref(key).get("engine", "")) and not self.aws_ok(key)[0]
 
     def _stt_dropped(self, item, why: str) -> None:
         """The whisper queue dropped or skipped it (sizeup/stt.py SttQueue, #195): it says so ("Transcription
@@ -3704,7 +3746,7 @@ class App:
         from sizeup.transcribe import is_context
         keys = {*self._chan_ov, *self.cfg.stt_aws_channels}
         promoted = {k for k in _promoted(self) if is_context(k)}     # a crash pre-alert's: forced to AWS (stt_engine)
-        return sorted({k for k in keys if is_context(k) and self.channel_pref(k).get("engine") in ("aws", "both")}
+        return sorted({k for k in keys if is_context(k) and sttroute.hub_aws(self.channel_pref(k).get("engine", ""))}
                       | promoted)
 
     def aws_split(self, ok: bool) -> tuple[list[str], list[str], str]:
@@ -3849,6 +3891,7 @@ class App:
                 "deny_ok": True,                                  # (takes aws.deny: radio-intel PR 3)
                 "promote_ok": True,                               # (takes aws.promote: sizeup/cad/opchannel.py)
                 "promote_p25_ok": True,                           # (... with another system's "p25:" keys: intel)
+                "engine_select_ok": True,                         # (takes auto, auto_bg, pin:<id>: sizeup/sttroute.py)
                 "sig": channels.sig(self._chan_ov, self._hub_aws["ok"], self._tone_ov, self._hub_aws.get("reserve"),
                                     self._sq_ov, self._hub_aws.get("deny"), self._hub_aws.get("promote"))}
 
