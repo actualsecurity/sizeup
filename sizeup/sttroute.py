@@ -8,6 +8,10 @@ A channel's engine (sizeup/channels.py ENGINES; the stored value, then what the 
                 station's whisper. For the pages, Fire/EMS main talkgroups, firegrounds, police alert talkgroups and
                 the airband. The station skips its whisper and hands the clip to the hub at once (unless the hub said
                 no GPU worker is ready and AWS can't take it: then its own whisper at once, no round trip).
+    auto_norm   Auto · normal: a GPU worker first, queued after every priority clip (and before background work), when
+                one can start it within NORM_GPU_BUDGET_S; else the stations (its own, then a pooled one within
+                NORM_STATION_BUDGET_S); else AWS within its budget; else back to its own station. Never dropped. No
+                migration: nothing moves to it until an admin picks it.
     auto_bg     Auto · background (#896): the stations' whisper first (its own, then any station in the pool that can
                 start it within its class's budget: BG_BUDGET_S), a GPU worker as overflow (idle, no priority work on
                 it, none in the last BG_QUIET_S), AWS last within its budget, else back to its own station's queue.
@@ -52,12 +56,22 @@ from collections import deque
 from typing import Callable
 
 AUTO, AUTO_BG, PIN = "auto", "auto_bg", "pin:"
+AUTO_NORM = "auto_norm"   # Auto · normal: a GPU after the priority work, then the stations, then AWS (the admin)
 LEGACY = ("local", "aws", "both")
 STATION_PIN = "station:"
 # "pin:gpu-pc" (a GPU worker's id: sizeup/cloud/sttworkers.py ID) or "pin:station:<id>" (a station's id)
 PIN_RE = re.compile(r"pin:(?:station:[A-Za-z0-9][A-Za-z0-9_.-]{0,63}|[a-z0-9][a-z0-9_-]{0,39})")
 PIN_AWS = "pin:aws"       # Amazon Transcribe and nothing else while it can take the clip (a GPU worker only when it can't)
-MODES = {AUTO: "auto·priority", AUTO_BG: "auto·background", "local": "station", "aws": "AWS", "both": "compare"}
+MODES = {AUTO: "auto·priority", AUTO_NORM: "auto·normal", AUTO_BG: "auto·background", "local": "station", "aws": "AWS",
+         "both": "compare"}
+# Auto · normal (the admin: "goes to the GPU workers first, but is queued behind the priority channels and then goes to
+# the stations if it can't hit the GPU, and then AWS"): a GPU worker when one can START it within NORM_GPU_BUDGET_S
+# (the work ahead of it there: every priority clip and the normal ones older than it, x the measured time per clip, over
+# the GPUs ready), queued after every priority clip and before background work; else its own station's whisper or a
+# pooled station that can start it within NORM_STATION_BUDGET_S; else AWS within its budget (under 80% of its month);
+# else back to its own station's queue. Never dropped. Constants for now (Settings later).
+NORM_GPU_BUDGET_S = 25.0
+NORM_STATION_BUDGET_S = 90.0
 
 # Auto · background (#896, the admin: "stations first, if overflow then the GPU, AWS last"): a clip goes to a station's
 # whisper that can START it within its class's budget (estimated wait: its queue x its measured time per clip), the
@@ -94,7 +108,7 @@ def bg_budget(cls) -> float:
 
 
 def is_auto(eng: str) -> bool:
-    return eng in (AUTO, AUTO_BG)
+    return eng in (AUTO, AUTO_BG, AUTO_NORM)
 
 
 def is_pin(eng: str) -> bool:
@@ -119,7 +133,7 @@ def pinned(eng: str) -> str:
 
 
 def valid(eng) -> bool:
-    return isinstance(eng, str) and (eng in LEGACY or eng in (AUTO, AUTO_BG) or bool(PIN_RE.fullmatch(eng)))
+    return isinstance(eng, str) and (eng in LEGACY or eng in (AUTO, AUTO_BG, AUTO_NORM) or bool(PIN_RE.fullmatch(eng)))
 
 
 def strict_aws(eng: str) -> bool:
@@ -133,6 +147,12 @@ def legacy(eng: str) -> str:
     if eng == AUTO_BG:
         return "local"
     return "aws" if is_new(eng) else eng
+
+
+def before_norm(eng: str) -> str:
+    """The nearest engine a station that has the selector but not Auto · normal knows (its engine_norm_ok missing):
+    Auto · priority (it hands the clip to the hub, which routes it by the channel's own choice)."""
+    return AUTO if eng == AUTO_NORM else eng
 
 
 def mode_label(eng: str) -> str:

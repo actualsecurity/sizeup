@@ -36,7 +36,7 @@ window.RadioControls = (() => {
                services: null, servicesRev: null, servicesBusy: false, svcPending: new Map(), svcWaiting: new Set() };
   // the engine selector (#875, sizeup/sttroute.py): the hub sends each option with its live state (channels.engines);
   // this list without one (a station's own page, all-in-one). "aws" is never stored since #896: shown as pinned AWS
-  const ENGINES = [["auto", "Auto · priority"], ["auto_bg", "Auto · background"], ["local", "Local"], ["pin:aws", "AWS"],
+  const ENGINES = [["auto", "Auto · priority"], ["auto_norm", "Auto · normal"], ["auto_bg", "Auto · background"], ["local", "Local"], ["pin:aws", "AWS"],
                    ["both", "Compare"]];
   const LEGACY_ENGINES = new Set();
   // Another P25 system's talkgroup has a tier instead of Record / Main / Transcribe (#409, sizeup/tiers.py)
@@ -45,6 +45,7 @@ window.RadioControls = (() => {
     + "Record only: audio kept, no speech-to-text.\nOff: dropped.\nActivity only: encrypted, never decoded; "
     + "only when it was active and which radios.";
   const ENGINE_HELP = "Auto · priority: idle GPU worker → AWS → station whisper.\n"
+    + "Auto · normal: GPU (after priority) → stations → AWS.\n"
     + "Auto · background: stations → GPU overflow → AWS (its budget).\n"
     + "Pinned (a station, a GPU worker, AWS): that engine first, then Auto · priority's order.\n"
     + "Compare: station whisper and AWS on every clip (\u21c4).\n"

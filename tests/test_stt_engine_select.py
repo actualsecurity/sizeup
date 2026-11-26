@@ -505,7 +505,7 @@ def test_the_dropdown_shows_each_engine_by_id_with_its_live_state(tmp_path):
         online(hub.app.sttpool, "gpu-2")
         e = hub.app.channels_state()["engines"]
         opts = {o["value"]: o for o in e["options"]}
-        assert [o["value"] for o in e["options"]] == ["auto", "auto_bg", "local", "pin:gpu-2", "pin:gpu-pc", "pin:aws",
+        assert [o["value"] for o in e["options"]] == ["auto", "auto_norm", "auto_bg", "local", "pin:gpu-2", "pin:gpu-pc", "pin:aws",
                                                       "both"]                     # (no legacy "aws": #896)
         assert (opts["pin:gpu-pc"]["label"], opts["pin:gpu-pc"]["state"], opts["pin:gpu-pc"]["ok"]) == ("gpu-pc", "gaming", False)
         assert (opts["pin:gpu-2"]["state"], opts["pin:gpu-2"]["ok"]) == ("online", True)

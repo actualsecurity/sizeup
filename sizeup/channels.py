@@ -54,7 +54,7 @@ import hashlib
 import json
 import re
 
-ENGINES = ("local", "aws", "both", "auto", "auto_bg")      # + "pin:<id>" (sizeup/sttroute.py PIN_RE)
+ENGINES = ("local", "aws", "both", "auto", "auto_bg", "auto_norm")   # + "pin:<id>" (sizeup/sttroute.py PIN_RE)
 PIN_AWS = "pin:aws"        # (sizeup/sttroute.py PIN_AWS) "aws" is only what an old station is sent, never stored (#896)
 FIELDS = ("record", "transcribe", "engine")
 # "tg:307": the county system's talkgroup; "p25:<system>:<tg>": another P25 system's (#409, sizeup/sourcekeys.py)
@@ -122,7 +122,7 @@ def pref(key: str, overrides: dict, aws_channels=DEFAULT_AWS, record_only=DEFAUL
     return p
 
 
-def for_station(overrides: dict, record_only=DEFAULT_RECORD_ONLY, select_ok: bool = True) -> dict:
+def for_station(overrides: dict, record_only=DEFAULT_RECORD_ONLY, select_ok: bool = True, norm_ok: bool = True) -> dict:
     """The map the hub sends the station (set_channel_prefs): its Settings overrides, plus {"transcribe": false}
     for each record_only channel whose override doesn't say (the station's defaults don't know the hub's
     record_only; a Settings choice wins). Only fields a station keeps (check_map), so its sig agrees. select_ok False:
@@ -135,6 +135,9 @@ def for_station(overrides: dict, record_only=DEFAULT_RECORD_ONLY, select_ok: boo
                for k, v in out.items()}
     else:                                  # (#896: "aws" is pinned AWS wherever it is still met)
         out = {k: dict(v, engine=PIN_AWS) if v.get("engine") == "aws" else v for k, v in out.items()}
+        if not norm_ok:                    # (a station with the selector but not Auto · normal: Auto · priority's way)
+            out = {k: dict(v, engine=sttroute.before_norm(v["engine"])) if v.get("engine") == sttroute.AUTO_NORM else v
+                   for k, v in out.items()}
     for key in record_only:
         if KEY.fullmatch(key) and "transcribe" not in out.get(key, {}):
             out[key] = {**out.get(key, {}), "transcribe": False}

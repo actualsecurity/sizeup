@@ -10,6 +10,7 @@
     "promote_ok": true,
     "promote_p25_ok": true,
     "engine_select_ok": true,
+    "engine_norm_ok": true,
     "sig": "d26d8cf926e1"
   }
 }

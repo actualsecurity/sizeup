@@ -436,6 +436,15 @@ const StationHealth = (() => {
             s > bg.budget_s ? "hl-warn" : ""]),
         ]));
       }
+      const nh = bg && bg.norm_h;           // Auto · normal: where its clips went (a GPU first, after priority)
+      if (nh && Object.keys(nh).length) {
+        const nn = Object.values(nh).reduce((a, b) => a + b, 0), off = nn - (nh.gpu || 0);
+        const t = el("h3", "hl-sub", "Auto · normal");
+        t.title = `Auto · normal clips, last hour: a GPU when one could start it within ${bg.norm_gpu_budget_s} s, `
+          + "else a station, AWS, or back to its station. Off the GPU often: the GPU is busy with priority work";
+        kids.push(t, dl([["Clips 1 h", `${nh.gpu || 0} GPU · ${nh.station || 0} station · ${nh.aws || 0} AWS · ${nh.back || 0} back`,
+          nn && off / nn > 0.5 ? "hl-warn" : ""]]));
+      }
       const lat = sp.latency || [];
       if (lat.length) {
         const lh = el("h3", "hl-sub", "Speech-to-text latency");

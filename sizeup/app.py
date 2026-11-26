@@ -3229,7 +3229,7 @@ class App:
         if key in _promoted(self):
             eng = p.get("engine", "local")
             p = dict(p, transcribe=True, engine=channels.PIN_AWS if eng in ("local", "aws") else sttroute.AUTO
-                     if eng == sttroute.AUTO_BG else eng)
+                     if eng in (sttroute.AUTO_BG, sttroute.AUTO_NORM) else eng)
         return channels.effective(p, self.aws_ok(key)[0])
 
     def _stt_way(self, eng: str, key: str) -> str:
@@ -3245,13 +3245,15 @@ class App:
             return eng
         pin = sttroute.pinned(eng)
         if not self.forwarding():
-            return "aws" if eng != sttroute.AUTO_BG and self.aws_ok(key)[0] else "local"
+            return "aws" if eng not in (sttroute.AUTO_BG, sttroute.AUTO_NORM) and self.aws_ok(key)[0] else "local"
         link = self.link
         if pin.startswith(sttroute.STATION_PIN) and pin.removeprefix(sttroute.STATION_PIN) == getattr(link, "station_id", None):
             return "local"
         if eng == sttroute.AUTO_BG:
             return "local_bg"
         gpu = link is not None and hasattr(link, "pool_gpu_ready") and link.pool_gpu_ready()
+        if eng == sttroute.AUTO_NORM:          # Auto · normal: the hub's while a GPU is ready (it queues it after the
+            return "aws" if gpu else "local_bg"   # priority work), else this station's whisper first, the hub's way once behind
         return "aws" if gpu or pin.startswith(sttroute.STATION_PIN) or self.aws_ok(key)[0] else "local"
         # (pinned AWS: "aws" too: the hub runs AWS, a GPU worker only when AWS can't take it)
 
@@ -4284,6 +4286,7 @@ class App:
                 "promote_ok": True,                               # (takes aws.promote: sizeup/cad/opchannel.py)
                 "promote_p25_ok": True,                           # (... with another system's "p25:" keys: intel)
                 "engine_select_ok": True,                         # (takes auto, auto_bg, pin:<id>: sizeup/sttroute.py)
+                "engine_norm_ok": True,                           # (takes auto_norm: Auto · normal)
                 "sig": channels.sig(self._chan_ov, self._hub_aws["ok"], self._tone_ov, self._hub_aws.get("reserve"),
                                     self._sq_ov, self._hub_aws.get("deny"), self._hub_aws.get("promote"))}
 

@@ -814,7 +814,7 @@ def test_what_the_station_answers_to_arguments_of_the_wrong_type(live, monkeypat
     assert refused == {"ok": False, "error": "ValueError: keys: a list of source keys; rev: a number"}
     assert run("call", {"fn": "set_stt_terms", "args": [{"sets": {"Bad Name": {}}}]})["error"].startswith("ValueError: stt terms")
     assert run("call", {"fn": "set_channel_prefs", "args": [{"Fireground 1": {"engine": "from_the_future"}}]})["error"] \
-        == "ValueError: engine: one of local, aws, both, auto, auto_bg, or pin:<engine id>"
+        == "ValueError: engine: one of local, aws, both, auto, auto_bg, auto_norm, or pin:<engine id>"
     assert run("call", {"fn": "set_antenna_groups", "args": [{"name": "roof"}]}) \
         == {"ok": True, "result": "each channel has its own dongle: nothing to group"}
     assert run("call", {"fn": "reception_post", "args": [["start"], "", ""]}) == {"ok": True, "result": "a JSON object"}
