@@ -193,8 +193,8 @@ def test_a_change_retags_the_last_30_days_in_batches_and_back_to_automatic(tmp_p
     for i in range(7):
         cad.record_traffic(p25_row(f"b-{i}", clock.t - i * DAY, PD, "mrrs", "transit"))
     cad.record_traffic(p25_row("same-1", clock.t - 5, PD, "westchester", "police", group="Police"))   # the county's PD
-    monkeypatch.setattr(type(cad.comms), "retag", lambda self, s, v, since, batch=3, pause=0.0,
-                        _real=type(cad.comms).retag: _real(self, s, v, since, batch, pause))         # 3 a batch
+    monkeypatch.setattr(type(cad.comms), "retag", lambda self, s, v, since, batch=3, pause=0.0, stop=None,
+                        _real=type(cad.comms).retag: _real(self, s, v, since, batch, pause, stop))   # 3 a batch
     batches = []
     real_tx = cad.store.tx
     cad.store.tx = lambda: (batches.append(1), real_tx())[1]
@@ -252,6 +252,39 @@ def test_retag_runs_off_the_request_is_marked_with_the_setting_and_resumed_by_th
     assert time.monotonic() - t0 < 0.3                   # the request didn't wait for it
     again.retag_thread.join(10)
     assert started == [1] and pending(again) == []
+
+
+def test_shutdown_stops_a_retag_between_batches_joins_it_and_keeps_its_mark(tmp_path, monkeypatch):
+    """#740: a re-tag still walking its batches when the CAD shuts down (a test's teardown) stops before its next batch
+    and is joined before the store closes (a thread left on the connection as it closed crashed the process: SIGSEGV).
+    Its mark stays for the next start; none starts once shut."""
+    clock = Clock()
+    cad = clocked_cad(tmp_path, clock)
+    cad.comms.context_broadcast = True
+    cad.source_rows = lambda: [{"source": MINE, "service": "transit", "service_auto": "transit"}]
+    for i in range(6):
+        cad.record_traffic(p25_row(f"b-{i}", clock.t - 60 - i, PD, "mrrs", "transit"))
+    batches = []
+    real = type(cad.comms).retag
+
+    def slow(self, s, v, since, batch=1, pause=0.0, stop=None):
+        def stop_after_a_batch():
+            batches.append(1)
+            if len(batches) == 2:
+                time.sleep(0.2)                  # the second batch: shutdown() comes now
+            return stop is not None and stop()
+        return real(self, s, v, since, 1, 0.0, stop_after_a_batch)
+    monkeypatch.setattr(type(cad.comms), "retag", slow)
+    post(cad, action="set", key=MINE, service="fire")
+    t = cad.retag_thread
+    while len(batches) < 2:
+        time.sleep(0.01)
+    cad.shutdown(wait_s=5)
+    assert not t.is_alive() and len(batches) == 2                # stopped before its second batch, joined
+    assert cad.retag_services() is None                          # shut: nothing new starts
+    again = clocked_cad(tmp_path, clock)
+    assert pending(again) == [MINE] and services(again, MINE).count("fire") == 1       # one batch done, the mark kept
+    assert not [r for r in again.settings.audit_log("radios") if r["key"].endswith("/retag")]
 
 
 def test_back_to_automatic_waits_for_the_stations_talkgroups_never_guesses(tmp_path):

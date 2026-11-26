@@ -171,6 +171,77 @@ def test_shutdown_with_work_queued_never_crashes(tmp_path):
         assert not any(t.is_alive() for t in c.radiolog._threads)
 
 
+def test_a_close_from_another_thread_waits_for_the_store_lock(tmp_path):
+    """#740: the connection's close() (Store.shutdown, or a test's own store.db.close()) waits for whoever holds the
+    store's lock: a transaction on another thread ends first, never cut off by the close under it."""
+    s = Store(tmp_path / "cad.sqlite")
+    inside, done = threading.Event(), threading.Event()
+    closed: list[float] = []
+
+    def writer():
+        with s.tx() as db:
+            inside.set()
+            done.wait(5)
+            db.execute("INSERT INTO meta (key, value) VALUES ('k', 'v')")
+    w = threading.Thread(target=writer)
+    w.start()
+    inside.wait(5)
+    c = threading.Thread(target=lambda: (s.db.close(), closed.append(1)))
+    c.start()
+    c.join(0.2)
+    assert c.is_alive() and not closed                     # waiting for the writer's transaction
+    done.set()
+    w.join(5)
+    c.join(5)
+    assert closed == [1]
+    with pytest.raises(sqlite3.ProgrammingError):
+        s.q("SELECT 1")
+    assert sqlite3.connect(tmp_path / "cad.sqlite").execute("SELECT value FROM meta WHERE key = 'k'").fetchone() == ("v",)
+
+
+RACE = """
+import sys, tempfile, threading, time
+from pathlib import Path
+from sizeup.cad.store import Store
+
+for i in range(100):
+    s = Store(Path(tempfile.mkdtemp(dir=sys.argv[1])) / "cad.sqlite")
+    for k in range(60):
+        s.q(f"SELECT {k}")                          # cached statements: close() finalizes them with the GIL let go
+    go = threading.Event()
+
+    def run():
+        go.set()
+        try:
+            while True:
+                with s.tx() as db:
+                    db.execute("SELECT count(*) FROM meta").fetchall()
+        except Exception:
+            pass
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    go.wait()
+    time.sleep(0.001)
+    s.db.close()                                    # not Store.shutdown(): the connection's own close, as tests do
+    t.join(2)
+print("ok")
+"""
+
+
+def test_a_close_while_another_thread_runs_transactions_never_crashes(tmp_path):
+    """#740: CI workers died of SIGSEGV in tests/test_intel_replay.py: the test closed its store's connection while
+    the CAD's re-tag thread ran BEGIN IMMEDIATE on it. close() drops the statement cache, then finalizes the statements
+    with the GIL let go; the other thread's execute called into the dropped cache. In a subprocess (a crash would take
+    this worker with it): 100 rounds crashed every time before the close waited for the store's lock."""
+    import subprocess
+    import sys
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    r = subprocess.run([sys.executable, "-X", "faulthandler", "-c", RACE, str(tmp_path)], cwd=root, capture_output=True,
+                       text=True, timeout=120)
+    assert r.returncode == 0 and r.stdout.strip() == "ok", (r.returncode, r.stderr[-3000:])
+
+
 # -- review follow-ups -------------------------------------------------------------------------------------------------
 
 
