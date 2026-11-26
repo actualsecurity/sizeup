@@ -476,6 +476,90 @@ def test_a_fill_long_after_air_alarms_labelled_late_and_past_the_alarms_age_is_a
     assert len(push.sent) == 1 and "raised 5 min late" in push.sent[0][0]      # (the notice: never pushed)
 
 
+def test_a_late_notice_stays_a_notice_whatever_text_comes_after_and_a_late_alarm_pushes_once(hub, made):
+    from tests.test_p25_replay import Push
+    push = hub.app.cad.alarms.notifier = Push()
+    st = made({3: MAYDAY, 4: MAYDAY})
+    a = fm(st, time.time() - 5 * 60, 3.0)
+    b = fm(st, time.time() - 3 * 3600, 4.0)
+    st.flush(hub)
+    st.whisper.go.set()
+    assert wait(lambda: st.kinds(a) == ["traffic", "retext"] and st.kinds(b) == ["traffic", "retext"], 15)
+    st.flush(hub)
+    rows = lambda: {r["traffic_id"]: r for r in hub.app.cad.store.q("SELECT * FROM alarms")}    # noqa: E731
+    assert wait(lambda: set(rows()) == {a, b}, 10)
+    for tid in (a, b):          # a second text later (AWS's "both", a re-ask, a re-run): no late_fill on it
+        hub.app._retext(tid, "mayday mayday Engine 5 trapped on the second floor", "done", 0.9, "aws-transcribe",
+                        why="AWS Transcribe")
+    time.sleep(0.5)
+    assert rows()[b]["level"] == "notice" and rows()[a]["level"] == "alarm"
+    assert len(push.sent) == 1 and "raised 5 min late" in push.sent[0][0]      # (the late alarm once; the notice never)
+
+
+def test_a_restarted_station_that_couldnt_be_asked_is_asked_on_its_next_post(hub, made, monkeypatch):
+    from sizeup.cloud.hub import StationOffline
+    st = made({3: SAID})
+    tid = fm(st, time.time() - 30)
+    st.flush(hub)
+    tries = []
+
+    def remote(fn, *a, **k):
+        if fn != "stt_held":
+            return {}
+        tries.append(a[0])
+        if len(tries) <= 2:
+            raise StationOffline("the station didn't answer in 12 s")
+        return {"held": [], "sent": [], "unknown": list(a[0])}
+    monkeypatch.setattr(hub.app.hub, "connected", lambda: True)
+    monkeypatch.setattr(hub.app.hub, "remote", remote)
+    monkeypatch.setattr(hub_mod, "RESTART_RECHECK_S", 3600.0)
+    post = lambda proc: hub.app.hub._state(json.dumps(           # noqa: E731
+        {"at": time.time(), "proc": proc, "status": {"id": "t", "caps": ["stt_withdraw", "stt_held"]}}).encode())
+    post("proc-a")
+    post("proc-b")                                                  # (a new process: asked, and it doesn't answer)
+    assert wait(lambda: len(tries) == 1 and not hub.app._held_busy, 10)
+    post("proc-b")                                                  # (its next post: asked again, still no answer)
+    assert wait(lambda: len(tries) == 2 and not hub.app._held_busy, 10) and row(hub, tid)["status"] == "pending"
+    post("proc-b")                                                  # (and again: it answers, the lost one is shed)
+    assert wait(lambda: row(hub, tid)["status"] == "skipped", 10) and len(tries) == 3
+    post("proc-b")
+    time.sleep(0.3)
+    assert len(tries) == 3                                          # (answered: not asked again until its recheck)
+
+
+def test_an_old_button_notice_and_a_mayday_hours_late_on_a_watched_channel_stay_a_notice(hub, monkeypatch):
+    from tests.test_p25_replay import Push
+    alarms = hub.app.cad.alarms
+    push = alarms.notifier = Push()
+    end = time.time() - 3 * 3600
+    t = {"id": "FG1-1794990000000", "start": end - 3, "end": end, "source": "FG1", "talkgroup": None, "unit": "6401",
+         "rig": "", "radio_id": "6401", "text": "", "emergency": True, "via": "MDC", "late": True, "late_fill": True}
+    real = alarms.config
+    monkeypatch.setattr(alarms, "config", lambda: dict(real(), channels=[]))      # (not watched then: a notice)
+    a = alarms.on_traffic(t)
+    assert a is not None and a["level"] == "notice"
+    monkeypatch.setattr(alarms, "config", real)                                    # (FG1 watched now)
+    b = alarms.on_traffic(dict(t, text=MAYDAY, late_fill=False))                   # (its words, hours late, no flag)
+    assert b["id"] == a["id"] and b["level"] == "notice" and push.sent == []
+
+
+def test_a_station_restart_across_a_hub_restart_is_still_asked_what_it_holds(tmp_path, made, monkeypatch):
+    st = made({3: SAID})
+    tid = fm(st, time.time() - 30)
+    first = HubRun(hub_cfg(tmp_path))
+    try:
+        st.flush(first)
+        first.app.hub._state(json.dumps({"at": time.time(), "proc": "proc-a", "status": {"id": "t"}}).encode())
+    finally:
+        first.close()
+    again = HubRun(hub_cfg(tmp_path))                               # (a deploy: the station's process id from hub.sqlite)
+    try:
+        asked = restarted_once(again, monkeypatch, lambda ids: {"held": [], "sent": [], "unknown": list(ids)}, "proc-b")
+        assert wait(lambda: row(again, tid)["status"] == "skipped", 10) and asked == [("stt_held", ([tid],))]
+    finally:
+        again.close()
+
+
 def test_a_fill_for_a_row_this_hub_shed_still_reaches_the_alarms(hub, made, monkeypatch):
     from sizeup.stt import MAX_WAIT_S
     st = made({3: MAYDAY})
@@ -490,17 +574,22 @@ def test_a_fill_for_a_row_this_hub_shed_still_reaches_the_alarms(hub, made, monk
     assert wait(lambda: len(hub.app.cad.store.q("SELECT * FROM alarms")) == 1, 10)   # (but its mayday alarms)
 
 
-def restarted(hub: HubRun, monkeypatch, held) -> list:
-    """The hub hears a new sizeup process on the station (its state post's `proc`): what it asks it."""
+def restarted_once(hub: HubRun, monkeypatch, held, *procs: str) -> list:
+    """The hub hears these sizeup processes on the station, one state post each (its `proc`): what it asks it."""
     asked = []
     monkeypatch.setattr(hub.app.hub, "connected", lambda: True)
     monkeypatch.setattr(hub.app.hub, "remote", lambda fn, *a, **k: (asked.append((fn, a)) or held(a[0]))
                         if fn == "stt_held" else {})
     monkeypatch.setattr(hub_mod, "RESTART_RECHECK_S", 3600.0)
-    for proc in ("proc-a", "proc-b"):
+    for proc in procs:
         hub.app.hub._state(json.dumps({"at": time.time(), "proc": proc,
                                        "status": {"id": "t", "caps": ["stt_withdraw", "stt_held"]}}).encode())
     return asked
+
+
+def restarted(hub: HubRun, monkeypatch, held) -> list:
+    """The hub hears a new sizeup process on the station (its state post's `proc`): what it asks it."""
+    return restarted_once(hub, monkeypatch, held, "proc-a", "proc-b")
 
 
 def test_a_station_process_that_restarted_without_its_queue_has_its_rows_shed_at_once(hub, made, monkeypatch):

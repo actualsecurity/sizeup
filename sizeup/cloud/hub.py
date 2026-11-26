@@ -726,9 +726,19 @@ class Hub:
         if isinstance(d.get("boot_id"), str) and d["boot_id"]:
             self.boot_id = d["boot_id"][:64]     # (#927: a reboot since a transmission came is the sweep's evidence)
         proc = d.get("proc")
-        restarted = isinstance(proc, str) and bool(proc) and bool(self.proc) and proc[:64] != self.proc
         if isinstance(proc, str) and proc:
-            self.proc = proc[:64]
+            # (kept in hub.sqlite: a station that started again across a hub deploy or a takeover is still asked)
+            # TODO(multi-station): self.proc per station id, and one station_restarted at a time per station
+            key = f"station_proc:{who}" if who else "station_proc"
+            if not self.proc:
+                self.proc = self.app.mdb.get(key) if getattr(self.app, "mdb", None) is not None else ""
+            restarted = bool(self.proc) and proc[:64] != self.proc
+            if proc[:64] != self.proc:
+                self.proc = proc[:64]
+                if getattr(self.app, "mdb", None) is not None:
+                    self.app.mdb.put(key, self.proc)
+        else:
+            restarted = False
         if isinstance(d.get("status"), dict):
             st = dict(d["status"])
             if sid:
@@ -750,6 +760,8 @@ class Hub:
                 self.log(f"hub: reception test not logged: {type(e).__name__}: {e}")
         if restarted and hasattr(self.app, "station_restarted"):    # (#927) after its status: the caps of the
             self.app.station_restarted()                               # process that started now
+        elif hasattr(self.app, "station_posted"):
+            self.app.station_posted()                                  # (... and until it has answered)
         if isinstance(talking, list):
             self.live.update(talking, now, paging if isinstance(paging, list) else None)
         # caps: what this hub knows (#409's other P25 systems; each clip's STT input, sizeup/cloud/sttinput.py)
@@ -2874,25 +2886,52 @@ class HubApp(App):
             self._rerun_finish(cid, f"failed: {err or 'the station has no recording to re-run'}")
         self.sync()
 
+    _held_want = False          # (#927) a new station process not yet asked what it holds (stt_held)
+    _held_recheck_at = 0.0      # ... and when to ask it again (its old process's events still in the outbox)
+    _held_busy = False
+
     def station_restarted(self) -> None:
-        """(#927) sizeup on the station started again (a new proc_id): which of the transmissions waiting for its text it
-        still has is asked now and again RESTART_RECHECK_S later, in the background (never on the state post's
-        thread). A station without the call (an older one): the sweep's evidence as ever."""
+        """(#927) sizeup on the station started again (a new proc): which of the transmissions waiting for its text it
+        still has is asked now, and on each later state post until it answers (a station offline, a call timed out),
+        then once more RESTART_RECHECK_S after the restart. In the background, one ask at a time (never on the state
+        post's thread). A station without the call (an older one): the age backstop as ever."""
+        self._held_want, self._held_recheck_at = True, time.time() + RESTART_RECHECK_S
+        self._held_try()
+
+    def station_posted(self) -> None:
+        """(#927) Each state post: a station process still to be asked (the last try failed), or due its recheck."""
+        if self._held_want or (self._held_recheck_at and time.time() >= self._held_recheck_at):
+            self._held_try()
+
+    def _held_try(self) -> None:
+        with self._unclear_lock:                  # (a small lock of this app's: single-flight)
+            if self._held_busy:
+                return
+            self._held_busy = True
+
         def run() -> None:
-            for wait_s in (0.0, RESTART_RECHECK_S):
-                if wait_s and self._stopping.wait(wait_s):
-                    return
-                try:
-                    self._station_held_check()
-                except Exception as e:  # noqa: BLE001 - the sweep's evidence still holds
-                    self.hub.log(f"speech-to-text: after the station's restart: {type(e).__name__}: {e}")
+            try:
+                due = bool(self._held_recheck_at) and time.time() >= self._held_recheck_at
+                if self._station_held_check() >= 0:
+                    self._held_want = False
+                    if due:
+                        self._held_recheck_at = 0.0
+            except Exception as e:  # noqa: BLE001 - the backstop still holds; the next post tries again
+                self.hub.log(f"speech-to-text: after the station's restart: {type(e).__name__}: {e}")
+            finally:
+                self._held_busy = False
         threading.Thread(target=run, name="hub-station-held", daemon=True).start()
 
     def _station_held_check(self) -> int:
         """The transmissions still waiting for the station's text that its process doesn't have (lost with a crash or a
-        kill: no stt-queue.json): shed now, the catch-up's. Held or sent: left as they are. How many shed."""
-        if not self._may_write_audio() or "stt_held" not in self.hub.station_caps():
+        kill: no stt-queue.json): shed now, the catch-up's. Held or sent: left as they are. How many shed; -1 when the
+        station couldn't be asked (offline, timed out: asked again on its next state post)."""
+        if not self._may_write_audio():
             return 0
+        if not self.hub.connected():
+            return -1                             # (offline: asked when it is back)
+        if "stt_held" not in self.hub.station_caps():
+            return 0                              # (an older station: the age backstop)
         ids = [r[0] for r in self.mdb.waiting()]
         n = 0
         for k in range(0, len(ids), 500):
@@ -2901,7 +2940,7 @@ class HubApp(App):
                 got = self.hub.remote("stt_held", chunk)
             except (StationOffline, RuntimeError) as e:
                 self.hub.log(f"speech-to-text: after the station's restart: what it still has not asked ({str(e)[:120]})")
-                return n
+                return -1
             lost = [x for x in (got.get("unknown") if isinstance(got, dict) else None) or [] if x in set(chunk)]
             for tid in lost:
                 n += self._station_gave_up(tid, "the station stopped (sizeup started again without it)")

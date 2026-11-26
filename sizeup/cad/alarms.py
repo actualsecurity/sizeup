@@ -746,7 +746,10 @@ class Alarms:
                 kws = list(a["keywords"]) + [k for k in heard if k not in a["keywords"]]
                 em = a["emergency"] or emergency
                 level = a["level"]
-                if level == "notice" and (heard or (em and (fire or self._ours(rig or a["rig"])))):
+                # (#927) a notice about words that came too late to push (past MAX_AGE_S and LATE_FILL_SLACK) stays one,
+                # whatever later text comes for it (AWS's "both", a re-ask, a re-run): never a pushed alarm hours late
+                stale = now - float(a.get("end") or a.get("at") or end) > MAX_AGE_S * LATE_FILL_SLACK
+                if level == "notice" and not stale and (heard or (em and (fire or self._ours(rig or a["rig"])))):
                     level = "alarm"
                 new_text = text if text else a["text"]
                 new_spans = spans if text else a["spans"]
