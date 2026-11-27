@@ -10,7 +10,8 @@ GPU back at once (see [The local LLM](#the-local-llm-optional)).
 
 - **Connections:** the worker only connects out, to the hub over HTTPS through Cloudflare Access, to
   `whisper-server` (and `llama-server`) on 127.0.0.1, and, for its [self-update](#updating), to GitHub
-  (`api.github.com`, `raw.githubusercontent.com`; no token). Nothing on the PC listens on the network.
+  (`api.github.com`, `raw.githubusercontent.com`; no token), and for its pinned downloads (llama.cpp and whisper.cpp
+  builds, speech models) to ggml-org's GitHub releases and Hugging Face. Nothing on the PC listens on the network.
 - **Python:** standard library only, Python 3.10 or newer. `worker.toml` needs 3.11+. On 3.10, use `worker.json`
   with the same keys.
 - **Logs:** they hold job ids, timings and token counts. They never hold transcripts, prompts, the LLM's answers or
@@ -21,9 +22,9 @@ GPU back at once (see [The local LLM](#the-local-llm-optional)).
 In an ordinary (not elevated) PowerShell window, as the user who games on the PC:
 
 ```powershell
-$u = 'https://raw.githubusercontent.com/actualsecurity/sizeup/09f527a7d172173923ded0480b79239b8d6ed9c9/deploy/stt-worker/install.ps1'
+$u = 'https://raw.githubusercontent.com/actualsecurity/sizeup/12b5447a57a3cffbbb09b239b05a19d283d53b4a/deploy/stt-worker/install.ps1'
 Invoke-WebRequest $u -UseBasicParsing -OutFile "$env:TEMP\sizeup-stt-install.ps1"
-(Get-FileHash "$env:TEMP\sizeup-stt-install.ps1").Hash -eq '1808D57B5B90E40C62B7B32BB563FDCF6C51C4145B6A9C19787A6E9F85260A9D'   # True
+(Get-FileHash "$env:TEMP\sizeup-stt-install.ps1").Hash -eq '5F460E1111422846765EADA16BB72C97F3A90F24944790A387F1FED4DD251746'   # True
 powershell -ExecutionPolicy Bypass -File "$env:TEMP\sizeup-stt-install.ps1"
 ```
 
@@ -34,8 +35,10 @@ token and the Cloudflare client id and secret (read hidden, stored only as user 
 downloads, checks each file's size and SHA-256 against [`pins.json`](pins.json) before using it, writes `worker.toml`,
 runs `check` with whisper-server on 127.0.0.1, and registers and starts the task.
 
-- **Again:** safe to run again. It keeps what already matches its pin and asks before it replaces `worker.toml`, a
-  secret or the task. A `worker.py` that has updated itself is kept.
+- **First install only:** after it, `worker.py` updates itself and keeps llama.cpp and whisper.cpp at the builds it
+  pins ([Runtime updates](#runtime-updates-llamacpp-whispercpp)). Nothing to re-run for an upgrade.
+- **Again:** safe to run again (a repair). It keeps what already matches its pin and asks before it replaces
+  `worker.toml`, a secret or the task. A `worker.py` that has updated itself is kept.
 - **`-DryRun`:** prints what it would do, with no prompts, downloads or changes.
 - **`-Uninstall`:** removes the task, `%LOCALAPPDATA%\sizeup-stt` and the three variables, after you confirm. A copy
   of the script stays in that folder for this.
@@ -118,25 +121,29 @@ Leave it running for step 7, then stop it with Ctrl+C.
 
 Skip this step for speech-to-text only. What it is for: [The local LLM](#the-local-llm-optional).
 
-llama.cpp release **b12359** (the build of v1.0.0, commit `b1b770d9`), two assets for CUDA 12.4. Both unpack into
+llama.cpp release **b12728** (commit `ea722948`; Qwen3-ASR's audio needs b12643 or later), two assets for CUDA 12.4. Both unpack into
 the same folder (they are flat), and together they hold `llama-server.exe` with its DLLs and the CUDA runtime, so you
 don't need the CUDA Toolkit. The build covers the RTX 30 series (sm_86).
 
 | asset | bytes | SHA256 |
 |---|---|---|
-| `llama-b12359-bin-win-cuda-12.4-x64.zip` | 318,976,332 | `E9C0ABF442E8339C06728366C1AD2C711332F9939C0C00603FB75D85FD44C914` |
+| `llama-b12728-bin-win-cuda-12.4-x64.zip` | 358,626,875 | `85B6E332ED7B40FD7A240AC7F32C4F1A29E9DDF6B52853925A215FDA23EF24B3` |
 | `cudart-llama-bin-win-cuda-12.4-x64.zip` | 391,443,627 | `8C79A9B226DE4B3CACFD1F83D24F962D0773BE79F1E7B75C6AF4DED7E32AE1D6` |
 
 ```powershell
-$r = 'https://github.com/ggml-org/llama.cpp/releases/download/b12359'
-Invoke-WebRequest "$r/llama-b12359-bin-win-cuda-12.4-x64.zip" -OutFile "$d\llama-cuda.zip"
+$r = 'https://github.com/ggml-org/llama.cpp/releases/download/b12728'
+Invoke-WebRequest "$r/llama-b12728-bin-win-cuda-12.4-x64.zip" -OutFile "$d\llama-cuda.zip"
 Invoke-WebRequest "$r/cudart-llama-bin-win-cuda-12.4-x64.zip" -OutFile "$d\llama-cudart.zip"
-(Get-FileHash "$d\llama-cuda.zip").Hash -eq 'E9C0ABF442E8339C06728366C1AD2C711332F9939C0C00603FB75D85FD44C914'     # True
+(Get-FileHash "$d\llama-cuda.zip").Hash -eq '85B6E332ED7B40FD7A240AC7F32C4F1A29E9DDF6B52853925A215FDA23EF24B3'     # True
 (Get-FileHash "$d\llama-cudart.zip").Hash -eq '8C79A9B226DE4B3CACFD1F83D24F962D0773BE79F1E7B75C6AF4DED7E32AE1D6'   # True
 Expand-Archive "$d\llama-cuda.zip" "$d\llama"
 Expand-Archive "$d\llama-cudart.zip" "$d\llama" -Force     # -> $d\llama\llama-server.exe and its DLLs
 Remove-Item "$d\llama-cuda.zip", "$d\llama-cudart.zip"
 ```
+
+**Newer builds come by themselves:** this step (or the Quick install) is for the first install only. After it the
+worker keeps llama.cpp and whisper.cpp at the builds its `worker.py` pins, with nothing to do on the PC (see
+[Runtime updates](#runtime-updates-llamacpp-whispercpp)). Don't re-run the installer or this step to upgrade.
 
 The zip has llama.cpp's other tools too; the worker runs only `llama-server.exe` (which loads
 `llama-server-impl.dll` and the `ggml*.dll` beside it).
@@ -200,13 +207,13 @@ http://127.0.0.1:8180`. With it running, `py -3 "$d\worker.py" check` also tries
 
 ### 5. The worker
 
-For the first install, `worker.py` is pinned to a commit (245,409 bytes). Check its hash after the download. From then on it
+For the first install, `worker.py` is pinned to a commit (309,899 bytes). Check its hash after the download. From then on it
 [updates itself](#updating). A worker installed from an older pin (before the self-update) needs this download once
 more to get it.
 
 ```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/b1a190cc27dd0777404f58d71ecd9f9afcc0c2b2/deploy/stt-worker/worker.py -OutFile "$d\worker.py"
-(Get-FileHash "$d\worker.py").Hash -eq '30240EDAECBF54CD0AD6BC86A582D9C41492506189752E1A56F841CB909CA3E8'   # True
+Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/b1e3b0f90dc4bd93435c58c3cd5ab6c99d221a47/deploy/stt-worker/worker.py -OutFile "$d\worker.py"
+(Get-FileHash "$d\worker.py").Hash -eq '25198F06BDBD89CCDA0E488E0A84E3E099640E83581F7CC43D8AA25895EF3C79'   # True
 notepad "$d\worker.toml"
 ```
 
@@ -378,6 +385,49 @@ py -3 "$d\worker.py" update retry         # the hashes marked bad may be tried a
   left is marked bad, so the worker doesn't fetch it again. **Hold** keeps it from taking a newer one.
 - **Update by hand** (with `auto_update = false`): download `worker.py` from the commit this README names and check its
   hash (step 5), then `schtasks /End` and `schtasks /Run` the task.
+
+### Runtime updates (llama.cpp, whisper.cpp)
+
+The programs the worker's servers run (`llama-server.exe` and `whisper-server.exe`) update themselves too: no
+installer run, nothing to do on the PC. `worker.py` pins one llama.cpp build and one whisper.cpp build (release tag,
+asset URLs, sizes and SHA-256s: the same as [`pins.json`](pins.json), a test checks), so a new build reaches the PC as
+a new `worker.py`, through the self-update's checks above.
+
+1. **Download:** when the build that runs isn't the pinned one, the worker downloads the pinned zips from the
+   ggml-org GitHub releases only (the same hosts and checks as the speech models: exact size and SHA-256). It checks
+   the free disk space first, never downloads while gaming or paused, and resumes a stopped download where it left
+   off.
+2. **Unpack beside the running build:** into `runtimes\llama\b12728\` (or `runtimes\whisper\b5454\`) next to
+   `worker.toml`, never over the folder in use. A zip with a path outside its folder, or a link, is refused whole.
+3. **Switch only when idle:** no clip, no LLM job, not gaming or paused, no gaming for 2 minutes, and no other switch
+   (one lock for every switch: a runtime, the LLM's model, the self-update). The worker takes no new jobs
+   (`paused: updating`), stops the servers that run that program and starts them from the new folder.
+   `worker.toml` keeps its paths (`llama\llama-server.exe`, `whisper\Release\whisper-server.exe`): the worker runs
+   the active build's program in their place.
+4. **Test:** whisper-server must decode a second of silence. For llama.cpp, `--version` must name the build, and
+   llama-server must give a 1-token completion on its own 1.2 MB test model (`stories260K.gguf`, pinned in
+   `worker.py`, in `runtimes\test\`), whatever the LLM and the speech models are doing. When the LLM runs, it must
+   also give its 1-token constrained answer. Then every wanted speech model of that kind whose files are there must
+   decode a second of silence; one that doesn't fit beside what is loaded (the LLM is never stopped for it), or
+   runs out of VRAM, is left untested and covered by the probation below. Each part has 3 minutes. A whisper.cpp build is downloaded only when `worker.toml` has
+   its own `whisper_server` to test it with.
+5. **Rollback:** any failure makes the build before active again (its folder is kept), restarts it and checks it.
+   While gaming or paused it only stops llama-server and the speech models' servers (whisper-server keeps running
+   as it always does while gaming, until `gaming_stop_whisper_min`); the worker starts them again once the PC is
+   free. The new
+   build is tried again after 30 minutes, then 60; after 3 failures in a row it is marked bad for a day. Gaming
+   during the test doesn't count as a failure. A worker stopped mid-switch goes back to the build before at its next
+   start. For 30 minutes after a switch, a speech model of that kind that fails to load rolls the build back (a
+   failure of the build, not of the model). Such failures add up across passing tests (30, then 60 minutes, then
+   bad for a day) until the build passes a whole probation.
+6. **Prune:** only the running build and the one before it stay in `runtimes\`. The installer's own `llama\` and
+   `whisper\` folders are never deleted.
+
+Health shows each worker's builds (`Runtimes`: `whisper b5454 · llama b12728`) with the update's state in the hover:
+`ok`, `downloading b12728`, `b12728: waiting (gaming)`, `b12728 ready, waiting: a clip`, `switching to b12728`,
+`rolled back: <why> (again in 30 min)`, `bad: <why>`. A program outside the installer's layout (your own build) is
+left alone (`not managed (own path)`), and so is everything with `auto_update = false`. `worker.py update retry`
+also clears the builds marked bad.
 
 **Linux (`systemd --user`):** the same `worker.py` updates itself the same way. Run it as a user service with
 `Restart=always` (for example `RestartSec=5`): systemd starts the new file right after the exit with code 75. Keep
@@ -631,10 +681,12 @@ These are in `%LOCALAPPDATA%\sizeup-stt\state` (`state_dir`):
 | `llm-key` | the API key llama-server was last started with (only you can read it; `check` uses it) |
 | `children.json` | the pids of the servers the worker started: the next start ends one a worker that died left running |
 | `update.json` | the self-update: hashes marked bad, the swap not confirmed yet, the last update or rollback |
+| `runtimes.json` | llama.cpp's and whisper.cpp's active build, the one before, a switch not finished yet, failures and builds marked bad |
 | `logspool\` | `worker.log`'s lines waiting for the hub, gzipped batches (5 MB at most, the oldest deleted first) |
 
 Next to `worker.py`: `worker.py.prev` (the version before the last self-update, for a rollback) and, for a moment,
-`worker.py.new` (the version being checked).
+`worker.py.new` (the version being checked); `runtimes\` (llama.cpp's and whisper.cpp's builds the worker installed
+itself, two of each at most, and their downloads in progress).
 
 ## Logs (CloudWatch)
 
@@ -698,7 +750,7 @@ rollback) still starts with a newer one's keys; a known key with a bad value sto
 | `llm_stop_gaming_s` | auto | seconds of gaming before the worker stops its llama-server (its VRAM back to the game); 0 at once; unset: 60 for a model up to 6 GB (Qwen3-8B), 20 for a bigger one (Gemma-3-12B) |
 | `llm_timeout_s`, `llm_check_s`, `llm_fail_max` | 30, 10, 3 | per answer; health checks; failures in a row before no LLM until healthy |
 | `llm_no_think` | `true` | sends `enable_thinking: false` to the chat template (Qwen3); other templates ignore it |
-| `auto_update` | `true` | updates itself to the version the hub names (see [Updating](#updating)); `false`: never |
+| `auto_update` | `true` | updates itself to the version the hub names (see [Updating](#updating)), and llama.cpp and whisper.cpp to the builds that version pins ([Runtime updates](#runtime-updates-llamacpp-whispercpp)); `false`: never |
 | `log_ship` | `true` | `worker.log`'s lines to the hub too (see [Logs](#logs-cloudwatch)); `false`: they stay on the PC |
 | `managed_models` | `true` | runs the hub's [speech models](#speech-models) beside `whisper_server`; `false`: only `whisper_server` |
 | `models_dir` | `models` | the models' files go in `<models_dir>\\managed` |

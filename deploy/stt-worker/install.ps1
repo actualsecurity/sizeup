@@ -56,19 +56,19 @@ $PinsJson = @'
     },
     "worker_py": {
       "what": "worker.py (first install; it updates itself afterwards)",
-      "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/b1a190cc27dd0777404f58d71ecd9f9afcc0c2b2/deploy/stt-worker/worker.py",
-      "bytes": 245409,
-      "sha256": "30240EDAECBF54CD0AD6BC86A582D9C41492506189752E1A56F841CB909CA3E8"
+      "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/b1e3b0f90dc4bd93435c58c3cd5ab6c99d221a47/deploy/stt-worker/worker.py",
+      "bytes": 309899,
+      "sha256": "25198F06BDBD89CCDA0E488E0A84E3E099640E83581F7CC43D8AA25895EF3C79"
     },
     "llama_zip": {
-      "what": "llama.cpp b12359, CUDA 12.4 (llama-server.exe)",
-      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12359/llama-b12359-bin-win-cuda-12.4-x64.zip",
-      "bytes": 318976332,
-      "sha256": "E9C0ABF442E8339C06728366C1AD2C711332F9939C0C00603FB75D85FD44C914"
+      "what": "llama.cpp b12728, CUDA 12.4 (llama-server.exe; Qwen3-ASR's audio needs b12643 or later)",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12728/llama-b12728-bin-win-cuda-12.4-x64.zip",
+      "bytes": 358626875,
+      "sha256": "85B6E332ED7B40FD7A240AC7F32C4F1A29E9DDF6B52853925A215FDA23EF24B3"
     },
     "llama_cudart_zip": {
-      "what": "llama.cpp b12359, the CUDA 12.4 runtime",
-      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12359/cudart-llama-bin-win-cuda-12.4-x64.zip",
+      "what": "llama.cpp b12728, the CUDA 12.4 runtime",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12728/cudart-llama-bin-win-cuda-12.4-x64.zip",
       "bytes": 391443627,
       "sha256": "8C79A9B226DE4B3CACFD1F83D24F962D0773BE79F1E7B75C6AF4DED7E32AE1D6"
     },
@@ -671,7 +671,7 @@ function Invoke-Install {
     Install-Zips 'whisper' @($Art.whisper_zip) (Join-Path $D 'whisper') 'Release\whisper-server.exe' $keepWhisper
     Save-Pinned $Art.whisper_model (Join-Path $D 'models\ggml-large-v3-turbo-q5_0.bin')
     if ($withLlm) {
-        Step '5b/9 llama.cpp b12359 (CUDA) and Qwen3-8B'
+        Step '5b/9 llama.cpp b12728 (CUDA) and Qwen3-8B'
         Install-Zips 'llama' @($Art.llama_zip, $Art.llama_cudart_zip) (Join-Path $D 'llama') 'llama-server.exe' $keepLlama
         Save-Pinned $Art.qwen3_8b (Join-Path $D 'models\Qwen3-8B-Q4_K_M.gguf')
     }
@@ -758,7 +758,7 @@ function Invoke-Install {
     Say "  whisper.cpp b5454 CUDA   whisper\Release\whisper-server.exe   zip SHA-256 $($Art.whisper_zip.sha256)"
     Say "  model                    models\ggml-large-v3-turbo-q5_0.bin   SHA-256 $($Art.whisper_model.sha256)"
     if ($withLlm) {
-        Say "  llama.cpp b12359 CUDA    llama\llama-server.exe                zip SHA-256 $($Art.llama_zip.sha256), $($Art.llama_cudart_zip.sha256)"
+        Say "  llama.cpp b12728 CUDA    llama\llama-server.exe                zip SHA-256 $($Art.llama_zip.sha256), $($Art.llama_cudart_zip.sha256)"
         Say "  Qwen3-8B Q4_K_M          models\Qwen3-8B-Q4_K_M.gguf          SHA-256 $($Art.qwen3_8b.sha256)"
     }
     if ($keepWorker) { Say '  worker.py                kept (self-updated)' }

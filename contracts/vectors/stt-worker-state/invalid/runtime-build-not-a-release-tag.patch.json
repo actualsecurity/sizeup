@@ -1,0 +1,10 @@
+{
+  "base": "stt-worker-state/valid/gpu-worker-online.json",
+  "patch": [
+    {
+      "op": "add",
+      "path": "/runtimes",
+      "value": {"llama": {"build": "12728", "state": "ok"}}
+    }
+  ]
+}
