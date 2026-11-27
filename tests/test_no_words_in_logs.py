@@ -293,3 +293,54 @@ def test_the_models_context_routing_and_discard_paths(tmp_path, logs):
         hub.close()
         fake.close()
     logs.check()
+
+
+def test_the_challenger_path(tmp_path, logs, monkeypatch):
+    """A challenger's run (#869): the champion's and the challenger's words, the context, its scoring and a failure on
+    its thread: none of it in a log line (the error's type only)."""
+    from sizeup import sttpool
+    from tests.test_channels import AWS_TEXT
+    from tests.test_cloud import call
+    from tests.test_stt_engine_select import _set
+    q8, qwen = "large-v3-turbo-q8_0", "qwen3-asr-1.7b-q8_0"
+    monkeypatch.setattr(sttpool, "CHALL_QUIET_S", 0.0)
+
+    class ModelWorker(FakeWorker):
+        def post(self, path, body):
+            if path.endswith(("/claim", "/hello", "/state")):
+                body = dict(body, models=["large-v3-turbo-q5_0", qwen, q8] if path.endswith("/claim")
+                            else body.get("models"), caps=["challenger"])
+                if path.endswith("/claim"):
+                    body["try_loaded"] = [q8]                       # (its try server for the challenger)
+            elif path.endswith("/complete") and self.jobs:
+                job = self.jobs[-1]
+                body = dict(body, model=job.get("model") or "large-v3-turbo-q5_0")
+                if job.get("challenger"):
+                    body["text"] = f"Ladder 31 {MARK} challenger words"
+            return call(self.url + path, "POST", body, token=self.token)
+
+    fake = FakeTranscribe(phrases={500: AWS_TEXT})
+    hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
+    w = None
+    try:
+        app = hub.app
+        _set(hub, "FG1", "auto")
+        app._pool_class = lambda item, key: LIVE
+        app.stt_choices.set("FG1", {"model": qwen, "challenger": q8, "pct": 100, "callsigns": [f"{MARK} Base"]})
+        token = app.hub.workers.add("gpu-1")
+        w = ModelWorker(hub.url, token, text=f"Engine 61 {MARK} on location").start()
+        assert wait(lambda: app.sttpool.ready_forced(URGENT)[0], 5)
+        send(hub, pending_event("FG1-41"))
+        assert wait(lambda: any(r["role"] == "challenger" for r in app.stt_runs.of("FG1-41")), 30)
+        import threading
+        ran = threading.Event()
+        app._chall_exec(lambda: (_ for _ in ()).throw(ValueError(f"{MARK} in an error")))
+        app._chall_exec(ran.set)                  # (the challenger thread runs them in turn)
+        assert ran.wait(10)
+        assert wait(lambda: "stt challenger: ValueError" in logs.text(), 10)
+    finally:
+        if w is not None:
+            w.close()
+        hub.close()
+        fake.close()
+    logs.check()

@@ -44,6 +44,8 @@ CONTEXT_MAX = 12
 CALLSIGNS_MAX = 8
 CALLSIGN = re.compile(r"[A-Za-z0-9][A-Za-z0-9 .'/-]{0,39}")
 WANT_MAX = 8
+FIELDS = ("model", "context", "callsigns", "challenger", "pct", "promoted", "rolled_back")
+PCT_DEFAULT = 10.0           # a challenger's share of its channel's clips
 # the GPU worker's local LLM (the intel lane's, sizeup/cloud/infer.py): models.json "llm_models" (the worker checks
 # it, downloads the GGUF and swaps llama-server; README "The local LLM"). The hub names one (Settings > Station >
 # Health, beside the LLM's status); DEFAULT_LLM is today's 8B: the 4B only once an admin picks it (intel's cue gate first)
@@ -147,13 +149,20 @@ class Choices:
         self.llms = load_llms() if llms is None else llms
         self._lock = threading.RLock()        # (set() and promote() call their before hook holding it)
         self._cache: tuple[float, dict] = (0.0, {})
+        self.service_of: Callable[[str], str] = lambda key: ""    # a channel key's service (the hub's: _key_service)
 
     def settings(self) -> dict:
-        """{channel key: {model?, context?, callsigns?}} as stored (read at most once a second: asked per clip)."""
+        """{channel key: {model?, context?, callsigns?, ...}} as stored (read at most once a second: asked per clip)."""
         now = self.clock()
         at, s = self._cache
         if at and now - at < 1.0:
             return s
+        s = self._read()
+        self._cache = (now, s)
+        return s
+
+    def _read(self) -> dict:
+        """The choices as the store has them now (the writers' read, under the lock: never the cache)."""
         try:
             raw = json.loads(self.mdb.get(META, "") or "{}")
         except ValueError:
@@ -161,8 +170,7 @@ class Choices:
         s = {}
         for k, v in (raw.items() if isinstance(raw, dict) else ()):
             if isinstance(k, str) and isinstance(v, dict):
-                s[k] = {f: v[f] for f in ("model", "context", "callsigns") if f in v}
-        self._cache = (now, s)
+                s[k] = {f: v[f] for f in FIELDS if f in v}
         return s
 
     def default_for(self, service: str) -> str:
@@ -192,6 +200,69 @@ class Choices:
         """The catalog's models this channel's context is off for (the job's `plain`: whichever model decodes it)."""
         return [m for m in self.catalog if not self.context_on(key, m)]
 
+    def challenger_for(self, key: str) -> tuple[str, float] | None:
+        """(the challenger model, its share in %) a channel's clips are sampled for, None for none."""
+        v = self.settings().get(key) or {}
+        m = v.get("challenger")
+        if not isinstance(m, str) or m not in self.catalog:
+            return None
+        pct = v.get("pct")
+        return m, float(pct) if isinstance(pct, (int, float)) and not isinstance(pct, bool) else PCT_DEFAULT
+
+    def promoted(self, key: str) -> dict:
+        v = (self.settings().get(key) or {}).get("promoted")
+        return dict(v) if isinstance(v, dict) else {}
+
+    def _write(self, cur: dict) -> None:
+        self.mdb.put(META, json.dumps(cur, separators=(",", ":"), sort_keys=True))
+        self._cache = (0.0, {})
+
+    def promote(self, key: str, service: str | None = None, why: str = "", expect: tuple | None = None,
+                before: Callable[[str, str, str], None] | None = None) -> tuple[dict, dict]:
+        """The channel's challenger becomes its model; the model it replaces becomes the challenger (at the same share),
+        so the two go on being compared: if the new one scores worse over the samples since (sttscore.should_roll_back),
+        roll_back() puts the old one back. (old, new). ValueError with no challenger, or when the pair isn't expect
+        (champion, challenger: the one the evidence was for). before(key, from, to): under the lock, before it is
+        stored (intel told first: HubApp.stt_champion_change)."""
+        with self._lock:
+            cur = dict(self._read())
+            key = self.key_of(key)
+            old = dict(cur.get(key) or {})
+            m = old.get("challenger")
+            ch = (m, float(old.get("pct") or PCT_DEFAULT)) if isinstance(m, str) and m in self.catalog else None
+            if ch is None:
+                raise ValueError("no challenger on this channel")
+            was = old.get("model") if old.get("model") in self.catalog else \
+                self.default_for(self.service_of(key) if service is None else service)
+            if expect is not None and (was, ch[0]) != tuple(expect):
+                raise ValueError("the channel's models changed meanwhile: look at the evidence again")
+            if before is not None:
+                before(key, was, ch[0])
+            new = dict(old, model=ch[0], challenger=was, promoted={"from": was, "to": ch[0], "at": self.clock(),
+                                                                   **({"why": why[:80]} if why else {})})
+            cur[key] = new
+            self._write(cur)
+        return old, new
+
+    def roll_back(self, key: str, why: str, expect_to: str | None = None,
+                  before: Callable[[str, str, str], None] | None = None) -> tuple[dict, dict] | None:
+        """A promotion undone: the model it replaced is the channel's again, the challenger cleared (the rolled-back
+        model isn't sampled again until an admin says so). None when nothing was promoted."""
+        with self._lock:
+            cur = dict(self._read())
+            old = dict(cur.get(key) or {})
+            p = old.get("promoted") if isinstance(old.get("promoted"), dict) else None
+            if not p or p.get("from") not in self.catalog or (expect_to is not None and p.get("to") != expect_to):
+                return None
+            if before is not None:
+                before(key, str(p.get("to") or ""), str(p["from"]))
+            new = {k: v for k, v in old.items() if k not in ("promoted", "challenger", "pct")}
+            new["model"] = p["from"]
+            new["rolled_back"] = {"from": p.get("to"), "at": self.clock(), "why": why[:120]}
+            cur[key] = new
+            self._write(cur)
+        return old, new
+
     def callsigns(self, key: str) -> list[str]:
         v = (self.settings().get(key) or {}).get("callsigns")
         return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
@@ -213,19 +284,42 @@ class Choices:
                     out.append(m)
         return out[:WANT_MAX]
 
-    def set(self, key: str, body: dict, before: Callable[[str, dict, dict], None] | None = None) -> tuple[dict, dict]:
-        """One channel's {model?, context?, callsigns?} (null or "" a field back to its default). (old, new). ValueError.
-        before(key, old, new): called once every field is checked, before it is stored (a champion change: intel told
-        first, HubApp.stt_champion_change)."""
+    def tries(self, services: dict | None = None, want: list | None = None) -> list[str]:
+        """The challengers (#869): the models a worker loads only on demand, never in its resident plan (want): only while
+        idle, only beside the champions AND the LLM, unloaded under pressure (the worker's stt_models.try). Fire's
+        first. One that is also a champion (or the primary) is kept: the worker runs it on a separate try instance of
+        the same files, never on its live server."""
+        services = services or {}
+        want = self.want(services) if want is None else want
+        order = {s: i for i, s in enumerate(SERVICE_ORDER)}
+        chall = sorted(((order.get(services.get(k, ""), len(order)), k, v.get("challenger"))
+                        for k, v in self.settings().items() if v.get("challenger")), key=lambda x: (x[0], x[1]))
+        out: list[str] = []
+        for _o, _k, m in chall:
+            if isinstance(m, str) and m in self.catalog and m not in out:
+                out.append(m)
+        return out[:WANT_MAX]
+
+    @staticmethod
+    def key_of(key) -> str:
+        """A channel key as kept: a label or a talkgroup key; the county's talkgroups as "tg:307", as routed.
+        ValueError."""
         from sizeup import channels
         from sizeup import sourcekeys
         if not isinstance(key, str) or not channels.KEY.fullmatch(key):
             raise ValueError("key: a channel label or a talkgroup key")
         got = sourcekeys.parse(key) if key.startswith("p25:") else None
         if got is not None and got[0] == sourcekeys.COUNTY:
-            key = channels.tg_key(got[1])              # (the county's talkgroups are kept as "tg:307", as routed)
+            key = channels.tg_key(got[1])
+        return key
+
+    def set(self, key: str, body: dict, before: Callable[[str, dict, dict], None] | None = None) -> tuple[dict, dict]:
+        """One channel's {model?, context?, callsigns?, challenger?, pct?} (null or "" a field back to its default).
+        (old, new). ValueError. before(key, old, new): called once every field is checked, before it is stored (a
+        champion change: intel told first, HubApp.stt_champion_change)."""
+        key = self.key_of(key)
         with self._lock:
-            cur = dict(self.settings())
+            cur = dict(self._read())
             old = dict(cur.get(key) or {})
             new = dict(old)
             if "model" in body:
@@ -250,14 +344,34 @@ class Choices:
                     new["callsigns"] = cs
                 else:
                     new.pop("callsigns", None)
+            if "challenger" in body:
+                c = body.get("challenger")
+                if c in (None, ""):
+                    for f in ("challenger", "pct"):
+                        new.pop(f, None)
+                elif not isinstance(c, str) or c not in self.catalog:
+                    raise ValueError(f"challenger: one of {', '.join(self.catalog)}")
+                else:
+                    new["challenger"] = c
+            if "pct" in body:
+                v = body.get("pct")
+                if v in (None, ""):
+                    new.pop("pct", None)
+                elif isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 < v <= 100:
+                    raise ValueError("pct: a share of the channel's clips, above 0 and at most 100")
+                else:
+                    new["pct"] = float(v)
+            if new.get("challenger") and new.get("challenger") == (new.get("model") or old.get("model")):
+                raise ValueError("challenger: not the channel's own model")
+            if new.get("model") != old.get("model") or new.get("challenger") != old.get("challenger"):
+                new.pop("promoted", None)            # (a promotion is watched only while its pair stands)
             if before is not None and old != new:
                 before(key, old, new)
             if new:
                 cur[key] = new
             else:
                 cur.pop(key, None)
-            self.mdb.put(META, json.dumps(cur, separators=(",", ":"), sort_keys=True))
-            self._cache = (0.0, {})
+            self._write(cur)
         return old, new
 
     # -- the workers' local LLM: which model, and who gives way on VRAM ---------------------------------------------

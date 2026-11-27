@@ -20,6 +20,14 @@ one for longer than its class allows, and nothing is ever dropped.
                 hub's latency guard decides that: avoid); pin: that worker only; bg (Auto · background, the catch-up):
                 after every other job, and on a GPU worker only while it holds nothing, no other job waits and no
                 priority clip came in the last BG_QUIET_S (#878: priority work never waits behind it)
+    challengers a challenger model's shadow run (#869, sizeup/sttscore.py; the hub's _challenge_*): chall jobs rank
+                below everything (background too), go only to a GPU worker that has the model loaded (its claim's
+                models), holds nothing, has no LLM work held or queued anywhere (llm_busy) and no other job waits, and
+                only CHALL_QUIET_S after any other clip came in; at most CHALL_CAP_CHANNEL_H per channel and
+                CHALL_CAP_WORKER_H per worker an hour. Any other job (priority, normal, background) or LLM work takes
+                them back at once (preempt_challengers: the worker's watch says so and it stops the decode): a worker
+                holding only a challenger is free for everything else. Never a worker's failure or cooldown, never its
+                pre-alert speed record, never in the pool's numbers (stats' challengers), never AWS
     results     complete() from the lease's holder while the lease is live: on_done(job, result). Late (the lease
                 gone): refused and counted, never applied
     numbers     done, fallbacks by reason, refused late answers, per worker; queued -> done p50/p90 (stats(), Health)
@@ -45,6 +53,16 @@ BUDGETS: dict[float, tuple[float, float, float]] = {
     URGENT: (2.5, 4.0, 8.0), HIGH: (2.5, 4.0, 8.0), CONTEXT_FALLBACK: (2.5, 4.0, 8.0), CONTEXT: (2.5, 4.0, 8.0),
     LIVE: (5.0, 10.0, 20.0), RERUN: (10.0, 15.0, 45.0), LOW: (30.0, 20.0, 60.0), CATCHUP: (120.0, 20.0, 20.0)}
 # (a catch-up clip keeps the catch-up's own bounds on any worker: one greedy pass, 20 s at most, sttcatchup's clip cap)
+# challengers (#869): (wait for a claim, first lease, lease cap); a lease renewed by the worker, taken back at once
+CHALL_BUDGET = (600.0, 15.0, 60.0)
+CHALL_QUIET_S = 10.0           # a challenger only this long after any other clip came in (no back-to-back preempts)
+CHALL_MAX_S = 30.0             # a clip longer than this isn't sampled (it would hold the GPU)
+CHALL_CAP_CHANNEL_H = 30       # challenger runs an hour per channel at most ...
+CHALL_CAP_WORKER_H = 60        # ... and per worker
+CHALL_QUEUE_MAX = 20           # challengers waiting at most (a sample less beyond)
+CHALL_CAP = "challenger"       # a worker's caps word: it takes challenger jobs (greedy, the watch, try models: #964)
+CHALL_SAME_CAP = "challenger_same_model"   # ... and runs one for a model it serves live on a separate try instance of
+                                           # the same files (never on the live server: whisper-server can't abort)
 PER_AUDIO_S = 0.25        # each lease (and cap) this much longer per second of audio (never a pre-alert class's: its
                           # deadline is absolute, so a long page can't hold a dead worker's clip for longer)
 READY_S = 15.0            # a worker seen this recently (or in a claim now) is ready ...
@@ -103,6 +121,8 @@ def _budgets(job) -> tuple[float, float, float]:
     station's whisper decodes in seconds to tens of seconds, never a pre-alert lease)."""
     if job.extra.get("station_only"):
         return float(job.extra.get("claim_wait") or BUDGETS[LOW][0]), BUDGETS[LOW][1], BUDGETS[LOW][2]
+    if job.chall:                                    # (a challenger: CHALL_BUDGET, never a class's)
+        return CHALL_BUDGET
     if job.norm:                                     # (Auto · normal: its start budget to be claimed, a LOW lease)
         return float(job.extra.get("claim_wait") or BUDGETS[LOW][0]), BUDGETS[LOW][1], BUDGETS[LOW][2]
     return BUDGETS[job.cls]
@@ -110,8 +130,8 @@ def _budgets(job) -> tuple[float, float, float]:
 
 def rank(job) -> int:
     """Where a job queues (#896 + Auto · normal): priority work first (0), Auto · normal next (1), background and the
-    catch-up last (2); then by class, then oldest first."""
-    return 2 if job.bg else 1 if job.norm else 0
+    catch-up (2), challengers last of all (3, #869); then by class, then oldest first."""
+    return 3 if getattr(job, "chall", False) else 2 if job.bg else 1 if job.norm else 0
 
 
 def priority(job) -> bool:
@@ -122,7 +142,7 @@ def priority(job) -> bool:
 
 
 def _extra(job) -> float:
-    if job.extra.get("station_only") or job.norm:
+    if job.extra.get("station_only") or job.norm or job.chall:
         return PER_AUDIO_S * max(0.0, job.seconds)
     return 0.0 if job.cls in FAST_CLASSES or job.cls == CATCHUP else PER_AUDIO_S * max(0.0, job.seconds)
 PENDING_MODEL = "gpu-worker"   # a row's model while a worker has it (the UI: "Transcribing (GPU)")
@@ -134,6 +154,11 @@ def model_label(model: str, worker: str = "", kind: str = "gpu") -> str:
     if kind == "station":
         return f"{name} (station {worker.removeprefix('station:')})"
     return f"{name} (GPU {worker})" if worker else f"{name} (GPU)"
+
+
+def model_id(model: str) -> str:
+    """A worker's model as a catalog id ("ggml-large-v3-turbo-q5_0.bin" -> "large-v3-turbo-q5_0")."""
+    return str(model or "").rsplit("/", 1)[-1].rsplit("\\", 1)[-1].removeprefix("ggml-").removesuffix(".bin")
 
 
 def _short(wid: str) -> str:
@@ -182,6 +207,8 @@ class Job:
     bg: bool = False                            # background work (Auto · background, the catch-up): after every other
                                                 # job, and on a GPU only while no priority work is there (#878)
     avoid: frozenset = frozenset()              # workers it must not go to (the hub's latency guard)
+    chall: bool = False                         # a challenger's shadow run (#869): its model only, last of all, taken
+                                                # back by any other work (preempt_challengers); never the text of record
     model: str = ""                             # the catalog model its channel uses (sizeup/sttmodels.py): a worker that
                                                 # has it loaded first; any other decodes it on its own
     context: list = field(default_factory=list)   # a llama-asr model's context (sttmodels.context_list)
@@ -193,7 +220,11 @@ class Job:
         return {"lease": self.lease, "id": self.id, "kind": self.kind, "channel": self.channel,
                 "class": class_key(self.cls), "prompt": self.prompt, "seconds": round(self.seconds, 2),
                 "lease_s": round(max(0.0, self.expires - (self.claimed_at or 0.0)), 1), "cap_at": self.cap_at,
-                "fast": self.cls in FAST_CLASSES or self.cls == CATCHUP or self.extra.get("kind") == "station",
+                "fast": not self.chall and (self.cls in FAST_CLASSES or self.cls == CATCHUP
+                                            or self.extra.get("kind") == "station"),
+                # a challenger (#869): one greedy pass on its model only, never the LLM's preemption (the worker's
+                # "fast" is a pre-alert's), stopped when the hub's watch says it was taken back
+                **({"challenger": True, "greedy": True} if self.chall else {}),
                 "audio": f"/api/station/stt/jobs/{self.lease}/audio",
                 **({"model": self.model} if self.model else {}),
                 **({"context": list(self.context)} if self.context else {}),
@@ -225,6 +256,8 @@ class Worker:
     lost: int = 0
     last_job: float | None = None
     leases: set = field(default_factory=set)
+    caps: frozenset = frozenset()               # what it says it can do: "challenger" (#869: watch, greedy, try models)
+    try_models: frozenset = frozenset()         # its try instances that answer now (#869: try_loaded / models.stt_try)
     models: list = field(default_factory=list)  # a GPU worker's models loaded now: its whisper_server's, then the
                                                 # catalog's that answer (its claim and heartbeat say)
     stt_state: dict = field(default_factory=dict)   # each model it was asked for: ready, downloading, no room ...
@@ -250,6 +283,13 @@ class Pool:
         pool's own switch (Settings), which a channel's engine choice never overrides (its class switches it does)."""
         self.enabled, self.clock, self.log, self.allowed, self.on = enabled, clock, log, allowed, on
         self._prio_at = 0.0                       # the last priority clip (not background) that came in
+        self._any_at = 0.0                        # the last clip of any kind (not a challenger) that came in
+        self.llm_busy: Callable[[str], bool] = lambda wid: False   # LLM work held by this worker or queued (the hub's
+                                                  # infer lane, read without its lock): no challenger meanwhile
+        self.challenges = {"done": 0, "skipped": 0, "preempted": 0}   # challengers (never in the numbers below)
+        self.resident: frozenset = frozenset()     # the champions (the hub's want): models live traffic decodes on;
+                                                  # a challenger never on one (its server decodes one clip at a time)
+        self._chall_runs: deque = deque()         # (at, channel, worker) of each challenger leased: the hourly caps
         self._cv = threading.Condition()
         self._queue: list[Job] = []
         self._leases: dict[str, Job] = {}
@@ -319,7 +359,10 @@ class Pool:
         on the job (extra["fell"]): a catch-up clip's lost lease is a failed try, nobody taking it is none."""
         self._open.discard(job.id)
         job.extra["fell"] = reason
-        self.fallbacks[reason] = self.fallbacks.get(reason, 0) + 1
+        if job.chall:                             # (a sample less: never in the pool's own numbers)
+            self.challenges["preempted" if reason == "preempted" else "skipped"] += 1
+        else:
+            self.fallbacks[reason] = self.fallbacks.get(reason, 0) + 1
         with self._fb_cv:
             self._fb_q.append((job, why))
             self._fb_cv.notify()
@@ -340,7 +383,8 @@ class Pool:
     def seen(self, wid: str, state: str | None = None, model: str | None = None, gpu: dict | None = None,
              version: str | None = None, kind: str | None = None, load: dict | None = None,
              update: dict | None = None, keep_awake: dict | None = None, reason: str | None = None,
-             models: list | None = None, stt_state: dict | None = None) -> Worker:
+             models: list | None = None, stt_state: dict | None = None, caps: list | None = None,
+             try_models: list | None = None) -> Worker:
         """A worker's request (hello, state, claim): its state and when it was last seen. A worker that is no longer
         online hands its pre-alert and Auto · normal jobs back at once (a normal clip has the stations and AWS still
         ahead of it; the rest run to their lease: it may finish them). None: a worker
@@ -361,9 +405,9 @@ class Pool:
                 if state != "online" and w.state == "online":
                     for lease in list(w.leases):
                         job = self._leases.get(lease)
-                        if job is not None and (job.cls in FAST_CLASSES or job.norm):
+                        if job is not None and (job.cls in FAST_CLASSES or job.norm or job.chall):
                             self._end_lease(job)
-                            self._fall(job, "released", f"GPU worker {wid} went {state}")
+                            self._fall(job, "preempted" if job.chall else "released", f"GPU worker {wid} went {state}")
                 w.state = state
             if model is not None:
                 w.model = str(model)[:80]
@@ -377,6 +421,10 @@ class Pool:
                 w.bye = reason == "shutdown"
             if isinstance(models, list):
                 w.models = [str(m)[:48] for m in models[:16] if isinstance(m, str)]
+            if isinstance(caps, list):
+                w.caps = frozenset(str(c)[:24] for c in caps[:16] if isinstance(c, str))
+            if isinstance(try_models, list):
+                w.try_models = frozenset(str(m)[:48] for m in try_models[:16] if isinstance(m, str))
             if isinstance(stt_state, dict):
                 w.stt_state = {str(k)[:48]: str(v)[:60] for k, v in list(stt_state.items())[:16]}
             if isinstance(gpu, dict):
@@ -440,7 +488,7 @@ class Pool:
     def _fast_ok(self, w: Worker, now: float) -> bool:
         """May this worker have a pre-alert clip now: idle (in a claim, holding nothing), and quick on them lately, or
         slow but due a probe (PROBE_S since its last slow one or probe)."""
-        if w.polling <= 0 or w.leases or not self._ready(w, now):
+        if not self._free(w) or not self._ready(w, now):
             return False
         s = self._fast_s(w, now)
         if s is None or s <= PREALERT_MAX_SERVICE_S:
@@ -468,8 +516,7 @@ class Pool:
                 "gpu_idle_n": gpu_idle_n, "gpu_ready": gpu_ready, "gpu_bg": bool(gpu_bg)}
 
     def _gpu_idle(self, now: float) -> bool:
-        return any(w.kind == "gpu" and w.polling > 0 and not w.leases and self._ready(w, now)
-                   for w in self.workers.values())
+        return any(w.kind == "gpu" and self._free(w) and self._ready(w, now) for w in self.workers.values())
 
     def _on(self) -> bool:
         try:
@@ -486,20 +533,29 @@ class Pool:
     def _holds_bg(self, w: Worker) -> bool:
         """(lock held) This worker holds background or Auto · normal work now (it decodes one clip at a time): busy for a
         priority clip (it goes on, AWS), never one queued behind it."""
-        return any(rank(self._leases[lease]) > 0 for lease in w.leases if lease in self._leases)
+        return any(rank(self._leases[lease]) in (1, 2) for lease in w.leases if lease in self._leases)
+
+    def _live(self, w: Worker) -> list:
+        """(lock held) This worker's leases other than a challenger's (one taken back the moment other work comes)."""
+        return [lease for lease in w.leases if not getattr(self._leases.get(lease), "chall", False)]
+
+    def _free(self, w: Worker) -> bool:
+        """(lock held) Free for a clip now: in a claim and holding nothing, or holding only a challenger (#869: taken
+        back at once when the clip is queued; the worker is back in a claim a moment later)."""
+        return not self._live(w) and (w.polling > 0 or bool(w.leases))
 
     def _bg_free(self, w: Worker, now: float, seconds: float | None = None) -> bool:
         """(lock held) May this GPU worker take background work now (#878): it holds nothing and is in a claim, no
         other job waits, no priority clip came in the last BG_QUIET_S, and the clip is short (it is back at once)."""
-        return (self._ready(w, now) and w.polling > 0 and not w.leases and now - self._prio_at >= BG_QUIET_S
-                and not any(not j.bg and not j.extra.get("station_only") for j in self._queue)
+        return (self._ready(w, now) and self._free(w) and now - self._prio_at >= BG_QUIET_S
+                and not any(not j.bg and not j.chall and not j.extra.get("station_only") for j in self._queue)
                 and (seconds is None or seconds <= BG_GPU_MAX_S))
 
     def _norm_free(self, w: Worker, now: float) -> bool:
         """(lock held) May this GPU worker start Auto · normal work now: it holds nothing and is in a claim, no priority
         job it could take waits (it goes first), and no priority clip came in the last NORM_QUIET_S (a page right behind a normal
         decode would wait for it: a worker decodes one clip at a time)."""
-        return (self._ready(w, now) and w.polling > 0 and not w.leases and now - self._prio_at >= NORM_QUIET_S
+        return (self._ready(w, now) and self._free(w) and now - self._prio_at >= NORM_QUIET_S
                 and not any(priority(j) and self._fits(w, j, now) for j in self._queue))
 
     def _fits(self, w: Worker, j: Job, now: float) -> bool:
@@ -509,6 +565,8 @@ class Pool:
         A pinned job: its worker only; never a worker in its avoid."""
         if (j.pin and w.id != j.pin) or w.id in j.avoid or (j.extra.get("station_only") and w.kind != "station"):
             return False
+        if j.chall:
+            return self._chall_ok(w, j, now)
         if j.bg and w.kind == "gpu":             # (#896: stations first: a GPU only once no station could take it)
             return self._bg_free(w, now, j.seconds) and (bool(j.pin) or bool(j.extra.get("overflow"))
                                                          or now - j.queued_at >= BG_STATION_FIRST_S
@@ -528,14 +586,97 @@ class Pool:
         if j.norm:                                 # (Auto · normal: after the priority work, leased like LOW: a free GPU
             return self._norm_free(w, now)         # with no priority work waiting or just in)
         if j.cls in FAST_CLASSES and j.forced:     # (the pre-alert speed gate too; AWS out: any free worker)
-            return w.polling > 0 and not w.leases and self._ready(w, now) and (
+            return self._free(w) and self._ready(w, now) and (
                 bool(j.extra.get("queue_ok")) or self._fast_ok(w, now))
         return j.cls not in FAST_CLASSES or self._fast_ok(w, now)
+
+    def _chall_ok(self, w: Worker, j: Job, now: float) -> bool:
+        """(lock held) A challenger on this worker now (#869): a GPU worker with its model loaded, in a claim and holding
+        nothing, no LLM work held or queued, no other job waiting, no other clip for CHALL_QUIET_S, and under the
+        hourly caps (its channel's, the worker's)."""
+        if w.kind != "gpu" or w.polling <= 0 or w.leases or not self._ready(w, now):
+            return False
+        if CHALL_CAP not in w.caps or not self._chall_model_ok(w, j.model):
+            return False
+        if now - self._any_at < CHALL_QUIET_S or any(not o.chall and not o.extra.get("station_only")
+                                                     for o in self._queue):
+            return False
+        if not self._chall_room(j.channel, w.id, now):
+            return False
+        try:
+            return not self.llm_busy(w.id)
+        except Exception:  # noqa: BLE001 - can't tell: no challenger
+            return False
+
+    def _chall_model_ok(self, w: Worker, model: str) -> bool:
+        """(lock held) A challenger never on a SERVER live traffic decodes on (whisper-server can't abort a decode): only
+        on a try server that answers now (the worker's try_loaded: #964 runs challengers there alone), and for a model
+        this worker serves live (its primary, a champion: resident) only when it says CHALL_SAME_CAP (that try server is
+        a separate instance of the same files)."""
+        if model not in w.try_models:
+            return False
+        return CHALL_SAME_CAP in w.caps or (model not in self.resident and model != model_id(w.model))
+
+    def _chall_room(self, channel: str, wid: str = "", now: float | None = None) -> bool:
+        """(lock held) Under the hourly caps: CHALL_CAP_CHANNEL_H for the channel, CHALL_CAP_WORKER_H for the worker."""
+        now = self.clock() if now is None else now
+        while self._chall_runs and now - self._chall_runs[0][0] > 3600.0:
+            self._chall_runs.popleft()
+        return (sum(1 for _a, c, _w in self._chall_runs if c == channel) < CHALL_CAP_CHANNEL_H
+                and (not wid or sum(1 for _a, _c, x in self._chall_runs if x == wid) < CHALL_CAP_WORKER_H))
+
+    def chall_ready(self, channel: str, model: str, seconds: float, now: float | None = None) -> tuple[bool, str]:
+        """May a challenger of this channel's clip be queued now (#869): the pool on, a GPU worker with the model loaded,
+        the clip short enough, under the channel's hourly cap, not too many waiting. (yes, why not)."""
+        now = self.clock() if now is None else now
+        if not self._on() or self._stop.is_set():
+            return False, "pool off"
+        if seconds <= 0 or seconds > CHALL_MAX_S:
+            return False, "too long"
+        with self._cv:
+            if not any(w.kind == "gpu" and self._ready(w, now) and CHALL_CAP in w.caps
+                       and self._chall_model_ok(w, model) for w in self.workers.values()):
+                return False, "no worker has the model loaded"
+            if not self._chall_room(channel, "", now):
+                return False, "its hourly cap"
+            if sum(1 for j in self._queue if j.chall) >= CHALL_QUEUE_MAX:
+                return False, "challengers wait already"
+        return True, ""
+
+    def preempt_challengers(self, why: str) -> int:
+        """Every challenger leased now taken back (#869: any other work came, LLM work included): its worker's watch says
+        so at once and it stops the decode; never its failure. How many."""
+        with self._cv:
+            n = self._preempt_locked(why)
+            if n:
+                self._cv.notify_all()
+        return n
+
+    def _preempt_locked(self, why: str) -> int:
+        n = 0
+        for job in [j for j in self._leases.values() if j.chall]:
+            self._end_lease(job)
+            self._fall(job, "preempted", why)
+            n += 1
+        return n
+
+    def watch(self, wid: str, lease: str, wait: float = 20.0) -> bool:
+        """A challenger's worker asks whether its lease still stands (a long poll, at most CLAIM_WAIT_MAX_S): False at once
+        when it was taken back (preempted, run out), True after the wait."""
+        end = time.monotonic() + max(0.0, min(CLAIM_WAIT_MAX_S, float(wait)))
+        with self._cv:
+            while True:
+                if self._held(wid, lease) is None:
+                    return False
+                left = end - time.monotonic()
+                if left <= 0 or self._stop.is_set():
+                    return True
+                self._cv.wait(min(left, 1.0))
 
     def _model_idle(self, j: Job, w: Worker, now: float) -> bool:
         """Another GPU worker has this job's model loaded and could take the job now (in a claim, room for a lease;
         for a pre-alert clip: quick and holding nothing)."""
-        return any(o is not w and o.kind == "gpu" and j.model in o.models and o.polling > 0 and self._ready(o, now)
+        return any(o is not w and o.kind == "gpu" and j.model in o.models and self._free(o) and self._ready(o, now)
                    and o.id not in j.avoid and (not j.pin or o.id == j.pin) and not (priority(j) and self._holds_bg(o))
                    and len(o.leases) < MAX_LEASES and (j.cls not in FAST_CLASSES or self._fast_ok(o, now))
                    for o in self.workers.values())
@@ -564,7 +705,7 @@ class Pool:
             if cls in FAST_CLASSES:
                 # a pre-alert clip: only to a worker idle now (in a claim: never one busy on a catch-up clip), and only
                 # while the workers are quick on these (else AWS, which answers them in seconds)
-                idle = [w for w in ready if w.polling > 0 and not w.leases]
+                idle = [w for w in ready if self._free(w)]
                 if not idle:
                     return False, "no worker idle now"
                 if any(j.cls in FAST_CLASSES and priority(j) for j in self._queue):
@@ -573,10 +714,10 @@ class Pool:
                     svc = min(self._fast_s(w, now) or 0.0 for w in idle)
                     return False, f"slow on pre-alert clips lately ({svc:.1f} s)"
                 return True, ""
-            if any(w.polling > 0 and len(w.leases) < MAX_LEASES for w in ready) and \
+            if any(self._free(w) or (w.polling > 0 and len(self._live(w)) < MAX_LEASES) for w in ready) and \
                     not any(j.cls <= cls and priority(j) for j in self._queue):
                 return True, ""                    # a worker in a claim now and nothing ahead: it takes it at once
-            # (the priority work ahead of it: Auto · normal and background work never is, it yields)
+            # (the priority work ahead of it: Auto · normal, background work and challengers never are, they yield)
             ahead = sum(1 for j in self._queue if j.cls <= cls and priority(j)) + sum(
                 1 for j in self._leases.values() if priority(j))
             est = ahead * self._service_s() / len(ready)
@@ -620,10 +761,10 @@ class Pool:
                 if st:
                     return True, ""
                 return False, "busy with priority work" if gpu else "no worker free"
-            idle = [w for w in ready if w.polling > 0 and not w.leases]
+            idle = [w for w in ready if self._free(w)]
 
             def busy_why(w: Worker) -> str:
-                held = [self._leases.get(lease) for lease in w.leases]
+                held = [self._leases.get(lease) for lease in self._live(w)]
                 tier = (" (background)" if held and all(j is not None and j.bg for j in held) else
                         " (normal)" if held and all(j is not None and rank(j) > 0 for j in held) else "")
                 return f"{_short(w.id)} busy{tier}"
@@ -648,7 +789,7 @@ class Pool:
             if any(w in idle for w in free) and not any(priority(j) and j.cls <= cls for j in self._queue):
                 return True, ""
             ahead = sum(1 for j in self._queue if priority(j) and j.cls <= cls) + sum(
-                1 for w in free for _lease in w.leases)
+                1 for w in free for _lease in self._live(w))
             est = ahead * self._service_s() / len(free)
         if est > BUDGETS[cls][0]:
             return False, f"busy (about {est:.0f} s of work ahead)"
@@ -714,7 +855,7 @@ class Pool:
             ids = {w.id for w in ready}
             ahead = sum(1 for j in self._queue if rank(j) <= 1 and not j.extra.get("station_only")
                         and (not j.pin or j.pin in ids) and not ids <= set(j.avoid))
-            ahead += sum(len(w.leases) for w in ready)
+            ahead += sum(len(self._live(w)) for w in ready)
             est = ahead * self._service_s(gpu=True) / len(ready)
         if est > budget:
             return False, f"GPU busy (about {est:.0f} s ahead)", round(est, 1)
@@ -736,7 +877,9 @@ class Pool:
     def submit(self, job: Job) -> bool:
         """Queued (True), or not taken: the pool not ready for its class, or the clip already open here. The caller
         goes its own way on False; on True exactly one of on_done / on_fallback follows."""
-        if job.norm and job.forced:               # (Auto · normal: placed already, norm_place / bg_place)
+        if job.chall:                              # (a challenger: chall_ready said so; its own checks at the claim)
+            ok = self._on()
+        elif job.norm and job.forced:             # (Auto · normal: placed already, norm_place / bg_place)
             ok = self._on()
         elif job.forced or job.pin:
             ok, _why = self.ready_forced(job.cls, pin=job.pin, avoid=job.avoid, bg=job.bg, seconds=job.seconds,
@@ -753,6 +896,9 @@ class Pool:
             job.queued_at = self.clock()
             if priority(job):
                 self._prio_at = job.queued_at      # (background work keeps off a GPU for BG_QUIET_S after it)
+            if not job.chall and not job.extra.get("station_only"):   # (#869: any other work a GPU could take
+                self._any_at = job.queued_at                              # takes the challengers' GPUs back at once)
+                self._preempt_locked("other work came")
             self._queue.append(job)
             self._open.add(job.id)
             self.submitted += 1
@@ -772,12 +918,13 @@ class Pool:
         return min((j for j in self._queue if w is None or self._fits(w, j, now)), key=key, default=None)
 
     def claim(self, wid: str, wait: float = 0.0, state: str | None = None, model: str | None = None,
-              kind: str | None = None, load: dict | None = None, models: list | None = None) -> Job | None:
+              kind: str | None = None, load: dict | None = None, models: list | None = None,
+              caps: list | None = None, try_models: list | None = None) -> Job | None:
         """A worker's long poll: the best job (leased to it) or None after `wait`. Only an online worker gets one.
         models: the models it has loaded now (a job for one of them goes to it first: _fits)."""
         wait = max(0.0, min(CLAIM_WAIT_MAX_S, float(wait)))
         end = time.monotonic() + wait
-        w = self.seen(wid, state, model, kind=kind, load=load, models=models)
+        w = self.seen(wid, state, model, kind=kind, load=load, models=models, caps=caps, try_models=try_models)
         if w is None:
             return None
         with self._cv:
@@ -795,6 +942,8 @@ class Pool:
                             if job.cls in FAST_CLASSES and priority(job) and \
                                     (self._fast_s(w, now) or 0.0) > PREALERT_MAX_SERVICE_S:
                                 w.probe_at = now               # a slow worker's probe: the next one PROBE_S on
+                            if job.chall:
+                                self._chall_runs.append((now, job.channel, w.id))
                             return self._lease(job, w, now)
                     left = end - time.monotonic()
                     if left <= 0:
@@ -855,8 +1004,10 @@ class Pool:
         if w is not None:
             w.leases.discard(job.lease)
 
-    def _failed(self, wid: str, now: float) -> None:
+    def _failed(self, wid: str, now: float, job: Job | None = None) -> None:
         w = self.workers.get(wid)
+        if job is not None and job.chall:
+            return                                 # (#869: a challenger's trouble never cools a worker down)
         if w is not None:
             w.fails += 1
             w.lost += 1
@@ -877,17 +1028,23 @@ class Pool:
             self._end_lease(job, now - job.claimed_at if job.claimed_at is not None else None)
             self._open.discard(job.id)
             w = self.workers.get(wid)
-            if w is not None:
-                w.fails, w.cools, w.done = 0, 0, w.done + 1
-            self._done.append((now, job.cls, job.channel, now - job.queued_at,
-                               now - job.claimed_at if job.claimed_at is not None else None, wid,
-                               w.kind if w is not None else str(job.extra.get("kind") or "gpu")))
+            if job.chall:                          # (#869: never in the pool's numbers nor a worker's record)
+                self.challenges["done"] += 1
+            else:
+                if w is not None:
+                    w.fails, w.cools, w.done = 0, 0, w.done + 1
+                self._done.append((now, job.cls, job.channel, now - job.queued_at,
+                                   now - job.claimed_at if job.claimed_at is not None else None, wid,
+                                   w.kind if w is not None else str(job.extra.get("kind") or "gpu")))
             while self._done and now - self._done[0][0] > WINDOW_S:
                 self._done.popleft()
             self._cv.notify_all()
         try:
             job.on_done(job, result)
         except Exception as e:  # noqa: BLE001 - its text couldn't be applied: the next engine takes it (never dropped)
+            if job.chall:                          # (a sample less)
+                self.log(f"stt pool: {job.id}: a challenger's result not kept ({type(e).__name__})")
+                return True
             self.log(f"stt pool: {job.id}: the result couldn't be applied ({type(e).__name__}): falling back")
             with self._cv:
                 self.fallbacks["error"] += 1
@@ -902,7 +1059,7 @@ class Pool:
             if job is None:
                 return False
             self._end_lease(job)
-            self._failed(wid, self.clock())
+            self._failed(wid, self.clock(), job)
             self._fall(job, "released", f"GPU worker {wid} handed it back" + (f": {why[:120]}" if why else ""))
             self._cv.notify_all()
         return True
@@ -940,12 +1097,12 @@ class Pool:
                 w = self.workers.get(job.worker)
                 if now < job.expires and w is not None and now - w.seen >= LOST_S:
                     self._end_lease(job, lost=True)    # its worker unheard: gone (a crash, the network), not slow
-                    self._failed(job.worker, now)
+                    self._failed(job.worker, now, job)
                     self._fall(job, "lease", f"GPU worker {job.worker}: no word for {now - w.seen:.0f} s")
                     n += 1
                 elif now >= job.expires:
                     self._end_lease(job, lost=True)
-                    self._failed(job.worker, now)
+                    self._failed(job.worker, now, job)
                     past_cap = now >= job.cap_at
                     self._fall(job, "lease", f"GPU worker {job.worker}: no text in time"
                                + (" (its lease cap)" if past_cap else " (its lease ran out)"))
@@ -985,13 +1142,17 @@ class Pool:
                                 "cool_until": w.cool_until if w.cool_until > now else None})
             queued: dict[str, int] = {}
             for j in self._queue:
-                queued[class_key(j.cls)] = queued.get(class_key(j.cls), 0) + 1
+                if not j.chall:
+                    queued[class_key(j.cls)] = queued.get(class_key(j.cls), 0) + 1
             total = [x[3] for x in done]
             by_class: dict[str, list[float]] = {}
             for x in done:
                 by_class.setdefault(class_key(x[1]), []).append(x[3])
-            out = {"workers": workers, "queued": len(self._queue), "queued_by_class": queued,
-                   "leased": len(self._leases), "submitted": self.submitted, "done_h": len(hour),
+            out = {"workers": workers, "queued": sum(queued.values()), "queued_by_class": queued,
+                   "challengers": {**self.challenges, "queued": sum(1 for j in self._queue if j.chall),
+                                   "leased": sum(1 for j in self._leases.values() if j.chall),
+                                   "h": len(self._chall_runs)},
+                   "leased": sum(1 for j in self._leases.values() if not j.chall), "submitted": self.submitted, "done_h": len(hour),
                    "done_2h": len(done), "fallbacks": dict(self.fallbacks), "refused_late": self.refused_late,
                    "p50_s": pct(total, 50), "p90_s": pct(total, 90),
                    "classes": {k: {"n": len(v), "p50_s": pct(v, 50), "p90_s": pct(v, 90)} for k, v in by_class.items()},

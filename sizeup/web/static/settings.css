@@ -326,6 +326,11 @@
   .tg-svc { flex: none; inline-size: auto; max-inline-size: 8.5rem; font-size: var(--fs-xs); padding-block: 0; }
   /* a channel's speech model on the GPU workers (sizeup/sttmodels.py): beside the Engine, the hub's admins only */
   .tg-mod { flex: none; inline-size: auto; max-inline-size: 14rem; }
+  /* its challenger (#869): the select, the evidence (n/needed · Δ; the rest in the hover), Promote when it is earned */
+  .tg-challenger { display: inline-flex; align-items: center; gap: var(--s-1); flex: none; }
+  .tg-chall { inline-size: auto; max-inline-size: 12rem; }
+  .tg-ev { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .tg-promote { flex: none; }
   /* Settings > Station > Speech models (sttworkers.js): a channel's context and call signs */
   .stt-models td :is(input, select) { inline-size: 100%; min-inline-size: 6rem; }
   .stt-models table + table { margin-block-start: var(--s-4); }

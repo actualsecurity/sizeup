@@ -220,6 +220,7 @@ class Lane:
                  llm_on: Callable[[str], bool] = lambda wid: True):
         self.stt_busy, self.may_write, self.clock, self.log = stt_busy, may_write, clock, log
         self.enabled, self.llm_on = enabled, llm_on
+        self.on_queued: Callable[[], None] = lambda: None   # LLM work queued: the pool's challengers step aside (#869)
         self._cv = threading.Condition()
         self._queue: list[Job] = []
         self._leases: dict[str, Job] = {}
@@ -443,7 +444,18 @@ class Lane:
                 self._cv.notify_all()
         if stopped:                                # (stop() ran in between: nothing would ever answer it)
             self._resolve(job, None, "no_worker", inline=True)
+        else:
+            try:
+                self.on_queued()                   # (#869: never held or preempted by a challenger)
+            except Exception as e:  # noqa: BLE001 - the ask is queued all the same
+                self.log(f"infer: on_queued: {type(e).__name__}")
         return fut
+
+    def llm_busy(self, wid: str) -> bool:
+        """LLM work queued, or held by this worker now (#869: no challenger meanwhile). Read without the lane's lock
+        (the pool asks under its own: never the two locks at once)."""
+        w = self.workers.get(wid)
+        return bool(self._queue) or bool(w is not None and w.lease)
 
     def _job(self, task, messages, schema, deadline_s, priority, meta, fut, t0) -> Job:
         if not isinstance(task, str) or not TASK.fullmatch(task):
@@ -530,6 +542,10 @@ class Lane:
         if job.deadline_at - self.clock() >= MIN_LEFT_S and not self._stop.is_set():
             self._queue.append(job)
             self._cv.notify_all()
+            try:                                   # (#869: queued again: challengers step aside too; the pool never
+                self.on_queued()                   # calls into the lane under its own lock: no cycle)
+            except Exception:  # noqa: BLE001 - requeued all the same
+                pass
             return None
         return job, ("gaming" if job.last_why == "gaming" else "deadline")
 

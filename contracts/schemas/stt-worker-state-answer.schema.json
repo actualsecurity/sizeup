@@ -35,6 +35,7 @@
       "properties": {
         "catalog": {"type": "object", "description": "deploy/stt-worker/models.json at a commit on main and its SHA-256: the worker fetches that file itself.", "additionalProperties": true, "properties": {"commit": {"type": "string", "pattern": "^[0-9a-f]{40}$", "description": "The hub's build commit."}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "models.json's SHA-256 in that build."}}},
         "want": {"type": "array", "description": "The champions: the catalog models the channels use, most important first (the worker's resident VRAM plan).", "items": {"type": "string", "description": "A catalog model id.", "pattern": "^[a-z0-9][a-z0-9._-]{0,47}$"}},
+        "try": {"type": "array", "description": "The challengers (#869): catalog models loaded only on demand, never in the resident plan: while the worker is idle, beside the champions and the LLM, unloaded under pressure.", "items": {"type": "string", "description": "A catalog model id.", "pattern": "^[a-z0-9][a-z0-9._-]{0,47}$"}},
         "llm": {"type": "string", "description": "The local LLM to run: an llm_models id of models.json (absent: worker.toml's).", "pattern": "^[a-z0-9][a-z0-9._-]{0,47}$"},
         "llm_priority": {"type": "string", "description": "`yield`: speech first (the LLM gives its VRAM to the speech models that need it); `keep`: the LLM first.", "x-known": ["yield", "keep"]}
       }

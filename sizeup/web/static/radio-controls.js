@@ -108,6 +108,8 @@ window.RadioControls = (() => {
       n.groups.addEventListener("change", onEngine);
       n.groups.addEventListener("change", onService);
       n.groups.addEventListener("change", onModel);
+      n.groups.addEventListener("change", onChallenger);
+      n.groups.addEventListener("click", onPromote);
       n.systems = el("div", "dim small rc-systems");   // the other P25 systems: state, unknown talkgroups (#409)
       n.tiers = el("div", "dim small rc-tiers");       // each tier's audio retention and the expected storage
       n.sync = el("div", "small rc-sync");
@@ -1799,6 +1801,81 @@ window.RadioControls = (() => {
       : "Speech model";
   }
 
+  // ---- its challenger (#869, sizeup/sttscore.py): a model decoding a share of its clips in shadow on an idle GPU,
+  // scored against the champion, never the transcript; the evidence terse on the row (details in the hover) and
+  // Promote only once the evidence is there (the hub checks it again and shows it before the admin confirms)
+  const boardOf = (k) => ((st.models || {}).challenges || []).find((b) => b.key === k) || null;
+  async function onChallenger(e) {
+    const s = e.target.closest("select.tg-chall");
+    if (!s || s.disabled || ro() || !st.models) return;
+    const li = s.closest(".tg-row"), key = li.dataset.ckey;
+    st.error = "";
+    s.disabled = true;
+    try {
+      st.models = (await st.modelsApi.save(key, { challenger: s.value || null })) || st.models;
+    } catch (err) {
+      st.error = `Couldn't set the challenger of ${li.dataset.label || key}: ${err.message}`;
+    }
+    renderTalkgroups();
+  }
+  async function onPromote(e) {
+    const b = e.target.closest("button.tg-promote");
+    if (!b || b.disabled || ro() || !st.models) return;
+    const li = b.closest(".tg-row"), key = li.dataset.ckey;
+    st.error = "";
+    b.disabled = true;
+    try {
+      const ask = await st.modelsApi.promote(key, false);         // the evidence, as the hub sees it now
+      if (ask && ask.confirm && await UI.confirm(`${li.dataset.label || key}: promote? ${ask.confirm}`,
+                                                 { ok: "Promote", danger: false })) {
+        const d = await st.modelsApi.promote(key, true);
+        if (d && d.models) st.models = d.models;
+      }
+    } catch (err) {
+      st.error = `Couldn't promote on ${li.dataset.label || key}: ${err.message}`;
+    }
+    b.disabled = false;
+    renderTalkgroups();
+  }
+  function challengerBits() {
+    const sel = el("select", "tg-chall sm");
+    sel.append(new Option("vs —", ""));
+    sel.setAttribute("aria-label", "Challenger");
+    const ev = el("span", "tg-ev small");
+    const pb = el("button", "tg-promote sm", "Promote");
+    pb.type = "button";
+    const box = el("span", "tg-challenger");
+    box.append(sel, ev, pb);
+    return box;
+  }
+  function fillChallenger(box, r, lock) {
+    const [sel, ev, pb] = box.children;
+    const m = st.models, k = r.fm ? r.chan : r.ckey, ch = (m.channels || {})[k] || {}, b = boardOf(k);
+    const champ = modelChosen(r) || modelAuto(r);
+    const ids = (m.catalog || []).map((c) => c.id).filter((id) => id !== champ);
+    if (sel.options.length !== ids.length + 1 || ids.some((id, i) => sel.options[i + 1].value !== id)) {
+      sel.replaceChildren(new Option("vs —", ""), ...ids.map((id) => new Option(`vs ${id}`, id)));
+    }
+    const v = ch.challenger || "";
+    if (sel.value !== v) sel.value = v;
+    sel.disabled = lock;
+    sel.title = "Challenger: decodes a share of this channel's clips after its model (same audio, same context), only on "
+      + `an idle GPU; scored, never the transcript${v ? ` · ${ch.pct || 10}% of its clips` : ""}`;
+    const f = (x) => (x == null ? "—" : x.toFixed(3));
+    // terse: n of the samples needed and the difference; the rest in the hover
+    setText(ev, b && b.challenger ? (b.paused ? "paused" : `${b.n}/${b.min_n}${b.diff == null ? "" : ` · ${b.diff > 0 ? "+" : ""}${b.diff.toFixed(2)}`}`) : "");
+    ev.className = "tg-ev small " + (b && b.verdict === "challenger better" ? "ok" : b && b.verdict === "champion better" ? "warn" : "dim");
+    ev.title = b ? `${b.champion} ${f(b.champ)} vs ${b.challenger || "—"} ${f(b.chall)} over ${b.n} clips`
+      + (b.diff == null ? "" : ` (Δ ${b.diff > 0 ? "+" : ""}${b.diff.toFixed(3)} ± ${(b.ci || 0).toFixed(3)})`)
+      + `\n${b.verdict || ""} · ${b.min_n} needed to promote · ${b.samples} sampled, ${b.edits} corrected`
+      + (b.promoted && b.promoted.at ? `\nPromoted ${fmtTime(b.promoted.at, true)}: watched, rolled back if it does worse` : "")
+      + (b.rolled_back && b.rolled_back.at ? `\nRolled back ${fmtTime(b.rolled_back.at, true)}: ${b.rolled_back.why || ""}` : "")
+      : "";
+    show(ev, !!(b && b.challenger));
+    show(pb, !!(b && b.promote_ok) && !lock);
+    pb.title = b && b.promote_ok ? `Make ${b.challenger} the model: ${b.evidence}` : "";
+  }
+
   // ---- the Channels list, by radio system ------------------------------------------------------------------------
   // Analog FM (FG1, FG2, South 2, ...), Airband, County P25, then each other P25 system by its label; under a P25
   // system its groups (the talkgroups file's Tag). [{id, label, fm, list} | {id, label, groups: [{g, group, list}]}]
@@ -1868,7 +1945,8 @@ window.RadioControls = (() => {
                                          r.tier_set, (((st.state && st.state.channels) || {}).sync || {}).state,
                                          nameable, st.renaming === nameKey(r), servable, chosenService(r), autoService(r),
                                          st.svcWaiting.has(nameKey(r)), engineOptions(), modeled && [modelChosen(r), modelAuto(r),
-                                         ((st.models.channels || {})[r.fm ? r.chan : r.ckey] || null), (st.models.catalog || []).length]]);
+                                         ((st.models.channels || {})[r.fm ? r.chan : r.ckey] || null), (st.models.catalog || []).length,
+                                         boardOf(r.fm ? r.chan : r.ckey)]]);
     syncList(n.groups, items, {
       key: (x) => (x.head ? `s:${x.id}` : `g:${x.g}`),
       sig: (x) => (x.head ? JSON.stringify([x.label, x.n, x.heard])
@@ -1940,7 +2018,7 @@ window.RadioControls = (() => {
             // the same switches on every row (Record, Transcribe, Alerts, Main; Activity only: another system's
             // encrypted talkgroup), then the engine: its own slot
             sw.append(switchButton("record"), switchButton("transcribe"), switchButton("alerts"), switchButton("main"),
-                      switchButton("activity"), engineSelect(), modelSelect());
+                      switchButton("activity"), engineSelect(), modelSelect(), challengerBits());
             li.append(id, info, sw);
             return li;
           },
@@ -1997,9 +2075,11 @@ window.RadioControls = (() => {
             setText(note, t);
             note.className = "tg-note" + (confirming ? " warn" : r.encrypted ? " enc" : "");
             show(note, !!t);
-            const [recB, sttB, alrB, mainB, actB, engS, modS] = sw.children;
+            const [recB, sttB, alrB, mainB, actB, engS, modS, chS] = sw.children;
             show(modS, modeled);                          // the hub's admins only (sttworkers.js models)
             if (modeled) fillModel(modS, r, lock);
+            show(chS, modeled && !!(st.models.catalog || []).length);
+            if (modeled) fillChallenger(chS, r, lock);
             // another system's talkgroup: its tier shown as the switches (sizeup/tiers.py); encrypted: activity only
             const other = !r.fm && !!r.tier_set, sealed = other && !!r.encrypted;
             const tierName = other ? (TIERS.find(([v]) => v === r.tier) || [, r.tier])[1] : "";

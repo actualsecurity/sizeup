@@ -317,7 +317,10 @@ POST /api/cad/stt-workers                 {action: add {id, name?} | rename {id,
                                           self-update) | pool {on?, classes?} | channel_model {key, model?, context?
                                           (on|off|default), callsigns?} (a channel's speech model, sizeup/sttmodels.py;
                                           audited as Radios; a model change goes through HubApp.stt_champion_change
-                                          first: intel told) | llm_model {model?, priority?} (the workers' local LLM:
+                                          first: intel told; challenger?, pct?: its challenger, #869) | promote {key,
+                                          confirm?} (its challenger becomes its champion, only on evidence:
+                                          sttscore.promote_ok; without confirm: {confirm: the evidence}; intel told
+                                          first; audited as Radios) | llm_model {model?, priority?} (the workers' local LLM:
                                           an llm_models id or "" for the default, and yield|keep; audited as System)}:
                                           a signed-in admin only. add / rotate answer {token}
                                           (no-store), the one time it is shown. In the Settings audit (System) and the
@@ -1331,6 +1334,22 @@ class CadApi:
         except LogsError as e:
             return _json(e.status, {"error": str(e)})
 
+    def _models_panel(self) -> dict:
+        """Settings' speech models panel (sizeup/sttmodels.py) with each channel's champion/challenger board (#869)."""
+        out = self.cad.stt_models.panel()
+        board = getattr(self.cad, "stt_challenges", None)
+        if board is not None:
+            out["challenges"] = board()
+        return out
+
+    def _models_audit(self, op: str, key: str, old: dict, new: dict) -> None:
+        """A channel's model fields changed, in the Settings audit (Radios)."""
+        for f in ("model", "context", "callsigns", "challenger", "pct"):
+            if old.get(f) != new.get(f):
+                said = lambda v: (", ".join(v) if isinstance(v, list)                          # noqa: E731
+                                  else "default" if v in (None, "") else f"{v:g}" if isinstance(v, float) else str(v))
+                self.cad.settings.note(op, "radios", f"stt_models/{key}/{f}", said(old.get(f)), said(new.get(f)))
+
     def _signed_admin(self, who) -> str | None:
         """None when who is an admin with a verified sign-in; else why not (the 403's text)."""
         if who is None or not getattr(who, "email", ""):
@@ -1367,7 +1386,7 @@ class CadApi:
         out = reg.panel(getattr(self.cad, "stt_workers_live", None))
         sm = getattr(self.cad, "stt_models", None)
         if sm is not None:                                   # each channel's speech model (sizeup/sttmodels.py)
-            out["models"] = sm.panel()
+            out["models"] = self._models_panel()
             out["llm"] = sm.llm_panel()
         return _json(200, out)
 
@@ -1623,16 +1642,25 @@ class CadApi:
             def before(k: str, was: dict, now: dict) -> None:     # (a champion change: intel told before it applies)
                 if hook is not None and was.get("model") != now.get("model"):
                     hook(k, was.get("model") or "", now.get("model") or "", op, "settings")
-            try:     # a channel's speech model, context and call signs, in the Settings audit (Radios)
-                old, new = c.stt_models.set(key, {k: body[k] for k in ("model", "context", "callsigns") if k in body},
-                                            before=before)
+            try:     # a channel's speech model, context, call signs and challenger, in the Settings audit (Radios)
+                old, new = c.stt_models.set(key, {k: body[k] for k in ("model", "context", "callsigns", "challenger",
+                                                                       "pct") if k in body}, before=before)
             except ValueError as e:
                 raise CadError(str(e)) from None
-            for f in ("model", "context", "callsigns"):
-                if old.get(f) != new.get(f):
-                    said = lambda v: ", ".join(v) if isinstance(v, list) else (v or "default")   # noqa: E731
-                    c.settings.note(op, "radios", f"stt_models/{key}/{f}", said(old.get(f)), said(new.get(f)))
-            return {"ok": True, "key": key, "channel": new, "models": c.stt_models.panel()}
+            self._models_audit(op, key, old, new)
+            return {"ok": True, "key": key, "channel": new, "models": self._models_panel()}
+        if path == "/api/cad/stt-workers" and body.get("action") == "promote" \
+                and getattr(c, "stt_promote", None) is not None:
+            op = str(body.get("operator") or "")
+            key = str(body.get("key") or "")
+            try:     # an admin's promote: only on evidence, shown first (#869); intel told before it applies
+                got = c.stt_promote(key, op, confirm=body.get("confirm") is True)
+            except ValueError as e:
+                raise CadError(str(e)) from None
+            if "confirm" in got:
+                return {"ok": True, "key": key, "confirm": got["confirm"]}
+            self._models_audit(op, c.stt_models.key_of(key), got["old"], got["new"])
+            return {"ok": True, "key": key, "evidence": got["evidence"], "models": self._models_panel()}
         if path == "/api/cad/stt-workers" and body.get("action") == "llm_model" \
                 and getattr(c, "stt_models", None) is not None:
             op = str(body.get("operator") or "")

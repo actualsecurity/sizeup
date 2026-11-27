@@ -35,6 +35,9 @@ token_revoked); 409 {error} for a lease that is gone.
     POST /api/station/stt/jobs/<lease>/complete   {text, segments: [{start, end, text, words: [{word, start, end,
                                                   probability}]}], model, timing: {fetch_ms, infer_ms}} -> {ok}
     POST /api/station/stt/jobs/<lease>/release    {why} -> {ok}: the next engine takes it now
+    POST /api/station/stt/jobs/<lease>/watch      {wait <= 25} -> {live}: a challenger's lease (#869), a long poll: live
+                                                  false at once when the hub took it back or the lease is gone (other
+                                                  work came: the worker stops the decode, no complete, no release)
     POST /api/station/stt/logs                    gzipped worker.log lines (see "Its log" below) -> {ok, accepted}
 
 The heartbeat contract: while it runs, a worker sends a request (state, extend or claim) at least every 6 s, during a
@@ -105,7 +108,7 @@ WORKER_FILE = Path(__file__).resolve().parents[2].joinpath(*WORKER_PATH.split("/
 COMMIT = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 API = "/api/station/stt/"
-LEASE_PATH = re.compile(r"/api/station/stt/jobs/([0-9a-f]{16})/(audio|extend|complete|release)")
+LEASE_PATH = re.compile(r"/api/station/stt/jobs/([0-9a-f]{16})/(audio|extend|complete|release|watch)")
 INFER_MAX_BODY = 32 * 1024     # an LLM job's answer (its 16 KB at most, sizeup/cloud/infer.py) and its counts
 MAX_BODY = 1024 * 1024                  # a result: the text and its words (a 2-minute clip's are ~100 KB)
 TEXT_MAX = 20000
@@ -706,6 +709,8 @@ class WorkerApi:
                 if word:
                     told["stt_models"] = word
             ms = d.get("models") if isinstance(d.get("models"), dict) else {}
+            caps = d.get("caps") if gpu and isinstance(d.get("caps"), list) else None   # (#869: "challenger")
+            tried = ms.get("stt_try") if gpu and isinstance(ms.get("stt_try"), list) else None   # (its try instances)
             loaded = ms.get("stt_loaded") if isinstance(ms.get("stt_loaded"), list) else None
             stt_state = ms.get("stt_state") if isinstance(ms.get("stt_state"), dict) else None
             if loaded is not None and model and state == "online":
@@ -716,25 +721,29 @@ class WorkerApi:
             if path == API + "hello":
                 self.pool.seen(wid, state, model, d.get("gpu"), d.get("version") if isinstance(d.get("version"), str) else None,
                                kind=kind, load=load, update=su, keep_awake=ka, reason=why, models=loaded,
-                               stt_state=stt_state)
+                               stt_state=stt_state, caps=caps, try_models=tried)
                 return _json(200, {"ok": True, "worker": wid, "poll_s": POLL_S, "pool_on": self._pool_on(),
                                    "classes": [sttpool.class_key(c) for c in sttpool.CLASSES], **told})
             if path == API + "state":
                 self.pool.seen(wid, state, model, d.get("gpu"), d.get("version") if isinstance(d.get("version"), str) else None,
                                kind=kind, load=load, update=su, keep_awake=ka, reason=why, models=loaded,
-                               stt_state=stt_state)
+                               stt_state=stt_state, caps=caps, try_models=tried)
                 return _json(200, {"ok": True, "pool_on": self._pool_on(), **told})
             if path == API + "claim":
                 wait = _num(d.get("wait")) or 0.0
                 cm = d.get("models")
                 cm = [m for m in cm[:16] if isinstance(m, str)] if isinstance(cm, list) else None
-                job = self.pool.claim(wid, wait, state, model, kind=kind, load=load, models=cm)
+                cc = d.get("caps") if gpu and isinstance(d.get("caps"), list) else None
+                ct = d.get("try_loaded") if gpu and isinstance(d.get("try_loaded"), list) else None
+                job = self.pool.claim(wid, wait, state, model, kind=kind, load=load, models=cm, caps=cc, try_models=ct)
                 return _json(200, {"job": job.public() if job is not None else None})
             m = LEASE_PATH.fullmatch(path)
             if m is None or m.group(2) == "audio":
                 return _json(404, {"error": "not found"})
             self.pool.seen(wid)
             lease, what = m.group(1), m.group(2)
+            if what == "watch":                   # (#869: a challenger's, on the worker's own connection)
+                return _json(200, {"live": self.pool.watch(wid, lease, _num(d.get("wait")) or 0.0)})
             if what == "extend":
                 job = self.pool.extend(wid, lease)
                 if job is None:

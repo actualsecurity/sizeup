@@ -192,3 +192,56 @@ def test_a_radios_hint_switch_shows_the_effective_state_and_sets_it(site):
     finally:
         browser.close()
         pw.stop()
+
+
+def test_a_channels_challenger_its_evidence_and_promote_on_its_radios_row(site):
+    """#869: the challenger is on the channel's own row (never the STT workers pane), its evidence terse there (n of the
+    samples needed, the difference; the rest in the hover), and Promote only once the hub says the evidence is there,
+    shown again before the admin confirms."""
+    from sizeup import sttscore
+    boards = []
+    site.cad.stt_challenges = lambda: boards
+
+    def promote(key, op, confirm=False):
+        ok, said = sttscore.promote_ok(boards[0])
+        if not ok:
+            raise ValueError(f"not enough evidence to promote: {said}")
+        if not confirm:
+            return {"confirm": said}
+        old, new = site.cad.stt_models.promote(key)
+        return {"old": old, "new": new, "evidence": said}
+    site.cad.stt_promote = promote
+    pw, browser, pg = browser_page(site, CASEY)
+    try:
+        pg.goto(site.base + "/cad#settings/radios/channels")
+        row = lambda key: pg.locator(f"li.tg-row[data-ckey='{key}']")        # noqa: E731
+        ch = row("tg:307").locator("select.tg-chall")
+        ch.wait_for()
+        assert Q8 not in [o.get_attribute("value") for o in ch.locator("option").all()]   # (never its own champion)
+        ch.select_option(QWEN)
+        until(pg, lambda: (site.cad.stt_models.challenger_for("tg:307") or ("",))[0] == QWEN, "a challenger set")
+        assert not row("tg:307").locator("button.tg-promote").is_visible()       # (no evidence yet: no Promote)
+        boards.append({"key": "tg:307", "champion": Q8, "challenger": QWEN, "pct": 10.0, "n": 42, "samples": 44,
+                       "champ": 0.612, "chall": 0.705, "diff": 0.093, "ci": 0.031, "verdict": "challenger better",
+                       "domain": "fire", "min_n": 40, "promoted": {}, "rolled_back": {}, "edits": 3,
+                       "norm": sttscore.NORM, "paused": False})
+        boards[0].update(dict(zip(("promote_ok", "evidence"), sttscore.promote_ok(boards[0]))))
+        pg.reload()
+        ev = row("tg:307").locator(".tg-ev")
+        ev.wait_for()
+        assert ev.inner_text() == "42/40 · +0.09" and "0.612" in ev.get_attribute("title")
+        pg.evaluate("document.activeElement && document.activeElement.blur()")
+        shot(pg, "#settings-radio-controls .tg-group", "channels-challenger")
+        row("tg:307").locator("button.tg-promote").click()
+        dialog = pg.get_by_role("alertdialog")
+        dialog.wait_for()
+        assert "over 42 clips" in dialog.inner_text()                             # (the evidence, before it applies)
+        pg.get_by_role("button", name="Promote").last.click()
+        until(pg, lambda: site.cad.stt_models.settings()["tg:307"].get("model") == QWEN, "promoted")
+        assert site.cad.stt_models.challenger_for("tg:307")[0] == Q8
+        audit = json.dumps(site.cad.settings.audit_log("radios"))
+        assert "stt_models/tg:307/challenger" in audit and "stt_models/tg:307/model" in audit
+        assert pg.errors == []
+    finally:
+        browser.close()
+        pw.stop()

@@ -411,6 +411,8 @@ const SttWorkersCard = (() => {
     save: async (key, body) => (await post({ action: "channel_model", key, ...body })).models,
     // ... and the workers' LLM (Settings > Station > Health beside its status: health.js): {model?, priority?}
     setLlm: async (body) => (await post({ action: "llm_model", ...body })).llm,
+    // ... and a channel's promote (#869): without confirm {confirm: the evidence}; with it {models}
+    promote: async (key, confirm) => post({ action: "promote", key, confirm: !!confirm }),
   };
 
   document.addEventListener("visibilitychange", () => { if (isOpen() && !timer) poll(); });

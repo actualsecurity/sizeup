@@ -1852,6 +1852,58 @@ Each channel has its own speech-to-text model on the GPU workers (`sizeup/sttmod
   page, the firegrounds: a "mayday" said again and again is real). A clip the worker finds near-silent isn't decoded
   (no speech).
 
+### Champion and challenger (#639, #869)
+
+An admin can trial another catalog model on a channel (`sizeup/sttscore.py`): Settings > Radios > Channels, on the
+channel's row, beside its speech model ("vs <model>"; the evidence terse on the row, the rest in its hover; Promote
+only once the evidence is there). The live path uses only the champion (the channel's model).
+
+- **Sampled:** the channel's challenger and its share (10% by default, `pct`). A clip whose text of record came from the
+  champion itself on a GPU worker is sampled by its id's hash, so the choice is the same every time. Clips over 30 s
+  aren't sampled.
+- **Never slows live traffic** (`sttpool` `chall` jobs, the admin's rules):
+  - it ranks below everything, background and the catch-up too, and goes only to a GPU worker that has the model
+    loaded, holds nothing and finds nothing else waiting, never within 10 s of another clip coming in
+    (`CHALL_QUIET_S`), never while LLM work is held by that worker or queued (`infer.Lane.llm_busy`);
+  - at most 30 runs an hour per channel and 60 per worker (`CHALL_CAP_CHANNEL_H`, `CHALL_CAP_WORKER_H`);
+  - any other job (priority, normal, background) or LLM work takes it back at once (`preempt_challengers`): the
+    worker's long poll `POST /api/station/stt/jobs/<lease>/watch` answers `{live: false}` and it stops the decode. A
+    worker holding only a challenger counts as free for everything else (`_free`), so no clip ever waits behind one;
+  - its model is never in the worker's resident plan: the hub names it in `stt_models.try`, and the worker loads it
+    only while idle, beside the champions and the LLM, and unloads it under pressure (the worker side: #964);
+  - one greedy pass (`greedy`, never the pre-alert `fast`: the LLM's work is never preempted for it), never AWS,
+    never a worker's failure or cooldown, never its pre-alert speed record, never `_pool_submit`, `Routes` or the
+    EngineBook, never in the pool's numbers (Health: challengers done / skipped / taken back). A challenger that fails
+    on the worker 5 times in a row on a channel isn't sampled there for 30 min (taken back, not loaded, the LLM busy:
+    no failure). Its refs and scores are worked out on a thread of their own, never on a worker's request.
+- **The same input:** the same audio input the champion decoded (#918: the station's STT input at 16 kHz, or the 8 kHz
+  listening clip; never the other one) and the same prompt, context list and `plain`.
+- **Kept privately:** the challenger's words are a run in `stt_runs` (role `challenger`, with its `input` and `corr`),
+  pruned with the transcript, never on the radio log, in an API or for intel. Each holds its sample's scores (numbers
+  only, `score`).
+- **Scored per domain**, after the pinned folding `norm/2` (lower case, spelled numbers in digits, ten-codes, street
+  suffixes in full; its version carries a hash of its rules and number words, and the board compares one version's
+  samples only):
+  - fire/EMS: the dispatcher's trailing time (#727), and the county CAD feed's units and address found (only incidents
+    the feed made; read when the challenger's text comes);
+  - police: the channel's terms found;
+  - airband: the ADS-B aircraft near the field at the clip's time found;
+  - any domain: once a person corrects the clip, word error and identifier recall against the correction.
+  A ref that was in the context sent (the ADS-B list, a talker's name, a call sign) never scores (`drop_context`).
+  "Found" means of what either side found, and each side is averaged over the metrics both have. A loop or a read-back
+  context scores as no text. Agreement is shown, never ranked.
+- **The board:** per channel, n, each side's mean, the difference and its 95% interval. The verdict is "challenger
+  better" or "champion better" only with 20 samples or more and an interval clear of 0.
+- **Promote** (an admin's action, audited as Radios): only on evidence, at least 40 scored samples of the channel's
+  domain (30 for other channels, `MIN_N_PROMOTE`) and the verdict "challenger better" (`promote_ok`). The hub shows the
+  evidence before the admin confirms (`promote` without `confirm` answers `{confirm: <the evidence>}`). Intel is told
+  first (`HubApp.stt_champion_change`). The challenger becomes the channel's model, and the model it replaced becomes
+  the challenger at the same share.
+- **Automatic rollback:** the hub compares the two at checkpoints (n = 20, 40, 80, ...). When the replaced model scores
+  better and even the low end of a 99% interval of the difference is past 0.02, it rolls the promotion back: intel told
+  first, audited ("system: automatic rollback"), the admins notified (a push on the status topic) and said in the log.
+  Any other change of the channel's model or challenger ends the watch.
+
 ## Phone pre-alert (Tapout)
 
 > "can we bake in the ntfy.sh feed from tapout into this? lets receive that feed as a possible
