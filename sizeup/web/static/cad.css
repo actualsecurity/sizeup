@@ -977,6 +977,7 @@
   .nt-note-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s-1) var(--s-2); min-inline-size: 0; }
   .nt-tag[aria-pressed="true"] { border-color: var(--accent-text); color: var(--accent-text); }
   .nt-done { color: var(--ok); }
+  .nt-ok { color: var(--ok); }
   .nt-text { overflow-wrap: anywhere; white-space: pre-wrap; }
   .nt-fix { overflow-wrap: anywhere; }
   .nt-acts { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); }

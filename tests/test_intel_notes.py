@@ -369,3 +369,35 @@ global.fmtTime = (u) => `T${{Math.round(u)}}`;
     assert "a man waving a machete outside the deli" in out["items"][0] and "Car 3 confirmed" in out["items"][1]
     assert out["edits"] == [["Edit", "Delete"], []]                            # Val's own, not Jordan's
     assert out["chip"] == "✎2" and out["none"] is None
+
+
+def test_the_list_row_carries_the_done_count_and_texts(site):
+    cad, _clock = site
+    a = save(cad)
+    b = save(cad, first_at=T0 - 60)
+    api = CadApi(cad)
+    n1 = add(api, a.id, VAL, text="one", tags=["rule_to_add"])[1]["note"]["id"]
+    n2 = add(api, a.id, VAL, text="two", tags=["late"])[1]["note"]["id"]
+    add(api, b.id, VAL, text="three")
+    call(api, f"/api/cad/intel/notes/{n1}/done", {"done": "PR #123"}, CASEY)
+    call(api, f"/api/cad/intel/notes/{n2}/done", {"done": "rule added"}, CASEY)
+    rows = {e["id"]: e["notes"] for e in listing(cad)["events"]}
+    assert rows[a.id]["done"] == 2 and sorted(rows[a.id]["done_texts"]) == ["PR #123", "rule added"]
+    assert rows[a.id]["review"] == 0 and "done" not in rows[b.id]
+
+
+@needs_node
+def test_a_done_text_links_its_pr_numbers_and_leaves_the_rest_as_text():
+    script = f"""
+{(STATIC / "intel-notes.js").read_text()}
+const view = (t) => IntelNotes.linkify(t).map((x) => typeof x === "string" ? x
+  : [x.textContent, x.attrs.href, x.attrs.target, x.attrs.rel]);
+const chip = IntelNotes.chip({{ n: 1, tags: [], review: 0, done: 1, done_texts: ["PR #123", "rule added"] }});
+console.log(JSON.stringify({{ a: view("PR #12, #34 and rule x"), b: view('<img src=x onerror=alert(1)> #5'),
+  c: view("plain"), ok: chip.children[0].textContent, tip: chip.children[0].title }}));
+"""
+    out = run_node(script, {})
+    pr = lambda n, t: [t, f"https://github.com/actualsecurity/sizeup/pull/{n}", "_blank", "noopener"]   # noqa: E731
+    assert out["a"] == [pr(12, "PR #12"), ", ", pr(34, "#34"), " and rule x"]
+    assert out["b"] == ["<img src=x onerror=alert(1)> ", pr(5, "#5")] and out["c"] == ["plain"]
+    assert out["ok"] == " ✓" and out["tip"] == "Done: PR #123 · rule added"
