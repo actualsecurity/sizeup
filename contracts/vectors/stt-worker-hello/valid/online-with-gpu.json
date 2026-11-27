@@ -10,6 +10,7 @@
     "state": "starting",
     "bad": []
   },
+  "caps": ["challenger", "challenger_same_model"],
   "gpu": {"util_pct": 3, "mem_used_mb": 1210, "mem_total_mb": 12282, "others": 0},
   "worker": "gpu-1"
 }

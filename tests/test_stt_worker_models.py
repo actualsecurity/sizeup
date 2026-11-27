@@ -445,21 +445,55 @@ def _exits_with(m, mid: str, line: str) -> None:
     s.proc.proc.returncode = 1
 
 
-def test_out_of_vram_at_load_is_a_short_retry_never_bad(tmp_path, monkeypatch):
+def test_out_of_vram_at_load_is_a_short_retry_never_bad_then_parked(tmp_path, monkeypatch):
+    """Out of VRAM is never the model's fault: tried again at 5, then 10 min, never marked bad. The MODEL_OOM_PARK-th
+    in a row parks it "no room (VRAM)" (#940): not tried again (nor the LLM stopped for it) until the budget, the
+    hub's models or the free VRAM (PARK_FREE_MB more) change; one more out of VRAM then parks it again at once."""
     m, procs, clock = ready_models(tmp_path, monkeypatch)
     m.want = ["atc-test"]
     h = m.catalog["atc-test"]["sha256"]
-    for n in range(1, W.MODEL_BAD_TRIES + 2):
+    oom = ("ggml_backend_cuda_buffer_type_alloc_buffer: allocating 2300.00 MiB on device 0: cudaMalloc failed: "
+           "out of memory")
+    for n in range(1, W.MODEL_OOM_PARK + 1):
         step(m)
         assert len(procs) == n
-        _exits_with(m, "atc-test", "ggml_backend_cuda_buffer_type_alloc_buffer: allocating 2300.00 MiB on device 0: "
-                                   "cudaMalloc failed: out of memory")
+        _exits_with(m, "atc-test", oom)
         step(m)
-        wait = min(W.MODEL_SHORT_RETRY_S * 2 ** (n - 1), W.MODEL_RETRY_S)
         assert "atc-test" not in m.servers and not m.bad(h)
-        assert m.status["atc-test"] == f"failed: out of VRAM (again in {wait / 60:.0f} min)"
-        clock[0] += wait
-    assert not m.bad(h) and h not in m._fails
+        if n < W.MODEL_OOM_PARK:
+            wait = min(W.MODEL_SHORT_RETRY_S * 2 ** (n - 1), W.MODEL_RETRY_S)
+            assert m.status["atc-test"] == f"failed: out of VRAM (again in {wait / 60:.0f} min)"
+            clock[0] += wait
+    assert m.status["atc-test"] == "no room (VRAM)" and not m.bad(h) and h not in m._fails
+    clock[0] += W.MODEL_RETRY_S * 10
+    for _ in range(3):
+        step(m)
+    assert len(procs) == W.MODEL_OOM_PARK and m.status["atc-test"] == "no room (VRAM)"    # never again by itself
+    m.cfg.vram_budget_mb = 21000                                              # the budget changed: tried again
+    step(m)
+    assert len(procs) == W.MODEL_OOM_PARK + 1
+    gpu = {"mem_total_mb": 12288, "mem_used_mb": 9000}
+    _exits_with(m, "atc-test", oom)
+    step(m, gpu=gpu)
+    assert m.status["atc-test"] == "no room (VRAM)"                           # parked again at once
+    step(m, gpu={"mem_total_mb": 12288, "mem_used_mb": 8500})
+    assert len(procs) == W.MODEL_OOM_PARK + 1                                 # 500 MB more free: still parked
+    step(m, gpu={"mem_total_mb": 12288, "mem_used_mb": 7900})
+    assert len(procs) == W.MODEL_OOM_PARK + 2                                 # 1.1 GB more: tried again
+
+
+def test_a_parked_model_never_makes_the_llm_yield(tmp_path, monkeypatch):
+    """#940: Qwen3-ASR out of VRAM at every load under llm_priority yield: parked, and Qwen3-8B keeps its room
+    (no LLM stop/start every 30 min)."""
+    m, procs = real_12gb(tmp_path, monkeypatch, QWEN3_8B, "version: 12728 (ea722948)\n")
+    m.want = [ASR]
+    assert m.make_plan(GPU_12GB) == [ASR] and not m.llm_room_ok
+    m._gpu = GPU_12GB
+    m._short_fails[ASR] = W.MODEL_OOM_PARK
+    m.park(ASR)
+    assert m.make_plan(GPU_12GB) == [] and m.llm_room_ok and m.status[ASR] == "no room (VRAM)"
+    m.want = [ASR, ATC]                                                       # the hub's models changed
+    assert m.make_plan(GPU_12GB) == [ASR, ATC] and not m.llm_room_ok
 
 
 def test_a_port_another_program_holds_is_left_alone_and_the_next_one_taken(tmp_path, monkeypatch):

@@ -763,6 +763,7 @@ def test_shutdown_releases_the_job_and_says_paused(tmp_path, hub, whisper):
     assert w.counts["failed"] == 0
     last = dict(hub.calls("/state")[-1][3])
     assert last.pop("self_update")["sha256"] == hashlib.sha256(WORKER_PY.read_bytes()).hexdigest()
+    assert last.pop("caps") == ["challenger", "challenger_same_model"]
     assert last | {"gpu": None} == {"state": "paused", "reason": "shutdown", "gpu": None,
                                                          "model": "large-v3-turbo-q5_0", "version": W.VERSION,
                                                          "models": {"stt": "large-v3-turbo-q5_0", "llm": "", "llm_version": ""}}

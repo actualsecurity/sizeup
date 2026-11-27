@@ -66,7 +66,8 @@
       "properties": {
         "stt": {"type": "string", "description": "The speech-to-text model.", "maxLength": 80},
         "llm": {"type": "string", "description": "The language model; \"\" for none now.", "maxLength": 80},
-        "llm_version": {"type": "string", "description": "Its server's version.", "maxLength": 64}
+        "llm_version": {"type": "string", "description": "Its server's version.", "maxLength": 64},
+        "stt_try": {"type": "array", "items": {"type": "string", "maxLength": 48}, "maxItems": 16, "description": "The try (challenger) ids whose try server answers now: a try model's own, or a separate try instance of a model this worker also serves live (its primary, a wanted one), each having passed its test decode and not being unloaded (deploy/stt-worker/worker.py Models.try_ready). Sent only to a hub that names a catalog. The claim body carries the same list as `try_loaded`: a challenger job only for an id in it."}
       }
     },
     "reason": {"type": "string", "description": "A GPU worker that is not online: why, in words. The hub reads only `shutdown` (a clean stop: never shown as asleep); the rest is for people."},
@@ -81,6 +82,12 @@
         "held": {"type": "boolean", "description": "The flag is set now: false while paused by hand, before the worker's first tick, or when Windows refused it."},
         "why": {"type": "string", "maxLength": 40, "description": "Not held: why, in words (starting, paused, refused by Windows, stopped, error). Sent only with `on` true and `held` false; the hub keeps 40 characters and shows it in Health's hover."}
       }
+    },
+    "caps": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {"type": "string", "maxLength": 40},
+      "description": "What this worker.py fully supports, also in its claim body. `challenger`: challenger / greedy jobs, their POST jobs/<lease>/watch preemption and stt_models.try (deploy/stt-worker/worker.py CAPS). `challenger_same_model`: a try id that this worker also serves live (its primary, a wanted model) runs on a separate try instance of the same files, never on the live server. The hub sends challenger jobs only to a worker whose latest hello, state or claim said it; a worker from before sends none. A hub from before ignores it."
     },
     "runtimes": {
       "title": "Runtimes",

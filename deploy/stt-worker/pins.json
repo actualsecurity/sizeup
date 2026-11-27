@@ -16,9 +16,9 @@
     },
     "worker_py": {
       "what": "worker.py (first install; it updates itself afterwards)",
-      "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/b1e3b0f90dc4bd93435c58c3cd5ab6c99d221a47/deploy/stt-worker/worker.py",
-      "bytes": 309899,
-      "sha256": "25198F06BDBD89CCDA0E488E0A84E3E099640E83581F7CC43D8AA25895EF3C79"
+      "url": "https://raw.githubusercontent.com/actualsecurity/sizeup/df457e8e1506503fcac2106b3d9bfa997491b696/deploy/stt-worker/worker.py",
+      "bytes": 354646,
+      "sha256": "933A4CE5E4C9BE1B405C73C016205B687BC9D3922368983886777D62654F699C"
     },
     "llama_zip": {
       "what": "llama.cpp b12728, CUDA 12.4 (llama-server.exe; Qwen3-ASR's audio needs b12643 or later)",

@@ -22,9 +22,9 @@ GPU back at once (see [The local LLM](#the-local-llm-optional)).
 In an ordinary (not elevated) PowerShell window, as the user who games on the PC:
 
 ```powershell
-$u = 'https://raw.githubusercontent.com/actualsecurity/sizeup/12b5447a57a3cffbbb09b239b05a19d283d53b4a/deploy/stt-worker/install.ps1'
+$u = 'https://raw.githubusercontent.com/actualsecurity/sizeup/a3975a75d83a620aea27f47ae79b4a12aa73cf3b/deploy/stt-worker/install.ps1'
 Invoke-WebRequest $u -UseBasicParsing -OutFile "$env:TEMP\sizeup-stt-install.ps1"
-(Get-FileHash "$env:TEMP\sizeup-stt-install.ps1").Hash -eq '5F460E1111422846765EADA16BB72C97F3A90F24944790A387F1FED4DD251746'   # True
+(Get-FileHash "$env:TEMP\sizeup-stt-install.ps1").Hash -eq 'AD1715EC4470E06D012D6E363B31AB06C163F5CFF005B2815A9AA04725B49DC9'   # True
 powershell -ExecutionPolicy Bypass -File "$env:TEMP\sizeup-stt-install.ps1"
 ```
 
@@ -148,8 +148,10 @@ worker keeps llama.cpp and whisper.cpp at the builds its `worker.py` pins, with 
 The zip has llama.cpp's other tools too; the worker runs only `llama-server.exe` (which loads
 `llama-server-impl.dll` and the `ggml*.dll` beside it).
 
-**The model is a choice in `worker.toml`:** three are pinned, and switching is config only (download the other one,
-change three keys, restart the worker). Qwen3-8B is the default. Why these: the PR that added the LLM compares
+**The model is a choice in `worker.toml`, or the hub's:** three are pinned, and switching is config only (download
+the other one, change three keys, restart the worker). The hub can also name one of them for a worker that runs its
+own llama-server: the worker then downloads and switches by itself, and `worker.toml` stays as it is (see [The hub
+names the LLM](#the-hub-names-the-llm)). Qwen3-8B is the default. Why these: the PR that added the LLM compares
 Qwen3-8B and Gemma with Qwen2.5-7B and Llama-3.1-8B on synthetic dispatch traffic (`llm_eval/`). Qwen3-4B is the
 small one: it fits beside every speech model on a 12 GB card (see [Speech models](#speech-models), VRAM). It isn't
 the default yet: intel re-evaluates it first.
@@ -160,8 +162,8 @@ the default yet: intel re-evaluates it first.
 | file, bytes | `Qwen3-8B-Q4_K_M.gguf`, 5,027,783,488 | `google_gemma-3-12b-it-Q4_K_M.gguf`, 7,300,575,264 | `Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf`, 2,497,280,736 |
 | SHA256 | `D98CDCBD03E17CE47681435B5150E34C1417F50B5C0019DD560E4882C5745785` | `FC57F67EFA46D711C346E587CBEF7D049E95F3DF8DB2EB2271153343EF0ACC7B` | `2FDE00CE69DD4899C70D020845E2638353015BBA0FDF161B3EB965F2BCA4464E` |
 | license | Apache-2.0 | Gemma Terms of Use | Apache-2.0 |
-| VRAM (4k context; the worker's estimate) | about 6 GB (6,179 MB) | about 8.3 GB | about 3.5 GB (3,522 MB) |
-| `llm_model` | `qwen3-8b-q4_k_m` | `gemma-3-12b-it-q4_k_m` | `qwen3-4b-instruct-2507-q4_k_m` |
+| VRAM (4k context; the worker's estimate) | about 6 GB (6,179 MB) | about 8.6 GB (8,566 MB) | about 3.5 GB (3,522 MB) |
+| `llm_model`, the catalog id the hub names | `qwen3-8b-q4_k_m` | `gemma-3-12b-it-q4_k_m` | `qwen3-4b-instruct-2507-q4_k_m` |
 | `llm_server` | `-m models\Qwen3-8B-Q4_K_M.gguf ... --reasoning off` | `-m models\google_gemma-3-12b-it-Q4_K_M.gguf ...` (no `--reasoning off`: Qwen3's) | `-m models\Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf ... --reasoning off` |
 
 ```powershell
@@ -207,13 +209,13 @@ http://127.0.0.1:8180`. With it running, `py -3 "$d\worker.py" check` also tries
 
 ### 5. The worker
 
-For the first install, `worker.py` is pinned to a commit (309,899 bytes). Check its hash after the download. From then on it
+For the first install, `worker.py` is pinned to a commit (354,646 bytes). Check its hash after the download. From then on it
 [updates itself](#updating). A worker installed from an older pin (before the self-update) needs this download once
 more to get it.
 
 ```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/b1e3b0f90dc4bd93435c58c3cd5ab6c99d221a47/deploy/stt-worker/worker.py -OutFile "$d\worker.py"
-(Get-FileHash "$d\worker.py").Hash -eq '25198F06BDBD89CCDA0E488E0A84E3E099640E83581F7CC43D8AA25895EF3C79'   # True
+Invoke-WebRequest https://raw.githubusercontent.com/actualsecurity/sizeup/df457e8e1506503fcac2106b3d9bfa997491b696/deploy/stt-worker/worker.py -OutFile "$d\worker.py"
+(Get-FileHash "$d\worker.py").Hash -eq '933A4CE5E4C9BE1B405C73C016205B687BC9D3922368983886777D62654F699C'   # True
 notepad "$d\worker.toml"
 ```
 
@@ -459,6 +461,20 @@ that folder and keeps the file's mode. The state stays in `~/.local/state/sizeup
   the same tokens), one at a time, never while a pre-alert clip is held. The worker tells the hub its models with every
   heartbeat (`models: {stt, llm, llm_version}`); `llm` is empty while llama-server isn't answering, and the hub sends
   it no LLM job then. A hub without the infer lane answers 404: the worker asks again every 10 minutes.
+- **Models the hub names:** `stt_models {catalog, want, try, llm, llm_priority}` in every hello and state answer
+  ([Speech models](#speech-models), [The hub names the LLM](#the-hub-names-the-llm)). To such a hub, `models` also
+  carries `stt_loaded`, `stt_try` (the try ids whose try server answers now), `stt_state`, `stt_catalog` and, with an LLM, `llm_state` (`ok` or why not) and `llm_id` (the
+  catalog LLM in use, `""` for `worker.toml`'s).
+- **Challenger jobs** (`challenger: true`, `greedy: true`): a clip for a try model, decoded only on that model's try
+  server (`model not loaded` otherwise), never on a server that serves live traffic (`whisper_server`, a planned
+  model's: whisper-server can't cut a decode short), and never without a model (`model serves live traffic`). The
+  claim body says which try servers answer (`try_loaded`), and `caps` is `["challenger", "challenger_same_model"]`
+  in hello, state and claim. greedily (`temperature_inc=0`). It gives way to
+  the LLM (`busy: LLM`: an LLM job held or arriving) and never preempts it. While it decodes, the worker long-polls
+  `POST /api/station/stt/jobs/{lease}/watch` `{"wait": 20}` on a connection of its own: `{"live": true}` after the
+  wait; `{"live": false}`, 409 or 410 once the hub has taken the lease back, and the worker stops the decode at once
+  and sends nothing more for it (no complete, no release), then claims again. A hub without the route (404): the
+  worker extends every 0.5 s instead (409/410 there: taken back). Gaming or a pause hands it back at once.
 
 ## The local LLM (optional)
 
@@ -486,6 +502,28 @@ the worker starts, checks and stops. Nothing goes to a cloud model.
   worker looks at the file's size and time again, and hashes it again when they changed).
 - **No orphans:** on Windows the servers the worker starts join a job object that ends them when the worker ends,
   however it ends. Their pids are also kept in `children.json`: the next start ends one still running.
+
+### The hub names the LLM
+
+For a worker that runs its own llama-server (`llm_server`), the hub can name its LLM: `stt_models` `llm`, an id of
+[`models.json`](models.json) `llm_models` (the three GGUFs above, each with its URL, size, SHA-256, `vram_mb` and
+whether it needs `--reasoning off`). Nothing in `worker.toml` changes.
+
+- **Same file as `worker.toml`'s** (by SHA-256: the 8B today): nothing downloaded, no restart; the hub sees the id.
+- **Another one:** its GGUF is downloaded to `models\managed` through the same path as the speech models and the
+  [runtime builds](#runtime-updates-llamacpp-whispercpp) (allowed hosts, exact size and SHA-256, a disk-space check,
+  resumed, never while gaming or paused). Then, with no LLM job in hand or being claimed, not gaming, and no
+  other switch under way (the one lock every switch takes), llama-server is stopped and started again with that `-m` and its `--reasoning` (every
+  other option as `llm_server` says), its hash checked before its first start. It gets LLM jobs only after the same
+  1-token test answer a new llama.cpp build passes. Health shows its id and hash; its `vram_mb` is the LLM's share
+  in the VRAM plan.
+- **Nothing named, `""`, an id the catalog doesn't have, or an older hub:** `worker.toml`'s LLM, as before.
+- **A failure** (download, hash, an exit, no answer within 3 minutes, a failed test answer): `worker.toml`'s LLM again, the named one tried
+  again after 5 minutes, then 10, 20, 30. Out of VRAM three times in a row: parked `no room (VRAM)` until the budget,
+  the hub's models or the free VRAM change. Any other failure the third time in a row: marked bad for 6 hours.
+- **Health:** `llm_state` is `ok`, or why not: `downloading`, `failed: out of VRAM (again in 5 min)`, `no room
+  (VRAM)`, `model hash mismatch`, `unavailable: gave its VRAM to the speech models`. `llm` says which LLM answers
+  meanwhile. The choice is kept in `state\models.json`: after a restart the worker starts the named one directly.
 
 ### VRAM budget (12 GB, RTX 3080 Ti)
 
@@ -539,7 +577,9 @@ and SHA-256, the VRAM it holds, its services, and whether the channel's context 
   a language). A catalog entry without `en` in `langs` is refused.
 - **What the hub names:** every hello and state answer carries `stt_models {catalog: {commit, sha256}, want}`: the
   commit on main the hub was built from, the SHA-256 of `models.json` in it, and the models the channels use, most
-  important first (fire/EMS, then police, then airband).
+  important first (fire/EMS, then police, then airband). Also `try` (challengers, below) and `llm` ([The hub names the
+  LLM](#the-hub-names-the-llm)); `models.json`'s `llm_models` sit beside `stt_models`, which an older worker reads
+  alone.
 - **Where the list comes from:** the worker fetches `deploy/stt-worker/models.json` at that commit, only after GitHub's
   API says it is main's own (the same check as the [self-update](#updating)), and only with exactly that hash. It keeps
   it in `state\catalog.json`. One entry that breaks a rule (a URL not allowed, a bad hash, a missing file) refuses
@@ -586,7 +626,9 @@ and SHA-256, the VRAM it holds, its services, and whether the channel's context 
   starts or stops only while the worker holds no clip, one at a time; a server a clip is being decoded on is never
   stopped by the models thread. A new server must answer a test decode (a second of silence) within 3 minutes.
 - **A server that fails to load:** out of VRAM or on a port another program holds (its own log says which) is never
-  the model's fault: it is tried again in 5 minutes, then 10, 20, 30 (that port left alone for 30 minutes). Any other
+  the model's fault: it is tried again in 5 minutes, then 10, 20, 30 (that port left alone for 30 minutes). Out of
+  VRAM three times in a row: parked `no room (VRAM)`, not planned (so the LLM never stops for it) until the budget,
+  the hub's models or `llm_priority` change, or the GPU has 1 GB more free than then (#940). Any other
   exit, or no answer, is tried again in 5 minutes, then 10; the third time in a row with the same hash, it is marked
   bad for 6 hours (`state\models.json`). A new version of a model that runs is downloaded beside it; once it is
   ready it takes the old one's place, and the old files are kept: while the new one waits to be tried again, and
@@ -597,6 +639,17 @@ and SHA-256, the VRAM it holds, its services, and whether the channel's context 
 - **Gaming:** the LLM's rule, not whisper-server's longer one: after `llm_stop_gaming_s` of gaming (unset: 60 s, 20 s
   when they hold more than 6 GB together) the worker stops them all, and starts them again when gaming ends. The
   primary whisper-server keeps `gaming_stop_whisper_min` (10 minutes).
+- **Try (challenger) models:** `stt_models` `try`, ids of the catalog. One the worker also serves live (its primary, or
+  one in `want`) runs as a separate try instance of the same files on its own port, never on the live server; its
+  `stt_state` stays the live model's (`stt_try` says when the instance answers). One at a time, loaded on
+  demand only while the worker is idle (no clip, not gaming or paused) with every planned model settled, and only
+  into what the planned models and the LLM's share leave (the LLM's share counted whenever it may run; once it has
+  given way to the planned models, what they leave). A try model never counts in the plan, never takes the LLM's
+  room from it, never stops a planned model. It is unloaded, while idle and never with a clip on it, when no longer
+  in `try`, unused 10 minutes, or its room is needed: a planned model to start, or the LLM coming back (llama-server
+  waits until it is out). Meanwhile it takes no new clip and its challenger clip ends at once. `stt_state` says
+  `try: loading`, `try: ready`, `try: no room`, `try: unloaded (idle)`, `try: unloaded (preempted)`; `stt_try` (and
+  `stt_loaded`, for a try model of its own) lists it only while it answers.
 - **A clip:** the hub names the model it wants for each clip. The worker decodes it there if that model answers, else
   on the primary, and says which model wrote the text. Context: the clip's `prompt` (whisper) or `context` (a short
   list: a llama-asr model's system message), unless the hub says it is off for that model (`plain`).
