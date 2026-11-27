@@ -256,8 +256,9 @@ def test_the_models_context_routing_and_discard_paths(tmp_path, logs):
 
     class ModelWorker(FakeWorker):
         def post(self, path, body):
-            if path.endswith("/claim"):
-                body = dict(body, models=["large-v3-turbo-q5_0", qwen])
+            if path.endswith(("/claim", "/hello", "/state")):
+                body = dict(body, models=["large-v3-turbo-q5_0", qwen] if path.endswith("/claim")
+                            else body.get("models"), caps=["challenger"])
             return call(self.url + path, "POST", body, token=self.token)
 
     w = None
@@ -338,6 +339,44 @@ def test_the_challenger_path(tmp_path, logs, monkeypatch):
         app._chall_exec(ran.set)                  # (the challenger thread runs them in turn)
         assert ran.wait(10)
         assert wait(lambda: "stt challenger: ValueError" in logs.text(), 10)
+    finally:
+        if w is not None:
+            w.close()
+        hub.close()
+        fake.close()
+    logs.check()
+
+
+def test_the_shadow_path_against_aws(tmp_path, logs, monkeypatch):
+    """An AWS channel's GPU candidate in shadow (#878): AWS's words and the candidate's never in a log line."""
+    from sizeup import sttpool, sttscore
+    from tests.test_cloud import call
+    monkeypatch.setattr(sttpool, "CHALL_QUIET_S", 0.0)
+    monkeypatch.setattr(sttscore, "SHADOW_PCT", 100.0)
+    qwen = "qwen3-asr-1.7b-q8_0"
+
+    class ModelWorker(FakeWorker):
+        def post(self, path, body):
+            if path.endswith(("/claim", "/hello", "/state")):
+                body = dict(body, models=["large-v3-turbo-q5_0", qwen] if path.endswith("/claim")
+                            else body.get("models"), caps=["challenger"])
+                if path.endswith("/claim"):
+                    body["try_loaded"] = [qwen]                     # (its try server for the candidate)
+            elif path.endswith("/complete") and self.jobs:
+                body = dict(body, model=self.jobs[-1].get("model") or "large-v3-turbo-q5_0")
+            return call(self.url + path, "POST", body, token=self.token)
+
+    aws_text = f"Engine 63 {MARK} per AWS"
+    fake = FakeTranscribe(phrases={500: aws_text})
+    hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
+    w = None
+    try:
+        app = hub.app
+        app._pool_class = lambda item, key: LIVE
+        app.stt_choices.set("FG1", {"model": qwen, "callsigns": [f"{MARK} Base"]})
+        w = ModelWorker(hub.url, app.hub.workers.add("gpu-1"), text=f"Engine 63 {MARK} shadow words").start()
+        send(hub, pending_event("FG1-61"))
+        assert wait(lambda: any(r["role"] == "shadow" for r in app.stt_runs.of("FG1-61")), 30)
     finally:
         if w is not None:
             w.close()

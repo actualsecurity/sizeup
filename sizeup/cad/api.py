@@ -1340,11 +1340,14 @@ class CadApi:
         board = getattr(self.cad, "stt_challenges", None)
         if board is not None:
             out["challenges"] = board()
+        shadows = getattr(self.cad, "stt_shadows", None)           # (#878: AWS channels' GPU candidates vs AWS)
+        if shadows is not None:
+            out["shadows"] = shadows()
         return out
 
     def _models_audit(self, op: str, key: str, old: dict, new: dict) -> None:
         """A channel's model fields changed, in the Settings audit (Radios)."""
-        for f in ("model", "context", "callsigns", "challenger", "pct"):
+        for f in ("model", "context", "callsigns", "challenger", "pct", "shadow"):
             if old.get(f) != new.get(f):
                 said = lambda v: (", ".join(v) if isinstance(v, list)                          # noqa: E731
                                   else "default" if v in (None, "") else f"{v:g}" if isinstance(v, float) else str(v))
@@ -1644,7 +1647,7 @@ class CadApi:
                     hook(k, was.get("model") or "", now.get("model") or "", op, "settings")
             try:     # a channel's speech model, context, call signs and challenger, in the Settings audit (Radios)
                 old, new = c.stt_models.set(key, {k: body[k] for k in ("model", "context", "callsigns", "challenger",
-                                                                       "pct") if k in body}, before=before)
+                                                                       "pct", "shadow") if k in body}, before=before)
             except ValueError as e:
                 raise CadError(str(e)) from None
             self._models_audit(op, key, old, new)

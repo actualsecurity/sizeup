@@ -1904,6 +1904,31 @@ only once the evidence is there). The live path uses only the champion (the chan
   first, audited ("system: automatic rollback"), the admins notified (a push on the status topic) and said in the log.
   Any other change of the channel's model or challenger ends the watch.
 
+### Shadow evidence against AWS (#878)
+
+A channel on Amazon Transcribe (pinned AWS, or Auto · normal when its clip fell to AWS) has AWS as its champion, so
+no challenger evidence comes from it. Its GPU candidates (`sttmodels.candidates`: the model it would run on a GPU, and
+its challenger) decode a sampled share of its clips in shadow, AWS's text the reference (`HubApp._maybe_shadow`).
+
+- **The same no-slowdown rules** as a challenger (`sttpool` `chall` jobs: last of all, an idle GPU with the model
+  loaded on demand, taken back by any other work or LLM work, the hourly caps, never AWS, never a worker's failure).
+  The candidates go to the workers in `stt_models.try` while the channel's clips come (an hour), never in `want`.
+- **The same input** AWS heard (the 8 kHz listening clip) and the context the pool would send the channel's clip. A
+  GPU live would get the station's 16 kHz input, so the evidence understates the GPU. An unconfigured channel's
+  candidate is today's whisper, every worker's primary: it runs on the worker's separate try instance of it (caps
+  `challenger_same_model`, `try_loaded`), never on the live server.
+- **Sampled:** 10% of its clips (`sttscore.SHADOW_PCT`), on by default; an admin turns it off per channel (`shadow`).
+- **Scored against AWS** (role `shadow` in `stt_runs`, numbers only, `sttscore.vs_reference`): identifier recall
+  (AWS's identifiers the candidate has; one that was in the context sent never counts for it), agreement (1 - word
+  error against AWS), the dispatcher's trailing time (each side's match), and edit-WER of each side once a person
+  corrected the clip.
+- **Settings:** on the channel's Radios row, "vs AWS n/40" (the best candidate's, a check once one matches), each
+  candidate's numbers with their sample counts in the hover; a click turns its shadow runs off or on (audited as
+  Radios). Agreement 0.8 or more means it matches AWS, not that it beats it. A recommendation, "model X matches or
+  beats AWS on N clips" (40 samples, identifier recall 0.9 or more,
+  agreement 0.8 or more, and no worse than AWS on the time and the edits where there are 10 of them), or "not yet".
+  Only an admin moves a channel off AWS: nothing here switches a channel.
+
 ## Phone pre-alert (Tapout)
 
 > "can we bake in the ntfy.sh feed from tapout into this? lets receive that feed as a possible

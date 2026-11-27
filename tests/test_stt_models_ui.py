@@ -245,3 +245,33 @@ def test_a_channels_challenger_its_evidence_and_promote_on_its_radios_row(site):
     finally:
         browser.close()
         pw.stop()
+
+
+def test_an_aws_channels_shadow_evidence_on_its_radios_row(site):
+    """#878: an AWS channel's GPU candidates against AWS: terse on its row ("vs AWS n/needed", a check when one matches
+    or beats AWS), the rest in the hover; a click turns its shadow runs off (an admin's, audited). Never the STT workers
+    pane, never a switch of the channel."""
+    shadows = [{"key": "FG1", "on": True, "pct": 10.0, "min_n": 40, "models": [
+        {"model": QWEN, "n": 41, "agree": 0.91, "agree_n": 41, "ids": 0.97, "ids_n": 38,
+         "time": {"aws": 0.8, "model": 0.82, "n": 12}, "edit": {"aws": None, "model": None, "n": 0},
+         "verdict": "matches or beats AWS on 41 clips", "ok": True}]}]
+    site.cad.stt_shadows = lambda: [dict(s, on=site.cad.stt_models.shadow_on(s["key"])) for s in shadows]
+    pw, browser, pg = browser_page(site, CASEY)
+    try:
+        pg.goto(site.base + "/cad#settings/radios/channels")
+        sh = pg.locator("li.tg-row[data-ckey='FG1'] button.tg-shadow")
+        sh.wait_for()
+        assert sh.inner_text() == "vs AWS 41/40 ✓"
+        t = sh.get_attribute("title")
+        assert "matches or beats AWS on 41 clips" in t and "ids 97% (38)" in t and "Only an admin" in t
+        assert not pg.locator("li.tg-row[data-ckey='tg:307'] button.tg-shadow").is_visible()   # (no evidence there)
+        pg.evaluate("document.activeElement && document.activeElement.blur()")
+        shot(pg, "#settings-radio-controls .tg-group", "channels-shadow-vs-aws")
+        sh.click()
+        until(pg, lambda: not site.cad.stt_models.shadow_on("FG1"), "shadow off")
+        audit = json.dumps(site.cad.settings.audit_log("radios"))
+        assert "stt_models/FG1/shadow" in audit
+        assert pg.errors == []
+    finally:
+        browser.close()
+        pw.stop()

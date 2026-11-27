@@ -71,8 +71,9 @@ ENGINE_INPUT = {"station-whisper": "stt-src", "aws": "listening-8k"}
 
 def engine_input(engine: str) -> str:
     return ENGINE_INPUT.get(engine, "")
-ROLES = ("text", "alt", "late", "rerun", "catchup", "discarded", "challenger")   # discarded: a loop or its context
-# read back, not used; challenger: a challenger model's transcript (sizeup/sttscore.py: never the text of record)
+ROLES = ("text", "alt", "late", "rerun", "catchup", "discarded", "challenger", "shadow")   # discarded: a loop or its
+# context read back, not used; challenger: a challenger model's transcript (sizeup/sttscore.py: never the text of
+# record); shadow: a GPU candidate's on an AWS channel, AWS the reference (#878)
 KEEP_DAYS = 90.0
 # the dispatcher's trailing time (#727): added to a file from before them (Runs._open)
 _TEXT = "TEXT NOT NULL DEFAULT ''"
@@ -231,6 +232,8 @@ class Runs:
                 db.execute(f"CREATE INDEX IF NOT EXISTS {want[0]} ON stt_runs ({want[1]}) WHERE time_check != ''")
                 db.execute("CREATE INDEX IF NOT EXISTS stt_runs_challenger ON stt_runs (channel, done_at) "
                            "WHERE role = 'challenger'")
+                db.execute("CREATE INDEX IF NOT EXISTS stt_runs_shadow ON stt_runs (channel, done_at) "
+                           "WHERE role = 'shadow'")
             except Exception:
                 self._db = None                    # (opened again next time)
                 db.close()
@@ -296,17 +299,18 @@ class Runs:
             d["corr_rules"] = json.loads(d["corr_rules"]) if d.get("corr_rules") else []
         return rows
 
-    def challenges(self, channel: str, since: float = 0.0, limit: int = 2000) -> list[dict]:
-        """A channel's challenger runs since then, newest first: {clip_id, model, want, done_at, text, score} (score
-        parsed). Health and Settings read the scores only; text is for the scoreboard's edits (never shown)."""
+    def challenges(self, channel: str, since: float = 0.0, limit: int = 2000, role: str = "challenger") -> list[dict]:
+        """A channel's challenger (or shadow, #878) runs since then, newest first: {clip_id, model, want, done_at, text,
+        score} (score parsed). Health and Settings read the scores only; text is for the scoreboard's edits (never
+        shown)."""
         if not self._exists():
             return []
         try:
             with self._lock:
                 cur = self._open().execute(
-                    "SELECT clip_id, model, want, done_at, text, score, status FROM stt_runs WHERE role = 'challenger' AND "
+                    "SELECT clip_id, model, want, done_at, text, score, status FROM stt_runs WHERE role = ? AND "
                     "channel = ? AND done_at >= ? AND score != '' ORDER BY done_at DESC LIMIT ?",
-                    (channel, since, int(limit)))
+                    (role if role in ROLES else "challenger", channel, since, int(limit)))
                 rows = cur.fetchall()
         except Exception:  # noqa: BLE001 - none
             return []
@@ -319,6 +323,18 @@ class Runs:
             out.append({"clip_id": clip_id, "model": model, "want": want, "done_at": done_at, "text": text,
                         "score": sc, "status": status})
         return out
+
+    def shadow_channels(self, since: float = 0.0) -> list[str]:
+        """The channels with shadow runs (#878) since then."""
+        if not self._exists():
+            return []
+        try:
+            with self._lock:
+                cur = self._open().execute("SELECT DISTINCT channel FROM stt_runs WHERE role = 'shadow' AND done_at >= ?",
+                                           (since,))
+                return sorted(r[0] for r in cur.fetchall() if r[0])
+        except Exception:  # noqa: BLE001 - none
+            return []
 
     def text_of(self, clip_id: str, model: str = "") -> str:
         """The raw words of a clip's text of record (its run in role text, the newest; model: that model's), ""

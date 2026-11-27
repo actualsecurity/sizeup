@@ -1189,6 +1189,7 @@ class HubApp(App):
         # choice over its own), the boards for Settings, the promote with its evidence
         self.stt_choices.service_of = lambda key: sourcekeys.overridden(*self._key_service(key)[:2])
         self.cad.stt_challenges = self._challenge_boards
+        self.cad.stt_shadows = self._shadow_boards                 # (#878: AWS channels' GPU candidates vs AWS)
         self.cad.stt_promote = self.stt_promote
         from sizeup.cloud.metricsbackup import S3Copies
         self.stt_runs = sttruns.Runs(state / "stt.sqlite" if state else ":memory:", may_write=self._may_write_audio,
@@ -1747,6 +1748,11 @@ class HubApp(App):
             self._aws_since.pop(job.id, None)
             self._aws_asked.pop(job.id, None)
         self.sync()
+        if text and not job.catchup and not job.rerun and job.alt is None:
+            try:                                    # (#878: its GPU candidates in shadow, AWS the reference)
+                self._maybe_shadow(job, text)
+            except Exception as e:  # noqa: BLE001 - a sample less, never the transcript's trouble
+                self.hub.log(f"stt shadow: {type(e).__name__}")
 
     def _unclear(self, item, key: str, quiet: bool = False) -> None:
         """An unclear transcript (sizeup/stt_quality.py): said (App._unclear), then the clip asked ONCE of another engine
@@ -2372,8 +2378,15 @@ class HubApp(App):
                 services[key] = ""
         want = ch.want(services, off_gpu)
         self.sttpool.resident = frozenset(want)   # (#869: a challenger never on a model live traffic decodes on)
+        tries = ch.tries(services, want)          # (#869: the challengers, on demand only: never resident)
+        now = time.time()
+        for key, at in list(self.__dict__.get("_shadow_seen", {}).items()):   # (#878: an AWS channel's candidates,
+            if now - at <= 3600.0:                                              # while its clips come)
+                for m in ch.candidates(key, ch.service_of(key)):
+                    if m in ch.catalog and m not in tries:   # (one served live: a separate try instance)
+                        tries.append(m)
         word.update({"catalog": {"commit": build, "sha256": ch.digest}, "want": want,
-                     "try": ch.tries(services, want)})     # (#869: the challengers, on demand only: never resident)
+                     "try": tries[:sttmodels.WANT_MAX]})
         if ch.llm():
             word["llm"] = ch.llm()
         return word
@@ -3302,6 +3315,147 @@ class HubApp(App):
                        tags=("warning", "sizeup"))
         except Exception as e:  # noqa: BLE001 - the rollback stands; said in the log
             self.hub.log(f"stt challenger: {key}: notify: {type(e).__name__}")
+
+    # -- shadow evidence against AWS (#878) -------------------------------------------------------------------------
+    #
+    # A channel on Amazon Transcribe (pinned AWS, or Auto · normal when its clip fell to AWS) has AWS as its champion,
+    # so no challenger evidence comes from it. Its GPU candidates (sttmodels.candidates: the model it would run on a GPU,
+    # and its challenger) decode a sampled share of its clips in shadow, with AWS's text as the reference: the very
+    # input AWS heard (the 8 kHz listening clip) and the context the pool would send. The same rules as a challenger
+    # (sttpool chall: last of all, an idle GPU with the model loaded on demand, taken back by any other work, the hourly
+    # caps, never AWS); a run with role "shadow" and numbers-only scores. Settings shows the evidence on the channel's
+    # Radios row and a recommendation; only an admin moves a channel off AWS.
+
+    def _maybe_shadow(self, job, text: str) -> int:
+        """AWS's text of record on an AWS channel: its candidates queued in shadow for a sampled clip. How many."""
+        key = job.channel
+        ch = getattr(self, "stt_choices", None)
+        if ch is None or not ch.catalog or getattr(self, "sttpool", None) is None:
+            return 0
+        if self._hub_engine(key) not in (sttroute.PIN_AWS, sttroute.AUTO_NORM) or not ch.shadow_on(key):
+            return 0
+        self.__dict__.setdefault("_shadow_seen", {})[key] = time.time()   # (the workers load its candidates: try)
+        page = job.page if job.kind == "page" else None
+        item = page if page is not None else self._find(job.id)[0]
+        if item is None:
+            return 0
+        service = ch.service_of(key)
+        if time.time() < self.__dict__.setdefault("_shadow_pause", {}).get(key, 0.0):
+            return 0
+        seconds = max(0.0, float(getattr(item, "end", 0.0) or 0.0) - float(getattr(item, "start", 0.0) or 0.0))
+        n = 0
+        for model in ch.candidates(key, service):
+            if not sttscore.sampled(job.id, f"aws|{model}", sttscore.SHADOW_PCT):
+                continue
+            if not self.sttpool.chall_ready(key, model, seconds)[0]:
+                continue                           # (checked before any audio is read: on the AWS thread, cheap)
+            self._chall_exec(self._shadow_queue, item, page, key, model, text, service)
+            n += 1
+        return n
+
+    def _shadow_queue(self, item, page, key: str, model: str, text: str, service: str) -> None:
+        cid = str(getattr(item, "id", "") or "")
+        pcm = self._rerun_pcm(item)                 # (the listening clip AWS heard: read here, never on AWS's thread)
+        if pcm is None:
+            return
+        sj = sttpool.Job(f"{cid}~sh~{model}", self._pool_class(item, key), key, "page" if page is not None else "traffic",
+                         len(pcm) / 8000.0, audio=self._chall_audio(cid, page, pcm, sttinput.INPUT_LISTENING),
+                         on_done=self._shadow_done, on_fallback=self._shadow_fell,
+                         clip_end=self._hub_time(getattr(item, "end", None)), chall=True, bg=True, forced=True,
+                         gpu_only=True, avoid=frozenset(self._guard_avoid()),
+                         extra={"clip": cid, "page": page, "ref_text": text, "service": service, "shadow": True,
+                                "input": sttinput.INPUT_LISTENING})
+        try:                                        # (the context the pool would send this channel's clip)
+            sj.prompt, sj.extra["vocab_v"] = self._pool_prompt_v(item)
+        except Exception:  # noqa: BLE001 - no prompt is still a run
+            sj.prompt = ""
+        self._pool_models(sj, item, key)
+        sj.model = model
+        self.sttpool.submit(sj)
+
+    def _shadow_fell(self, job: sttpool.Job, why: str) -> None:
+        """A shadow run that didn't happen: a sample less. Failures on the worker count toward the channel's own shadow
+        pause (never its challenger's)."""
+        if job.extra.get("fell") in ("lease", "error"):
+            fails = self.__dict__.setdefault("_shadow_fails", {})
+            fails[job.channel] = fails.get(job.channel, 0) + 1
+            if fails[job.channel] >= self.CHALLENGE_FAILS:
+                fails[job.channel] = 0
+                self.__dict__.setdefault("_shadow_pause", {})[job.channel] = time.time() + self.CHALLENGE_PAUSE_S
+                self.hub.log(f"stt shadow: {job.channel}: {self.CHALLENGE_FAILS} failed in a row: not sampled for "
+                             f"{self.CHALLENGE_PAUSE_S / 60:.0f} min")
+
+    def _shadow_done(self, job: sttpool.Job, res: dict) -> None:
+        self._chall_exec(self._shadow_score, job, dict(res))
+
+    def _shadow_score(self, job: sttpool.Job, res: dict) -> None:
+        """A GPU candidate's words on an AWS channel's clip: a run (role shadow: never the row, the API or intel) with
+        the input it heard, its correction and its sample's scores against AWS's text."""
+        cid, raw = str(job.extra.get("clip") or ""), str(res.get("text") or "")
+        used = self._model_id(res.get("model"))
+        ctx = str(res.get("context") or "") or ("prompt" if job.prompt else "none")
+        prompt_v, prompt_n = sttmodels.context_version(ctx, job.prompt, job.context)
+        if raw and (stt_quality.assess(raw, job.seconds) == "repeated"
+                    or (ctx == "list" and sttmodels.context_echo(raw, job.context, job.seconds))):
+            text, status = "", "loop"
+        else:
+            sent = job.prompt if ctx == "prompt" else ", ".join(job.context) if ctx == "list" else ""
+            text, status = judge(raw, job.seconds, prompt=sent, vocab_v="list" if ctx == "list" and sent else
+                                 str(job.extra.get("vocab_v") or "") if ctx == "prompt" else "")
+        score = None
+        self.__dict__.setdefault("_shadow_fails", {})[job.channel] = 0
+        item = job.extra.get("page") or self._find(cid)[0]
+        if used == job.model:
+            ref = str(job.extra.get("ref_text") or "")
+            prompted = stt_time.prompted(job.prompt, job.clip_end) if ctx == "prompt" else False
+            checks = (self._time_check(job.channel, item, ref, job.clip_end, "aws", False) if ref else None,
+                      self._time_check(job.channel, item, text, job.clip_end, "gpu-worker", prompted) if text else None)
+            score = sttscore.vs_reference(str(job.extra.get("service") or ""), ref, text, checks, job.context,
+                                          job.prompt)
+            score.update(model=job.model)
+        done_at = time.time()
+        self.stt_runs.add(cid, "gpu-worker", text=raw, status=status, model=used, worker=job.worker,
+                          prompt_v=prompt_v, prompt_n=prompt_n, ctx=ctx, want=job.model, role="shadow",
+                          channel=job.channel, cls="shadow", clip_end=job.clip_end, queued_at=job.queued_at,
+                          engine_start=job.claimed_at, done_at=done_at, score=score, gate=str(res.get("gate") or ""),
+                          run_s=done_at - job.claimed_at if job.claimed_at else None,
+                          input=str(job.extra.get("input") or ""), corr=self._vocab_fix(job.channel, text))
+
+    def shadow_board(self, key: str, days: float = 30.0) -> dict:
+        """An AWS channel's shadow evidence (#878): per GPU candidate, its samples against AWS (sttscore.shadow_summary,
+        people's corrections scored in for both sides), and whether shadowing is on."""
+        ch = self.stt_choices
+        rows = [r for r in self.stt_runs.challenges(key, time.time() - days * 86400.0, role="shadow")
+                if r["score"].get("norm") == sttscore.NORM]
+        edits = self._corrections(sorted({r["clip_id"] for r in rows}))
+        models: dict = {}
+        for r in rows:
+            models.setdefault(r["want"], []).append(r)
+        out = []
+        for m, rs in sorted(models.items()):
+            pairs = []
+            for r in rs:
+                e = edits.get(r["clip_id"])
+                if e:
+                    a = sttscore.wer(e, self.stt_runs.text_of(r["clip_id"], channels_model()))
+                    c = sttscore.wer(e, r["text"])
+                    if a is not None and c is not None:
+                        pairs.append((min(1.0, a), min(1.0, c)))
+            out.append(dict(sttscore.shadow_summary([r["score"] for r in rs], pairs), model=m))
+        return {"key": key, "on": ch.shadow_on(key), "models": out, "pct": sttscore.SHADOW_PCT,
+                "min_n": sttscore.MIN_N_SHADOW}
+
+    def _shadow_boards(self) -> list[dict]:
+        """Every channel with shadow runs in the last 30 days, or AWS clips sampled in the last hour: its board."""
+        keys = set(self.stt_runs.shadow_channels(time.time() - 30 * 86400.0))
+        keys |= {k for k, at in self.__dict__.get("_shadow_seen", {}).items() if time.time() - at <= 3600.0}
+        out = []
+        for key in sorted(keys):
+            try:
+                out.append(self.shadow_board(key))
+            except Exception as e:  # noqa: BLE001 - one channel's board never hides the others
+                self.hub.log(f"stt shadow: {key}: board: {type(e).__name__}")
+        return out
 
     def _time_check(self, key: str, item, text: str, clip_end, engine: str = "",
                     prompted: bool | None = None) -> stt_time.Check | None:
